@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders
+  labels:
+    app: orders
+    attache.io/service: orders
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: orders
+  template:
+    metadata:
+      labels:
+        app: orders
+        attache.io/service: orders
+      annotations:
+        attache.io/inject: "false"   # injection is explicit in the MVP: the sidecar is written out below
+    spec:
+      containers:
+        - name: app
+          image: attache/orders:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: ATTACHE_URL
+              value: http://127.0.0.1:3500
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+        - name: attached
+          image: attache/attached:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: mesh
+              containerPort: 50002
+          env:
+            - name: ATTACHE_CHARTER
+              value: /etc/attache/charter/charter.yaml
+            - name: ATTACHE_TLS_DIR
+              value: /etc/attache/tls
+            - name: RUST_LOG
+              value: info
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: attache-anthropic
+                  key: ANTHROPIC_API_KEY
+                  optional: true
+          volumeMounts:
+            - name: charter
+              mountPath: /etc/attache/charter
+              readOnly: true
+            - name: tls
+              mountPath: /etc/attache/tls
+              readOnly: true
+            - name: run
+              mountPath: /run/attache
+          readinessProbe:
+            exec:
+              command: ["attache-ready"]
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["attache-ready"]
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+      volumes:
+        - name: charter
+          configMap:
+            name: orders-charter
+        - name: tls
+          secret:
+            secretName: attache-cert-orders
+        - name: run
+          emptyDir: {}

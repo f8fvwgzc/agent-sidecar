@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory
+  labels:
+    app: inventory
+    attache.io/service: inventory
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: inventory
+  template:
+    metadata:
+      labels:
+        app: inventory
+        attache.io/service: inventory
+      annotations:
+        attache.io/inject: "false"
+    spec:
+      containers:
+        - name: app
+          image: attache/inventory:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8000 }
+          resources:
+            requests: { cpu: 10m, memory: 64Mi }
+        - name: attached
+          image: attache/attached:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: mesh
+              containerPort: 50002
+          env:
+            - name: ATTACHE_CHARTER
+              value: /etc/attache/charter/charter.yaml
+            - name: ATTACHE_TLS_DIR
+              value: /etc/attache/tls
+            - name: RUST_LOG
+              value: info
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: attache-anthropic
+                  key: ANTHROPIC_API_KEY
+                  optional: true
+          volumeMounts:
+            - name: charter
+              mountPath: /etc/attache/charter
+              readOnly: true
+            - name: tls
+              mountPath: /etc/attache/tls
+              readOnly: true
+            - name: run
+              mountPath: /run/attache
+          readinessProbe:
+            exec:
+              command: ["attache-ready"]
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["attache-ready"]
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+      volumes:
+        - name: charter
+          configMap:
+            name: inventory-charter
+        - name: tls
+          secret:
+            secretName: attache-cert-inventory
+        - name: run
+          emptyDir: {}

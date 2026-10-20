@@ -1,0 +1,87 @@
+# charter.yaml for the `orders` service (CONTRACT.md §3).
+apiVersion: attache.io/v1alpha1
+kind: Charter
+service:
+  name: orders
+  namespace: attache-demo
+  app_port: 8080
+agents:
+  - name: ops-assistant
+    type: orchestrator
+    model: claude-opus-5-5
+    system: |
+      You are the operations assistant embedded in the orders service.
+      Answer questions about orders and stock. Use lookup_order for order
+      details, stock_analyst for anything about inventory levels or reorders,
+      and inventory_admin_reset only when explicitly asked to reset admin
+      counters. Be concise and state which tools you used.
+    tools:
+      - name: lookup_order
+        description: Look up an order by id in the orders service.
+        type: service
+        service: orders
+        method: GET
+        path: /orders/{order_id}
+        parameters:
+          type: object
+          properties:
+            order_id: { type: string, description: "Order id such as 1001" }
+          required: [order_id]
+      - name: stock_analyst
+        description: Ask the inventory service's stock analyst agent about stock levels, SKUs and reorder advice.
+        type: agent
+        agent: stock-analyst
+        service: inventory
+      - name: order_triage
+        description: Ask the local order triage agent to classify an order problem by urgency.
+        type: agent
+        agent: order-triage
+      - name: inventory_admin_reset
+        description: Reset the inventory admin counters (administrative, destructive).
+        type: service
+        service: inventory
+        method: POST
+        path: /admin/reset
+    budgets:
+      max_tokens_per_call: 1024
+      max_calls_per_minute: 30
+      max_cost_usd_per_day: 5.0
+      max_steps: 6
+  - name: order-triage
+    type: agent
+    model: claude-opus-5-5
+    system: |
+      You classify order problems into urgency P1 (blocked revenue), P2
+      (customer waiting) or P3 (cosmetic). Answer with the level and one line.
+    budgets:
+      max_tokens_per_call: 256
+      max_calls_per_minute: 60
+      max_cost_usd_per_day: 1.0
+      max_steps: 2
+guardrails:
+  max_input_bytes: 8192
+  pii_redact: true
+  input_deny:
+    - name: no-secrets
+      regex: "(?i)(api[_-]?key|password|secret)\\s*[:=]"
+  allowed_tools:
+    ops-assistant: [lookup_order, stock_analyst, order_triage, inventory_admin_reset]
+  allowed_services:
+    ops-assistant: [orders, inventory]
+authz:
+  default: deny
+  callers:
+    - identity: local
+      agents: ["*"]
+  services:
+    - name: self-orders
+      agent: ops-assistant
+      service: orders
+      allow: ["GET /orders/*"]
+    - name: egress-inventory
+      agent: ops-assistant
+      service: inventory
+      allow: ["GET /stock", "GET /stock/*", "POST /admin/*"]   # egress allows /admin on purpose: the inventory charter is the one that denies it
+audit:
+  sink: stdout
+  redact: []

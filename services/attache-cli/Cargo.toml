@@ -1,0 +1,18 @@
+[package]
+name = "attache-cli"
+description = "attache CLI: charter validate/schema, logs (CONTRACT.md §8)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "attache"
+path = "src/main.rs"
+
+[dependencies]
+attache-charter.workspace = true
+attache-common.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+anyhow.workspace = true

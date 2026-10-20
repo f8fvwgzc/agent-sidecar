@@ -1,0 +1,21 @@
+syntax = "proto3";
+package attache.v1alpha1;
+
+import "attache/v1alpha1/common.proto";
+
+// Served by attached on 127.0.0.1:50001 for the app container (plaintext).
+service AppApi {
+  rpc InvokeAgent(InvokeAgentRequest) returns (InvokeAgentResponse);
+  rpc ListAgents(Empty) returns (ListAgentsResponse);
+}
+
+message AgentSummary {
+  string name = 1;
+  string type = 2;
+  string model = 3;
+  repeated string tools = 4;
+}
+
+message ListAgentsResponse {
+  repeated AgentSummary agents = 1;
+}

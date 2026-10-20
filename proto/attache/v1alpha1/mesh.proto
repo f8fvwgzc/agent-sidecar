@@ -1,0 +1,12 @@
+syntax = "proto3";
+package attache.v1alpha1;
+
+import "attache/v1alpha1/common.proto";
+
+// Served by attached on 0.0.0.0:50002 over mTLS for other pods' sidecars.
+// Caller identity = URI SAN of the client certificate. Metadata: traceparent,
+// x-attache-request-id, x-attache-agent.
+service Mesh {
+  rpc InvokeAgent(InvokeAgentRequest) returns (InvokeAgentResponse);
+  rpc InvokeService(ServiceRequest) returns (ServiceResponse);
+}

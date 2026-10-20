@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: attache-demo
+resources:
+  - namespace.yaml
+  - embassy/rbac.yaml
+  - embassy/job.yaml
+  - orders/deployment.yaml
+  - orders/service.yaml
+  - inventory/deployment.yaml
+  - inventory/service.yaml
+# Charter ConfigMaps (orders-charter, inventory-charter) are created by `make charters`
+# from examples/charters/*.charter.yaml, the single committed copy (CONTRACT.md §7).

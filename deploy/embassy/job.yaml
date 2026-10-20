@@ -1,0 +1,25 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: embassy-bootstrap
+  labels:
+    attache.io/component: embassy
+spec:
+  backoffLimit: 4
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        attache.io/component: embassy
+    spec:
+      serviceAccountName: embassy
+      restartPolicy: OnFailure
+      containers:
+        - name: embassy
+          image: attache/embassy:dev
+          imagePullPolicy: IfNotPresent
+          args: ["bootstrap", "--namespace", "attache-demo", "--services", "orders,inventory"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true

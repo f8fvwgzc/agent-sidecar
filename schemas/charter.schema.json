@@ -1,0 +1,445 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "apiVersion": {
+      "type": "string"
+    },
+    "kind": {
+      "type": "string"
+    },
+    "service": {
+      "$ref": "#/$defs/ServiceSpec"
+    },
+    "mesh": {
+      "$ref": "#/$defs/MeshSpec",
+      "default": {
+        "port": 50002,
+        "peers": {}
+      }
+    },
+    "agents": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/AgentSpec"
+      },
+      "default": []
+    },
+    "guardrails": {
+      "$ref": "#/$defs/Guardrails",
+      "default": {
+        "max_input_bytes": 0,
+        "pii_redact": false,
+        "input_deny": [],
+        "output_deny": [],
+        "allowed_tools": {},
+        "allowed_services": {}
+      }
+    },
+    "authz": {
+      "$ref": "#/$defs/Authz",
+      "default": {
+        "default": "deny",
+        "callers": [],
+        "services": []
+      }
+    },
+    "audit": {
+      "$ref": "#/$defs/AuditSpec",
+      "default": {
+        "sink": "stdout",
+        "redact": []
+      }
+    }
+  },
+  "required": [
+    "apiVersion",
+    "kind",
+    "service"
+  ],
+  "title": "attache Charter (attache.io/v1alpha1)",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "ServiceSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "DNS-1123 label; also the `svc/<name>` segment of the pod's SPIFFE ID."
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "app_port": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535,
+          "description": "Port the app container listens on (localhost), target of inbound service invocations."
+        }
+      },
+      "required": [
+        "name",
+        "namespace",
+        "app_port"
+      ]
+    },
+    "MeshSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "port": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535,
+          "default": 50002
+        },
+        "peers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "service name → `host:port` override of `<service>.<namespace>.svc.cluster.local:50002`.",
+          "default": {}
+        }
+      }
+    },
+    "AgentSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "$ref": "#/$defs/AgentType",
+          "default": "agent"
+        },
+        "model": {
+          "type": "string",
+          "description": "A Claude model id (e.g. `claude-opus-5-5`) or `mock`."
+        },
+        "system": {
+          "type": "string",
+          "default": ""
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolSpec"
+          },
+          "default": []
+        },
+        "budgets": {
+          "$ref": "#/$defs/Budgets",
+          "default": {
+            "max_tokens_per_call": 1024,
+            "max_calls_per_minute": 60,
+            "max_cost_usd_per_day": 10.0,
+            "max_steps": 8
+          }
+        }
+      },
+      "required": [
+        "name",
+        "model"
+      ]
+    },
+    "AgentType": {
+      "type": "string",
+      "enum": [
+        "agent",
+        "orchestrator"
+      ]
+    },
+    "ToolSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "type": {
+          "$ref": "#/$defs/ToolType"
+        },
+        "parameters": {
+          "description": "JSON Schema object describing the tool input. Defaults per CONTRACT.md §3.1."
+        },
+        "service": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "`service` tools: target service. `agent` tools: remote service (omit for local)."
+        },
+        "method": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "agent": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "type"
+      ]
+    },
+    "ToolType": {
+      "type": "string",
+      "enum": [
+        "service",
+        "agent",
+        "http"
+      ]
+    },
+    "Budgets": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_tokens_per_call": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 1024
+        },
+        "max_calls_per_minute": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 60
+        },
+        "max_cost_usd_per_day": {
+          "type": "number",
+          "format": "double",
+          "default": 10.0
+        },
+        "max_steps": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 8
+        }
+      }
+    },
+    "Guardrails": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_input_bytes": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 16384
+        },
+        "pii_redact": {
+          "type": "boolean",
+          "default": false
+        },
+        "input_deny": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RegexRule"
+          },
+          "default": []
+        },
+        "output_deny": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RegexRule"
+          },
+          "default": []
+        },
+        "allowed_tools": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "description": "agent → tool names it may use (default: every tool it declares).",
+          "default": {}
+        },
+        "allowed_services": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "description": "agent → services it may call (default: every service its tools name).",
+          "default": {}
+        }
+      }
+    },
+    "RegexRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "regex": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "regex"
+      ]
+    },
+    "Authz": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "default": {
+          "$ref": "#/$defs/Decision",
+          "default": "deny"
+        },
+        "callers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CallerRule"
+          },
+          "default": []
+        },
+        "services": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ServiceRule"
+          },
+          "default": []
+        }
+      }
+    },
+    "Decision": {
+      "type": "string",
+      "enum": [
+        "allow",
+        "deny"
+      ]
+    },
+    "CallerRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "identity": {
+          "type": "string",
+          "description": "`local` (the app container) or a SPIFFE ID."
+        },
+        "agents": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Agent names, or `\"*\"`."
+        }
+      },
+      "required": [
+        "identity",
+        "agents"
+      ]
+    },
+    "ServiceRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "identity": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "agent": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "service": {
+          "type": "string",
+          "description": "Target service (this service's own name when evaluated inbound)."
+        },
+        "allow": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "`\"<METHOD|*> <path>\"`, optional trailing `*` on the path.",
+          "default": []
+        },
+        "deny": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      },
+      "required": [
+        "name",
+        "service"
+      ]
+    },
+    "AuditSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sink": {
+          "$ref": "#/$defs/AuditSink",
+          "default": "stdout"
+        },
+        "file": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "redact": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Dotted paths inside `input`/`output` replaced by \"[redacted]\".",
+          "default": []
+        }
+      }
+    },
+    "AuditSink": {
+      "type": "string",
+      "enum": [
+        "stdout",
+        "file"
+      ]
+    }
+  },
+  "$id": "https://attache.io/schemas/v1alpha1/charter.schema.json"
+}

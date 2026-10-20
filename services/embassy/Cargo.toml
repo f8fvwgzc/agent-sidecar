@@ -1,0 +1,21 @@
+[package]
+name = "embassy"
+description = "attache control plane: the cluster CA that issues SPIFFE-style certificates (CONTRACT.md §5, §7)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+attache-pki.workspace = true
+attache-common.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+rustls.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
