@@ -3,13 +3,15 @@
 set -euo pipefail
 NS=${NS:-attache-demo}
 ATTACHE=${ATTACHE:-./target/debug/attache}
-PORT=${PORT:-18080}
+KUBE_CONTEXT=${KUBE_CONTEXT:-minikube}
+PORT=${PORT:-38081}
+kc() { kubectl --context "$KUBE_CONTEXT" "$@"; }
 
 json() { python3 -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps(d, indent=2))'; }
 field() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
 
 echo "▶ port-forward svc/orders → localhost:$PORT"
-kubectl -n "$NS" port-forward svc/orders "$PORT:8080" >/dev/null 2>&1 &
+kc -n "$NS" port-forward svc/orders "$PORT:8080" >/dev/null 2>&1 &
 PF=$!
 trap 'kill $PF 2>/dev/null || true' EXIT
 for _ in $(seq 1 30); do curl -sf "http://localhost:$PORT/healthz" >/dev/null 2>&1 && break; sleep 0.5; done
@@ -45,9 +47,9 @@ echo "✓ the call was denied with rule authz.services.deny-admin and the agent 
 echo
 echo "▶ 3. audit trail of call 1 across both pods (same trace_id $TRACE1)"
 sleep 1
-$ATTACHE logs orders,inventory -n "$NS" --trace "$TRACE1"
+$ATTACHE logs orders,inventory -n "$NS" --context "$KUBE_CONTEXT" --trace "$TRACE1"
 echo
 echo "▶ 4. the denial of call 2 in both pods (trace $TRACE2)"
-$ATTACHE logs orders,inventory -n "$NS" --trace "$TRACE2" --denied
+$ATTACHE logs orders,inventory -n "$NS" --context "$KUBE_CONTEXT" --trace "$TRACE2" --denied
 echo
-echo "✓ demo complete. Raw JSONL: kubectl -n $NS logs -l attache.io/service=inventory -c attached"
+echo "✓ demo complete. Raw JSONL: kubectl --context $KUBE_CONTEXT -n $NS logs -l attache.io/service=inventory -c attached"

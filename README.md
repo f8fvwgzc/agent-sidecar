@@ -90,7 +90,7 @@ make minikube-up build deploy demo
 Raw records are plain container logs:
 
 ```bash
-kubectl -n attache-demo logs -l attache.io/service=inventory -c attached
+kubectl --context minikube -n attache-demo logs -l attache.io/service=inventory -c attached
 ```
 
 ## What the demo shows

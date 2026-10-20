@@ -45,6 +45,9 @@ struct LogsArgs {
     service: String,
     #[arg(short = 'n', long, default_value = "attache-demo")]
     namespace: String,
+    /// kubeconfig context (default: kubectl's current context).
+    #[arg(long)]
+    context: Option<String>,
     /// Only records of this agent.
     #[arg(long)]
     agent: Option<String>,
@@ -127,6 +130,9 @@ fn logs(args: LogsArgs) -> anyhow::Result<()> {
                 anyhow::bail!("usage: attache logs <service> [--agent A] [--trace T] [-f]");
             }
             let mut cmd = Command::new("kubectl");
+            if let Some(ctx) = &args.context {
+                cmd.args(["--context", ctx]);
+            }
             let selector = if args.service.contains(',') {
                 format!("attache.io/service in ({})", args.service)
             } else {

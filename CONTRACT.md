@@ -435,7 +435,7 @@ with `decision: deny` and the same `request_id` and `trace_id`.
 ```
 attache charter validate <file>        # exit 0 "valid", exit 1 with one error per line
 attache charter schema                 # JSON Schema to stdout (== schemas/charter.schema.json)
-attache logs <svc>[,<svc>…] [-n NS] [--agent A] [--trace T] [--request R] [--kind K] [--denied] [-f] [--raw] [--file F|-] [--tail N]
+attache logs <svc>[,<svc>…] [-n NS] [--context C] [--agent A] [--trace T] [--request R] [--kind K] [--denied] [-f] [--raw] [--file F|-] [--tail N]
 attache version
 ```
 

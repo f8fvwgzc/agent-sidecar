@@ -7,8 +7,8 @@ ROOT=$(pwd)
 LOCAL=$ROOT/.local
 NS=attache-demo
 # This machine may already use 8080/8000; the local demo runs the apps on these ports instead.
-ORDERS_PORT=${ORDERS_PORT:-18080}
-INVENTORY_PORT=${INVENTORY_PORT:-18000}
+ORDERS_PORT=${ORDERS_PORT:-38080}
+INVENTORY_PORT=${INVENTORY_PORT:-38000}
 mkdir -p "$LOCAL/run/orders" "$LOCAL/run/inventory" "$LOCAL/logs"
 PIDS=()
 cleanup() { for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done; }
