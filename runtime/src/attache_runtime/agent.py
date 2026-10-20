@@ -39,7 +39,8 @@ class ExecuteResult:
 
 
 def _now() -> str:
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.") + f"{datetime.now(UTC).microsecond // 1000:03d}Z"
+    now = datetime.now(UTC)  # read the clock once: two reads can straddle a second boundary
+    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
 
 
 def new_span_id() -> str:
@@ -171,10 +172,23 @@ async def run_agent(
         tool_uses = resp.tool_uses()
         if resp.stop_reason == "pause_turn":
             continue
-        if not tool_uses or resp.stop_reason in {"end_turn", "max_tokens", "stop_sequence"}:
+        if resp.stop_reason == "max_tokens":
+            # The budget cut the turn short. A half-written tool call must not run, and an answer
+            # with no text (thinking used the whole budget) is a failure, not an empty success.
+            text = resp.text()
+            if tool_uses or not text.strip():
+                result.status, result.rule = "error", "budget.max_tokens_per_call"
+                result.reason = (
+                    f"agent {spec.name} hit max_tokens_per_call={spec.budgets.max_tokens_per_call} "
+                    "before finishing; raise the budget in the charter"
+                )
+                result.steps[-1].summary = "stop=max_tokens (no complete answer)"
+                return result
+            result.output = text
+            result.steps[-1].summary = "stop=max_tokens (output truncated by budgets.max_tokens_per_call)"
+            return result
+        if not tool_uses or resp.stop_reason in {"end_turn", "stop_sequence"}:
             result.output = resp.text()
-            if resp.stop_reason == "max_tokens":
-                result.steps[-1].summary = "stop=max_tokens (output truncated by budgets.max_tokens_per_call)"
             return result
 
         tool_results: list[dict[str, Any]] = []

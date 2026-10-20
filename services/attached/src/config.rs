@@ -26,8 +26,15 @@ pub struct Config {
     /// Command that starts the agent runtime; `--listen` and `--sidecar` are appended.
     #[arg(long, env = "ATTACHE_RUNTIME_CMD", default_value = "attache-runtime")]
     pub runtime_cmd: String,
-    /// Do not spawn the runtime (something else runs it, or tests).
-    #[arg(long, env = "ATTACHE_NO_RUNTIME", default_value_t = false)]
+    /// Do not spawn the runtime (something else runs it, or tests). Env accepts 1/0, true/false, yes/no, on/off.
+    #[arg(
+        long,
+        env = "ATTACHE_NO_RUNTIME",
+        num_args = 0..=1,
+        default_value = "false",
+        default_missing_value = "true",
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
     pub no_runtime: bool,
 }
 
@@ -44,5 +51,30 @@ impl Config {
             runtime_cmd: "attache-runtime".into(),
             no_runtime: true,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_runtime_accepts_the_documented_forms() {
+        assert!(
+            Config::try_parse_from(["attached", "--no-runtime"])
+                .unwrap()
+                .no_runtime
+        );
+        assert!(!Config::try_parse_from(["attached"]).unwrap().no_runtime);
+        assert!(
+            Config::try_parse_from(["attached", "--no-runtime", "1"])
+                .unwrap()
+                .no_runtime
+        );
+        assert!(
+            !Config::try_parse_from(["attached", "--no-runtime", "0"])
+                .unwrap()
+                .no_runtime
+        );
     }
 }

@@ -108,7 +108,8 @@ kubectl --context minikube -n attache-demo logs -l attache.io/service=inventory 
    `POST /admin/reset` on `inventory`. The `inventory` sidecar denies it with
    rule `authz.services.deny-admin`. The agent receives the denial as a tool
    error and says so. Both pods log the denial with the same `request_id` and
-   `trace_id`.
+   `trace_id`. The inventory app listens only on its pod's loopback and its
+   Service exposes only the mesh port, so there is no way around the sidecar.
 3. **An input guardrail.** A question containing `api_key = …` is refused
    with HTTP 403 before any model call, under rule
    `guardrail.input_deny.no-secrets`.
@@ -174,7 +175,7 @@ authz:
   default: deny
   callers:
     - { identity: local, agents: ["*"] }
-    - { identity: spiffe://attache/ns/attache-demo/svc/orders, agents: [stock-analyst] }
+    - { identity: spiffe://attache/ns/attache-demo/svc/orders, agents: [stock-analyst], caller_agents: [ops-assistant] }
   services:
     - name: deny-admin
       identity: spiffe://attache/ns/attache-demo/svc/orders
@@ -231,10 +232,15 @@ make lint        # clippy -D warnings, ruff
 ```
 
 The Rust suite includes an in-process mesh test. It starts two sidecars with
-embassy-issued certificates on localhost and proves three things: an allowed
-call crosses mTLS, `/admin` is denied with the rule name in both audit logs
-under one trace, and a pod with another service's certificate or no
-certificate at all is refused.
+embassy-issued certificates on localhost and proves that:
+
+- an allowed call crosses mTLS;
+- `/admin` is denied with the rule name in both audit logs under one trace;
+- a pod with another service's certificate, or no certificate, is refused;
+- `caller_agents` limits which of a peer's agents may call;
+- `..` and `%2e%2e` traversals meet the deny rule they aim past, and encoded
+  slashes are refused;
+- a peer cannot smuggle `x-attache-caller` or `traceparent` headers to the app.
 
 ## Not built yet
 

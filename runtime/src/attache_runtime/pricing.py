@@ -20,6 +20,14 @@ PRICES: dict[str, tuple[float, float]] = {
 _FALLBACK = (10.00, 50.00)
 
 
+# Claude Haiku 5.5 is priced higher for prompts above 100K tokens (whole request at the higher rate).
+_LONG_PROMPT = {"claude-haiku-5-5": (100_000, (0.50, 2.50))}
+
+
 def cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
     inp, out = PRICES.get(model, _FALLBACK)
+    if model in _LONG_PROMPT:
+        threshold, rates = _LONG_PROMPT[model]
+        if input_tokens > threshold:
+            inp, out = rates
     return round((input_tokens * inp + output_tokens * out) / 1_000_000, 6)

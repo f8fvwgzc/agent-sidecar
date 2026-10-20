@@ -22,11 +22,11 @@ spec:
         - name: app
           image: attache/inventory:dev
           imagePullPolicy: IfNotPresent
-          ports:
-            - name: http
-              containerPort: 8000
+          # No container port: the app listens on 127.0.0.1 only and is reached through the sidecar.
           readinessProbe:
-            httpGet: { path: /healthz, port: 8000 }
+            exec:
+              command: ["python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
+            periodSeconds: 5
           resources:
             requests: { cpu: 10m, memory: 64Mi }
         - name: attached

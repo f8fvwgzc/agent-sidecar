@@ -7,6 +7,7 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Any, Protocol
+from urllib.parse import quote
 
 from .spec import ToolSpec
 
@@ -65,7 +66,9 @@ def fill_path(template: str, args: dict[str, Any]) -> tuple[str, dict[str, Any]]
     def sub(m: re.Match[str]) -> str:
         key = m.group(1)
         if key in rest:
-            return str(rest.pop(key))
+            # Encoded, so a value can never add path segments: "../admin" arrives as "..%2Fadmin",
+            # which the sidecar refuses (CONTRACT.md §5.1).
+            return quote(str(rest.pop(key)), safe="")
         return ""
 
     path = re.sub(r"\{([a-zA-Z0-9_]+)\}", sub, template)

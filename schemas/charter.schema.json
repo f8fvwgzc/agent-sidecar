@@ -28,7 +28,7 @@
     "guardrails": {
       "$ref": "#/$defs/Guardrails",
       "default": {
-        "max_input_bytes": 0,
+        "max_input_bytes": 16384,
         "pii_redact": false,
         "input_deny": [],
         "output_deny": [],
@@ -358,6 +358,13 @@
             "type": "string"
           },
           "description": "Agent names, or `\"*\"`."
+        },
+        "caller_agents": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Calling agents (the `x-attache-agent` claim of the caller's sidecar) this rule admits.\nEmpty = any calling agent, including a direct call by the caller's app."
         }
       },
       "required": [

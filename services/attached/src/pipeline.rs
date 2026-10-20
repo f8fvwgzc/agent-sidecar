@@ -156,25 +156,33 @@ pub async fn invoke(state: &Arc<AppState>, inv: Invocation) -> InvokeAgentRespon
         )
     };
 
-    let Some(agent) = state.charter.agent(&inv.agent) else {
-        let v = Verdict::deny(
-            RULE_UNKNOWN_AGENT,
-            format!("agent {:?} is not declared in the charter", inv.agent),
-        );
-        let mut rec = record(Value::Null).verdict(&v).latency(started);
-        rec.error = Some(v.reason.clone());
-        state.audit.write(rec);
-        return errored(&inv, RULE_UNKNOWN_AGENT, v.reason, vec![]);
-    };
+    // Values at audit.redact paths of the input must not reappear in this request's later records.
+    state.audit.remember(&inv.request_id, "input", &input_value);
 
-    // 1. authz.callers
-    let v = authz::authorize_caller(&state.charter, &inv.caller, &inv.agent);
+    // 1. authz.callers — before the agent lookup, so an unauthorized peer cannot probe agent names
+    let v = authz::authorize_caller(
+        &state.charter,
+        &inv.caller,
+        inv.caller_agent.as_deref(),
+        &inv.agent,
+    );
     if !v.allow {
         state
             .audit
             .write(record(Value::Null).verdict(&v).latency(started));
         return denied(&inv, &v, vec![step("authz", &inv.agent, &v, 0, "")]);
     }
+    let Some(agent) = state.charter.agent(&inv.agent) else {
+        let v = Verdict::deny(
+            RULE_UNKNOWN_AGENT,
+            format!("agent {:?} is not declared in the charter", inv.agent),
+        );
+        let mut rec = record(Value::Null).latency(started);
+        rec.error = Some(v.reason.clone());
+        rec.rule = Some(RULE_UNKNOWN_AGENT.into());
+        state.audit.write(rec);
+        return errored(&inv, RULE_UNKNOWN_AGENT, v.reason, vec![]);
+    };
     if inv.depth > MAX_DEPTH {
         let v = Verdict::deny(
             "budget.max_depth",
@@ -218,7 +226,9 @@ pub async fn invoke(state: &Arc<AppState>, inv: Invocation) -> InvokeAgentRespon
     }
 
     // 3. input guardrails
-    let v = state.guardrails.check_input(&inv.input);
+    let v = state
+        .guardrails
+        .check_input_with_context(&inv.input, &inv.context_json);
     if !v.allow {
         let rec = AuditRecord::new(
             Kind::Guardrail,

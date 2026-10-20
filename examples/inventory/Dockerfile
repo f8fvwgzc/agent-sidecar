@@ -6,4 +6,5 @@ COPY app.py ./
 RUN useradd -u 10001 inventory
 USER 10001
 EXPOSE 8000
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+# Bound to the pod's loopback: the only way in is through the attached sidecar (and its charter).
+CMD ["uvicorn", "app:app", "--host", "127.0.0.1", "--port", "8000"]

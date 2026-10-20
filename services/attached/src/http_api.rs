@@ -127,13 +127,14 @@ async fn charter(State(state): State<Arc<AppState>>) -> Json<Value> {
 
 async fn readyz(State(state): State<Arc<AppState>>) -> Response {
     let provider = state.runtime_provider.lock().unwrap().clone();
-    if state.is_ready() {
-        (
-            StatusCode::OK,
-            Json(json!({ "ready": true, "model_provider": provider, "mesh": state.tls.is_some() })),
-        )
-            .into_response()
+    let runtime = state
+        .runtime_ready
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let body = json!({ "ready": state.is_ready(), "runtime": runtime, "model_provider": provider, "mesh": state.tls.is_some() });
+    let code = if state.is_ready() {
+        StatusCode::OK
     } else {
-        (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "ready": false, "reason": "agent runtime not healthy yet", "mesh": state.tls.is_some() }))).into_response()
-    }
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (code, Json(body)).into_response()
 }

@@ -11,6 +11,8 @@ pub const API_VERSION: &str = "attache.io/v1alpha1";
 pub const KIND: &str = "Charter";
 pub const LOCAL_IDENTITY: &str = "local";
 pub const DEFAULT_MESH_PORT: u16 = 50002;
+/// Largest `max_tokens` any current Claude model accepts.
+pub const MAX_TOKENS_PER_CALL_LIMIT: u32 = 128_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -157,7 +159,7 @@ impl Default for Budgets {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Guardrails {
     #[serde(default = "d_max_input_bytes")]
@@ -177,6 +179,20 @@ pub struct Guardrails {
 }
 fn d_max_input_bytes() -> usize {
     16 * 1024
+}
+
+// A charter without a `guardrails:` block gets the same defaults as an empty one.
+impl Default for Guardrails {
+    fn default() -> Self {
+        Self {
+            max_input_bytes: d_max_input_bytes(),
+            pii_redact: false,
+            input_deny: Vec::new(),
+            output_deny: Vec::new(),
+            allowed_tools: BTreeMap::new(),
+            allowed_services: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -212,6 +228,10 @@ pub struct CallerRule {
     pub identity: String,
     /// Agent names, or `"*"`.
     pub agents: Vec<String>,
+    /// Calling agents (the `x-attache-agent` claim of the caller's sidecar) this rule admits.
+    /// Empty = any calling agent, including a direct call by the caller's app.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub caller_agents: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -371,6 +391,11 @@ impl Charter {
             {
                 errs.push(format!("{at}: every budget must be > 0"));
             }
+            if agent.budgets.max_tokens_per_call > MAX_TOKENS_PER_CALL_LIMIT {
+                errs.push(format!(
+                    "{at}: budgets.max_tokens_per_call must be <= {MAX_TOKENS_PER_CALL_LIMIT}"
+                ));
+            }
             let mut tool_names = std::collections::BTreeSet::new();
             for (j, tool) in agent.tools.iter().enumerate() {
                 let tt = format!("{at}.tools[{j}] ({})", tool.name);
@@ -419,7 +444,11 @@ impl Charter {
                         match &tool.agent {
                             None => errs.push(format!("{tt}: agent tools need agent")),
                             Some(target) => {
-                                if tool.service.is_none() {
+                                let local = match &tool.service {
+                                    None => true,
+                                    Some(s) => s == &self.service.name,
+                                };
+                                if local {
                                     if target == &agent.name {
                                         errs.push(format!("{tt}: an agent may not call itself"));
                                     } else if !self.agents.iter().any(|a| &a.name == target) {
@@ -435,6 +464,13 @@ impl Charter {
                     ToolType::Http => {
                         if tool.method.is_none() || tool.url.is_none() {
                             errs.push(format!("{tt}: http tools need method and url"));
+                        }
+                        if let Some(u) = &tool.url
+                            && http_origin(u).is_none()
+                        {
+                            errs.push(format!(
+                                "{tt}: url must be http(s)://host[:port]/… with no {{param}} in the scheme, host or port"
+                            ));
                         }
                         if tool.service.is_some() || tool.agent.is_some() || tool.path.is_some() {
                             errs.push(format!(
@@ -549,6 +585,19 @@ pub fn is_dns_label(s: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
         && !s.starts_with('-')
         && !s.ends_with('-')
+}
+
+/// `scheme://authority` of an http(s) URL template, if it has no `{param}` before the path.
+pub fn http_origin(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() || authority.contains(['{', '}', '@']) {
+        return None;
+    }
+    Some(format!("{scheme}://{}", authority.to_ascii_lowercase()))
 }
 
 pub fn is_method(m: &str) -> bool {
@@ -671,6 +720,7 @@ mod tests {
         c.authz.callers.push(CallerRule {
             identity: "nobody".into(),
             agents: vec!["ghost".into()],
+            caller_agents: vec![],
         });
         c.agents[0].budgets.max_steps = 0;
         let err = c.validate().unwrap_err();
@@ -682,6 +732,59 @@ mod tests {
         );
         assert!(msg.contains("unknown agent \"ghost\""), "{msg}");
         assert!(msg.contains("every budget must be > 0"), "{msg}");
+    }
+
+    #[test]
+    fn missing_guardrails_block_gets_defaults() {
+        let text = "apiVersion: attache.io/v1alpha1\nkind: Charter\nservice: {name: a, namespace: b, app_port: 1}\nagents: [{name: x, model: mock}]\n";
+        let c = Charter::from_yaml(text).unwrap();
+        assert_eq!(c.guardrails.max_input_bytes, 16 * 1024);
+        assert_eq!(c.agents[0].budgets.max_steps, 8);
+    }
+
+    #[test]
+    fn caller_agents_and_limits() {
+        let inv = Charter::from_yaml(INVENTORY).unwrap();
+        let rule = inv
+            .authz
+            .callers
+            .iter()
+            .find(|r| r.identity.ends_with("/svc/orders"))
+            .unwrap();
+        assert_eq!(rule.caller_agents, vec!["ops-assistant".to_string()]);
+        let too_big = ORDERS.replace("max_tokens_per_call: 2048", "max_tokens_per_call: 200000");
+        assert!(
+            Charter::from_yaml(&too_big)
+                .unwrap_err()
+                .to_string()
+                .contains("<= 128000")
+        );
+    }
+
+    #[test]
+    fn http_tool_urls_and_own_service_agent_tools() {
+        assert_eq!(
+            http_origin("https://api.example.com:8443/v1/{id}"),
+            Some("https://api.example.com:8443".into())
+        );
+        assert_eq!(http_origin("http://{host}/x"), None);
+        assert_eq!(http_origin("ftp://x/y"), None);
+        assert_eq!(http_origin("https://user@evil/x"), None);
+        let mut c = Charter::from_yaml(ORDERS).unwrap();
+        // an agent tool naming this service is local: the target must exist and may not be the caller
+        let t = c.agents[0]
+            .tools
+            .iter_mut()
+            .find(|t| t.name == "order_triage")
+            .unwrap();
+        t.service = Some("orders".into());
+        t.agent = Some("ops-assistant".into());
+        assert!(
+            c.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("may not call itself")
+        );
     }
 
     #[test]

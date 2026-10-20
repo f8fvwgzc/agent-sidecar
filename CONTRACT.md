@@ -83,7 +83,7 @@ Flags / environment of `attached` (flag wins over env):
 | `--mesh-addr`     | `ATTACHE_MESH_ADDR`      | `0.0.0.0:50002`                   |
 | `--socket-dir`    | `ATTACHE_SOCKET_DIR`     | `/run/attache`                    |
 | `--runtime-cmd`   | `ATTACHE_RUNTIME_CMD`    | `attache-runtime` (shell words; `--listen` and `--sidecar` are appended) |
-| `--no-runtime`    | `ATTACHE_NO_RUNTIME=1`   | off (sidecar expects an externally started runtime) |
+| `--no-runtime`    | `ATTACHE_NO_RUNTIME`     | off. `1/true/yes/on` = do not spawn the runtime; something else serves `runtime.sock`, and readiness still follows its `Health` |
 | —                 | `ANTHROPIC_API_KEY`      | unset → the runtime uses the `mock` model for every agent |
 
 ## 3. `charter.yaml`
@@ -110,7 +110,7 @@ agents:
     system: "..."              # system prompt
     tools: []                  # see below
     budgets:
-      max_tokens_per_call: 1024      # max_tokens for each model call
+      max_tokens_per_call: 2048      # max_tokens for each model call, 1..=128000 (thinking counts against it)
       max_calls_per_minute: 30       # inbound invocations of this agent, sliding window
       max_cost_usd_per_day: 5.0      # sum of model_call cost_usd per UTC day
       max_steps: 6                   # model-call iterations per invocation
@@ -131,6 +131,7 @@ authz:
       agents: ["*"]
     - identity: spiffe://attache/ns/attache-demo/svc/orders  # a peer pod
       agents: [stock-analyst]
+      caller_agents: [ops-assistant]   # optional: only when the caller's sidecar says this agent is calling
   services:                    # path-level rules for service invocation
     - name: inbound-orders-to-stock
       identity: spiffe://attache/ns/attache-demo/svc/orders  # caller pod; omit = any (incl. local)
@@ -140,7 +141,7 @@ authz:
       deny:  ["* /admin", "* /admin/*"]
 audit:
   sink: stdout                 # stdout | file
-  file: /var/log/attache/audit.jsonl   # only with sink: file
+  file: /var/log/attache/audit.jsonl   # only with sink: file; the image makes /var/log/attache writable
   redact: []                   # dotted paths inside `input`/`output` to replace with "[redacted]"
 ```
 
@@ -161,20 +162,27 @@ audit:
   # type: agent — invoke another agent (orchestrator pattern)
   agent: stock-analyst
   service: inventory           # omit for a local agent
-  # type: http — any URL, performed by the sidecar
+  # type: http — a URL performed by the sidecar; `{param}` only in the path/query,
+  # never in the scheme, host or port (the origin is fixed by the charter)
   method: GET
-  url: https://example.com/{path}
+  url: https://example.com/items/{id}
 ```
 
 `agent` tools take `{ "input": string }`; their `parameters` default to that.
-Only `type: orchestrator` agents may declare `agent` tools.
+Only `type: orchestrator` agents may declare `agent` tools. An `agent` tool
+whose `service` is this charter's own service is a local agent tool.
+
+`{param}` values are percent-encoded by the runtime (`/` becomes `%2F`), so a
+value can never add path segments.
 
 ### 3.2 Validation rules (all enforced by `attache-charter`)
 
 - `apiVersion` must be `attache.io/v1alpha1`, `kind` must be `Charter`.
 - Names (`service.name`, `service.namespace`, agent names) are DNS-1123 labels.
 - Agent names unique; tool names unique per agent.
-- `agent` tools only on orchestrators; a local `agent` tool must name an agent in this charter; an agent may not call itself.
+- `agent` tools only on orchestrators; a local `agent` tool (no `service`, or this service) must name an agent in this charter; an agent may not call itself.
+- `http` tool `url` is `http(s)://host[:port]/…` with no `{param}` and no userinfo before the path.
+- `budgets.max_tokens_per_call` ≤ 128000.
 - `service` tools need `service`, `method`, `path`; `http` tools need `method`, `url`; `agent` tools need `agent`.
 - `guardrails.allowed_tools` / `allowed_services` keys must be agent names and the values must be declared tools / referenced services.
 - `authz.services[].name` unique; `allow`/`deny` entries are `"<METHOD|*> <path-glob>"` where the glob supports a trailing `*` only.
@@ -234,8 +242,13 @@ Response headers always include `traceparent` and `x-attache-request-id`.
 
 Also: `GET /v1/agents` → `{"agents":[{"name","type","model","tools":[...]}]}`,
 `GET /v1/charter` → the loaded charter as JSON, `GET /healthz` → `200 ok`
-(process up), `GET /readyz` → `200 ready` once the charter is loaded, TLS is
-loaded and the runtime answered `Health`; `503` otherwise.
+(process up), `GET /readyz` → `200` once the charter is loaded, TLS is
+loaded and the runtime answered `Health`; `503` otherwise. Body:
+`{"ready", "runtime", "model_provider", "mesh"}`.
+
+An unknown agent is reported only after `authz.callers` passed: the app gets
+`404 agent.unknown`, a peer not allowed for that name gets
+`403 authz.callers.*` (no probing of agent names over the mesh).
 
 gRPC equivalent on `127.0.0.1:50001`: `AppApi.InvokeAgent(InvokeAgentRequest)`
 and `AppApi.ListAgents`. Denials map to `PERMISSION_DENIED` /
@@ -274,19 +287,39 @@ exactly as far as its own `authz` rules say.
 `SidecarTools` (served by the sidecar on `sidecar.sock`, called by the runtime
 for every tool call so the sidecar can authorize and audit it):
 
-- `InvokeService(ToolServiceRequest) → ServiceResponse` — egress check
-  (`guardrails.allowed_services`, `authz.services` with `service = target`),
-  then local app (`service == self`) or mesh.
-- `InvokeAgent(ToolAgentRequest) → InvokeAgentResponse` — local agent (re-enters
-  the invocation pipeline with `caller = local`, `caller_agent` set) or mesh.
-- `InvokeHttp(ToolHttpRequest) → ServiceResponse` — plain HTTP egress, audited
-  as `http_call`.
+The sidecar does not trust the runtime (it is driven by a model). Every call
+must name a tool the agent declared and may use (`guardrail.allowed_tools`)
+and must match that tool's declaration — same service and method, same agent
+target, same http origin — else `guardrail.tool_spec`.
+
+- `InvokeService(ToolServiceRequest) → ServiceResponse` — tool check,
+  `guardrail.allowed_services`, path canonicalisation (§5.1,
+  `guardrail.path`), `authz.services` with `identity = local`,
+  `service = target`; then the local app (`service == self`) or the mesh.
+- `InvokeAgent(ToolAgentRequest) → InvokeAgentResponse` — tool check; a local
+  agent re-enters the invocation pipeline with `caller = local`,
+  `caller_agent` set; a remote one goes over the mesh.
+- `InvokeHttp(ToolHttpRequest) → ServiceResponse` — tool check (origin must
+  equal the declared URL's), then plain HTTP egress, audited as `http_call`.
 - `ReportEvent(AuditEvent{json}) → Empty` — the runtime's `model_call` records;
   the sidecar stamps `service`, `namespace`, redacts, and writes them.
 
-Denied tool calls return gRPC `PERMISSION_DENIED` (message = reason, metadata
-`x-attache-rule`); the runtime turns that into an `is_error` tool result whose
-text is `denied by <rule>: <reason>`.
+The sidecar adds `traceparent` (a child span) and `x-attache-request-id` to
+every request it sends — local app, mesh, http tool — and, toward an app,
+`x-attache-caller` and `x-attache-agent`. Values for `traceparent`,
+`tracestate`, `host`, `content-length` and any `x-attache-*` header supplied by
+the runtime or a peer are dropped, never forwarded.
+
+Outcomes, for all three tool RPCs (message = reason, metadata `x-attache-rule`):
+
+| outcome | gRPC status | runtime sees | audit `decision` |
+| ------- | ----------- | ------------ | ---------------- |
+| allowed and done | `OK` | the result | `allow` |
+| denied by policy (here or at the callee) | `PERMISSION_DENIED` (`RESOURCE_EXHAUSTED` for `budget.*`) | `is_error` tool result `denied by <rule>: <reason>` | `deny` + rule |
+| allowed but failed (peer down, app down, model error, unknown agent) | `UNAVAILABLE` (`NOT_FOUND` for `agent.unknown`) | `is_error` tool result `tool failed: …` | `allow` + `error` |
+
+A `RESOURCE_EXHAUSTED` without a `budget.*` rule (gRPC's own message-size
+limit) is a failure, not a denial.
 
 Clients of the unix sockets must send a plain `:authority` (the runtime sets
 `grpc.default_authority=localhost`): grpc-python's default for `unix:` targets
@@ -315,14 +348,22 @@ with `PROTOCOL_ERROR`.
 ### 5.1 Authz evaluation order (callee side, inbound)
 
 1. `authz.callers`: find rules whose `identity` equals the caller (`local` or
-   the SAN); the agent is allowed if any such rule lists it or `"*"`. Otherwise
-   `deny` with rule `authz.callers.default` (or the matched rule's identity
-   when it exists but excludes the agent).
+   the SAN); the agent is allowed if any such rule lists it or `"*"` **and**
+   the rule's `caller_agents` is empty or contains the calling agent (the
+   caller sidecar's `x-attache-agent` claim; for local agent calls, the local
+   calling agent). Otherwise `deny` with rule `authz.callers.default` (no rule
+   for that identity) or `authz.callers.<service>` (a rule exists but excludes
+   the agent or the calling agent). This runs before the agent name is looked
+   up.
 2. Budgets: `budget.max_calls_per_minute`, `budget.max_cost_usd_per_day`.
-3. Guardrails on input: `guardrail.max_input_bytes`, `guardrail.input_deny.<name>`.
+3. Guardrails on input — the `input` **and** the `context` JSON, everything
+   the model sees first: `guardrail.max_input_bytes` (their sum),
+   `guardrail.input_deny.<name>` (either matches).
 4. Run. Tool calls: egress rules on the caller side (`guardrail.allowed_tools`,
-   `guardrail.allowed_services`, `authz.services` for the target), inbound
-   rules on the callee side (`authz.services` for self).
+   `guardrail.tool_spec`, `guardrail.allowed_services`, `guardrail.path`,
+   `authz.services` for the target with identity `local`), inbound rules on
+   the callee side (`guardrail.path`, `authz.services` for self with the
+   caller's SAN).
 5. Guardrails on output: `guardrail.output_deny.<name>` → deny;
    `guardrail.pii_redact` → rewrite, decision stays `allow`.
 
@@ -334,6 +375,18 @@ the caller identity, its `agent` (if set) equals the calling agent and its
 `authz.default` (`authz.default.deny` / `authz.default.allow`). A pattern is
 `"<METHOD> <path>"` with `*` as the method wildcard and an optional trailing
 `*` on the path (`/stock/*` matches `/stock/x` and `/stock/x/y`, not `/stock`).
+
+Path canonicalisation (`guardrail.path`): before any `authz.services` match,
+on both sides, the path is resolved with the same WHATWG URL parser the
+sidecar uses to send the request, so `.`/`..` and percent-encoded dot segments
+(`%2e%2e`) are removed first — `/stock/../admin/reset` is matched, audited and
+sent as `/admin/reset`. A path that does not start with `/`, or contains
+whitespace, a control character, `\`, `#`, or an encoded `/`, `\` or NUL
+(`%2f`, `%5c`, `%00`), is denied with `guardrail.path`.
+
+`identity: local` in `authz.services` matches calls made by this pod's own
+agents (egress and self calls); a SPIFFE identity matches inbound calls from
+that peer.
 
 ## 6. Audit record
 
@@ -369,15 +422,24 @@ with `kubectl logs -c attached`, or `file`). Field order is fixed as below so
 }
 ```
 
-Redaction: `audit.redact` dotted paths are replaced with `"[redacted]"` inside
-`input`/`output`; `guardrails.pii_redact` rewrites emails to
-`[redacted:email]` and phone numbers to `[redacted:phone]` in the agent's
-output returned to the caller **and** in every string of every audit
-`input`/`output` that sidecar writes (model prompts, tool results, service
-bodies);
-payloads larger than 8 KiB are truncated to 8 KiB plus `…(truncated, N bytes)`.
-`input_sha256`/`output_sha256` are always computed over the full original
-bytes, so a consumer can prove a payload later without the sidecar storing it.
+Redaction, in this order, over the full payloads:
+
+1. `input_sha256` / `output_sha256` are computed over the full original bytes,
+   so a consumer can prove a payload later without the sidecar storing it.
+2. `audit.redact` dotted paths are replaced with `"[redacted]"` inside
+   `input`/`output` (arrays are walked). Values found at those paths (strings
+   and numbers of 4+ characters) are also remembered per `request_id` for 15
+   minutes and scrubbed from every later record of the same request in that
+   sidecar — they reappear as text inside model prompts and tool results.
+3. `guardrails.pii_redact` rewrites emails to `[redacted:email]` and phone
+   numbers to `[redacted:phone]` in the agent's output returned to the caller
+   **and** in every string of every audit `input`/`output` that sidecar writes.
+4. Payloads larger than 8 KiB are truncated to 8 KiB plus
+   `…(truncated, N bytes)` — after redaction, so a cut never exposes part of a
+   redacted value.
+
+A mesh call refused for its certificate (`authz.identity.invalid`) is audited
+as kind `authz` with `caller: "unknown"`.
 
 Which records a single demo call produces (orders pod unless noted):
 
@@ -423,6 +485,9 @@ with `decision: deny` and the same `request_id` and `trace_id`.
 - Images (built inside minikube's docker): `attache/attached:dev`
   (sidecar binary + Python runtime in one image), `attache/embassy:dev`,
   `attache/orders:dev`, `attache/inventory:dev`. `imagePullPolicy: IfNotPresent`.
+- The inventory app listens on `127.0.0.1` inside its pod and its Service
+  exposes only `mesh`: every other pod reaches it through the sidecar. (The
+  orders app keeps its HTTP port because it is the demo's entry point.)
 - Optional Secret `attache-anthropic` (`ANTHROPIC_API_KEY`), referenced with
   `optional: true`; without it every agent runs on the mock model.
 - Sidecar injection is **explicit** in the MVP: the `attached` container, the
@@ -467,12 +532,19 @@ record:
   from the API `usage`; `cost_usd` from the pricing table in
   `runtime/src/attache_runtime/pricing.py` (per 1M tokens; `mock` = 0).
 - Provider selection: `ANTHROPIC_API_KEY` set and `model != mock` → Anthropic
-  SDK (`anthropic.Anthropic().messages.create`), else the deterministic mock.
+  SDK, else the deterministic mock. Requests are streamed and collected
+  (`messages.stream(...).get_final_message()`), so large `max_tokens` never
+  trip the SDK's non-streaming limit; `output_config.effort: low` is sent to
+  every model that accepts it (not `claude-haiku-4-5`, `claude-sonnet-4-5` or
+  older). Thinking blocks are replayed unchanged on the next turn.
+- `stop_reason: max_tokens`: with text and no tool call → `ok` with the
+  truncated text (step summary says so); with a tool call or no text → `error`,
+  rule `budget.max_tokens_per_call` (a cut-off tool call never runs).
 - Mock model: on a turn without tool results it picks the single tool whose
   name+description shares the most words with the input (ties → declaration
   order) and fills string parameters heuristically (`input`/`question`/`query`
-  → the whole input; `sku`/`id`/`order_id` → the first `UPPER-1` or digit
-  token); on a turn with tool results it answers
+  → the whole input; `sku`/`id`/`order_id` → the first `UPPER-1` token, else
+  the first run of 3+ digits); on a turn with tool results it answers
   `Based on <tool>: <result>` (results truncated to 600 chars). No tools → it
   echoes `Mock answer for: <input>`.
 

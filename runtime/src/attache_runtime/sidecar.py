@@ -10,6 +10,9 @@ import grpc
 from .pb.attache.v1alpha1 import runtime_pb2, runtime_pb2_grpc
 from .tools import CallContext, ToolDenied, ToolFailed
 
+# Tool responses up to this size reach the agent (it truncates what it shows the model).
+MAX_MESSAGE = 32 * 1024 * 1024
+
 
 def _rule_of(err: grpc.aio.AioRpcError) -> str:
     md = err.trailing_metadata() or ()
@@ -34,16 +37,28 @@ class GrpcSidecar:
     def __init__(self, address: str) -> None:
         # grpc-python sends the percent-encoded socket path as :authority on unix: targets, which hyper
         # (tonic) rejects with an HTTP/2 PROTOCOL_ERROR. A plain authority avoids that.
-        self._channel = grpc.aio.insecure_channel(address, options=[("grpc.default_authority", "localhost")])
+        self._channel = grpc.aio.insecure_channel(
+            address,
+            options=[
+                ("grpc.default_authority", "localhost"),
+                ("grpc.max_receive_message_length", MAX_MESSAGE),
+                ("grpc.max_send_message_length", MAX_MESSAGE),
+            ],
+        )
         self._stub = runtime_pb2_grpc.SidecarToolsStub(self._channel)
 
     async def _call(self, coro):
         try:
             return await coro
         except grpc.aio.AioRpcError as e:
-            if e.code() in (grpc.StatusCode.PERMISSION_DENIED, grpc.StatusCode.RESOURCE_EXHAUSTED):
-                raise ToolDenied(_rule_of(e), e.details() or "denied") from None
-            raise ToolFailed(f"{e.code().name}: {e.details()}") from None
+            rule = _rule_of(e)
+            # A denial is a policy decision the sidecar made and named. Anything else — including
+            # RESOURCE_EXHAUSTED from gRPC's own message-size limit, which carries no rule — failed.
+            if e.code() == grpc.StatusCode.PERMISSION_DENIED or (
+                e.code() == grpc.StatusCode.RESOURCE_EXHAUSTED and rule.startswith("budget.")
+            ):
+                raise ToolDenied(rule, e.details() or "denied") from None
+            raise ToolFailed(f"{rule}: {e.code().name}: {e.details()}") from None
 
     async def invoke_service(
         self, ctx: CallContext, tool: str, service: str, method: str, path: str, headers: dict[str, str], body: bytes
@@ -61,8 +76,10 @@ class GrpcSidecar:
             ctx=_ctx(ctx, tool), target_service=target_service, target_agent=target_agent, input=input
         )
         resp = await self._call(self._stub.InvokeAgent(req, timeout=300))
+        if resp.status == "denied":  # older sidecars answered with an envelope
+            raise ToolDenied(resp.rule or "agent.denied", resp.reason or f"agent {target_agent} denied the call")
         if resp.status != "ok":
-            raise ToolDenied(resp.rule or "agent.error", resp.reason or f"agent {target_agent} returned {resp.status}")
+            raise ToolFailed(f"{resp.rule}: {resp.reason}")
         return resp.output
 
     async def invoke_http(

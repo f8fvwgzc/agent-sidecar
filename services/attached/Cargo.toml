@@ -37,6 +37,7 @@ tracing-subscriber.workspace = true
 shell-words.workspace = true
 futures.workspace = true
 rustls.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

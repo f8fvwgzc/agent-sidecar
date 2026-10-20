@@ -32,6 +32,7 @@ def get_stock(sku: str):
 
 @app.post("/admin/reset")
 def admin_reset(request: Request):
-    # Only reachable through the sidecar; the inventory charter denies it to the orders ops-assistant.
+    # The app listens on 127.0.0.1 inside the pod, so this is reachable only through the sidecar,
+    # and the inventory charter denies it to the orders ops-assistant.
     ADMIN["resets"] += 1
     return {"reset": True, "resets": ADMIN["resets"], "caller": request.headers.get("x-attache-caller", "direct")}

@@ -36,18 +36,23 @@ impl CompiledGuardrails {
     }
 
     pub fn check_input(&self, input: &str) -> Verdict {
-        if input.len() > self.max_input_bytes {
+        self.check_input_with_context(input, "")
+    }
+
+    /// Everything the model will see on the first turn: the input and the `context` JSON.
+    pub fn check_input_with_context(&self, input: &str, context: &str) -> Verdict {
+        let size = input.len() + context.len();
+        if size > self.max_input_bytes {
             return Verdict::deny(
                 "guardrail.max_input_bytes",
                 format!(
-                    "input is {} bytes, limit {}",
-                    input.len(),
+                    "input and context are {size} bytes, limit {}",
                     self.max_input_bytes
                 ),
             );
         }
         for (name, re) in &self.input_deny {
-            if re.is_match(input) {
+            if re.is_match(input) || (!context.is_empty() && re.is_match(context)) {
                 return Verdict::deny(
                     format!("guardrail.input_deny.{name}"),
                     format!("input matches deny rule {name}"),
@@ -133,6 +138,16 @@ mod tests {
         assert_eq!(
             c2.check_input("my Password = hunter2").rule,
             "guardrail.input_deny.no-secrets"
+        );
+        // the context goes to the model too, so it is checked too
+        assert_eq!(
+            c2.check_input_with_context("hi", r#"{"note":"password: x"}"#)
+                .rule,
+            "guardrail.input_deny.no-secrets"
+        );
+        assert_eq!(
+            c2.check_input_with_context("hi", &"y".repeat(1000)).rule,
+            "guardrail.max_input_bytes"
         );
     }
 }

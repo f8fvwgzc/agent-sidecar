@@ -11,8 +11,13 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let config = attached::Config::parse();
     let sidecar = attached::start(config).await?;
-    tokio::signal::ctrl_c().await?;
+    // Kubernetes stops containers with SIGTERM (and attached is PID 1, so nothing else handles it).
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = term.recv() => {}
+    }
     tracing::info!("shutting down");
-    sidecar.abort();
+    sidecar.shutdown().await;
     Ok(())
 }

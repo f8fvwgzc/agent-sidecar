@@ -34,10 +34,18 @@ impl Pki {
 }
 
 async fn fake_inventory_app() -> std::net::SocketAddr {
+    // `seen_by_app` echoes the identity headers the app received, to prove the sidecar owns them.
     let app = Router::new()
-        .route("/stock/{sku}", get(|axum::extract::Path(sku): axum::extract::Path<String>| async move {
-            Json(json!({"sku": sku, "on_hand": 42, "reorder_point": 50, "warehouse_contact": "ops-lead@example.com"}))
-        }))
+        .route(
+            "/stock/{sku}",
+            get(|axum::extract::Path(sku): axum::extract::Path<String>, headers: axum::http::HeaderMap| async move {
+                let all = |k: &str| headers.get_all(k).iter().map(|v| v.to_str().unwrap_or("").to_string()).collect::<Vec<_>>();
+                Json(json!({
+                    "sku": sku, "on_hand": 42, "reorder_point": 50, "warehouse_contact": "ops-lead@example.com",
+                    "seen_by_app": { "x-attache-caller": all("x-attache-caller"), "traceparent": all("traceparent") }
+                }))
+            }),
+        )
         .route("/admin/reset", post(|| async { Json(json!({"reset": true})) }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -220,7 +228,8 @@ async fn mesh_mtls_end_to_end() {
         "authz.callers.default"
     );
 
-    // 5. the orders identity passes authz; without a runtime the call fails later, as UNAVAILABLE.
+    // 5. the orders identity passes authz only for the calling agent its rule names (caller_agents);
+    //    with ops-assistant it gets through, and without a runtime fails later, as UNAVAILABLE.
     let orders_tls = orders.state.tls.as_ref().unwrap();
     let channel = attached::tls::client_channel(
         orders_tls,
@@ -236,11 +245,137 @@ async fn mesh_mtls_end_to_end() {
             ..Default::default()
         })
         .await
+        .expect_err("no calling agent claimed");
+    assert_eq!(err.code(), tonic::Code::PermissionDenied, "{err:?}");
+    assert_eq!(
+        err.metadata().get("x-attache-rule").unwrap(),
+        "authz.callers.orders"
+    );
+    let mut req = tonic::Request::new(InvokeAgentRequest {
+        agent: "stock-analyst".into(),
+        input: "hi".into(),
+        ..Default::default()
+    });
+    req.metadata_mut()
+        .insert("x-attache-agent", "ops-assistant".parse().unwrap());
+    let err = mesh
+        .invoke_agent(req)
+        .await
         .expect_err("no runtime in this test");
     assert_eq!(err.code(), tonic::Code::Unavailable, "{err:?}");
     assert_eq!(
         err.metadata().get("x-attache-rule").unwrap(),
         "runtime.unavailable"
+    );
+    // an unknown agent: a peer allowed for nothing by that name gets the authz denial, not a 404 probe
+    let mut req = tonic::Request::new(InvokeAgentRequest {
+        agent: "secret-agent".into(),
+        input: "hi".into(),
+        ..Default::default()
+    });
+    req.metadata_mut()
+        .insert("x-attache-agent", "ops-assistant".parse().unwrap());
+    let err = mesh.invoke_agent(req).await.unwrap_err();
+    assert_eq!(
+        err.metadata().get("x-attache-rule").unwrap(),
+        "authz.callers.orders"
+    );
+
+    // 5b. a peer cannot smuggle identity headers to the app: the sidecar's values replace them.
+    let mut headers = std::collections::HashMap::new();
+    headers.insert(
+        "x-attache-caller".to_string(),
+        "spiffe://attache/ns/attache-demo/svc/admin".to_string(),
+    );
+    headers.insert(
+        "traceparent".to_string(),
+        "00-11111111111111111111111111111111-2222222222222222-01".to_string(),
+    );
+    let mut req = tonic::Request::new(attache_proto::ServiceRequest {
+        method: "GET".into(),
+        path: "/stock/WIDGET-1".into(),
+        headers,
+        body: vec![],
+        request_id: "req-spoof".into(),
+        traceparent: String::new(),
+        agent: String::new(),
+    });
+    req.metadata_mut()
+        .insert("x-attache-agent", "ops-assistant".parse().unwrap());
+    let resp = mesh
+        .invoke_service(req)
+        .await
+        .expect("stock read is allowed")
+        .into_inner();
+    let body: serde_json::Value = serde_json::from_slice(&resp.body).unwrap();
+    assert_eq!(
+        body["seen_by_app"]["x-attache-caller"],
+        json!(["spiffe://attache/ns/attache-demo/svc/orders"])
+    );
+    assert_eq!(
+        body["seen_by_app"]["traceparent"].as_array().unwrap().len(),
+        1
+    );
+    assert!(
+        !body["seen_by_app"]["traceparent"][0]
+            .as_str()
+            .unwrap()
+            .contains("1111111111")
+    );
+
+    // 5c. dot segments are resolved before authz, so a traversal meets the deny rule it aims past,
+    //     and encoded slashes are refused outright — on the caller's sidecar and on the callee's.
+    let traversal = |path: &str| ToolServiceRequest {
+        ctx: ctx("check_stock", "req-traversal"),
+        service: "inventory".into(),
+        method: "GET".into(),
+        path: path.into(),
+        headers: Default::default(),
+        body: vec![],
+    };
+    for (path, rule) in [
+        ("/stock/../admin/reset", "authz.default.deny"),
+        ("/stock/%2e%2e/admin/reset", "authz.default.deny"),
+        ("/stock/..%2Fadmin%2Freset", "guardrail.path"),
+    ] {
+        let err = tools.invoke_service(traversal(path)).await.expect_err(path);
+        assert_eq!(err.code(), tonic::Code::PermissionDenied, "{path}: {err:?}");
+        assert_eq!(
+            err.metadata().get("x-attache-rule").unwrap(),
+            rule,
+            "{path}"
+        );
+    }
+    let mut req = tonic::Request::new(attache_proto::ServiceRequest {
+        method: "GET".into(),
+        path: "/stock/../admin/reset".into(),
+        headers: Default::default(),
+        body: vec![],
+        request_id: "req-traversal-inbound".into(),
+        traceparent: String::new(),
+        agent: String::new(),
+    });
+    req.metadata_mut()
+        .insert("x-attache-agent", "ops-assistant".parse().unwrap());
+    let err = mesh
+        .invoke_service(req)
+        .await
+        .expect_err("callee resolves the traversal too");
+    assert_eq!(
+        err.metadata().get("x-attache-rule").unwrap(),
+        "authz.services.deny-admin"
+    );
+
+    // 5d. the runtime cannot borrow a tool's name for a different request.
+    let mut wrong = traversal("/stock/WIDGET-1");
+    wrong.method = "DELETE".into();
+    let err = tools
+        .invoke_service(wrong)
+        .await
+        .expect_err("method differs from the declared tool");
+    assert_eq!(
+        err.metadata().get("x-attache-rule").unwrap(),
+        "guardrail.tool_spec"
     );
 
     // 6. a client without any certificate is refused at the TLS layer.

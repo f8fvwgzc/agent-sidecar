@@ -13,6 +13,9 @@ use tonic::{Request, Response, Status};
 
 use crate::pipeline::{self, Invocation};
 use crate::state::AppState;
+use crate::tools::is_reserved_header;
+
+pub const RULE_IDENTITY: &str = "authz.identity.invalid";
 
 pub struct MeshService {
     state: Arc<AppState>,
@@ -40,38 +43,12 @@ pub async fn serve(
     Ok((bound, task))
 }
 
-/// Caller identity from the client certificate's URI SAN, or a denial.
-fn caller_identity<T>(req: &Request<T>) -> Result<String, Status> {
-    let certs = req.peer_certs().ok_or_else(|| {
-        deny_status(&Verdict::deny(
-            "authz.identity.invalid",
-            "no client certificate",
-        ))
-    })?;
-    let leaf = certs.first().ok_or_else(|| {
-        deny_status(&Verdict::deny(
-            "authz.identity.invalid",
-            "empty client certificate chain",
-        ))
-    })?;
-    match attache_pki::spiffe_id_of(leaf) {
-        Ok(Some(id)) => Ok(id.uri()),
-        Ok(None) => Err(deny_status(&Verdict::deny(
-            "authz.identity.invalid",
-            "client certificate has no spiffe://attache/ URI SAN",
-        ))),
-        Err(e) => Err(deny_status(&Verdict::deny(
-            "authz.identity.invalid",
-            format!("client certificate unreadable: {e}"),
-        ))),
-    }
-}
-
 fn meta<T>(req: &Request<T>, key: &str) -> Option<String> {
     req.metadata()
         .get(key)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string)
+        .filter(|s| !s.is_empty())
 }
 
 fn deny_status(v: &Verdict) -> Status {
@@ -90,33 +67,105 @@ fn body_value(body: &[u8]) -> Value {
         .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(body).into_owned()))
 }
 
+/// What every inbound mesh call carries, read once.
+struct Inbound {
+    caller: Result<String, Verdict>,
+    agent: Option<String>,
+    trace: TraceContext,
+    request_id: String,
+}
+
+fn inbound<T>(
+    req: &Request<T>,
+    body_traceparent: &str,
+    body_request_id: &str,
+    body_agent: &str,
+) -> Inbound {
+    let caller = match req.peer_certs() {
+        None => Err(Verdict::deny(RULE_IDENTITY, "no client certificate")),
+        Some(certs) => match certs.first() {
+            None => Err(Verdict::deny(
+                RULE_IDENTITY,
+                "empty client certificate chain",
+            )),
+            Some(leaf) => match attache_pki::spiffe_id_of(leaf) {
+                Ok(Some(id)) => Ok(id.uri()),
+                Ok(None) => Err(Verdict::deny(
+                    RULE_IDENTITY,
+                    "client certificate has no spiffe://attache/ URI SAN",
+                )),
+                Err(e) => Err(Verdict::deny(
+                    RULE_IDENTITY,
+                    format!("client certificate unreadable: {e}"),
+                )),
+            },
+        },
+    };
+    let tp = meta(req, "traceparent").unwrap_or_else(|| body_traceparent.to_string());
+    Inbound {
+        caller,
+        agent: meta(req, "x-attache-agent")
+            .or_else(|| (!body_agent.is_empty()).then(|| body_agent.to_string())),
+        trace: TraceContext::from_traceparent(&tp),
+        request_id: meta(req, "x-attache-request-id")
+            .or_else(|| (!body_request_id.is_empty()).then(|| body_request_id.to_string()))
+            .unwrap_or_else(attache_common::trace::new_request_id),
+    }
+}
+
+impl MeshService {
+    /// A refused peer still leaves a trace in the callee's log (CONTRACT.md §6, kind `authz`).
+    fn audit_identity_denial(&self, inb: &Inbound, v: &Verdict, callee: &str, started: Instant) {
+        let rec = AuditRecord::new(
+            Kind::Authz,
+            Direction::Inbound,
+            &inb.request_id,
+            &inb.trace,
+            None,
+            "unknown",
+            inb.agent.as_deref(),
+            callee,
+            Value::Null,
+            Value::Null,
+        )
+        .verdict(v)
+        .latency(started);
+        self.state.audit.write(rec);
+    }
+}
+
 #[tonic::async_trait]
 impl Mesh for MeshService {
     async fn invoke_agent(
         &self,
         request: Request<InvokeAgentRequest>,
     ) -> Result<Response<InvokeAgentResponse>, Status> {
-        let caller = caller_identity(&request)?;
-        let caller_agent = meta(&request, "x-attache-agent");
-        let traceparent = meta(&request, "traceparent");
-        let request_id = meta(&request, "x-attache-request-id");
+        let started = Instant::now();
+        let inb = {
+            let body = request.get_ref();
+            inbound(
+                &request,
+                &body.traceparent,
+                &body.request_id,
+                &body.caller_agent,
+            )
+        };
         let req = request.into_inner();
-        let trace =
-            TraceContext::from_traceparent(traceparent.as_deref().unwrap_or(&req.traceparent));
-        let request_id = request_id
-            .filter(|s| !s.is_empty())
-            .or_else(|| (!req.request_id.is_empty()).then(|| req.request_id.clone()))
-            .unwrap_or_else(attache_common::trace::new_request_id);
+        let caller = match &inb.caller {
+            Ok(c) => c.clone(),
+            Err(v) => {
+                self.audit_identity_denial(&inb, v, &req.agent, started);
+                return Err(deny_status(v));
+            }
+        };
         let inv = Invocation {
             agent: req.agent,
             input: req.input,
             context_json: req.context_json,
-            request_id,
-            trace,
+            request_id: inb.request_id.clone(),
+            trace: inb.trace.clone(),
             caller,
-            caller_agent: caller_agent
-                .filter(|s| !s.is_empty())
-                .or_else(|| (!req.caller_agent.is_empty()).then(|| req.caller_agent.clone())),
+            caller_agent: inb.agent.clone(),
             depth: req.depth,
         };
         let resp = pipeline::invoke(&self.state, inv).await;
@@ -131,68 +180,92 @@ impl Mesh for MeshService {
         request: Request<ServiceRequest>,
     ) -> Result<Response<ServiceResponse>, Status> {
         let started = Instant::now();
-        let caller = caller_identity(&request)?;
-        let agent = meta(&request, "x-attache-agent");
-        let traceparent = meta(&request, "traceparent");
-        let request_id = meta(&request, "x-attache-request-id");
+        let inb = {
+            let body = request.get_ref();
+            inbound(&request, &body.traceparent, &body.request_id, &body.agent)
+        };
         let req = request.into_inner();
-        let trace =
-            TraceContext::from_traceparent(traceparent.as_deref().unwrap_or(&req.traceparent));
-        let request_id = request_id
-            .filter(|s| !s.is_empty())
-            .unwrap_or(req.request_id.clone());
-        let agent = agent
-            .filter(|s| !s.is_empty())
-            .or_else(|| (!req.agent.is_empty()).then(|| req.agent.clone()));
         let me = self.state.charter.service.name.clone();
-        let callee = format!("{me} {} {}", req.method, req.path);
-        let input =
+        let raw_callee = format!("{me} {} {}", req.method, req.path);
+        let caller = match &inb.caller {
+            Ok(c) => c.clone(),
+            Err(v) => {
+                self.audit_identity_denial(&inb, v, &raw_callee, started);
+                return Err(deny_status(v));
+            }
+        };
+        let mut input =
             json!({ "method": req.method, "path": req.path, "body": body_value(&req.body) });
-        let record = |output: Value| {
+        let record = |callee: &str, input: &Value, output: Value| {
             AuditRecord::new(
                 Kind::ServiceCall,
                 Direction::Inbound,
-                &request_id,
-                &trace,
-                agent.as_deref(),
+                &inb.request_id,
+                &inb.trace,
+                inb.agent.as_deref(),
                 &caller,
-                agent.as_deref(),
-                &callee,
+                inb.agent.as_deref(),
+                callee,
                 input.clone(),
                 output,
             )
+            .latency(started)
         };
 
+        // The peer's sidecar canonicalised the path already; a peer is still not trusted to have.
+        let path = match authz::canonical_path(&req.path) {
+            Ok(p) => p,
+            Err(reason) => {
+                let v = Verdict::deny(authz::RULE_PATH, reason);
+                self.state
+                    .audit
+                    .write(record(&raw_callee, &input, Value::Null).verdict(&v));
+                return Err(deny_status(&v));
+            }
+        };
+        input["path"] = json!(path);
+        let callee = format!("{me} {} {path}", req.method);
         let v = authz::authorize_service_call(
             &self.state.charter,
             Some(&caller),
-            agent.as_deref(),
+            inb.agent.as_deref(),
             &me,
             &req.method,
-            &req.path,
+            &path,
         );
         if !v.allow {
             self.state
                 .audit
-                .write(record(Value::Null).verdict(&v).latency(started));
+                .write(record(&callee, &input, Value::Null).verdict(&v));
             return Err(deny_status(&v));
         }
 
-        let url = format!("{}{}", self.state.app_base_url(), req.path);
-        let method = reqwest::Method::from_bytes(req.method.as_bytes())
-            .map_err(|e| Status::invalid_argument(e.to_string()))?;
-        let mut hreq = self.state.http.request(method, &url);
-        for (k, val) in &req.headers {
-            if k.eq_ignore_ascii_case("host") || k.eq_ignore_ascii_case("content-length") {
-                continue;
+        let url = format!("{}{}", self.state.app_base_url(), path);
+        let method = match reqwest::Method::from_bytes(req.method.as_bytes()) {
+            Ok(m) => m,
+            Err(e) => {
+                let v = Verdict::deny(
+                    authz::RULE_PATH,
+                    format!("bad method {:?}: {e}", req.method),
+                );
+                self.state
+                    .audit
+                    .write(record(&callee, &input, Value::Null).verdict(&v));
+                return Err(deny_status(&v));
             }
-            hreq = hreq.header(k, val);
+        };
+        let mut hreq = self.state.http.request(method, &url);
+        // Identity and trace headers come from this sidecar only; a peer's copies are dropped.
+        for (k, val) in &req.headers {
+            if !is_reserved_header(k) {
+                hreq = hreq.header(k, val);
+            }
         }
         hreq = hreq
-            .header("traceparent", trace.traceparent())
-            .header("x-attache-request-id", &request_id)
+            .header("traceparent", inb.trace.traceparent())
+            .header("x-attache-request-id", &inb.request_id)
             .header("x-attache-caller", &caller)
-            .header("x-attache-agent", agent.clone().unwrap_or_default());
+            .header("x-attache-agent", inb.agent.clone().unwrap_or_default());
         if !req.body.is_empty() {
             hreq = hreq.body(req.body.clone());
         }
@@ -200,16 +273,20 @@ impl Mesh for MeshService {
             Ok(resp) => {
                 let sr = crate::tools::to_service_response(resp).await;
                 let out = json!({ "status": sr.status, "body": body_value(&sr.body) });
-                let mut rec = record(out).verdict(&v).latency(started);
-                rec.rule = Some(v.rule.clone());
-                self.state.audit.write(rec);
+                self.state
+                    .audit
+                    .write(record(&callee, &input, out).verdict(&v));
                 Ok(Response::new(sr))
             }
             Err(e) => {
-                let mut rec = record(Value::Null).verdict(&v).latency(started);
+                let mut rec = record(&callee, &input, Value::Null).verdict(&v);
                 rec.error = Some(format!("app unreachable at {url}: {e}"));
                 self.state.audit.write(rec);
-                Err(Status::unavailable(format!("{me} app unreachable: {e}")))
+                Err(crate::tools::status_with_rule(
+                    tonic::Code::Unavailable,
+                    crate::tools::RULE_APP_UNAVAILABLE,
+                    &format!("{me} app unreachable: {e}"),
+                ))
             }
         }
     }

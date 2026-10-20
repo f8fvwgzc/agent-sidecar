@@ -71,9 +71,14 @@ pub fn supervise(state: Arc<AppState>, config: Config) -> tokio::task::JoinHandl
                 tokio::spawn(forward(err, "runtime"));
             }
             let health = tokio::spawn(health_loop(state.clone()));
+            let ran_from = std::time::Instant::now();
             let status = child.wait().await;
             health.abort();
             state.runtime_ready.store(false, Ordering::Relaxed);
+            // A runtime that stayed up for a while earned a fresh start, not the accumulated backoff.
+            if ran_from.elapsed() > Duration::from_secs(60) {
+                backoff = Duration::from_secs(1);
+            }
             tracing::warn!(?status, "agent runtime exited; restarting in {backoff:?}");
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(Duration::from_secs(30));
@@ -88,7 +93,7 @@ async fn forward<R: tokio::io::AsyncRead + Unpin>(reader: R, prefix: &'static st
     }
 }
 
-async fn health_loop(state: Arc<AppState>) {
+pub async fn health_loop(state: Arc<AppState>) {
     let mut backoff_reset = false;
     loop {
         let mut client = state.runtime.clone();

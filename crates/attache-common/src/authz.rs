@@ -1,5 +1,7 @@
 //! Authorization decisions (CONTRACT.md §5.1).
 use attache_charter::{Charter, Decision, PathPattern};
+
+pub use crate::identity::LOCAL;
 use serde::Serialize;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -29,17 +31,76 @@ impl Verdict {
     }
 }
 
-/// May `caller` (`local` or a SPIFFE URI) invoke `agent`?
-pub fn authorize_caller(charter: &Charter, caller: &str, agent: &str) -> Verdict {
+/// The path the sidecar authorizes, audits and forwards — one string for all three (CONTRACT.md §5.1).
+///
+/// It is resolved with the same WHATWG URL parser reqwest uses to send the request, so `..`,
+/// `%2e%2e` and friends are removed *before* matching instead of after. Encoded `/` or `\`,
+/// backslashes, fragments, whitespace and control characters are refused outright.
+pub fn canonical_path(raw: &str) -> Result<String, String> {
+    if !raw.starts_with('/') {
+        return Err(format!("path {raw:?} must start with /"));
+    }
+    if raw
+        .chars()
+        .any(|c| c.is_control() || c.is_whitespace() || c == '\\' || c == '#')
+    {
+        return Err(format!(
+            "path {raw:?} contains whitespace, a control character, a backslash or a fragment"
+        ));
+    }
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("%2f") || lower.contains("%5c") || lower.contains("%00") {
+        return Err(format!(
+            "path {raw:?} contains an encoded slash, backslash or NUL"
+        ));
+    }
+    let url = url::Url::parse(&format!("http://attache.invalid{raw}"))
+        .map_err(|e| format!("path {raw:?}: {e}"))?;
+    if url.host_str() != Some("attache.invalid") {
+        return Err(format!("path {raw:?} changes the target host"));
+    }
+    let mut out = url.path().to_string();
+    if let Some(q) = url.query() {
+        out.push('?');
+        out.push_str(q);
+    }
+    Ok(out)
+}
+
+pub const RULE_PATH: &str = "guardrail.path";
+
+/// May `caller` (`local` or a SPIFFE URI), acting for `caller_agent` (the calling sidecar's
+/// `x-attache-agent` claim, or the local calling agent), invoke `agent`?
+pub fn authorize_caller(
+    charter: &Charter,
+    caller: &str,
+    caller_agent: Option<&str>,
+    agent: &str,
+) -> Verdict {
     let mut matched_identity = false;
+    let mut agent_mismatch = false;
     for rule in &charter.authz.callers {
         if rule.identity != caller {
             continue;
         }
         matched_identity = true;
         if rule.agents.iter().any(|a| a == "*" || a == agent) {
-            return Verdict::allow(format!("authz.callers.{}", short_identity(caller)));
+            if rule.caller_agents.is_empty()
+                || caller_agent.is_some_and(|ca| rule.caller_agents.iter().any(|x| x == ca))
+            {
+                return Verdict::allow(format!("authz.callers.{}", short_identity(caller)));
+            }
+            agent_mismatch = true;
         }
+    }
+    if agent_mismatch {
+        return Verdict::deny(
+            format!("authz.callers.{}", short_identity(caller)),
+            format!(
+                "identity {caller} may invoke {agent} only for caller_agents, and {:?} is not one",
+                caller_agent.unwrap_or("-")
+            ),
+        );
     }
     if matched_identity {
         Verdict::deny(
@@ -141,15 +202,65 @@ mod tests {
     #[test]
     fn callers() {
         let c = Charter::from_yaml(INVENTORY).unwrap();
-        assert!(authorize_caller(&c, "local", "stock-analyst").allow);
-        assert!(authorize_caller(&c, ORDERS_ID, "stock-analyst").allow);
+        assert!(authorize_caller(&c, "local", None, "stock-analyst").allow);
+        assert!(authorize_caller(&c, ORDERS_ID, Some("ops-assistant"), "stock-analyst").allow);
+        let other = authorize_caller(&c, ORDERS_ID, Some("refund-bot"), "stock-analyst");
+        assert!(
+            !other.allow,
+            "caller_agents restricts which orders agent may call"
+        );
+        assert_eq!(other.rule, "authz.callers.orders");
+        assert!(!authorize_caller(&c, ORDERS_ID, None, "stock-analyst").allow);
         let v = authorize_caller(
             &c,
             "spiffe://attache/ns/attache-demo/svc/billing",
+            Some("x"),
             "stock-analyst",
         );
         assert!(!v.allow);
         assert_eq!(v.rule, "authz.callers.default");
+    }
+
+    #[test]
+    fn canonical_paths() {
+        assert_eq!(
+            canonical_path("/stock/WIDGET-1").unwrap(),
+            "/stock/WIDGET-1"
+        );
+        assert_eq!(
+            canonical_path("/stock/../admin/reset").unwrap(),
+            "/admin/reset"
+        );
+        assert_eq!(
+            canonical_path("/stock/%2e%2e/admin/reset").unwrap(),
+            "/admin/reset"
+        );
+        assert_eq!(canonical_path("/stock/.%2E/admin/x").unwrap(), "/admin/x");
+        assert_eq!(canonical_path("/stock/./a?x=1").unwrap(), "/stock/a?x=1");
+        assert_eq!(canonical_path("/../../etc").unwrap(), "/etc");
+        for bad in [
+            "stock",
+            "http://evil/x",
+            "/stock/..%2fadmin",
+            "/a\\b",
+            "/a#b",
+            "/a b",
+            "/a%00",
+        ] {
+            assert!(canonical_path(bad).is_err(), "{bad} must be rejected");
+        }
+        // what authz sees is what is sent: the traversal now meets the deny rule
+        let c = Charter::from_yaml(INVENTORY).unwrap();
+        let p = canonical_path("/stock/../admin/reset").unwrap();
+        let v = authorize_service_call(
+            &c,
+            Some(ORDERS_ID),
+            Some("ops-assistant"),
+            "inventory",
+            "GET",
+            &p,
+        );
+        assert_eq!(v.rule, "authz.services.deny-admin");
     }
 
     #[test]

@@ -151,6 +151,17 @@ impl AuditRecord {
 
     /// Apply `audit.redact` dotted paths and size truncation to input/output.
     pub fn redact(&mut self, paths: &[String]) {
+        self.redact_paths(paths);
+        self.truncate_payloads();
+    }
+
+    pub fn truncate_payloads(&mut self) {
+        truncate(&mut self.input);
+        truncate(&mut self.output);
+    }
+
+    /// Apply `audit.redact` dotted paths to input/output.
+    pub fn redact_paths(&mut self, paths: &[String]) {
         for p in paths {
             if let Some(rest) = p.strip_prefix("input.") {
                 redact_path(&mut self.input, rest);
@@ -162,13 +173,62 @@ impl AuditRecord {
                 self.output = Value::String("[redacted]".into());
             }
         }
-        truncate(&mut self.input);
-        truncate(&mut self.output);
     }
 
     pub fn to_json_line(&self) -> String {
         serde_json::to_string(self)
             .unwrap_or_else(|e| format!("{{\"error\":\"serialize audit record: {e}\"}}"))
+    }
+}
+
+/// String values found at a dotted path (arrays are walked), for scrubbing them elsewhere.
+fn collect_path(v: &Value, dotted: &str, out: &mut Vec<String>) {
+    let (head, rest) = match dotted.split_once('.') {
+        Some((h, r)) => (h, Some(r)),
+        None => (dotted, None),
+    };
+    match v {
+        Value::Array(items) => items.iter().for_each(|i| collect_path(i, dotted, out)),
+        Value::Object(map) => {
+            if let Some(next) = map.get(head) {
+                match rest {
+                    Some(r) => collect_path(next, r, out),
+                    None => collect_leaves(next, out),
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_leaves(v: &Value, out: &mut Vec<String>) {
+    match v {
+        Value::String(s) if s.chars().count() >= MIN_SECRET_LEN && s != "[redacted]" => {
+            out.push(s.clone())
+        }
+        Value::Number(n) if n.to_string().len() >= MIN_SECRET_LEN => out.push(n.to_string()),
+        Value::Array(items) => items.iter().for_each(|i| collect_leaves(i, out)),
+        Value::Object(map) => map.values().for_each(|i| collect_leaves(i, out)),
+        _ => {}
+    }
+}
+
+/// Values shorter than this are not scrubbed from other records (too likely to hit unrelated text).
+pub const MIN_SECRET_LEN: usize = 4;
+const SECRET_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+fn scrub(v: &mut Value, secrets: &[String]) {
+    match v {
+        Value::String(s) => {
+            for secret in secrets {
+                if s.contains(secret.as_str()) {
+                    *s = s.replace(secret.as_str(), "[redacted]");
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(|i| scrub(i, secrets)),
+        Value::Object(map) => map.values_mut().for_each(|i| scrub(i, secrets)),
+        _ => {}
     }
 }
 
@@ -238,6 +298,9 @@ pub struct AuditWriter {
     namespace: String,
     redact: Vec<String>,
     pii_redact: bool,
+    /// request_id → values found at `audit.redact` paths, scrubbed from every later record of that
+    /// request (the same value reappears as text inside model prompts and tool results).
+    secrets: Mutex<std::collections::HashMap<String, (std::time::Instant, Vec<String>)>>,
     sink: Mutex<Box<dyn Write + Send>>,
 }
 
@@ -273,6 +336,7 @@ impl AuditWriter {
             namespace: namespace.into(),
             redact,
             pii_redact: false,
+            secrets: Mutex::new(std::collections::HashMap::new()),
             sink: Mutex::new(sink),
         }
     }
@@ -283,15 +347,58 @@ impl AuditWriter {
         self
     }
 
+    /// Remember the values at `audit.redact` paths of a payload (`side` = "input" | "output")
+    /// so later records of the same request never carry them, even embedded in text.
+    pub fn remember(&self, request_id: &str, side: &str, payload: &Value) {
+        if self.redact.is_empty() || request_id.is_empty() {
+            return;
+        }
+        let mut found = Vec::new();
+        let prefix = format!("{side}.");
+        for p in &self.redact {
+            if let Some(rest) = p.strip_prefix(&prefix) {
+                collect_path(payload, rest, &mut found);
+            } else if p == side {
+                collect_leaves(payload, &mut found);
+            }
+        }
+        if found.is_empty() {
+            return;
+        }
+        let mut secrets = self.secrets.lock().unwrap();
+        let now = std::time::Instant::now();
+        secrets.retain(|_, (t, _)| now.duration_since(*t) < SECRET_TTL);
+        let entry = secrets
+            .entry(request_id.to_string())
+            .or_insert_with(|| (now, Vec::new()));
+        entry.0 = now;
+        for f in found {
+            if !entry.1.contains(&f) {
+                entry.1.push(f);
+            }
+        }
+        // longest first, so a value that contains another is replaced whole
+        entry.1.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    }
+
+    /// Stamp, hash (over the original payloads), redact paths, scrub remembered values, redact PII,
+    /// then truncate — redaction always sees the whole payload (CONTRACT.md §6).
     pub fn write(&self, mut record: AuditRecord) {
         record.service = self.service.clone();
         record.namespace = self.namespace.clone();
         record.ensure_hashes();
-        record.redact(&self.redact);
+        self.remember(&record.request_id, "input", &record.input);
+        self.remember(&record.request_id, "output", &record.output);
+        record.redact_paths(&self.redact);
+        if let Some((_, secrets)) = self.secrets.lock().unwrap().get(&record.request_id) {
+            scrub(&mut record.input, secrets);
+            scrub(&mut record.output, secrets);
+        }
         if self.pii_redact {
             redact_pii_value(&mut record.input);
             redact_pii_value(&mut record.output);
         }
+        record.truncate_payloads();
         let line = record.to_json_line();
         let mut sink = self.sink.lock().unwrap();
         let _ = writeln!(sink, "{line}");
@@ -372,6 +479,123 @@ mod tests {
         assert_eq!(v["messages"][0]["content"], "mail [redacted:email]");
         assert_eq!(v["n"], 3);
         assert_ne!(before, sha256_hex(&payload_bytes(&v)));
+    }
+
+    #[derive(Clone, Default)]
+    struct Buf(std::sync::Arc<Mutex<Vec<u8>>>);
+    impl Write for Buf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl Buf {
+        fn lines(&self) -> Vec<Value> {
+            String::from_utf8(self.0.lock().unwrap().clone())
+                .unwrap()
+                .lines()
+                .map(|l| serde_json::from_str(l).unwrap())
+                .collect()
+        }
+    }
+
+    #[test]
+    fn redacted_values_are_scrubbed_from_later_records_of_the_same_request() {
+        let buf = Buf::default();
+        let w = AuditWriter::with_sink(
+            "orders",
+            "ns",
+            vec!["input.context.customer".into(), "output.body.card".into()],
+            Box::new(buf.clone()),
+        );
+        let t = TraceContext::new_root();
+        // the invocation input is remembered up front (its own record is written last)
+        w.remember(
+            "r1",
+            "input",
+            &serde_json::json!({"input": "hi", "context": {"customer": "cust-SECRET-99"}}),
+        );
+        let tool_out =
+            serde_json::json!({"status": 200, "body": {"card": "4111-1111", "sku": "W-1"}});
+        w.write(AuditRecord::new(
+            Kind::ServiceCall,
+            Direction::Internal,
+            "r1",
+            &t,
+            None,
+            "local",
+            None,
+            "x",
+            Value::Null,
+            tool_out,
+        ));
+        let prompt = serde_json::json!({"messages": [{"content": "hi <context>{\"customer\": \"cust-SECRET-99\"}</context>"}, {"content": "{\"card\":\"4111-1111\"}"}]});
+        w.write(AuditRecord::new(
+            Kind::ModelCall,
+            Direction::Outbound,
+            "r1",
+            &t,
+            None,
+            "local",
+            None,
+            "mock",
+            prompt,
+            Value::Null,
+        ));
+        w.write(AuditRecord::new(
+            Kind::ModelCall,
+            Direction::Outbound,
+            "r2",
+            &t,
+            None,
+            "local",
+            None,
+            "mock",
+            Value::String("cust-SECRET-99".into()),
+            Value::Null,
+        ));
+        let lines = buf.lines();
+        assert_eq!(lines[0]["output"]["body"]["card"], "[redacted]");
+        assert_eq!(lines[0]["output"]["body"]["sku"], "W-1");
+        let text = lines[1]["input"].to_string();
+        assert!(
+            !text.contains("cust-SECRET-99") && !text.contains("4111-1111"),
+            "{text}"
+        );
+        assert_eq!(
+            lines[2]["input"], "cust-SECRET-99",
+            "other requests are untouched"
+        );
+    }
+
+    #[test]
+    fn pii_redaction_happens_before_truncation() {
+        let buf = Buf::default();
+        let w =
+            AuditWriter::with_sink("s", "n", vec![], Box::new(buf.clone())).with_pii_redact(true);
+        let t = TraceContext::new_root();
+        // an email straddling the 8 KiB cut must not leak a partial address
+        let text = format!(
+            "{}someone.long.name@example.com tail",
+            "x".repeat(MAX_PAYLOAD_BYTES - 10)
+        );
+        w.write(AuditRecord::new(
+            Kind::ToolCall,
+            Direction::Internal,
+            "r",
+            &t,
+            None,
+            "local",
+            None,
+            "t",
+            Value::String(text),
+            Value::Null,
+        ));
+        let out = buf.lines()[0]["input"].as_str().unwrap().to_string();
+        assert!(!out.contains("someone.lo"), "{}", &out[out.len() - 80..]);
     }
 
     #[test]

@@ -32,6 +32,15 @@ impl Sidecar {
             t.abort();
         }
     }
+
+    /// Abort every task and wait for them to unwind, so the supervised runtime child is killed
+    /// (kill_on_drop) before the process exits.
+    pub async fn shutdown(self) {
+        self.abort();
+        for t in self.tasks {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), t).await;
+        }
+    }
 }
 
 /// Load the charter and TLS material, bind every listener, start the runtime supervisor.
@@ -46,7 +55,10 @@ pub async fn start(config: Config) -> anyhow::Result<Sidecar> {
         .with_context(|| format!("create {}", config.socket_dir.display()))?;
     let sidecar_sock = config.socket_dir.join("sidecar.sock");
     tasks.push(tools::serve(state.clone(), sidecar_sock.clone()).await?);
-    if !config.no_runtime {
+    if config.no_runtime {
+        // Someone else runs the runtime on runtime.sock; readiness still follows its Health.
+        tasks.push(tokio::spawn(runtime::health_loop(state.clone())));
+    } else {
         tasks.push(runtime::supervise(state.clone(), config.clone()));
     }
 

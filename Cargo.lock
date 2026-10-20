@@ -168,6 +168,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror",
+ "url",
  "uuid",
 ]
 
@@ -221,6 +222,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]

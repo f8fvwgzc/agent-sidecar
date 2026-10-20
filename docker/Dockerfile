@@ -29,7 +29,8 @@ COPY runtime/src ./src
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked --no-dev --no-editable
 COPY --from=build /out/attached /out/attache /usr/local/bin/
 COPY docker/attache-ready /usr/local/bin/attache-ready
-RUN useradd -u 10001 -m attache && mkdir -p /run/attache && chown attache /run/attache && chmod +x /usr/local/bin/attache-ready
+RUN useradd -u 10001 -m attache && mkdir -p /run/attache /var/log/attache \
+    && chown attache /run/attache /var/log/attache && chmod +x /usr/local/bin/attache-ready
 ENV PATH=/app/.venv/bin:$PATH ATTACHE_RUNTIME_CMD=attache-runtime RUST_LOG=info
 USER 10001
 EXPOSE 3500 50001 50002

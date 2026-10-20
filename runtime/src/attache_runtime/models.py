@@ -189,15 +189,32 @@ class AnthropicModel:
             kwargs["system"] = system
         if tools:
             kwargs["tools"] = tools
-        # Budgets are small by design; keep reasoning short. Older SDKs without output_config fall back.
-        try:
-            resp = self._client.messages.create(**kwargs, output_config={"effort": "low"})
-        except TypeError:
-            resp = self._client.messages.create(**kwargs)
+        if supports_effort(self.name):
+            # Budgets are small by design; keep reasoning short.
+            kwargs["output_config"] = {"effort": "low"}
+        # Streaming, collected into one message: the SDK refuses large non-streaming max_tokens,
+        # and a stream never hits the HTTP read timeout on a long turn.
+        with self._client.messages.stream(**kwargs) as stream:
+            resp = stream.get_final_message()
         content = [b.model_dump(exclude_none=True) for b in resp.content]
         return ModelResponse(
             content, resp.stop_reason or "end_turn", resp.usage.input_tokens, resp.usage.output_tokens, raw=resp
         )
+
+
+# Models that reject output_config.effort (CONTRACT.md §9). Everything newer accepts it.
+_NO_EFFORT_PREFIXES = (
+    "claude-haiku-4-5",
+    "claude-sonnet-4-5",
+    "claude-opus-4-1",
+    "claude-opus-4-0",
+    "claude-sonnet-4-0",
+    "claude-3",
+)
+
+
+def supports_effort(model: str) -> bool:
+    return not model.startswith(_NO_EFFORT_PREFIXES)
 
 
 def anthropic_available() -> bool:

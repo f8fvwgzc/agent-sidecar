@@ -122,6 +122,7 @@ fn main() {
 }
 
 fn logs(args: LogsArgs) -> anyhow::Result<()> {
+    let mut kubectl: Option<std::process::Child> = None;
     let reader: Box<dyn BufRead> = match &args.file {
         Some(f) if f == "-" => Box::new(BufReader::new(std::io::stdin())),
         Some(f) => Box::new(BufReader::new(std::fs::File::open(f)?)),
@@ -153,12 +154,14 @@ fn logs(args: LogsArgs) -> anyhow::Result<()> {
             if args.follow {
                 cmd.arg("-f");
             }
-            let child = cmd
+            let mut child = cmd
                 .stdout(Stdio::piped())
                 .stderr(Stdio::inherit())
                 .spawn()
                 .map_err(|e| anyhow::anyhow!("cannot run kubectl: {e}"))?;
-            Box::new(BufReader::new(child.stdout.unwrap()))
+            let stdout = child.stdout.take().expect("piped stdout");
+            kubectl = Some(child);
+            Box::new(BufReader::new(stdout))
         }
     };
     let stdout = std::io::stdout();
@@ -208,6 +211,13 @@ fn logs(args: LogsArgs) -> anyhow::Result<()> {
     records.sort_by(|a, b| a.ts.cmp(&b.ts));
     for rec in &records {
         print_record(&mut out, rec, args.raw)?;
+    }
+    // An empty table must mean "no records", never "kubectl failed".
+    if let Some(mut child) = kubectl {
+        let status = child.wait()?;
+        if !status.success() {
+            anyhow::bail!("kubectl logs failed ({status}); no audit records were read");
+        }
     }
     Ok(())
 }

@@ -88,8 +88,9 @@ impl AppState {
         })
     }
 
+    /// Ready = charter loaded (we exist), TLS identity loaded (the mesh is up) and the runtime healthy.
     pub fn is_ready(&self) -> bool {
-        self.runtime_ready.load(Ordering::Relaxed)
+        self.tls.is_some() && self.runtime_ready.load(Ordering::Relaxed)
     }
 
     pub fn app_base_url(&self) -> String {

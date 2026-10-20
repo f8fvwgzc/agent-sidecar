@@ -8,10 +8,8 @@ metadata:
 spec:
   selector:
     app: inventory
+  # Only the mesh port: other pods reach inventory's app solely through its sidecar's mTLS + authz.
   ports:
-    - name: http
-      port: 8000
-      targetPort: http
     - name: mesh
       port: 50002
       targetPort: mesh
