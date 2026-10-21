@@ -9,6 +9,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .with_writer(std::io::stderr)
         .init();
+    let profiler = agentscd::profiling::Profiler::from_env();
     let config = agentscd::Config::parse();
     let sidecar = agentscd::start(config).await?;
     // Kubernetes stops containers with SIGTERM (and agentscd is PID 1, so nothing else handles it).
@@ -19,5 +20,8 @@ async fn main() -> anyhow::Result<()> {
     }
     tracing::info!("shutting down");
     sidecar.shutdown().await;
+    if let Some(p) = profiler {
+        p.finish();
+    }
     Ok(())
 }

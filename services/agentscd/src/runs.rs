@@ -2,9 +2,11 @@
 //! accepted only for a request id and agent whose Execute is running or returned less than the
 //! run window (120 s) ago. Keyed by (request id, agent): a local orchestrator and the local agent
 //! it calls share the request id.
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
+
+type Key = (String, String);
 
 #[derive(Debug, Clone)]
 struct Entry {
@@ -26,7 +28,16 @@ pub struct RunState {
 
 pub struct Runs {
     window: Duration,
-    map: Mutex<HashMap<(String, String), Entry>>,
+    inner: Mutex<Inner>,
+}
+
+/// The runs, and the finished ones in the order they finished: pruning pops expired entries off
+/// the front of `finished` instead of scanning the whole map on every call (which was quadratic
+/// under load: the flamegraph showed most sidecar CPU in that scan).
+#[derive(Default)]
+struct Inner {
+    map: HashMap<Key, Entry>,
+    finished: VecDeque<(Instant, Key)>,
 }
 
 /// Marks the Execute finished when dropped (also when the caller drops the invocation).
@@ -38,11 +49,17 @@ pub struct RunGuard<'a> {
 
 impl Drop for RunGuard<'_> {
     fn drop(&mut self) {
-        let mut map = self.runs.map.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(e) = map.get_mut(&self.key) {
+        let mut inner = self
+            .runs
+            .inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let now = Instant::now();
+        if let Some(e) = inner.map.get_mut(&self.key) {
             e.in_flight = e.in_flight.saturating_sub(1);
             if e.in_flight == 0 {
-                e.finished_at = Some(Instant::now());
+                e.finished_at = Some(now);
+                inner.finished.push_back((now, self.key.clone()));
             }
         }
     }
@@ -52,7 +69,7 @@ impl Runs {
     pub fn new(window: Duration) -> Self {
         Self {
             window,
-            map: Mutex::new(HashMap::new()),
+            inner: Mutex::new(Inner::default()),
         }
     }
 
@@ -60,12 +77,25 @@ impl Runs {
         self.window
     }
 
-    fn prune(&self, map: &mut HashMap<(String, String), Entry>, now: Instant) {
-        map.retain(|_, e| {
-            e.in_flight > 0
-                || e.finished_at
-                    .is_some_and(|t| now.duration_since(t) < self.window)
-        });
+    /// Drop runs that finished at least the window ago. Amortised O(1): only expired queue
+    /// entries are visited; a run that started again since it was queued is left alone (its
+    /// newer finish has its own queue entry).
+    fn prune(&self, inner: &mut Inner, now: Instant) {
+        while let Some((at, _)) = inner.finished.front() {
+            if now.duration_since(*at) < self.window {
+                break;
+            }
+            let Some((at, key)) = inner.finished.pop_front() else {
+                break;
+            };
+            if inner
+                .map
+                .get(&key)
+                .is_some_and(|e| e.in_flight == 0 && e.finished_at == Some(at))
+            {
+                inner.map.remove(&key);
+            }
+        }
     }
 
     /// An Execute of `agent` for `request_id` starts.
@@ -77,9 +107,9 @@ impl Runs {
         trace_id: &str,
     ) -> RunGuard<'_> {
         let key = (request_id.to_string(), agent.to_string());
-        let mut map = self.map.lock().unwrap_or_else(PoisonError::into_inner);
-        self.prune(&mut map, Instant::now());
-        let e = map.entry(key.clone()).or_insert_with(|| Entry {
+        let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        self.prune(&mut inner, Instant::now());
+        let e = inner.map.entry(key.clone()).or_insert_with(|| Entry {
             caller: caller.to_string(),
             trace_id: trace_id.to_string(),
             in_flight: 0,
@@ -95,9 +125,11 @@ impl Runs {
 
     /// The run, if it is in flight or finished less than the window ago.
     pub fn lookup(&self, request_id: &str, agent: &str) -> Option<RunState> {
-        let mut map = self.map.lock().unwrap_or_else(PoisonError::into_inner);
-        self.prune(&mut map, Instant::now());
-        map.get(&(request_id.to_string(), agent.to_string()))
+        let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        self.prune(&mut inner, Instant::now());
+        inner
+            .map
+            .get(&(request_id.to_string(), agent.to_string()))
             .map(|e| RunState {
                 in_flight: e.in_flight > 0,
                 caller: e.caller.clone(),
@@ -129,5 +161,34 @@ mod tests {
         assert_eq!(s.caller, "spiffe://agentsc/ns/n/svc/s");
         std::thread::sleep(Duration::from_millis(250));
         assert!(runs.lookup("r1", "a").is_none(), "window passed");
+    }
+
+    #[test]
+    fn a_run_started_again_outlives_its_old_finish() {
+        let runs = Runs::new(Duration::from_millis(100));
+        drop(runs.start("r1", "a", "local", "t1"));
+        let g = runs.start("r1", "a", "local", "t1"); // runs again
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(
+            runs.lookup("r1", "a").unwrap().in_flight,
+            "the old finish does not prune it"
+        );
+        drop(g);
+        assert!(
+            runs.lookup("r1", "a").is_some(),
+            "known for the window after its new finish"
+        );
+    }
+
+    #[test]
+    fn expired_runs_are_dropped_from_the_map() {
+        let runs = Runs::new(Duration::from_millis(50));
+        for i in 0..1000 {
+            drop(runs.start(&format!("r{i}"), "a", "local", "t"));
+        }
+        std::thread::sleep(Duration::from_millis(80));
+        assert!(runs.lookup("x", "a").is_none());
+        let inner = runs.inner.lock().unwrap();
+        assert!(inner.map.is_empty() && inner.finished.is_empty());
     }
 }

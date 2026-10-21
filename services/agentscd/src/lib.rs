@@ -15,6 +15,7 @@ pub mod otel;
 pub mod outbox;
 pub mod persist;
 pub mod pipeline;
+pub mod profiling;
 pub mod reload;
 pub mod runs;
 pub mod runtime;

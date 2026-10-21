@@ -16,6 +16,11 @@ ORDERS_PORT=${ORDERS_PORT:-38180}
 INVENTORY_PORT=${INVENTORY_PORT:-38100}
 CP=127.0.0.1:15012
 CHECK_ONLY=${CHECK_ONLY:-0}
+# scripts/profile.sh sets these: a profiling build of the sidecar, where to write each sidecar's
+# CPU profile, and a longer stop grace so the profiles can be written.
+AGENTSCD=${AGENTSCD:-./target/debug/agentscd}
+PROFILE_DIR=${PROFILE_DIR:-}
+STOP_GRACE=${STOP_GRACE:-5}
 
 python3 - "$CONSOLE_PORT" "$ORDERS_PORT" "$INVENTORY_PORT" 15012 3520 3530 50021 50022 50023 50024 <<'PY'
 import socket, sys
@@ -31,7 +36,7 @@ PIDS=()
 cleanup() {
   set +e
   for p in "${PIDS[@]:-}"; do kill -TERM -- "-$p" 2>/dev/null; done
-  for _ in $(seq 1 50); do
+  for _ in $(seq 1 $((STOP_GRACE * 10))); do
     alive=
     for p in "${PIDS[@]:-}"; do kill -0 -- "-$p" 2>/dev/null && alive=1; done
     [[ -z $alive ]] && break
@@ -79,13 +84,16 @@ token() {  # token <file> <embassy token create args...>: the token to <file> (0
 
 echo "▶ start-up charters with local peer addresses (adopted by the control plane)"
 python3 - "$L" "$ORDERS_PORT" "$INVENTORY_PORT" <<'PY'
-import sys, re
+import os, sys, re
 local, orders_port, inventory_port = sys.argv[1:4]
 for name, peer, port in (("orders", "inventory: 127.0.0.1:50024", orders_port),
                          ("inventory", "orders: 127.0.0.1:50022", inventory_port)):
     text = open(f"examples/charters/{name}.charter.yaml").read()
     text = text.replace("agents:\n", f"mesh:\n  peers:\n    {peer}\nagents:\n", 1)
     text = re.sub(r"app_port: \d+", f"app_port: {port}", text, count=1)
+    if os.environ.get("RAISE_BUDGETS") == "1":  # load tests: no 429s from the demo's small budgets
+        text = re.sub(r"max_calls_per_minute: \d+", "max_calls_per_minute: 1000000", text)
+        text = re.sub(r"max_cost_usd_per_day: [0-9.]+", "max_cost_usd_per_day: 1000000.0", text)
     open(f"{local}/{name}.charter.yaml", "w").write(text)
 PY
 
@@ -103,7 +111,9 @@ ADDR=127.0.0.1:$ORDERS_PORT AGENTSC_URL=http://127.0.0.1:3520 "$L/orders" >"$L/l
 echo "▶ sidecars in managed mode (audit → $L/logs/<svc>-audit.jsonl)"
 RUNTIME_CMD="uv run --quiet --project $ROOT/runtime agentsc-runtime"
 sidecar() {  # sidecar <service> <app port> <http> <grpc> <mesh>
-  ./target/debug/agentscd --control-plane $CP --ca-file "$L/ca/ca.crt" \
+  local profile=()
+  [[ -n $PROFILE_DIR ]] && profile=(env "AGENTSC_PROFILE=$PROFILE_DIR/$1")
+  ${profile[@]+"${profile[@]}"} "$AGENTSCD" --control-plane $CP --ca-file "$L/ca/ca.crt" \
     --join-token-file "$L/secrets/$1-join-token" --service "$1" --namespace $NS --app-port "$2" \
     --pod-name "$1-local" --charter "$L/$1.charter.yaml" --state-dir "$L/state/$1" \
     --http-addr "127.0.0.1:$3" --grpc-addr "127.0.0.1:$4" --mesh-addr "127.0.0.1:$5" \

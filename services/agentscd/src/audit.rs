@@ -99,8 +99,27 @@ pub struct Audit {
     target: Mutex<SinkTarget>,
     /// request_id → values scrubbed from that request's later records.
     secrets: Mutex<HashMap<String, (Instant, Vec<String>)>>,
+    /// When `secrets` was last swept: a sweep visits every entry, so it runs at most once per
+    /// [`PRUNE_EVERY`] instead of on every record.
+    last_prune: Mutex<Instant>,
     /// Held shared by every write and exclusively by [`Audit::set_redaction`].
     gate: RwLock<()>,
+}
+
+const PRUNE_EVERY: Duration = Duration::from_secs(1);
+
+/// Drop remembered values older than [`SECRET_TTL`], at most once per [`PRUNE_EVERY`].
+fn prune_secrets(
+    secrets: &mut HashMap<String, (Instant, Vec<String>)>,
+    now: Instant,
+    last: &Mutex<Instant>,
+) {
+    let mut last = last.lock().unwrap_or_else(PoisonError::into_inner);
+    if now.duration_since(*last) < PRUNE_EVERY {
+        return;
+    }
+    *last = now;
+    secrets.retain(|_, (t, _)| now.duration_since(*t) < SECRET_TTL);
 }
 
 impl Audit {
@@ -124,6 +143,7 @@ impl Audit {
             sink,
             target: Mutex::new(target),
             secrets: Mutex::new(HashMap::new()),
+            last_prune: Mutex::new(Instant::now()),
             gate: RwLock::new(()),
         })
     }
@@ -212,7 +232,7 @@ impl Audit {
     pub fn scrub_values(&self, request_id: &str) -> Vec<String> {
         let mut secrets = self.secrets.lock().unwrap_or_else(PoisonError::into_inner);
         let now = Instant::now();
-        secrets.retain(|_, (t, _)| now.duration_since(*t) < SECRET_TTL);
+        prune_secrets(&mut secrets, now, &self.last_prune);
         secrets
             .get(request_id)
             .map(|(_, v)| v.clone())
@@ -250,7 +270,7 @@ impl Audit {
         }
         let mut secrets = self.secrets.lock().unwrap_or_else(PoisonError::into_inner);
         let now = Instant::now();
-        secrets.retain(|_, (t, _)| now.duration_since(*t) < SECRET_TTL);
+        prune_secrets(&mut secrets, now, &self.last_prune);
         let entry = secrets
             .entry(request_id.to_string())
             .or_insert_with(|| (now, Vec::new()));
