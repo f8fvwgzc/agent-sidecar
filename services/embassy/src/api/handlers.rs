@@ -82,6 +82,22 @@ pub async fn stored_or_404(hub: &Hub, key: &ServiceKey) -> Result<StoredCharter,
         .ok_or_else(|| Fail::not_found(format!("no charter for {key}")))
 }
 
+/// The stored charter, if its version is exactly `if_match`; else 409 with the current version.
+/// Every write computes its role-on-diff and its edit against this charter, and the store
+/// refuses the write if the version moved since, so a check is never made against a charter
+/// other than the one being replaced (design §8.3, §8.4).
+pub async fn stored_matching(
+    hub: &Hub,
+    key: &ServiceKey,
+    if_match: &str,
+) -> Result<StoredCharter, Fail> {
+    let c = stored_or_404(hub, key).await?;
+    if c.version != if_match {
+        return Err(Fail::conflict(c.version));
+    }
+    Ok(c)
+}
+
 fn version_response(status: StatusCode, s: &StoredCharter) -> Response {
     with_etag(
         status,
@@ -227,7 +243,7 @@ pub async fn delete_service(
     let key = service_key(&ident, &ns, &svc)?;
     require_role(&ident, Role::Admin)?;
     let v = require_if_match(&headers)?;
-    let before = stored_or_404(&hub, &key).await?;
+    let before = stored_matching(&hub, &key, &v).await?;
     let result = hub
         .store
         .delete_service(&key, &v, &ident.actor())
@@ -281,10 +297,8 @@ pub async fn put_charter(
         }
         (Precondition::NotExists, None)
     } else if let Some(v) = if_match(&headers)? {
-        (
-            Precondition::Version(v),
-            Some(stored_or_404(&hub, &key).await?),
-        )
+        let before = stored_matching(&hub, &key, &v).await?;
+        (Precondition::Version(v), Some(before))
     } else {
         return Err(Fail::invalid([
             "If-Match: \"<version>\" (or If-None-Match: * for the first charter) is required",
@@ -381,7 +395,7 @@ pub async fn rollback(
     let key = service_key(&ident, &ns, &svc)?;
     require_role(&ident, Role::Admin)?;
     let v = require_if_match(&headers)?;
-    let before = stored_or_404(&hub, &key).await?;
+    let before = stored_matching(&hub, &key, &v).await?;
     let yaml = hub
         .store
         .get_revision(&key, &body.version)

@@ -54,10 +54,11 @@ pub const EVENTS_CAPACITY: usize = 1024;
 /// The name of the actor of external edits.
 pub const FILE_ACTOR: &str = "file";
 
-/// Decides whether an externally edited charter text may be stored for a service: the charter
-/// as JSON (the YAML converted as written), or every problem.
+/// Decides whether an externally edited charter text may be stored for a service, given the
+/// charter text it would replace (`None` for a new service): the charter as JSON (the YAML
+/// converted as written), or every problem.
 pub type ExternalValidator =
-    dyn Fn(&ServiceKey, &str) -> Result<Value, Vec<String>> + Send + Sync + 'static;
+    dyn Fn(&ServiceKey, &str, Option<&str>) -> Result<Value, Vec<String>> + Send + Sync + 'static;
 
 /// The YAML text as JSON, converted as written (no defaults filled in).
 pub fn yaml_to_json(yaml: &str) -> Result<Value, String> {
@@ -71,7 +72,11 @@ pub fn sha256_hex(text: &str) -> String {
 
 /// The default external-edit check: the charter validator, and the charter names the service of
 /// its path.
-pub fn default_validator(key: &ServiceKey, yaml: &str) -> Result<Value, Vec<String>> {
+pub fn default_validator(
+    key: &ServiceKey,
+    yaml: &str,
+    _previous: Option<&str>,
+) -> Result<Value, Vec<String>> {
     let charter = agentsc_charter::Charter::from_yaml(yaml).map_err(|e| vec![e.to_string()])?;
     let mut errs = Vec::new();
     if charter.service.name != key.service {
@@ -419,8 +424,9 @@ impl FileStore {
                 continue;
             }
             svc.settling = None;
+            let previous = svc.current.as_ref().map(|c| c.yaml.clone());
             let validator = self.validator();
-            match validator(&key, &text) {
+            match validator(&key, &text, previous.as_deref()) {
                 Ok(json) => {
                     let actor = Actor {
                         name: FILE_ACTOR.into(),

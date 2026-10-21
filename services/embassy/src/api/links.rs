@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use super::edit;
 use super::error::Fail;
-use super::handlers::{require_role, stored_or_404, writer};
+use super::handlers::{require_role, stored_matching, stored_or_404, writer};
 use super::types::{
     AgentView, CpAction, LinkApplied, LinkRequest, LinkResult, Skill, VersionResult,
 };
@@ -32,7 +32,7 @@ async fn edit_write(
     version: String,
     change: impl FnOnce(&mut Value) -> Result<(), Fail>,
 ) -> Result<StoredCharter, Fail> {
-    let before = stored_or_404(hub, key).await?;
+    let before = stored_matching(hub, key, &version).await?;
     let mut json = before.charter_json.clone();
     let yaml = match change(&mut json).and_then(|()| edit::to_yaml(&json)) {
         Ok(y) => y,

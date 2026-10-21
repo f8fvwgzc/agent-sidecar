@@ -21,7 +21,20 @@ const MAX_VALUE: usize = 1024;
 #[serde(deny_unknown_fields)]
 pub struct Claims {
     pub token_name: String,
+    /// [`fingerprint`] of the token's configured SHA-256: a session dies when the token behind
+    /// its name is rotated, not only when the name is removed (design §8.3).
+    pub token_fp: String,
     pub exp: i64,
+}
+
+/// The first 16 hex characters of a configured token hash (not secret: it identifies which
+/// secret a session was opened with).
+pub fn fingerprint(sha256_hex: &str) -> String {
+    sha256_hex
+        .chars()
+        .take(16)
+        .collect::<String>()
+        .to_ascii_lowercase()
 }
 
 fn mac(key: &[u8], payload: &str) -> Option<Hmac<Sha256>> {
@@ -30,10 +43,12 @@ fn mac(key: &[u8], payload: &str) -> Option<Hmac<Sha256>> {
     Some(m)
 }
 
-/// A signed cookie value for `token_name`, valid until `exp` (unix seconds).
-pub fn sign(key: &[u8], token_name: &str, exp: i64) -> String {
+/// A signed cookie value for `token_name` opened with the token whose hash has fingerprint
+/// `token_fp`, valid until `exp` (unix seconds).
+pub fn sign(key: &[u8], token_name: &str, token_fp: &str, exp: i64) -> String {
     let claims = Claims {
         token_name: token_name.to_string(),
+        token_fp: token_fp.to_string(),
         exp,
     };
     let json = serde_json::to_vec(&claims).unwrap_or_default();
@@ -75,11 +90,12 @@ mod tests {
 
     #[test]
     fn signs_and_verifies() {
-        let v = sign(KEY, "alice", 2000);
+        let v = sign(KEY, "alice", "0123456789abcdef", 2000);
         assert_eq!(
             verify(KEY, &v, 1999),
             Some(Claims {
                 token_name: "alice".into(),
+                token_fp: "0123456789abcdef".into(),
                 exp: 2000
             })
         );

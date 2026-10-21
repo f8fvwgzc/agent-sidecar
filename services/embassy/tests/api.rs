@@ -543,6 +543,11 @@ async fn versions_and_if_match() {
     let r = put(&env, "alice", "orders", &c, "1").await;
     assert_eq!((r.status, r.error()), (409, "version_conflict"));
     assert_eq!(r.body["current_version"], "2");
+    // ahead of the stored version: refused before any role-on-diff is computed, so a version
+    // guessed one ahead can never be checked against an older charter than the one it replaces
+    let r = put(&env, "alice", "orders", &c, "3").await;
+    assert_eq!((r.status, r.error()), (409, "version_conflict"));
+    assert_eq!(r.body["current_version"], "2");
     // If-Match on a service without a charter
     let r = put(&env, "alice", "nothing", &c, "1").await;
     assert_eq!(r.status, 404);

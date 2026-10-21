@@ -51,6 +51,9 @@ pub struct Identity {
     /// `Token` (bearer or anonymous) or `Session`.
     pub kind: ActorKind,
     pub anonymous: bool,
+    /// [`session::fingerprint`] of the token hash this identity was admitted with ("" when
+    /// anonymous): a rotated token ends its sessions and open streams.
+    pub token_fp: String,
 }
 
 impl Identity {
@@ -62,6 +65,7 @@ impl Identity {
             payloads: t.payloads,
             kind,
             anonymous: false,
+            token_fp: session::fingerprint(&t.sha256),
         }
     }
 
@@ -74,6 +78,7 @@ impl Identity {
             payloads: false,
             kind: ActorKind::Token,
             anonymous: true,
+            token_fp: String::new(),
         }
     }
 
@@ -275,10 +280,18 @@ impl Auth {
         found.map(|e| Identity::from_entry(&e, ActorKind::Token))
     }
 
-    /// A new session cookie value for the token named `name`.
+    /// A new session cookie value for the token named `name` (bound to that token's current
+    /// hash, so rotating the token ends the session).
     pub fn new_session(&self, name: &str) -> String {
         let exp = chrono::Utc::now().timestamp() + session::LIFETIME.as_secs() as i64;
-        session::sign(&self.key.load(), name, exp)
+        let config = self.config.load();
+        let fp = self
+            .entries(&config)
+            .iter()
+            .find(|t| t.name == name)
+            .map(|t| session::fingerprint(&t.sha256))
+            .unwrap_or_default();
+        session::sign(&self.key.load(), name, &fp, exp)
     }
 
     /// The identity of a session cookie value: a valid signature, not expired, and the token
@@ -289,7 +302,15 @@ impl Auth {
         let config = self.config.load();
         self.entries(&config)
             .iter()
-            .find(|t| t.name == claims.token_name)
+            .find(|t| {
+                t.name == claims.token_name
+                    && !claims.token_fp.is_empty()
+                    && bool::from(
+                        session::fingerprint(&t.sha256)
+                            .as_bytes()
+                            .ct_eq(claims.token_fp.as_bytes()),
+                    )
+            })
             .map(|t| Identity::from_entry(t, ActorKind::Session))
     }
 
@@ -300,7 +321,9 @@ impl Auth {
             return self.anonymous_allowed();
         }
         let config = self.config.load();
-        self.entries(&config).iter().any(|t| t.name == ident.name)
+        self.entries(&config)
+            .iter()
+            .any(|t| t.name == ident.name && session::fingerprint(&t.sha256) == ident.token_fp)
     }
 
     /// `Set-Cookie` for a new session.
@@ -464,6 +487,37 @@ mod tests {
         let x = Auth::new(cfg.clone(), false, false).unwrap();
         let y = Auth::new(cfg, false, false).unwrap();
         assert!(y.from_session(&x.new_session("bob")).is_none());
+    }
+
+    #[test]
+    fn rotating_a_token_ends_its_sessions() {
+        let old = crate::token::generate().unwrap();
+        let new = crate::token::generate().unwrap();
+        let with = |t: &str| {
+            let mut c = crate::config::ControlPlaneConfig::default();
+            c.auth.tokens.push(crate::config::TokenEntry {
+                name: "bob".into(),
+                role: Role::Admin,
+                sha256: crate::token::sha256_hex(t),
+                namespaces: vec!["*".into()],
+                payloads: true,
+            });
+            c
+        };
+        let config = Arc::new(ArcSwap::from_pointee(with(&old)));
+        let a = Auth::new(config.clone(), false, false).unwrap();
+        let cookie = a.new_session("bob");
+        let ident = a.from_session(&cookie).expect("a valid session");
+        assert!(a.still_valid(&ident));
+        // same name, new secret: the old session and open streams end
+        config.store(Arc::new(with(&new)));
+        assert!(
+            a.from_session(&cookie).is_none(),
+            "a session of the rotated token"
+        );
+        assert!(!a.still_valid(&ident), "a stream of the rotated token");
+        // a session opened with the new secret works
+        assert!(a.from_session(&a.new_session("bob")).is_some());
     }
 
     #[test]

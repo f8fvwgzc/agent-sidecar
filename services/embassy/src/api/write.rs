@@ -219,7 +219,17 @@ pub fn restart_problems(
     stored: Option<&StoredCharter>,
     new: &Charter,
 ) -> Vec<String> {
-    let Some(old) = stored.and_then(|s| Charter::from_yaml(&s.yaml).ok()) else {
+    restart_problems_yaml(registry, key, stored.map(|s| s.yaml.as_str()), new)
+}
+
+/// [`restart_problems`] against the text of the charter being replaced.
+pub fn restart_problems_yaml(
+    registry: &Registry,
+    key: &ServiceKey,
+    old_yaml: Option<&str>,
+    new: &Charter,
+) -> Vec<String> {
+    let Some(old) = old_yaml.and_then(|y| Charter::from_yaml(y).ok()) else {
         return Vec::new();
     };
     let instances = registry.instances(key);

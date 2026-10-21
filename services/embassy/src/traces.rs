@@ -32,6 +32,10 @@ pub const SPAN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 pub const MAX_TRACES: usize = 10_000;
 /// Span starts kept per trace.
 const MAX_STARTS_PER_TRACE: usize = 5_000;
+/// Span starts are the only data this store owns (records are shared with the event ring, which
+/// is bounded by `events.retain_bytes`): their total size is capped, least recently updated
+/// traces first out.
+pub const MAX_START_BYTES: usize = 32 * 1024 * 1024;
 /// Traces evicted at once when [`MAX_TRACES`] is reached.
 const EVICT_BATCH: usize = 100;
 /// The kinds that are spans.
@@ -66,6 +70,23 @@ pub struct StartInfo {
 }
 
 impl StartInfo {
+    /// Approximate memory held by this start (its strings plus a fixed overhead).
+    pub fn size(&self) -> usize {
+        128 + self.namespace.len()
+            + self.service.len()
+            + self.request_id.len()
+            + self.trace_id.len()
+            + 2 * self.span_id.len()
+            + self.parent_span_id.as_ref().map_or(0, String::len)
+            + self.kind.len()
+            + self.agent.as_ref().map_or(0, String::len)
+            + self.caller.len()
+            + self.caller_agent.as_ref().map_or(0, String::len)
+            + self.callee.len()
+            + self.direction.len()
+            + self.ts.len()
+    }
+
     pub fn agent_node(&self) -> Option<String> {
         self.agent
             .as_deref()
@@ -89,12 +110,40 @@ struct Trace {
     starts: HashMap<String, StartInfo>,
     records: Vec<Arc<AuditRecord>>,
     touched: u64,
+    /// Sum of [`StartInfo::size`] of `starts`.
+    start_bytes: usize,
 }
 
 #[derive(Debug, Default)]
 struct Inner {
     traces: HashMap<String, Trace>,
     tick: u64,
+    /// Sum of every trace's `start_bytes`.
+    start_bytes: usize,
+}
+
+impl Inner {
+    fn remove(&mut self, trace_id: &str) {
+        if let Some(t) = self.traces.remove(trace_id) {
+            self.start_bytes = self.start_bytes.saturating_sub(t.start_bytes);
+        }
+    }
+
+    /// Evict the least recently updated traces (never `keep`) until the starts fit the budget.
+    fn fit_starts(&mut self, keep: &str) {
+        while self.start_bytes > MAX_START_BYTES {
+            let oldest = self
+                .traces
+                .iter()
+                .filter(|(id, t)| id.as_str() != keep && t.start_bytes > 0)
+                .min_by_key(|(_, t)| t.touched)
+                .map(|(id, _)| id.clone());
+            match oldest {
+                Some(id) => self.remove(&id),
+                None => break,
+            }
+        }
+    }
 }
 
 /// What a caller may see.
@@ -472,7 +521,15 @@ impl TraceStore {
             let n = EVICT_BATCH.min(touched.len().saturating_sub(1));
             let (_, cut, _) = touched.select_nth_unstable(n);
             let cut = *cut;
-            inner.traces.retain(|_, t| t.touched > cut);
+            let gone: Vec<String> = inner
+                .traces
+                .iter()
+                .filter(|(_, t)| t.touched <= cut)
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in gone {
+                inner.remove(&id);
+            }
         }
         let t = inner.traces.entry(trace_id.to_string()).or_default();
         t.touched = tick;
@@ -537,7 +594,15 @@ impl TraceStore {
         }
         let index = u32::try_from(seen.len()).unwrap_or(u32::MAX - 1) + 1;
         if t.starts.len() < MAX_STARTS_PER_TRACE || t.starts.contains_key(&start.span_id) {
-            t.starts.insert(start.span_id.clone(), start);
+            let size = start.size();
+            let trace_id = start.trace_id.clone();
+            let old = t
+                .starts
+                .insert(start.span_id.clone(), start)
+                .map_or(0, |o| o.size());
+            t.start_bytes = (t.start_bytes + size).saturating_sub(old);
+            inner.start_bytes = (inner.start_bytes + size).saturating_sub(old);
+            inner.fit_starts(&trace_id);
         }
         index
     }
@@ -553,8 +618,20 @@ impl TraceStore {
                 continue;
             };
             t.records.retain(|r| !Arc::ptr_eq(r, rec));
-            if t.records.is_empty() && t.starts.is_empty() {
-                inner.traces.remove(&rec.trace_id);
+            // with no records left, starts that never closed go once they are past the span
+            // timeout (they would only ever show as span.timeout errors)
+            let stale = |s: &StartInfo| {
+                parse_ts(&s.ts).is_none_or(|ts| {
+                    Utc::now()
+                        .signed_duration_since(ts)
+                        .to_std()
+                        .unwrap_or_default()
+                        > SPAN_TIMEOUT
+                })
+            };
+            if t.records.is_empty() && t.starts.values().all(stale) {
+                let id = rec.trace_id.clone();
+                inner.remove(&id);
             }
         }
     }
@@ -685,6 +762,35 @@ mod tests {
             }
         }
         Arc::new(serde_json::from_value(base).unwrap())
+    }
+
+    #[test]
+    fn span_starts_are_bounded_by_bytes() {
+        let store = TraceStore::default();
+        let big = "x".repeat(4096);
+        let mut last = String::new();
+        // about 40 MiB of starts over many traces: more than MAX_START_BYTES
+        for i in 0..10_000 {
+            let mut s = start(
+                &format!("{i:016x}"),
+                "agent_call",
+                "2026-10-21T10:00:00.000Z",
+                &big,
+                None,
+            );
+            s.trace_id = format!("{:032x}", i / 4);
+            last = s.trace_id.clone();
+            store.add_start(s);
+        }
+        let inner = store.lock();
+        let counted: usize = inner.traces.values().map(|t| t.start_bytes).sum();
+        assert_eq!(inner.start_bytes, counted, "the total matches the traces");
+        assert!(
+            inner.start_bytes <= MAX_START_BYTES,
+            "{} bytes kept",
+            inner.start_bytes
+        );
+        assert!(inner.traces.contains_key(&last), "the newest trace is kept");
     }
 
     fn start(span: &str, kind: &str, ts: &str, callee: &str, parent: Option<&str>) -> StartInfo {

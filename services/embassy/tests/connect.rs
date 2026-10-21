@@ -830,6 +830,37 @@ async fn connect_shares_the_grpc_address_with_the_ca_component() {
     env.stop().await;
 }
 
+#[tokio::test]
+async fn external_edits_get_the_restart_only_check_while_instances_are_connected() {
+    let env = Env::start().await;
+    let v1 = env.create("orders", &common::orders_yaml()).await;
+    let mut sc = env
+        .sidecar(NS, "orders", hello(NS, "orders", "orders-0"))
+        .await
+        .unwrap();
+    // the stored charter and memory are pushed on connect
+    sc.next().await;
+    sc.next().await;
+    // a hand edit of the stored file that changes service.app_port (restart only, design §4)
+    let file = env.store_dir.join(NS).join("orders.charter.yaml");
+    let edited = common::orders_yaml().replace("app_port: 8080", "app_port: 9090");
+    assert_ne!(edited, common::orders_yaml());
+    std::fs::write(&file, &edited).unwrap();
+    // two polls of the store (it takes a change in on the second sight)
+    tokio::time::sleep(embassy::store::file::POLL_INTERVAL * 3).await;
+    let (version, c) = env.charter("orders").await;
+    assert_eq!(
+        version, v1,
+        "the edit is refused while orders-0 is connected"
+    );
+    assert_eq!(c["service"]["app_port"], 8080);
+    assert!(
+        sc.next_within(Duration::from_millis(200)).await.is_none(),
+        "nothing is pushed"
+    );
+    env.stop().await;
+}
+
 fn auto_note(id: &str, text: &str, expires_at: &str) -> embassy::store::Note {
     embassy::store::Note {
         id: id.into(),

@@ -467,25 +467,46 @@ impl Started {
     }
 }
 
-/// The external-edit check of the file store: the charter validator and the write policy.
+/// The hub, once it exists: the file store is opened before it, and its external-edit check
+/// needs the connected instances.
+pub type HubCell = Arc<std::sync::OnceLock<std::sync::Weak<Hub>>>;
+
+/// The external-edit check of the file store: the charter validator, the write policy, and,
+/// with instances connected, the version-skew and restart-only checks of every API write
+/// (design §8.4, §15 rule 5).
 fn file_store_validator(
     config: Arc<ArcSwap<ControlPlaneConfig>>,
+    hub: HubCell,
 ) -> Arc<crate::store::file::ExternalValidator> {
-    Arc::new(move |key: &crate::store::ServiceKey, yaml: &str| {
-        let json = crate::store::file::default_validator(key, yaml)?;
-        let charter = agentsc_charter::Charter::from_yaml(yaml).map_err(|e| vec![e.to_string()])?;
-        let policy = crate::api::write::policy_problems(config.load().policy.as_ref(), &charter);
-        if policy.is_empty() {
-            Ok(json)
-        } else {
-            Err(policy)
-        }
-    })
+    Arc::new(
+        move |key: &crate::store::ServiceKey, yaml: &str, previous: Option<&str>| {
+            let json = crate::store::file::default_validator(key, yaml, previous)?;
+            let charter =
+                agentsc_charter::Charter::from_yaml(yaml).map_err(|e| vec![e.to_string()])?;
+            let mut problems =
+                crate::api::write::policy_problems(config.load().policy.as_ref(), &charter);
+            if let Some(h) = hub.get().and_then(std::sync::Weak::upgrade) {
+                problems.extend(crate::api::write::skew_problems(&h.registry, key, &charter));
+                problems.extend(crate::api::write::restart_problems_yaml(
+                    &h.registry,
+                    key,
+                    previous,
+                    &charter,
+                ));
+            }
+            if problems.is_empty() {
+                Ok(json)
+            } else {
+                Err(problems)
+            }
+        },
+    )
 }
 
 async fn open_store(
     args: &ServeArgs,
     config: &Arc<ArcSwap<ControlPlaneConfig>>,
+    hub: &HubCell,
 ) -> anyhow::Result<Option<Arc<dyn Store>>> {
     Ok(match &args.store {
         None => None,
@@ -493,7 +514,7 @@ async fn open_store(
             let fs = crate::store::file::FileStore::open(dir.clone())
                 .await
                 .with_context(|| format!("--store file:{}", dir.display()))?;
-            fs.set_validator(file_store_validator(config.clone()));
+            fs.set_validator(file_store_validator(config.clone(), hub.clone()));
             Some(fs)
         }
         Some(StoreSpec::Kubernetes) => Some(crate::k8s::open_store(args).await?),
@@ -561,7 +582,8 @@ pub async fn start(
 ) -> anyhow::Result<Started> {
     use Component::*;
     let config = Arc::new(ArcSwap::from_pointee(config));
-    let store = open_store(&args, &config).await?;
+    let hub_cell: HubCell = Arc::default();
+    let store = open_store(&args, &config, &hub_cell).await?;
     let ca = if args.has(Ca) {
         match (&args.ca_dir, &args.ca_secret) {
             (Some(dir), _) => Some(Arc::new(crate::ca::CaMaterial::load_dir(dir)?)),
@@ -641,6 +663,7 @@ pub async fn start(
             }
         }
         background.extend(h.start(shutdown.clone()));
+        let _ = hub_cell.set(Arc::downgrade(&h));
         hub = Some(h);
     }
 
