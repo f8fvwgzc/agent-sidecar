@@ -3,6 +3,8 @@
 import { summaryTitle } from "./model.js";
 import { el, fmtCompact, fmtSeconds, statusLabel } from "./util.js";
 
+const EMPTY = "No runs yet. A run appears here when an agent is invoked.";
+
 export class RunList {
   constructor({ onSelect, onFollow, follow = true }) {
     this.onSelect = onSelect;
@@ -15,7 +17,8 @@ export class RunList {
     );
     this.followBtn.addEventListener("click", () => onFollow(this.followBtn.getAttribute("aria-checked") !== "true"));
     this.listEl = el("ul", { class: "tl-runlist", "aria-label": "Runs" });
-    this.emptyEl = el("p", { class: "tl-runs-empty", text: "No runs yet. A run appears here when an agent is invoked." });
+    this.emptyEl = el("p", { class: "tl-runs-empty", text: "Loading runs…" });
+    this.note = null;
     this.el = el(
       "aside",
       { class: "tl-runs", "aria-label": "Runs" },
@@ -26,10 +29,16 @@ export class RunList {
     this.rows = new Map();
   }
 
+  /** Why the list may be empty when the runs could not be loaded (null: they were). */
+  setNote(text) {
+    this.note = text || null;
+  }
+
   render(runs, selectedId, follow, now) {
     this.followBtn.setAttribute("aria-checked", follow ? "true" : "false");
     this.countEl.textContent = runs.length ? String(runs.length) : "";
     this.emptyEl.hidden = runs.length > 0;
+    if (!runs.length) this.emptyEl.textContent = this.note || EMPTY;
     const keep = new Set();
     let prev = null;
     for (const run of runs) {

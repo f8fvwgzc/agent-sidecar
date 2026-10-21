@@ -58,7 +58,8 @@ export function openAddAgent(app, preset = {}) {
     toast('No service with a stored charter is visible. Adopt or create a charter first.', { kind: 'warn' });
     return;
   }
-  const draft = { svc: '', agent: { name: '', type: 'agent', model: app.knownModels()[0] || 'claude-opus-5-5' } };
+  // The model starts as the one most agents of this graph use, as reported by the control plane.
+  const draft = { svc: '', agent: { name: '', type: 'agent', model: app.knownModels()[0] || '' } };
   const key = (s) => `${s.namespace}/${s.service}`;
   draft.svc = preset.svc && services.some((s) => key(s) === preset.svc) ? preset.svc : key(services[0]);
   const form = new Form({ onChange: () => sync() });
@@ -81,10 +82,10 @@ export function openAddAgent(app, preset = {}) {
         mono: true,
         required: true,
         emptyUnset: false,
-        placeholder: 'refund-helper',
+        placeholder: 'agent-name',
         validate: (v) => (!DNS_LABEL.test(v || '') ? 'lowercase letters, digits and -, at most 63' : existing().includes(v) ? 'this service already has that agent' : null),
       }),
-      form.text('Model', draft, ['agent', 'model'], { mono: true, required: true, emptyUnset: false, list: listId, validate: (v) => (isModelName(v) ? null : 'non-empty, at most 128 bytes, no spaces') }),
+      form.text('Model', draft, ['agent', 'model'], { mono: true, required: true, emptyUnset: false, list: listId, placeholder: 'model-id', validate: (v) => (isModelName(v) ? null : 'non-empty, at most 128 bytes, no spaces') }),
     ),
     form.textarea('System prompt', draft, ['agent', 'system'], { rows: 5, placeholder: 'What this agent does and how it answers' }),
     grid(

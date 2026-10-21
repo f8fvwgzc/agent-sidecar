@@ -193,7 +193,7 @@ export function agentName(nodeId) {
   return i >= 0 ? nodeId.slice(i + 1) : nodeId.replace(/^agent:/, "");
 }
 
-/** Display name of an agent for lane labels and tooltips: "stock-analyst" → "Stock analyst". */
+/** Display name of an agent for lane labels and tooltips: "my-agent" → "My agent". */
 export function displayName(nodeIdOrName) {
   const raw = agentName(nodeIdOrName).replace(/[-_]+/g, " ").trim();
   return raw ? raw.charAt(0).toUpperCase() + raw.slice(1) : "Unknown";

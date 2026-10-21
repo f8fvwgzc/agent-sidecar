@@ -12,7 +12,7 @@ It fails when:
   `insertAdjacentHTML`, `createContextualFragment`, `DOMParser`, `document.write`, `eval(`,
   `new Function` / `Function(`, string timers, `javascript:` URLs, `srcdoc`, event-handler or
   style attributes set from script, or a remote import;
-* an HTML or SVG file under ui/ (vendor and fixtures excluded) has an inline event attribute
+* an HTML or SVG file under ui/ (vendor excluded) has an inline event attribute
   (`on<event>=`), a `style` attribute, a `<style>` element, an inline `<script>` without
   `src`, a remote script or stylesheet, or a frame/object/base element;
 * index.html does not load exactly the pinned d3 (classic script) before js/main.js (module);
@@ -38,7 +38,7 @@ import tempfile
 UI = pathlib.Path(__file__).resolve().parent.parent
 JS_DIR = UI / "js"
 VENDOR = UI / "vendor"
-SKIP_DIRS = {"vendor", "fixtures", "tests"}
+SKIP_DIRS = {"vendor", "tests"}
 
 D3_SCRIPT = "vendor/d3.v7.9.0.min.js"
 MAIN_SCRIPT = "js/main.js"

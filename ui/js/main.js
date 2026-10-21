@@ -1,7 +1,7 @@
 // The attache console: boots the API client, the sign-in screen, the canvas, the inspector and
 // the live stream, and wires the toolbar. Design: docs/design/agent-platform.md §11.
 
-import { createApi } from './api.js';
+import { ApiError, createApi, isUnreachable } from './api.js';
 import { GraphView } from './graph.js';
 import { Inspector, targetFor } from './inspector.js';
 import { openAddAgent, openLinkDialog, openAdopt } from './dialogs.js';
@@ -9,8 +9,6 @@ import { showSignin, hideSignin } from './signin.js';
 import { h, clear, append, toast, toastError, icon, ICONS, $ } from './dom.js';
 import { roleAtLeast, parseNodeId, throttle, outcomeOf, shortId, svcNodeId } from './util.js';
 import { loadFilters, saveFilters } from './store.js';
-
-const params = new URLSearchParams(location.search);
 
 const state = {
   api: null,
@@ -41,11 +39,11 @@ const app = {
   agentsOf: (ns, svc) => state.graph.nodes.filter((n) => n.type === 'agent' && !n.placeholder && n.parent === svcNodeId(ns, svc)),
   services: () => state.services,
   serviceSummary: (ns, svc) => state.services.find((s) => s.namespace === ns && s.service === svc) || null,
+  // The models the control plane reports for this graph's agents, most used first.
   knownModels: () => {
     const count = new Map();
     for (const n of state.graph.nodes) if (n.type === 'agent' && !n.placeholder && n.model) count.set(n.model, (count.get(n.model) || 0) + 1);
-    const seen = [...count.entries()].sort((a, b) => b[1] - a[1]).map(([m]) => m);
-    return [...new Set([...seen, 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'mock'])];
+    return [...count.entries()].sort((a, b) => b[1] - a[1]).map(([m]) => m);
   },
   refresh: () => Promise.all([refreshGraph(), refreshServices()]),
   openNode: (node, tab) => openNode(node, tab),
@@ -59,46 +57,55 @@ const app = {
 
 // ---- boot ----------------------------------------------------------------------------------------
 
-function fatal(message, retry) {
+function fatal(title, message, { detail, retry } = {}) {
   const boot = $('#boot');
   boot.hidden = false;
   clear(boot).append(
     h(
       'div',
-      { class: 'boot-card' },
-      h('div', { class: 'boot-title', text: 'The console could not start' }),
-      h('div', { class: 'muted', text: message }),
+      { class: 'boot-card', role: 'alert' },
+      h('div', { class: 'boot-title', text: title }),
+      h('div', { text: message }),
+      detail ? h('div', { class: 'muted small mono', text: detail }) : null,
       retry ? h('button', { type: 'button', class: 'btn btn-primary', text: 'Retry', on: { click: () => location.reload() } }) : null,
     ),
   );
 }
 
+/** Why GET /whoami did not give a session, for the boot screen. */
+function whoamiDetail(e) {
+  if (!e) return '';
+  if (e.code === 'not_the_api') return 'GET /whoami did not answer with the control-plane API';
+  if (!e.status) return `GET /whoami failed: ${(e.details && e.details[0]) || e.message || 'network error'}`;
+  return `GET /whoami answered HTTP ${e.status}${e.code && e.code !== `http_${e.status}` ? ` (${e.code})` : ''}`;
+}
+
 async function boot() {
   if (!globalThis.d3) {
-    fatal('d3 did not load (vendor/d3.v7.9.0.min.js).');
+    fatal('The console could not start', 'd3 did not load (vendor/d3.v7.9.0.min.js).');
     return;
   }
-  try {
-    state.api = await createApi({ params });
-  } catch (e) {
-    fatal(`Could not start: ${(e && e.message) || e}`, true);
-    return;
-  }
+  state.api = createApi();
   state.api.onUnauthenticated = () => signedOut('Your session ended. Sign in again.');
-  $('#fixtures-badge').hidden = !state.api.fixtures;
   wireToolbar();
+  let me;
   try {
     const res = await state.api.whoami();
-    $('#boot').hidden = true;
-    await enter(res.data);
+    me = res.data;
+    if (!me || typeof me !== 'object' || typeof me.name !== 'string' || typeof me.role !== 'string') throw new ApiError(200, { error: 'not_the_api' });
   } catch (e) {
     if (e && e.status === 401) {
       $('#boot').hidden = true;
       signedOut();
+    } else if (isUnreachable(e)) {
+      fatal('Not connected', `Cannot reach the control plane at ${state.api.baseUrl} — start embassy serve.`, { detail: whoamiDetail(e), retry: true });
     } else {
-      fatal(`Cannot reach the control plane: ${(e && e.message) || e}`, true);
+      fatal('The control plane refused the console', `${state.api.baseUrl} answered GET /whoami with an error.`, { detail: whoamiDetail(e), retry: true });
     }
+    return;
   }
+  $('#boot').hidden = true;
+  await enter(me);
 }
 
 async function enter(me) {
@@ -380,7 +387,7 @@ function updateEmpty() {
       : h(
           'div',
           { class: 'empty-card' },
-          h('div', { class: 'empty-title', text: 'No services yet' }),
+          h('div', { class: 'empty-title', text: 'No services connected yet' }),
           h('div', { class: 'muted', text: 'Services appear here when their sidecars connect to the control plane, or when a charter is stored.' }),
         ),
   );

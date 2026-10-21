@@ -3,10 +3,29 @@
 // `If-Match` values. The session is the HttpOnly cookie from POST /login: the console never
 // stores a token.
 //
-// With `?fixtures=1` the same client talks to fixtures.js instead, which answers from
-// ui/fixtures/ and replays ui/fixtures/events.sse as the live stream.
+// The console always talks to the control plane that serves it (`embassy serve`): REST under
+// `api/v1`, the live stream from `EventSource api/v1/events`. There is no offline or demo mode.
 
 const BASE = 'api/v1';
+
+/** The absolute URL of the API for messages (`http://host:port/api/v1`). */
+export function apiUrl(base = BASE) {
+  try {
+    return new URL(base, globalThis.location.href).href.replace(/\/$/, '');
+  } catch {
+    return base;
+  }
+}
+
+/**
+ * True when an error means nothing that speaks the control-plane API answered: the network
+ * failed, the path does not exist (a plain static server), a proxy failed, or the reply was not
+ * the API's JSON.
+ */
+export function isUnreachable(e) {
+  if (!e || typeof e.status !== 'number') return true;
+  return e.status === 0 || e.status === 404 || e.status === 405 || e.status >= 500 || e.code === 'not_the_api';
+}
 
 export const SSE_TYPES = ['audit', 'graph', 'registry', 'config', 'ack', 'proposal', 'cp_audit', 'lagged', 'reset'];
 
@@ -122,11 +141,11 @@ function eventStream(base, { onEvent, onStatus }) {
 }
 
 export class Api {
-  constructor(transport, { now, subscribe, fixtures }) {
+  constructor(transport, { now, subscribe, baseUrl = BASE } = {}) {
     this.transport = transport;
     this.now = now;
     this.subscribeImpl = subscribe;
-    this.fixtures = fixtures;
+    this.baseUrl = baseUrl;
     this.onUnauthenticated = null;
   }
 
@@ -222,17 +241,7 @@ export class Api {
   }
 }
 
-async function fetchText(url) {
-  const res = await fetch(url, { cache: 'no-store', credentials: 'same-origin' });
-  return res.ok ? res.text() : null;
-}
-
-export async function createApi({ params } = {}) {
-  if (params && params.get('fixtures') === '1') {
-    const { createFixtureServer } = await import('./fixtures.js');
-    const server = await createFixtureServer({ load: (name) => fetchText(`fixtures/${name}`), params });
-    const transport = (method, path, opts) => server.handle(method, path, opts);
-    return new Api(transport, { now: () => server.now(), subscribe: (h) => server.subscribe(h), fixtures: true });
-  }
-  return new Api(httpTransport(BASE), { now: () => Date.now(), subscribe: (h) => eventStream(BASE, h), fixtures: false });
+/** The client for the control plane that serves this page. */
+export function createApi() {
+  return new Api(httpTransport(BASE), { now: () => Date.now(), subscribe: (h) => eventStream(BASE, h), baseUrl: apiUrl(BASE) });
 }

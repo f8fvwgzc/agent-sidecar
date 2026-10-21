@@ -30,10 +30,6 @@ export function parseTime(v) {
   return Number.isFinite(t) ? t : null;
 }
 
-function iso(ms) {
-  return ms === null || ms === undefined ? null : new Date(ms).toISOString();
-}
-
 /** Node id of the agent a record belongs to. Inbound records other than invocations carry the calling peer's agent. */
 export function agentNodeFromRecord(rec) {
   if (!rec || !rec.agent) return null;
@@ -332,39 +328,6 @@ export class TraceModel {
       // Pairs, so a merged block stays short and the header totals stay close to the truth.
       lastByParent.delete(m.parent_span_id);
     }
-  }
-
-  /** Spans in the API shape (used by the fixture source for runs it simulates). */
-  toSpans() {
-    return [...this.spans.values()]
-      .sort((a, b) => a.start - b.start || KIND_ORDER[a.kind] - KIND_ORDER[b.kind])
-      .map((s) => ({
-        span_id: s.span_id,
-        parent_span_id: s.parent_span_id,
-        kind: s.kind,
-        agent: s.agent,
-        namespace: s.namespace,
-        service: s.service,
-        callee: s.callee,
-        callee_node: s.callee_node,
-        start: iso(s.start),
-        end: iso(s.end),
-        latency_ms: s.latency_ms,
-        status: s.end === null ? "running" : s.status,
-        decision: s.decision,
-        rule: s.rule,
-        request_id: s.request_id,
-        caller: s.caller,
-        caller_agent: s.caller_agent,
-        tokens_in: s.tokens_in,
-        tokens_out: s.tokens_out,
-        cost_usd: s.cost_usd,
-        call_index: s.call_index,
-        segment: s.segment,
-        attempt: s.attempt,
-        fallback: s.fallback,
-        events: s.events.slice(),
-      }));
   }
 
   /** Everything the view needs, recomputed only when the spans changed. */

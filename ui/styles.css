@@ -419,15 +419,6 @@ code,
   color: var(--text-2);
 }
 
-.pill-fixtures {
-  background: rgba(255, 181, 71, 0.1);
-  color: #ffc978;
-  border: 1px dashed rgba(255, 181, 71, 0.5);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  font-size: 10px;
-}
-
 .input {
   width: 100%;
   min-width: 0;
