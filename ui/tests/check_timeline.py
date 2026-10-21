@@ -5,8 +5,9 @@
    no inline handlers, scripts or styles.
 2. Fixtures: traces.json (TraceSummary), every trace-<id>.json (Span, §10.1.1) and
    timeline-live.sse (span_start and audit events, §10.2) have the documented fields and enums;
-   every handoff (agent_call) has its target lane; summaries agree with their traces; the live
-   transcript up to its snapshot rebuilds exactly the running trace's spans.
+   every handoff (agent_call) has its target lane; retried model calls follow a failed attempt;
+   summaries agree with their traces; the live transcript up to its snapshot rebuilds exactly
+   the running trace's spans.
 
 Run from anywhere: python3 -I ui/tests/check_timeline.py   (stdlib only; exit status 1 on failure)
 """
@@ -246,6 +247,16 @@ def check_trace(trace_id, doc):
             for c in children:
                 if c["agent"] != target:
                     fail("%s: handoff %s goes to %s but its invocation runs %s" % (where, s["span_id"], target, c["agent"]))
+    # Retries (design §12): a model call with attempt n > 1 follows the failed attempt of the same
+    # invocation, so the timeline can show one failed block and then the ↻ retry.
+    last_model = {}
+    for s in sorted(ok, key=lambda s: ms(s["start"])):
+        if s["kind"] != "model_call":
+            continue
+        prev = last_model.get(s["parent_span_id"])
+        if s["attempt"] > 1 and (prev is None or prev["status"] != "error" or prev["end"] is None or ms(prev["end"]) > ms(s["start"])):
+            fail("%s: model call %s is attempt %d but does not follow a failed model call" % (where, s["span_id"], s["attempt"]))
+        last_model[s["parent_span_id"]] = s
     # call_index: repeated calls from the same agent to the same callee, by start.
     counts = {}
     for s in sorted(ok, key=lambda s: (ms(s["start"]), SPAN_KINDS.index(s["kind"]))):

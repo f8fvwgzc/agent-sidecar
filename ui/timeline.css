@@ -50,6 +50,19 @@
   min-width: 0;
 }
 
+/* Text for screen readers only. */
+.tl-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* ---- run card ------------------------------------------------------------------------------ */
 
 .tl-card {
@@ -125,16 +138,6 @@
   height: 7px;
   border-radius: 50%;
   background: var(--tl-faint);
-}
-
-.tl-live.is-live {
-  color: var(--tl-text);
-  border-color: rgba(255, 255, 255, 0.16);
-}
-
-.tl-live.is-live .tl-live-dot {
-  background: #ff5a5f;
-  animation: tl-pulse 1.6s ease-in-out infinite;
 }
 
 .tl-body {
@@ -249,9 +252,30 @@
 
 .tl-plot {
   display: block;
-  touch-action: none;
+  touch-action: pan-y;
   user-select: none;
   -webkit-user-select: none;
+  border-radius: 6px;
+}
+
+.tl-plot:focus {
+  outline: none;
+}
+
+.tl-root .tl-plot:focus-visible {
+  outline: 2px solid var(--tl-focus);
+  outline-offset: 4px;
+}
+
+.tl-marks,
+.tl-navring {
+  pointer-events: none;
+}
+
+.tl-navring {
+  fill: none;
+  stroke: var(--tl-focus);
+  stroke-width: 2;
 }
 
 .tl-grid line,
@@ -741,8 +765,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .tl-run-dot.is-running,
-  .tl-live.is-live .tl-live-dot {
+  .tl-run-dot.is-running {
     animation: none;
   }
 }
@@ -765,7 +788,16 @@
 @media (max-width: 860px) {
   .tl-root {
     grid-template-columns: minmax(0, 1fr);
-    --tl-label-w: 128px;
+    --tl-label-w: 140px;
+  }
+
+  .tl-lane-row {
+    gap: 8px;
+  }
+
+  .tl-lane-model {
+    padding-left: 0;
+    font-size: 11px;
   }
 
   .tl-runs {

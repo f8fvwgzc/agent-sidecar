@@ -3,7 +3,7 @@
 // requestAnimationFrame; this module only draws and reports interactions through callbacks.
 
 import { openThinking } from "./model.js";
-import { CARD_BG, FAIL_RED, agentName, clamp, el, fmtCost, fmtInt, fmtLatency, fmtTick, icons, providerGlyph, svgEl } from "./util.js";
+import { CARD_BG, FAIL_RED, clamp, displayName, el, fmtCost, fmtInt, fmtLatency, fmtTick, icons, providerGlyph, svgEl } from "./util.js";
 
 export const LANE_H = 60;
 const BLOCK_H = 28;
@@ -18,6 +18,10 @@ const FADE_PX = 46;
 const VIRTUAL_LANES = 30;
 const VISIBLE_LANES_WHEN_VIRTUAL = 12;
 const LANE_OVERSCAN = 3;
+// A failed block narrower than this has no room for its ⊗ inside; it gets a marker above the band.
+const FAIL_ICON_MIN_W = 15;
+const BAND_TOP = (LANE_H - BLOCK_H) / 2;
+const NAV_KEYS = new Set(["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "Enter", "Escape", "+", "=", "-", "_", "0"]);
 
 let uidCounter = 0;
 
@@ -33,13 +37,58 @@ function relSec(t, start) {
   return (t - start) / 1000;
 }
 
-function elbow(x0, y0, x1, y1) {
+/** Handoff connector: down (or up) from the caller's dot, then into the callee; never past xMax (the playhead). */
+function elbow(x0, y0, x1, y1, xMax = Infinity) {
   const dy = y1 - y0;
-  if (Math.abs(dy) < 1) return `M${x0},${y0}H${Math.max(x1, x0 + 6)}`;
+  const room = Math.max(0, xMax - x0);
+  if (Math.abs(dy) < 1) return `M${x0},${y0}H${x0 + Math.min(Math.max(x1 - x0, 6), room)}`;
   const dir = dy > 0 ? 1 : -1;
-  const r = Math.min(8, Math.abs(dy) / 2);
-  const xEnd = Math.max(x1, x0 + r + 4);
+  const r = Math.min(8, Math.abs(dy) / 2, room);
+  const xEnd = x0 + Math.max(r, Math.min(Math.max(x1 - x0, r + 4), room));
   return `M${x0},${y0}V${y1 - dir * r}Q${x0},${y1} ${x0 + r},${y1}H${xEnd}`;
+}
+
+/** The ⊗ glyph, centred on 0,0; with `halo`, on a card-coloured disc so it reads over anything. */
+function failGlyph(r, halo = false) {
+  const g = svgEl("g", { class: "tl-ico-fail" });
+  if (halo) g.append(svgEl("circle", { r: r + 2.25, fill: CARD_BG }));
+  const a = r * 0.45;
+  g.append(
+    svgEl("circle", { r, fill: halo ? "#3a1719" : "none", stroke: FAIL_RED, "stroke-width": 1.4 }),
+    svgEl("path", { d: `M${-a},${-a}L${a},${a}M${a},${-a}L${-a},${a}`, stroke: FAIL_RED, "stroke-width": 1.4, "stroke-linecap": "round" }),
+  );
+  return g;
+}
+
+/**
+ * ⊗ markers for failed blocks too narrow to hold one: above the lane's band, so neighbouring
+ * blocks, handoff dots and the playhead never cover them. A sliver right next to a failed block
+ * that shows its own ⊗ (a failed call and the instant failure of the model call after it) and
+ * slivers close together share one marker. A refused handoff's own wait needs none: its dot says it.
+ */
+function failMarks(blocks, laneTop, markedCalls) {
+  const byLane = new Map();
+  for (const d of blocks) {
+    if (!d.failed || (d.item.span && markedCalls.has(d.item.span.key))) continue;
+    const list = byLane.get(d.item.laneIndex) || [];
+    list.push(d);
+    byLane.set(d.item.laneIndex, list);
+  }
+  const gap = (a, b) => Math.max(a.g.x - (b.g.x + b.g.w), b.g.x - (a.g.x + a.g.w));
+  const marks = [];
+  for (const [lane, list] of byLane) {
+    list.sort((a, b) => a.g.x - b.g.x);
+    let lastX = -Infinity;
+    for (const d of list) {
+      if (d.g.w >= FAIL_ICON_MIN_W) continue;
+      if (list.some((o) => o !== d && o.g.w >= FAIL_ICON_MIN_W && gap(o, d) <= 6)) continue;
+      const x = d.g.x + d.g.w / 2;
+      if (x - lastX < 12) continue;
+      lastX = x;
+      marks.push({ key: `m:${d.key}`, x, y: laneTop(lane) + BAND_TOP - 8 });
+    }
+  }
+  return marks;
 }
 
 export class RunCard {
@@ -61,7 +110,7 @@ export class RunCard {
   _build() {
     this.titleEl = el("h2", { class: "tl-title", id: `${this.uid}-title` });
     this.statusEl = el("p", { class: "tl-status" });
-    this.liveBtn = el("button", { type: "button", class: "tl-pill tl-live", "aria-label": "Jump to live", hidden: true }, el("span", { class: "tl-live-dot", "aria-hidden": "true" }), el("span", { class: "tl-live-text", text: "Live" }));
+    this.liveBtn = el("button", { type: "button", class: "tl-pill tl-live", "aria-label": "Jump to live", hidden: true }, el("span", { class: "tl-live-dot", "aria-hidden": "true" }), el("span", { class: "tl-live-text", text: "Go live" }));
     this.fitBtn = el("button", { type: "button", class: "tl-pill tl-fit", "aria-label": "Fit the whole run", hidden: true }, icons.fit(), el("span", { text: "Fit" }));
     const head = el(
       "header",
@@ -71,7 +120,20 @@ export class RunCard {
     );
 
     this.labelsEl = el("div", { class: "tl-labels" });
-    this.plot = svgEl("svg", { class: "tl-plot", role: "img", "aria-labelledby": `${this.uid}-title` });
+    this.navHint = el("p", {
+      class: "tl-sr",
+      id: `${this.uid}-hint`,
+      text: "Arrow keys move between segments and handoffs, Enter opens the selected one in Traffic, plus and minus zoom, 0 fits. Ctrl or Command and the mouse wheel zoom; Shift and the wheel pan.",
+    });
+    this.navLive = el("p", { class: "tl-sr", "aria-live": "polite" });
+    this.plot = svgEl("svg", {
+      class: "tl-plot",
+      role: "application",
+      "aria-roledescription": "run timeline",
+      tabindex: 0,
+      "aria-labelledby": `${this.uid}-title`,
+      "aria-describedby": `${this.uid}-hint`,
+    });
     this.plotWrap = el("div", { class: "tl-plotwrap" }, this.plot);
     this.lanesEl = el("div", { class: "tl-lanes" }, this.labelsEl, this.plotWrap);
     this.scrollEl = el("div", { class: "tl-scroll" }, this.lanesEl);
@@ -96,7 +158,7 @@ export class RunCard {
     const foot = el("footer", { class: "tl-foot" }, el("div", { class: "tl-ctrls" }, this.playBtn, this.restartBtn, speed), legend);
 
     this.tip = el("div", { class: "tl-tip", role: "tooltip", hidden: true });
-    this.el = el("section", { class: "tl-card", "aria-label": "Run" }, head, this.body, foot, this.tip);
+    this.el = el("section", { class: "tl-card", "aria-label": "Run" }, head, this.body, foot, this.tip, this.navHint, this.navLive);
 
     this._buildSvg();
     this._wire();
@@ -128,7 +190,11 @@ export class RunCard {
     this.phLine = svgEl("line", { class: "tl-ph-line", y1: 0 });
     this.phHit = svgEl("rect", { class: "tl-ph-hit", y: 0, width: 14 });
     this.gPh = g("tl-ph", {}, this.phLine, this.phHit);
-    this.plot.append(this.defs, this.gGrid, content, this.gPh);
+    // On top of everything: ⊗ markers of failed blocks too narrow to hold one, and the keyboard ring.
+    this.gMarks = g("tl-marks", { "clip-path": `url(#${id}-clip)` });
+    this.navRing = svgEl("rect", { class: "tl-navring", rx: 10 });
+    this.navRing.style.display = "none";
+    this.plot.append(this.defs, this.gGrid, content, this.gPh, this.gMarks, this.navRing);
 
     this.axGrid = g("tl-ax-grid");
     this.axBase = svgEl("line", { class: "tl-ax-base", y1: AXIS_Y, y2: AXIS_Y, x1: 0 });
@@ -160,10 +226,12 @@ export class RunCard {
     this.zoom = lib
       .zoom()
       .scaleExtent([1, 400])
+      // A click that moves a few pixels is still a click (else d3-zoom swallows it as a pan).
+      .clickDistance(4)
       .filter((ev) => ev.type !== "wheel" && ev.type !== "dblclick" && !ev.ctrlKey && !ev.button)
       .on("start", () => {
         this.dragging = true;
-        this._hideTip();
+        if (this.tipSource !== "key") this._hideTip();
       })
       .on("zoom", (ev) => {
         this.transform = ev.transform;
@@ -176,7 +244,11 @@ export class RunCard {
     this._onWheel = (e) => this._wheel(e);
     this.plot.addEventListener("wheel", this._onWheel, { passive: false });
     this.axis.addEventListener("wheel", this._onWheel, { passive: false });
-    this.plot.addEventListener("dblclick", () => this.fit());
+    this.plot.addEventListener("dblclick", (e) => {
+      // Over a segment the first click already opened it; fitting there too would surprise.
+      if (e.target.closest && e.target.closest("[data-open]")) return;
+      this.fit();
+    });
 
     // Scrub: drag the playhead (or anywhere on the axis).
     const seek = (phase) => (ev) => {
@@ -208,17 +280,39 @@ export class RunCard {
     this.plot.addEventListener("pointermove", (e) => {
       const n = e.target.closest && e.target.closest("[data-tip]");
       if (!n || this.dragging || !n.__data__) {
-        this._hideTip();
+        if (this.tipSource !== "key") this._hideTip();
         return;
       }
       this._showTip(n.__data__, e);
+      this.tipSource = "pointer";
     });
-    this.plot.addEventListener("pointerleave", () => this._hideTip());
+    this.plot.addEventListener("pointerleave", () => {
+      if (this.tipSource !== "key") this._hideTip();
+    });
     this.plot.addEventListener("click", (e) => {
+      if (e.detail > 1) return; // the second click of a double-click
       const n = e.target.closest && e.target.closest("[data-open]");
       if (!n || !n.__data__) return;
       const span = this._spanAt(n.__data__, e);
       if (span) this.cb.onOpenTraffic(span);
+    });
+
+    // Keyboard: segments, waits and handoff dots are reachable with the arrow keys.
+    this.nav = [];
+    this.navKey = null;
+    this.plot.addEventListener("keydown", (e) => this._navKeydown(e));
+    this.plot.addEventListener("focus", () => {
+      let visible = true;
+      try {
+        visible = this.plot.matches(":focus-visible");
+      } catch {
+        // older engines: treat every focus as keyboard focus
+      }
+      if (visible) this._navMove(this._navCurrent() || this._navStart(), true);
+    });
+    this.plot.addEventListener("blur", () => {
+      this.navRing.style.display = "none";
+      if (this.tipSource === "key") this._hideTip();
     });
 
     this.scrollEl.addEventListener("scroll", () => this.cb.onZoom(), { passive: true });
@@ -236,20 +330,30 @@ export class RunCard {
     d3().select(this.plot).on(".zoom", null);
   }
 
+  // Ctrl/Cmd + wheel (and a trackpad pinch) zooms; a horizontal wheel or Shift + wheel pans. A plain
+  // vertical wheel is left to the page (or to the lanes when they scroll), so the view never traps it.
   _wheel(e) {
     const lib = d3();
     const sel = lib.select(this.plot);
-    if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+    if (e.ctrlKey || e.metaKey) {
       e.preventDefault();
-      this.zoom.translateBy(sel, -e.deltaX / this.transform.k, 0);
+      const unit = e.deltaMode === 1 ? 0.05 : e.deltaMode ? 1 : 0.002;
+      const k = 2 ** (-e.deltaY * unit * (e.ctrlKey ? 5 : 1));
+      const [px] = lib.pointer(e, this.plot);
+      this.zoom.scaleBy(sel, k, [px, 0]);
       return;
     }
-    if (this.scrollable && !(e.ctrlKey || e.metaKey)) return; // let the lanes scroll
-    e.preventDefault();
-    const unit = e.deltaMode === 1 ? 0.05 : e.deltaMode ? 1 : 0.002;
-    const k = 2 ** (-e.deltaY * unit * (e.ctrlKey ? 5 : 1));
-    const [px] = lib.pointer(e, this.plot);
-    this.zoom.scaleBy(sel, k, [px, 0]);
+    const horizontal = Math.abs(e.deltaX) > Math.abs(e.deltaY);
+    if ((horizontal || e.shiftKey) && this.zoomed) {
+      e.preventDefault();
+      this.zoom.translateBy(sel, -(horizontal ? e.deltaX : e.deltaY) / this.transform.k, 0);
+    }
+  }
+
+  _zoomBy(k) {
+    const item = this._navCurrent();
+    const cx = item ? item.x + item.w / 2 : this.lastXP ?? this.plotW / 2;
+    this.zoom.scaleBy(d3().select(this.plot), k, [cx, 0]);
   }
 
   fit() {
@@ -303,10 +407,8 @@ export class RunCard {
     this.titleEl.textContent = state.title;
     this.titleEl.title = state.title;
     this.statusEl.textContent = state.statusText;
-    this.liveBtn.hidden = !state.running || !state.liveAvailable;
-    this.liveBtn.classList.toggle("is-live", state.live);
-    this.liveBtn.setAttribute("aria-pressed", state.live ? "true" : "false");
-    this.liveBtn.lastChild.textContent = state.live ? "Live" : "Go live";
+    // "Go live" only when a running run is shown away from now; "Fit" only when zoomed.
+    this.liveBtn.hidden = !state.running || !state.liveAvailable || state.live;
     this.fitBtn.hidden = !this.zoomed;
 
     // Footer.
@@ -417,7 +519,7 @@ export class RunCard {
       return { x: x0 + INSET, y, w, h };
     };
 
-    // Items visible at the playhead.
+    // Items visible at the playhead. A span is only drawn failed once the playhead passed its end.
     const visibleSpan = (s) => s.start <= at;
     const cut = (s) => {
       const done = s.end !== null && s.end <= at;
@@ -430,7 +532,7 @@ export class RunCard {
       const c = cut(t.span);
       const g = geom({ ...t, type: "invocation-track" }, t.span.start, c.end, c.running);
       if (g.x + g.w < visLo || g.x > visHi) continue;
-      const d = { key: t.key, item: t, g: { x: g.x - 2, y: g.y - 3, w: g.w + 4, h: g.h + 6 }, c: color(t.lane), failed: t.failed };
+      const d = { key: t.key, item: t, g: { x: g.x - 2, y: g.y - 3, w: g.w + 4, h: g.h + 6 }, c: color(t.lane), failed: t.failed && !c.running };
       (c.running ? tracksRun : tracksDone).push(d);
     }
 
@@ -473,7 +575,7 @@ export class RunCard {
       const c = cut(b.span);
       const g = geom(b, b.span.start, c.end, c.running);
       if (g.x + g.w < visLo || g.x > visHi) continue;
-      pushBlock({ key: b.key, item: b, g, c: color(b.lane), type: b.type, failed: b.failed, running: c.running }, c.running);
+      pushBlock({ key: b.key, item: b, g, c: color(b.lane), type: b.type, failed: b.failed && !c.running, running: c.running }, c.running);
     }
     for (const o of openThinking(derived, at)) {
       if (!laneVisible(o.laneIndex) || o.start > at) continue;
@@ -497,7 +599,8 @@ export class RunCard {
       if (x0 < visLo - 400 || x0 > visHi) continue;
       const childStarted = h.child && h.child.start <= at;
       const x1 = childStarted ? X(h.child.start) : x0;
-      conns.push({ key: h.key, h, x0, y0, x1, y1, c: color(h.to), failed: s.status === "error" || s.status === "denied", childStarted });
+      const ended = s.end !== null && s.end <= at;
+      conns.push({ key: h.key, h, x0, y0, x1, y1, xMax: xP, c: color(h.to), failed: ended && (s.status === "error" || s.status === "denied"), childStarted });
     }
 
     this._drawTracks(this.gTracks, tracksDone);
@@ -506,6 +609,14 @@ export class RunCard {
     this._drawBlocks(this.gBlocks, blocksDone);
     this._drawBlocks(this.gBlocksRun, blocksRun);
     this._drawDots(conns);
+    this._drawMarks(failMarks(blocksDone, laneTop, new Set(conns.filter((c) => c.failed).map((c) => c.h.call.key))));
+
+    // Keyboard navigation targets, by lane and then time.
+    const nav = [];
+    for (const d of blocksDone.concat(blocksRun)) nav.push({ key: d.key, lane: d.item.laneIndex, x: d.g.x, y: d.g.y, w: d.g.w, h: d.g.h, d });
+    for (const c of conns) nav.push({ key: c.key, lane: derived.laneIndex.get(c.h.from), x: c.x0 - 5, y: c.y0 - 5, w: 10, h: 10, d: c, dot: true });
+    nav.sort((a, b) => a.lane - b.lane || a.x - b.x || a.y - b.y);
+    this.nav = nav;
 
     // Fade at the playhead for running work.
     this.fadeGrad.setAttribute("x1", xP - FADE_PX);
@@ -516,6 +627,7 @@ export class RunCard {
     }
 
     // Playhead.
+    this.lastXP = xP;
     const phVisible = xP >= 0 && xP <= W;
     this.gPh.style.display = phVisible ? "" : "none";
     this.phLine.setAttribute("x1", xP);
@@ -534,8 +646,9 @@ export class RunCard {
 
     this._drawLabels(lanes, laneVisible, colors, state.running);
 
-    // Keep an open tooltip current while the run plays.
-    if (this.tipItem && this.tipEvent) this._showTip(this.tipItem, this.tipEvent, true);
+    // Keep an open tooltip (and the keyboard ring) current while the run plays.
+    if (document.activeElement === this.plot && this.navKey) this._navSync(false, this.tipSource === "key");
+    if (this.tipSource !== "key" && this.tipItem && this.tipEvent) this._showTip(this.tipItem, this.tipEvent, true);
   }
 
   _hatch(c) {
@@ -582,7 +695,13 @@ export class RunCard {
         return g;
       })
       .each(function draw(d) {
-        const path = elbow(d.x0, d.y0, d.childStarted ? d.x1 : d.x0, d.y1);
+        // A refused or failed handoff stops at the edge of the callee's band (nothing started there
+        // worth pointing into, and a stub would cross that lane's blocks).
+        const dir = d.y1 > d.y0 ? 1 : -1;
+        const path =
+          d.failed && Math.abs(d.y1 - d.y0) >= 1
+            ? `M${d.x0},${d.y0}V${d.y1 - dir * (BLOCK_H / 2 + 3)}`
+            : elbow(d.x0, d.y0, d.childStarted ? d.x1 : d.x0, d.y1, d.xMax);
         const [line, hit] = this.childNodes;
         line.setAttribute("d", path);
         line.setAttribute("stroke", d.c.base);
@@ -601,6 +720,21 @@ export class RunCard {
       .attr("cy", (d) => d.y0)
       .attr("fill", (d) => d.c.base)
       .classed("is-failed", (d) => d.failed);
+  }
+
+  _drawMarks(data) {
+    d3()
+      .select(this.gMarks)
+      .selectAll("g.tl-mark")
+      .data(data, (d) => d.key)
+      .join((enter) =>
+        enter.append((d) => {
+          const g = failGlyph(4.5, true);
+          g.setAttribute("class", "tl-mark");
+          return g;
+        }),
+      )
+      .attr("transform", (d) => `translate(${d.x.toFixed(2)},${d.y.toFixed(2)})`);
   }
 
   _drawBlocks(group, data) {
@@ -653,10 +787,10 @@ export class RunCard {
     const wide = g.w >= 22;
     const retry = d.type === "thinking" && span && span.attempt > 1 && (d.failed ? g.w >= 38 : wide);
     const fallback = !d.failed && d.type === "thinking" && span && span.fallback;
-    // ⊗ inside wide failed blocks (left) and mid-size ones (centred); slivers get a ⊗ marker over
-    // them; blocks in between are visible enough on their own.
-    const failIcon = d.failed && (g.w >= 15 || g.w < 8);
-    const sig = `${failIcon ? "f" : ""}${retry ? "r" : ""}${fallback && g.w >= 76 ? "b" : ""}${wide ? "w" : g.w < 8 ? "s" : "n"}${g.h}`;
+    // ⊗ inside wide failed blocks (left) and mid-size ones (centred); narrower ones get a marker
+    // above the band (failMarks), drawn on top of everything.
+    const failIcon = d.failed && g.w >= FAIL_ICON_MIN_W;
+    const sig = `${failIcon ? "f" : ""}${retry ? "r" : ""}${fallback && g.w >= 76 ? "b" : ""}${wide ? "w" : "n"}${g.h}`;
     const cy = g.h / 2;
     const failAt = `translate(${wide ? 11 : (g.w / 2).toFixed(2)},${cy})`;
     if (node.__sig === sig) {
@@ -667,13 +801,8 @@ export class RunCard {
     node.__sig = sig;
     while (node.childNodes.length > 1) node.lastChild.remove();
     if (failIcon) {
-      const r = Math.min(5, g.h / 2 - 1.5);
-      const grp = svgEl("g", { class: "tl-ico-fail", transform: failAt });
-      if (g.w < 8) grp.append(svgEl("circle", { r: r + 2, fill: CARD_BG }));
-      grp.append(
-        svgEl("circle", { r, fill: "none", stroke: FAIL_RED, "stroke-width": 1.4 }),
-        svgEl("path", { d: `M${-r * 0.45},${-r * 0.45}L${r * 0.45},${r * 0.45}M${r * 0.45},${-r * 0.45}L${-r * 0.45},${r * 0.45}`, stroke: FAIL_RED, "stroke-width": 1.4, "stroke-linecap": "round" }),
-      );
+      const grp = failGlyph(Math.min(5, g.h / 2 - 1.5));
+      grp.setAttribute("transform", failAt);
       node.append(grp);
     }
     if (retry) {
@@ -728,8 +857,100 @@ export class RunCard {
           modelEl.classList.toggle("is-pending", !d.model);
         }
         this.title = d.id;
-        this.setAttribute("aria-label", `${d.name}${d.model ? `, ${d.model}` : ""}. Select in the graph`);
+        this.setAttribute("aria-label", `${d.name}${d.model ? `, ${d.model}` : ""}. Select ${d.short} in the graph`);
       });
+  }
+
+  // ---- keyboard navigation -----------------------------------------------------------------
+  _navCurrent() {
+    return this.navKey ? this.nav.find((n) => n.key === this.navKey) || null : null;
+  }
+
+  /** First stop: the item of the first lane nearest the playhead. */
+  _navStart() {
+    if (!this.nav.length) return null;
+    const xP = this.lastXP ?? 0;
+    const lane = this.nav[0].lane;
+    let best = null;
+    for (const n of this.nav) {
+      if (n.lane !== lane) break;
+      if (!best || Math.abs(n.x + n.w / 2 - xP) < Math.abs(best.x + best.w / 2 - xP)) best = n;
+    }
+    return best;
+  }
+
+  _navKeydown(e) {
+    if (!NAV_KEYS.has(e.key) || e.ctrlKey || e.metaKey || e.altKey) return;
+    e.preventDefault();
+    const k = e.key;
+    if (k === "+" || k === "=") return this._zoomBy(1.6);
+    if (k === "-" || k === "_") return this._zoomBy(1 / 1.6);
+    if (k === "0") return this.fit();
+    if (k === "Escape") {
+      this.navKey = null;
+      this.navRing.style.display = "none";
+      this._hideTip();
+      return undefined;
+    }
+    const cur = this._navCurrent();
+    if (k === "Enter") {
+      const span = cur ? this._spanAt(cur.d, this._navEvent(cur)) : null;
+      if (span) this.cb.onOpenTraffic(span);
+      return undefined;
+    }
+    if (!cur) return this._navMove(this._navStart(), true);
+    const inLane = this.nav.filter((n) => n.lane === cur.lane);
+    const i = inLane.indexOf(cur);
+    let next = null;
+    if (k === "ArrowRight") next = inLane[Math.min(inLane.length - 1, i + 1)];
+    else if (k === "ArrowLeft") next = inLane[Math.max(0, i - 1)];
+    else if (k === "Home") next = inLane[0];
+    else if (k === "End") next = inLane[inLane.length - 1];
+    else {
+      const lanes = [...new Set(this.nav.map((n) => n.lane))];
+      const target = lanes[lanes.indexOf(cur.lane) + (k === "ArrowDown" ? 1 : -1)];
+      const cx = cur.x + cur.w / 2;
+      const dist = (n) => Math.abs(n.x + n.w / 2 - cx);
+      for (const n of this.nav) if (n.lane === target && (!next || dist(n) < dist(next))) next = n;
+    }
+    return this._navMove(next || cur, true);
+  }
+
+  _navEvent(item) {
+    const box = this.plot.getBoundingClientRect();
+    return { clientX: box.left + item.x + item.w / 2, clientY: box.top + item.y + item.h, target: this.plot };
+  }
+
+  _navMove(item, announce) {
+    if (!item) return;
+    this.navKey = item.key;
+    this.tipSource = "key";
+    this._navSync(announce, true);
+  }
+
+  /** Ring around the selected item; its tooltip; with `announce`, a summary for screen readers. */
+  _navSync(announce = false, withTip = true) {
+    const item = this._navCurrent();
+    if (!item) {
+      this.navRing.style.display = "none";
+      if (this.tipSource === "key") this._hideTip();
+      return;
+    }
+    const pad = item.dot ? 2 : 3;
+    this.navRing.setAttribute("x", (item.x - pad).toFixed(2));
+    this.navRing.setAttribute("y", (item.y - pad).toFixed(2));
+    this.navRing.setAttribute("width", Math.max(0, item.w + 2 * pad).toFixed(2));
+    this.navRing.setAttribute("height", (item.h + 2 * pad).toFixed(2));
+    this.navRing.setAttribute("rx", item.dot ? item.w / 2 + pad : 10);
+    this.navRing.style.display = "";
+    if (!withTip) return;
+    const info = this._showTip(item.d, this._navEvent(item), !announce);
+    this.tipSource = "key";
+    if (announce && info) {
+      const keep = new Set(["On", "Kind", "Callee", "Start", "Duration", "Status", "Attempt", "Error"]);
+      const rows = info.rows.filter(([k]) => keep.has(k)).map(([k, v]) => `${k} ${v}`);
+      this.navLive.textContent = `${info.title}. ${rows.join(", ")}. Enter opens it in Traffic.`;
+    }
   }
 
   // ---- tooltip -----------------------------------------------------------------------------
@@ -760,23 +981,23 @@ export class RunCard {
 
   _showTip(d, e, refresh = false) {
     const st = this.lastState;
-    if (!st) return;
+    if (!st) return null;
     const span = this._spanAt(d, e);
-    if (!span) return;
+    if (!span) return null;
     const runStart = st.derived.runStart;
     const at = runStart + st.P;
     const rows = [];
     let title;
     if (d.h) {
       const idx = d.h.call.call_index;
-      title = `Handoff → ${agentName(d.h.to)}${idx > 1 ? ` #${idx}` : ""}`;
-      rows.push(["From", agentName(d.h.from)], ["To", d.h.to]);
+      title = `Handoff → ${displayName(d.h.to)}${idx > 1 ? ` #${idx}` : ""}`;
+      rows.push(["From", displayName(d.h.from)], ["To", d.h.to]);
     } else if (d.open) {
-      title = `Thinking · ${agentName(d.item.lane)}`;
+      title = `Thinking · ${displayName(d.item.lane)}`;
       rows.push(["Since", `+${((d.item.start - runStart) / 1000).toFixed(3)}s`], ["So far", fmtLatency(at - d.item.start)], ["Note", "The model call is reported when it ends."]);
     } else {
       const type = d.type === "invocation" ? "Invocation" : TYPE_LABEL[d.type] || span.kind;
-      title = `${type} · ${agentName(span.agent)}${d.failed ? " · failed" : ""}`;
+      title = `${type} · ${displayName(span.agent)}${d.failed ? " · failed" : ""}`;
       if (d.type === "waiting" && span.callee) {
         const others = d.item.members ? d.item.members.length - 1 : 0;
         rows.push(["On", `${span.callee}${span.call_index > 1 ? ` #${span.call_index}` : ""}${others > 0 ? ` (+${others} more)` : ""}`]);
@@ -820,11 +1041,13 @@ export class RunCard {
     if (y + th > vh - 8) y = e.clientY - th - 12;
     this.tip.style.left = `${Math.max(8, x) - box.left}px`;
     this.tip.style.top = `${Math.max(8, y) - box.top}px`;
+    return { title, rows };
   }
 
   _hideTip() {
     this.tip.hidden = true;
     this.tipItem = null;
     this.tipEvent = null;
+    this.tipSource = null;
   }
 }

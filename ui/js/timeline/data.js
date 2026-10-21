@@ -7,7 +7,7 @@
 // `handler({type, data})` receives `span_start` and `audit` events (their SSE payloads), `reset`
 // (refetch everything) and `status` ({connected}). Nothing here mutates server state.
 
-import { TraceModel, applyEventToSummary, normaliseSummary, parseTime } from "./model.js";
+import { TraceModel, applyEventToSummary, isRootStart, normaliseSummary, parseTime, summaryFromRootStart } from "./model.js";
 
 const EVENT_TYPES = ["span_start", "audit"];
 
@@ -303,17 +303,9 @@ export class FixtureSource {
       else model.applyAudit(ev.data.record);
     }
     let sum = this.summaries.get(traceId);
-    if (!sum && ev.type === "span_start" && ev.data.kind === "agent_invocation" && !ev.data.parent_span_id) {
-      sum = normaliseSummary({
-        trace_id: traceId,
-        title: this.liveTitle,
-        root_agent: ev.data.agent_node,
-        root_request_id: ev.data.request_id,
-        started_at: ev.data.ts,
-        status: "running",
-        agents: 1,
-        invocations: 1,
-      });
+    if (!sum && ev.type === "span_start" && isRootStart(ev.data)) {
+      sum = summaryFromRootStart(ev.data);
+      sum.title = this.liveTitle;
       this.summaries.set(traceId, sum);
       if (this.summaries.size > 60) {
         const oldest = [...this.summaries.values()].sort((a, b) => a.started - b.started)[0];

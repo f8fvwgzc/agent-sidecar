@@ -69,7 +69,7 @@ export class RunList {
     const tokens = run.tokens_in + run.tokens_out;
     const elapsed = run.status === "running" ? Math.max(0, now - (run.started || now)) : run.duration_ms || 0;
     const title = summaryTitle(run);
-    const meta = `${statusLabel(run.status)} · ${fmtSeconds(elapsed)} · ${fmtCompact(tokens)} tokens`;
+    const meta = `${statusLabel(run.status)} · ${fmtSeconds(elapsed, run.status !== "running")} · ${fmtCompact(tokens)} tokens`;
     const sig = `${title}|${meta}|${run.status}|${selected}`;
     if (row.sig === sig) return;
     row.sig = sig;

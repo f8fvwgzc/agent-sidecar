@@ -127,8 +127,10 @@ export function providerGlyph(model) {
 
 // ---- formatting ------------------------------------------------------------------------------
 
-export function fmtSeconds(ms) {
+/** "9.0s", "2m 5s"; with `precise`, a duration under 0.1 s in milliseconds ("1ms"). */
+export function fmtSeconds(ms, precise = false) {
   const v = Math.max(0, ms || 0);
+  if (precise && v < 100) return `${Math.round(v)}ms`;
   if (v < 60_000) return `${(v / 1000).toFixed(1)}s`;
   const total = Math.round(v / 1000);
   const h = Math.floor(total / 3600);
@@ -162,12 +164,17 @@ export function fmtCost(usd) {
   return `$${v.toFixed(2)}`;
 }
 
-/** Axis tick label in seconds; minutes once the run is long. */
+/** Axis tick label: seconds (minutes once the run is long), milliseconds for sub-0.1 s steps. */
 export function fmtTick(sec, step) {
   if (sec >= 60 && step >= 1) {
     const m = Math.floor(sec / 60);
     const s = Math.round(sec - m * 60);
     return s === 0 ? `${m}m` : `${m}m${s}s`;
+  }
+  if (step < 0.1) {
+    const msStep = step * 1000;
+    const decimals = msStep >= 1 ? 0 : Math.min(3, Math.ceil(-Math.log10(msStep) - 1e-9));
+    return `${Number((sec * 1000).toFixed(decimals))}ms`;
   }
   const decimals = step >= 1 ? 0 : Math.min(3, Math.ceil(-Math.log10(step) - 1e-9));
   return `${Number(sec.toFixed(decimals))}s`;
@@ -184,6 +191,12 @@ export function agentName(nodeId) {
   if (typeof nodeId !== "string") return "unknown";
   const i = nodeId.lastIndexOf("/");
   return i >= 0 ? nodeId.slice(i + 1) : nodeId.replace(/^agent:/, "");
+}
+
+/** Display name of an agent for lane labels and tooltips: "stock-analyst" → "Stock analyst". */
+export function displayName(nodeIdOrName) {
+  const raw = agentName(nodeIdOrName).replace(/[-_]+/g, " ").trim();
+  return raw ? raw.charAt(0).toUpperCase() + raw.slice(1) : "Unknown";
 }
 
 // ---- colours ---------------------------------------------------------------------------------
@@ -240,23 +253,20 @@ function shades(base) {
 }
 
 /**
- * A stable colour per lane: the root orchestrator is neutral grey, every other agent gets the
- * palette entry its node id hashes to, moving to the next free entry when another lane of the same
- * run already has it.
+ * A stable colour per lane (design §11.1): the root orchestrator is neutral grey, every other
+ * agent gets the palette entry its node id hashes to, the same in every run. Two agents of one run
+ * can share a colour when their ids hash to the same entry.
  */
+export function colorFor(id) {
+  const idx = fnv1a(String(id)) % PALETTE.length;
+  return { index: idx, ...shades(PALETTE[idx]) };
+}
+
+const ROOT_SHADES = { index: -1, ...shades(ROOT_GREY), think: "#38383d", thinkStroke: "#45454b", tool: "#a9a9af", stripe: "#4a4a50", waitStroke: "#5c5c63" };
+
 export function assignColors(laneIds, rootId) {
   const out = new Map();
-  const used = new Set();
-  for (const id of laneIds) {
-    if (id === rootId) {
-      out.set(id, { index: -1, ...shades(ROOT_GREY), think: "#38383d", thinkStroke: "#45454b", tool: "#a9a9af", stripe: "#4a4a50", waitStroke: "#5c5c63" });
-      continue;
-    }
-    let idx = fnv1a(id) % PALETTE.length;
-    for (let i = 0; i < PALETTE.length && used.has(idx); i += 1) idx = (idx + 1) % PALETTE.length;
-    used.add(idx);
-    out.set(id, { index: idx, ...shades(PALETTE[idx]) });
-  }
+  for (const id of laneIds) out.set(id, id === rootId ? ROOT_SHADES : colorFor(id));
   return out;
 }
 

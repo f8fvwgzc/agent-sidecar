@@ -35,6 +35,7 @@ import { agentName, clamp, el, fmtCost, fmtInt, fmtSeconds, statusLabel } from "
 const LIVE_MIN_WINDOW_MS = 26_000;
 const FOLLOW_KEY = "attache.timeline.follow.v1";
 const MAX_RUNS = 100;
+const LIST_LIMIT = 50;
 
 const mounted = new WeakMap();
 
@@ -68,7 +69,9 @@ class TimelineView {
     this.model = null;
     this.buffer = null;
     this.loadToken = 0;
-    this.pb = { mode: "replay", playing: false, speed: 1, P: 0, lastTs: 0 };
+    // P: playhead in ms from the run start. pinEnd: a finished run's playhead stays at its end when
+    // late spans (e.g. a reflection model call) extend the run.
+    this.pb = { mode: "replay", playing: false, speed: 1, P: 0, lastTs: 0, pinEnd: false };
     this.skew = 0;
     this.raf = 0;
     this.destroyed = false;
@@ -97,6 +100,7 @@ class TimelineView {
 
     this.onKey = (e) => this.key(e);
     document.addEventListener("keydown", this.onKey);
+    // Running rows show their elapsed time; refresh them at the header's resolution (0.1 s).
     this.listTimer = setInterval(() => {
       for (const r of this.runs.values()) {
         if (r.status === "running") {
@@ -104,7 +108,7 @@ class TimelineView {
           break;
         }
       }
-    }, 1000);
+    }, 100);
 
     const view = this;
     this.handle = {
@@ -154,24 +158,34 @@ class TimelineView {
   async refreshList() {
     let list;
     try {
-      list = await this.source.listTraces({ limit: 50, ...this.filter });
+      list = await this.source.listTraces({ limit: LIST_LIMIT, ...this.filter });
     } catch (err) {
       if (this.destroyed) return;
       if (!this.selectedId) this.card.setMessage(err && err.message ? err.message : "Could not load runs.");
       return;
     }
     if (this.destroyed) return;
+    const rows = Array.isArray(list) ? list : [];
     const next = new Map();
-    for (const s of Array.isArray(list) ? list : []) {
+    for (const s of rows) {
       if (!s || typeof s.trace_id !== "string") continue;
       const prev = this.runs.get(s.trace_id);
       const sum = normaliseSummary(s);
-      if (prev) sum.seen = prev.seen;
+      if (prev) {
+        sum.seen = prev.seen;
+        sum.root_span_id = sum.root_span_id || prev.root_span_id;
+      }
       next.set(s.trace_id, sum);
     }
-    // Keep runs seen live that the list does not have yet.
-    const oldest = Math.min(...[...next.values()].map((r) => r.started || Infinity));
-    for (const [id, r] of this.runs) if (!next.has(id) && (r.started || 0) >= oldest) next.set(id, r);
+    // Keep the run being watched, and runs seen live that the list does not have yet: all of them
+    // when the list is not full, else those newer than its oldest row.
+    const complete = rows.length < LIST_LIMIT;
+    let oldest = Infinity;
+    for (const r of next.values()) if (r.started !== null) oldest = Math.min(oldest, r.started);
+    for (const [id, r] of this.runs) {
+      if (next.has(id) || !this.matchesFilter(r.root_agent)) continue;
+      if (id === this.selectedId || complete || (r.started ?? 0) >= oldest) next.set(id, r);
+    }
     this.runs = next;
     this.trimRuns();
     this.renderList();
@@ -269,17 +283,20 @@ class TimelineView {
       for (const s of d.spans) this.observeClock(s.end ?? s.start);
       const pb = this.pb;
       pb.lastTs = 0;
+      pb.pinEnd = false;
       if (d.runEnd === null && this.live) {
         pb.mode = "live";
         pb.playing = true;
       } else {
         pb.mode = "replay";
         pb.playing = false;
-        pb.P = d.runEnd !== null ? d.runEnd - d.runStart : Math.max(0, d.lastKnownAt - d.runStart);
+        pb.P = d.endAt !== null ? d.endAt - d.runStart : Math.max(0, d.lastKnownAt - d.runStart);
+        pb.pinEnd = d.endAt !== null;
       }
       if (this.pendingAt !== null) {
         pb.mode = "replay";
         pb.playing = false;
+        pb.pinEnd = false;
         pb.P = Math.max(0, this.pendingAt * 1000);
         this.pendingAt = null;
       }
@@ -356,6 +373,7 @@ class TimelineView {
     const d = this.derived();
     if (!d) return;
     const pb = this.pb;
+    pb.pinEnd = false;
     if (d.runEnd === null) {
       // A running run: Pause freezes the view while data keeps arriving; Play jumps back to live.
       if (pb.mode === "live" || pb.playing) {
@@ -371,7 +389,7 @@ class TimelineView {
     } else if (pb.playing) {
       pb.playing = false;
     } else {
-      if (pb.P >= d.runEnd - d.runStart - 1) pb.P = 0;
+      if (pb.P >= d.endAt - d.runStart - 1) pb.P = 0;
       pb.playing = true;
       pb.lastTs = 0;
     }
@@ -380,19 +398,20 @@ class TimelineView {
 
   restart() {
     if (!this.derived()) return;
-    Object.assign(this.pb, { mode: "replay", playing: true, P: 0, lastTs: 0 });
+    Object.assign(this.pb, { mode: "replay", playing: true, P: 0, lastTs: 0, pinEnd: false });
     this.invalidate();
   }
 
   seek(ms, phase) {
     const d = this.derived();
     if (!d) return;
-    const maxP = d.runEnd !== null ? d.runEnd - d.runStart : Math.max(0, this.now() - d.runStart);
+    const maxP = d.endAt !== null ? d.endAt - d.runStart : Math.max(0, this.now() - d.runStart);
     const pb = this.pb;
     pb.P = clamp(ms === Infinity ? maxP : ms, 0, maxP);
     pb.mode = "replay";
     pb.playing = false;
     pb.lastTs = 0;
+    pb.pinEnd = d.endAt !== null && pb.P >= maxP;
     if (d.runEnd === null && this.live && (phase === "end" || phase === "key") && pb.P >= maxP - 150) {
       pb.mode = "live";
       pb.playing = true;
@@ -432,7 +451,7 @@ class TimelineView {
     const pb = this.pb;
     const now = this.now();
     const finished = d.runEnd !== null;
-    const dur = finished ? d.runEnd - d.runStart : null;
+    const dur = finished ? d.endAt - d.runStart : null;
     const liveP = Math.max(0, now - d.runStart);
     const maxP = finished ? dur : liveP;
     if (pb.mode === "live") {
@@ -441,6 +460,7 @@ class TimelineView {
         pb.mode = "replay";
         pb.playing = false;
         pb.P = dur;
+        pb.pinEnd = true;
         this.card.resetZoom();
       } else {
         pb.P = liveP;
@@ -452,6 +472,7 @@ class TimelineView {
       if (finished && pb.P >= dur) {
         pb.P = dur;
         pb.playing = false;
+        pb.pinEnd = true;
       } else if (!finished && pb.P >= liveP) {
         pb.P = liveP;
         if (this.live) pb.mode = "live";
@@ -459,13 +480,20 @@ class TimelineView {
       }
     }
     pb.lastTs = pb.playing && pb.mode !== "live" ? ts : 0;
+    if (finished && pb.pinEnd && !pb.playing) pb.P = dur;
     pb.P = clamp(pb.P, 0, maxP);
 
-    const baseEndMs = finished ? Math.max(1000, dur * 1.04) : Math.max(LIVE_MIN_WINDOW_MS, Math.ceil((liveP * 1.15) / 10_000) * 10_000);
+    // A finished run is fitted to its duration; a running one gets a window that grows with it.
+    const baseEndMs = finished ? Math.max(1, dur * 1.04) : Math.max(LIVE_MIN_WINDOW_MS, Math.ceil((liveP * 1.15) / 10_000) * 10_000);
     const totals = totalsAt(d, d.runStart + pb.P);
-    const ended = finished && pb.P >= dur - 0.5;
+    // Status: the run's own (Done / Denied / Failed once it finished, also while it replays);
+    // time: the playhead, "of" the duration while a finished run replays.
+    let time;
+    if (!finished) time = fmtSeconds(pb.P);
+    else if (pb.P >= dur - 0.5) time = fmtSeconds(dur, true);
+    else time = `${fmtSeconds(pb.P)} / ${fmtSeconds(dur, true)}`;
     const title = sum ? summaryTitle(sum) : `${agentName(d.rootLane)} · ${String(this.selectedId).slice(0, 8)}`;
-    const statusText = `${statusLabel(ended ? d.status : "running")} · ${fmtSeconds(ended ? dur : pb.P)} · ${fmtInt(totals.tokens)} tokens · ${fmtCost(totals.cost)}`;
+    const statusText = `${statusLabel(finished ? d.status : "running")} · ${time} · ${fmtInt(totals.tokens)} tokens · ${fmtCost(totals.cost)}`;
     this.card.render({
       derived: d,
       title,

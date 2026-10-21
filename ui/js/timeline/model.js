@@ -5,7 +5,7 @@
 // with the same key closes it. Audit records of other kinds (guardrail, authz, budget, …) attach to
 // the span with their span id as `events`.
 
-import { assignColors } from "./util.js";
+import { assignColors, displayName } from "./util.js";
 
 export const SPAN_KINDS = ["agent_invocation", "agent_call", "service_call", "http_call", "model_call", "tool_call"];
 const KIND_ORDER = Object.fromEntries(SPAN_KINDS.map((k, i) => [k, i]));
@@ -141,6 +141,7 @@ export class TraceModel {
       segment: SEGMENTS.includes(s.segment) ? s.segment : SEGMENT_BY_KIND[s.kind],
       attempt: num(s.attempt) || 1,
       fallback: Boolean(s.fallback),
+      attemptKnown: true,
       events: Array.isArray(s.events) ? s.events.slice(0, MAX_EVENTS_PER_SPAN) : [],
       merged: num(s.merged) || 0,
     };
@@ -199,6 +200,7 @@ export class TraceModel {
         segment: SEGMENT_BY_KIND[ev.kind],
         attempt: 1,
         fallback: false,
+        attemptKnown: false,
         events: [],
         merged: 0,
       };
@@ -264,9 +266,18 @@ export class TraceModel {
       tokens_in: rec.tokens ? num(rec.tokens.input) : null,
       tokens_out: rec.tokens ? num(rec.tokens.output) : null,
       cost_usd: num(rec.cost_usd),
-      attempt: rec.kind === "model_call" && input && num(input.attempt) ? num(input.attempt) : span.attempt || 1,
-      fallback: rec.kind === "model_call" && input ? Boolean(input.fallback) : Boolean(span.fallback),
     });
+    // attempt/fallback come from the model_call record's input (design §11.1). Without payloads
+    // (`input` is null) they are inferred from the calls before it when the view is derived.
+    if (rec.kind === "model_call" && input) {
+      span.attempt = num(input.attempt) || 1;
+      span.fallback = Boolean(input.fallback);
+      span.attemptKnown = true;
+    } else if (!span.attemptKnown) {
+      span.attempt = span.attempt || 1;
+      span.fallback = Boolean(span.fallback);
+      span.attemptKnown = rec.kind !== "model_call";
+    }
     if (!span.agent) span.agent = agentNodeFromRecord(rec);
     if (!span.callee_node) span.callee_node = calleeNodeFor(rec.kind, rec.namespace, rec.service, rec.callee);
     this._attachPending(span);
@@ -395,6 +406,25 @@ function deriveRun(model) {
     if (s.call_index === null || s.call_index === undefined) s.call_index = n;
   }
 
+  // attempt/fallback of model calls seen without payloads: a model call that follows a failed one
+  // in the same invocation is its retry (the harness only goes on after a retryable failure); a
+  // different model after the failure is the fallback.
+  const lastModel = new Map();
+  for (const s of spans) {
+    if (s.kind !== "model_call") continue;
+    if (s.attemptKnown === false) {
+      const prev = lastModel.get(s.parent_span_id);
+      if (prev && prev.status === "error" && prev.end !== null && prev.end <= s.start) {
+        s.attempt = (prev.attempt || 1) + 1;
+        s.fallback = Boolean(prev.fallback) || splitModel(prev.callee).model !== splitModel(s.callee).model;
+      } else {
+        s.attempt = 1;
+        s.fallback = false;
+      }
+    }
+    lastModel.set(s.parent_span_id, s);
+  }
+
   // Root: the invocation without a (known) parent, earliest first.
   const invocations = spans.filter((s) => s.kind === "agent_invocation");
   const root = invocations.find((s) => !s.parent_span_id || !byId.has(s.parent_span_id)) || invocations[0] || spans[0] || null;
@@ -491,7 +521,7 @@ function deriveRun(model) {
   const colors = assignColors(order, rootLane);
   const lanes = order.map((id, index) => {
     const parts = id.replace(/^agent:/, "").split("/");
-    return { id, index, name: parts[parts.length - 1], namespace: parts[0] || null, service: parts.length > 2 ? parts[1] : null, isRoot: id === rootLane, model: null, provider: null };
+    return { id, index, name: displayName(id), short: parts[parts.length - 1], namespace: parts[0] || null, service: parts.length > 2 ? parts[1] : null, isRoot: id === rootLane, model: null, provider: null };
   });
   for (const s of spans) {
     if (s.kind !== "model_call") continue;
@@ -566,6 +596,9 @@ function deriveRun(model) {
 
   let lastKnownAt = runStart;
   for (const s of spans) lastKnownAt = Math.max(lastKnownAt ?? s.start, s.start, s.end ?? s.start);
+  // A finished run plays to its last span: model calls reported after the root returned (e.g. the
+  // learning reflection, accepted up to 120 s later) are part of it.
+  const endAt = runEnd === null ? null : Math.max(runEnd, lastKnownAt);
 
   return {
     version: model.version,
@@ -574,6 +607,7 @@ function deriveRun(model) {
     rootLane,
     runStart,
     runEnd,
+    endAt,
     status,
     lanes,
     laneIndex,
@@ -652,6 +686,7 @@ export function normaliseSummary(s) {
     tokens_in: num(s.tokens_in) || 0,
     tokens_out: num(s.tokens_out) || 0,
     cost_usd: num(s.cost_usd) || 0,
+    root_span_id: typeof s.root_span_id === "string" ? s.root_span_id : null,
     seen: new Set(),
   };
 }
@@ -662,9 +697,10 @@ export function summaryTitle(sum) {
   return `${name} · ${String(sum.trace_id).slice(0, 8)}`;
 }
 
-/** A summary for a run first seen through its root span start. */
+/** A summary for a run first seen through its root span start (its counts then come from events). */
 export function summaryFromRootStart(ev) {
-  return normaliseSummary({
+  const sum = normaliseSummary({
+    root_span_id: ev.span_id,
     trace_id: ev.trace_id,
     title: null,
     root_agent: ev.agent_node || `agent:${ev.namespace}/${ev.service}/${ev.agent}`,
@@ -676,10 +712,28 @@ export function summaryFromRootStart(ev) {
     agents: 1,
     invocations: 1,
   });
+  sum.liveCounts = true;
+  sum.seen.add(`a:${sum.root_agent}`);
+  return sum;
+}
+
+/**
+ * The root invocation of a run: invoked by the local app (caller `local`, no caller agent), or
+ * without a parent. An app that sends a W3C `traceparent` gives its root a parent span id that is
+ * not in the trace, so a parent alone does not make an invocation a sub-agent's.
+ */
+export function isRootInvocation(r) {
+  return Boolean(r) && r.kind === "agent_invocation" && (!r.parent_span_id || (r.caller === "local" && !r.caller_agent));
 }
 
 export function isRootStart(ev) {
-  return ev && ev.kind === "agent_invocation" && !ev.parent_span_id;
+  return isRootInvocation(ev);
+}
+
+/** Whether `r` (span start or audit record) is the root invocation of the run `sum` describes. */
+function isSummaryRoot(sum, r, node) {
+  if (sum.root_span_id) return r.span_id === sum.root_span_id;
+  return isRootInvocation(r) && (!sum.root_agent || !node || node === sum.root_agent);
 }
 
 /** Keep a run-list summary current from one SSE event. Returns true when it changed. */
@@ -688,9 +742,13 @@ export function applyEventToSummary(sum, type, data) {
   if (type === "span_start") {
     if (data.kind === "agent_invocation" && !sum.seen.has(`i:${data.span_id}`)) {
       sum.seen.add(`i:${data.span_id}`);
-      if (data.parent_span_id) {
+      const node = data.agent_node || (data.agent ? `agent:${data.namespace}/${data.service}/${data.agent}` : null);
+      if (!isSummaryRoot(sum, data, node)) {
         sum.invocations += 1;
-        sum.agents = Math.max(sum.agents, 1);
+        if (sum.liveCounts && node && !sum.seen.has(`a:${node}`)) {
+          sum.seen.add(`a:${node}`);
+          sum.agents += 1;
+        }
       }
       return true;
     }
@@ -715,7 +773,8 @@ export function applyEventToSummary(sum, type, data) {
     sum.tool_calls += 1;
     return true;
   }
-  if (rec.kind === "agent_invocation" && !rec.parent_span_id) {
+  if (rec.kind === "agent_invocation" && isSummaryRoot(sum, rec, agentNodeFromRecord(rec))) {
+    sum.root_span_id = sum.root_span_id || rec.span_id;
     sum.ended = parseTime(rec.ts);
     sum.duration_ms = num(rec.latency_ms);
     if (sum.started === null && sum.ended !== null) sum.started = sum.ended - (sum.duration_ms || 0);
