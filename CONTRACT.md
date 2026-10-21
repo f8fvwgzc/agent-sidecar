@@ -255,12 +255,18 @@ with `maxLength` 128; the validator is the authority, e.g. it counts the 128 in 
 6. `learning.mode: auto` requires `learning.enabled: true`. `learning` ranges: `max_notes`
    1..=200, `max_note_chars` 50..=4000, `note_ttl_days` 1..=365, `max_proposals_per_hour`
    1..=100.
-7. Size limits: the charter is at most 256 KiB (the YAML text before it is parsed, and its JSON
-   serialization; in the custom resource form, §3.4, the limit applies to `spec` only, never to
-   `status` or `metadata`); at most 64 skills; `agents[].system` at most 32 KiB; a skill's
-   `instructions` 1 to 32768 bytes and its `description` 1 to 1024 characters; and a service's
-   memory is at most 262144 **characters**: the sum of `max_notes × max_note_chars` over the
-   agents with learning enabled is at most 262144 (`MAX_MEMORY_CHARS`). Memory exists only for
+7. Size limits: the charter is at most 256 KiB, measured the same way whatever form it arrives
+   in: its JSON serialization and its plain YAML as `Charter::to_yaml` writes it (the text
+   `CharterUpdate.charter_yaml` and the file store carry) are each at most 262144 bytes, so a
+   charter accepted in one form (a custom resource at the webhook, JSON, YAML) is accepted in
+   every form it is converted to. YAML indents every line of a block scalar, so the YAML can be
+   the bigger of the two. A plain charter's YAML text, comments included, is also at most
+   256 KiB and is refused before it is parsed when bigger. In the custom resource form, §3.4,
+   the limit applies to the charter `spec` describes, never to `status` or `metadata`. At most
+   64 skills; `agents[].system` at most 32 KiB; a skill's `instructions` 1 to 32768 bytes and
+   its `description` 1 to 1024 characters; and a service's memory is at most 262144
+   **characters**: the sum of `max_notes × max_note_chars` over the agents with learning
+   enabled is at most 262144 (`MAX_MEMORY_CHARS`). Memory exists only for
    agents with learning enabled: agents with learning off or absent hold no notes, do not count,
    and get no memory from `runtime_spec` (§4.3).
 8. `service.service_accounts` entries are DNS-1123 labels.
@@ -305,9 +311,12 @@ spec:                          # the plain charter without apiVersion and kind
 Other `metadata` fields (labels, annotations, uid, …) are kept as they are and ignored; `status`
 is written by embassy only and ignored when the charter is read; unknown fields anywhere else are
 errors, as in the plain form. A namespace in neither place is an error. The 256 KiB limit
-(§3.2 rule 7) applies to `spec` (its JSON serialization), not to `status` (which holds the
-service's memory and proposals) or `metadata`; a resource document is not parsed beyond 3 MiB
-(`MAX_RESOURCE_BYTES`, the API server's own request limit).
+(§3.2 rule 7) applies to the charter `spec` describes (measured as in rule 7, so the same charter
+passes or fails in both forms), not to `status` (which holds the service's memory and proposals)
+or `metadata`; a resource document is not parsed beyond 3 MiB (`MAX_RESOURCE_BYTES`, the API
+server's own request limit). A text over 256 KiB is parsed only when it may be the resource
+form, that is when `spec` or `metadata` followed by `:` appears in it; any other is refused as
+an oversized plain charter before it is parsed.
 
 - `attache charter to-cr <file>` prints the resource form of a charter (`metadata` from `service`,
   `spec.service` without `namespace`); `Charter::to_resource` does the same in code.

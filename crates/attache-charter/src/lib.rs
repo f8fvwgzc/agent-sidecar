@@ -27,8 +27,13 @@ pub const MAX_TOKENS_PER_CALL_LIMIT: u32 = 128_000;
 /// The charter schema level this build understands: 1 = v0.1 fields only, 2 = v0.2
 /// (`skills`, `telemetry`, `service.service_accounts`, `agents[].skills/harness/learning`).
 pub const CHARTER_SCHEMA_LEVEL: u32 = 2;
-/// A serialized charter (the YAML text, and its JSON form) is at most this many bytes. In the
-/// custom resource form the limit applies to `spec` only, never to `status` or `metadata`.
+/// A charter is at most this many bytes, measured the same way whatever form it arrived in
+/// ([`Charter::validate`]): its JSON serialization and its plain YAML ([`Charter::to_yaml`], the
+/// text `CharterUpdate.charter_yaml` and the file store carry) are each at most this size, so a
+/// charter accepted in one form is accepted in every form it is converted to. A plain charter's
+/// YAML text, comments included, is also refused beyond this size before it is parsed. In the
+/// custom resource form the limit applies to the charter `spec` describes, never to `status` or
+/// `metadata`.
 pub const MAX_CHARTER_BYTES: usize = 256 * 1024;
 /// A custom resource document (`spec` plus `metadata` and the `status` embassy writes, which
 /// holds the service's memory and proposals) is not even parsed beyond this many bytes: the
@@ -571,22 +576,24 @@ pub enum CharterError {
 impl Charter {
     /// Parse and validate a charter, plain or in the custom resource form (`metadata` + `spec`).
     ///
-    /// Size: a plain charter's text is at most [`MAX_CHARTER_BYTES`]. In the resource form that
-    /// limit applies to `spec` (its JSON serialization), not to `status` (embassy keeps the
-    /// service's memory and proposals there) or `metadata`; the whole document is at most
-    /// [`MAX_RESOURCE_BYTES`].
+    /// Size: the charter is measured by [`Charter::validate`] (its JSON serialization and its
+    /// plain YAML, each at most [`MAX_CHARTER_BYTES`]), the same in both forms. In the resource
+    /// form that is the charter `spec` describes, not `status` (embassy keeps the service's
+    /// memory and proposals there) or `metadata`; the whole document is at most
+    /// [`MAX_RESOURCE_BYTES`]. A plain charter's text is also at most [`MAX_CHARTER_BYTES`], and
+    /// a bigger text that cannot be the resource form ([`resource::may_be_resource_text`]) is
+    /// refused before it is parsed.
     pub fn from_yaml(text: &str) -> Result<Charter, CharterError> {
         if text.len() > MAX_RESOURCE_BYTES {
             return Err(too_big("charter", text.len(), MAX_RESOURCE_BYTES));
+        }
+        if text.len() > MAX_CHARTER_BYTES && !resource::may_be_resource_text(text) {
+            return Err(too_big("charter", text.len(), MAX_CHARTER_BYTES));
         }
         // Parsed twice: once to see which form it is, then typed from the text, so that errors
         // keep their YAML path ("guardrails: unknown field …").
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(text)?;
         let charter = if resource::is_resource_yaml(&doc) {
-            // (a spec JSON cannot express fails the typed parse below instead)
-            if let Some(spec) = doc.get("spec").and_then(|s| serde_json::to_vec(s).ok()) {
-                check_spec_size(spec.len())?;
-            }
             serde_yaml_ng::from_str::<CharterResource>(text)?.into_charter()?
         } else if text.len() > MAX_CHARTER_BYTES {
             return Err(too_big("charter", text.len(), MAX_CHARTER_BYTES));
@@ -598,12 +605,10 @@ impl Charter {
     }
 
     /// [`Charter::from_yaml`] for a JSON value (e.g. a custom resource read from the API server).
-    /// In the resource form the size limit applies to `spec` only.
+    /// The size limit is [`Charter::validate`]'s, as in `from_yaml`: in the resource form it
+    /// applies to the charter `spec` describes only.
     pub fn from_value(value: &serde_json::Value) -> Result<Charter, CharterError> {
         let charter = if resource::is_resource(value) {
-            if let Some(spec) = value.get("spec") {
-                check_spec_size(serde_json::to_vec(spec)?.len())?;
-            }
             CharterResource::deserialize(value)?.into_charter()?
         } else {
             Charter::deserialize(value)?
@@ -1014,19 +1019,42 @@ impl Charter {
                  service's memory holds"
             ));
         }
-        match serde_json::to_vec(self) {
-            Ok(json) if json.len() > MAX_CHARTER_BYTES => errs.push(format!(
-                "charter is {} bytes serialized, more than the {MAX_CHARTER_BYTES} allowed",
-                json.len()
-            )),
-            Ok(_) => {}
-            Err(e) => errs.push(format!("charter cannot be serialized: {e}")),
+        if let Err(e) = self.check_size() {
+            errs.push(e);
         }
         if errs.is_empty() {
             Ok(())
         } else {
             Err(CharterError::Invalid(errs))
         }
+    }
+
+    /// Rule 7, the charter's size, measured on the parsed charter so that every form agrees:
+    /// its JSON serialization and its plain YAML ([`Charter::to_yaml`], what sidecars receive in
+    /// `CharterUpdate.charter_yaml` and the file store keeps) are each at most
+    /// [`MAX_CHARTER_BYTES`]. YAML block scalars indent every line of a system prompt or a
+    /// skill's instructions, so the YAML can be the bigger of the two; bounding both means a
+    /// charter accepted as a resource or as JSON is never refused when it arrives as YAML.
+    fn check_size(&self) -> Result<(), String> {
+        let json = serde_json::to_vec(self)
+            .map_err(|e| format!("charter cannot be serialized: {e}"))?
+            .len();
+        if json > MAX_CHARTER_BYTES {
+            return Err(format!(
+                "charter is {json} bytes serialized, more than the {MAX_CHARTER_BYTES} allowed"
+            ));
+        }
+        let yaml = self
+            .to_yaml()
+            .map_err(|e| format!("charter cannot be serialized: {e}"))?
+            .len();
+        if yaml > MAX_CHARTER_BYTES {
+            return Err(format!(
+                "charter is {yaml} bytes serialized as plain YAML (the form sidecars receive), \
+                 more than the {MAX_CHARTER_BYTES} allowed"
+            ));
+        }
+        Ok(())
     }
 
     /// Top-level `skills`: names, uniqueness, sizes (design §4 rules 1 and 7).
@@ -1136,14 +1164,6 @@ fn too_big(what: &str, len: usize, max: usize) -> CharterError {
     CharterError::Invalid(vec![format!(
         "{what} is {len} bytes, more than the {max} allowed"
     )])
-}
-
-/// The resource form's `spec`, serialized as JSON, is at most [`MAX_CHARTER_BYTES`].
-fn check_spec_size(len: usize) -> Result<(), CharterError> {
-    if len > MAX_CHARTER_BYTES {
-        return Err(too_big("charter spec", len, MAX_CHARTER_BYTES));
-    }
-    Ok(())
 }
 
 /// Whitespace (Unicode `White_Space`, plus U+FEFF, which JSON Schema's ECMA-262 `\s` also
