@@ -120,8 +120,10 @@ pub fn weakened(old: &Charter, new: &Charter) -> Vec<String> {
 /// `guardrails` rules, `authz.default`, `authz.services`, any non-local `authz.callers` rule added,
 /// changed or removed, an agent's `type`, `learning.mode: auto`, and a new `http` tool origin.
 ///
-/// A service without a stored charter has nothing to diff against; creating its first charter
-/// is an admin write (callers decide that case before calling this).
+/// A service without a stored charter has nothing to diff against, so callers decide its first
+/// charter with [`first_charter_role`] instead (design §8.3): adopting a pending charter
+/// (`POST .../adopt`) needs **editor** (the validator and the policy still apply), while creating
+/// it with `PUT .../charter` needs **admin**.
 pub fn required_role(old: &Charter, new: &Charter) -> (Role, Vec<String>) {
     let mut admin: Vec<String> = Vec::new();
     let mut need = |changed: bool, field: &str| {
@@ -238,6 +240,28 @@ pub fn required_role(old: &Charter, new: &Charter) -> (Role, Vec<String>) {
         (Role::Editor, admin)
     } else {
         (Role::Admin, admin)
+    }
+}
+
+/// How a service without a stored charter gets its first one (design §8.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FirstCharter {
+    /// `POST /services/{ns}/{svc}/adopt`: the start-up charter a sidecar reported (pending
+    /// adoption) becomes the stored one.
+    Adopt,
+    /// `PUT /services/{ns}/{svc}/charter` with no stored charter.
+    Put,
+}
+
+/// The role that creating a service's first stored charter needs: editor to adopt a pending
+/// charter, admin to write one with `PUT` (the validator and the policy apply either way).
+pub fn first_charter_role(via: FirstCharter) -> (Role, Vec<String>) {
+    match via {
+        FirstCharter::Adopt => (Role::Editor, Vec::new()),
+        FirstCharter::Put => (
+            Role::Admin,
+            vec!["a first charter written with PUT requires admin".into()],
+        ),
     }
 }
 

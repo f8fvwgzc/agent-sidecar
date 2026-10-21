@@ -182,7 +182,9 @@
         },
         "model": {
           "type": "string",
-          "description": "A Claude model id (e.g. `claude-opus-5-5`) or `mock`."
+          "description": "A Claude model id (e.g. `claude-opus-5-5`) or `mock`: not empty, no whitespace or control\ncharacters, at most 128 bytes.",
+          "maxLength": 128,
+          "pattern": "^[^\\s\\x00-\\x1f\\x7f-\\x9f]+$"
         },
         "system": {
           "type": "string",
@@ -255,7 +257,12 @@
       "additionalProperties": false,
       "properties": {
         "name": {
-          "type": "string"
+          "type": "string",
+          "description": "The name the model sees, unique per agent: `^[a-zA-Z0-9_-]{1,64}$`, and never\n`load_skill` (the runtime's tool for skills).",
+          "pattern": "^[a-zA-Z0-9_-]{1,64}$",
+          "not": {
+            "const": "load_skill"
+          }
         },
         "description": {
           "type": "string"
@@ -366,7 +373,9 @@
             "string",
             "null"
           ],
-          "description": "Model tried once after the last retryable failure; a valid model id other than `model`."
+          "description": "Model tried once after the last retryable failure; a valid model id other than `model`\n(the `model` rules: not empty, no whitespace or control characters, at most 128 bytes).",
+          "maxLength": 128,
+          "pattern": "^[^\\s\\x00-\\x1f\\x7f-\\x9f]+$"
         },
         "tool_result_max_chars": {
           "type": "integer",
@@ -678,7 +687,7 @@
             "null"
           ],
           "description": "OTLP/HTTP endpoint, `http(s)://host[:port]` with no path, query or fragment. Honoured only\nwhen the sidecar allows it (`--otlp-endpoint-allow`); changing it needs a restart.",
-          "pattern": "^https?://[^/?#@\\s]+/?$"
+          "pattern": "^https?://[^/?#@\\s\\x00-\\x1f\\x7f-\\x9f]+/?$"
         },
         "traces": {
           "type": "boolean",

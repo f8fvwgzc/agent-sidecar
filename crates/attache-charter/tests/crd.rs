@@ -128,6 +128,78 @@ fn the_schema_is_structural() {
     assert_eq!(service["properties"]["namespace"]["nullable"], true);
 }
 
+/// Every object node of `node` carries `x-kubernetes-preserve-unknown-fields: true`; the paths
+/// of those that do not.
+fn objects_without_preserve(node: &Value, path: &str, out: &mut Vec<String>) {
+    let Some(obj) = node.as_object() else {
+        return;
+    };
+    if obj.get("type") == Some(&json!("object"))
+        && obj.get("x-kubernetes-preserve-unknown-fields") != Some(&json!(true))
+    {
+        out.push(path.to_string());
+    }
+    if let Some(props) = obj.get("properties").and_then(Value::as_object) {
+        for (k, v) in props {
+            objects_without_preserve(v, &format!("{path}.{k}"), out);
+        }
+    }
+    if let Some(items) = obj.get("items") {
+        objects_without_preserve(items, &format!("{path}[]"), out);
+    }
+    if let Some(ap) = obj.get("additionalProperties") {
+        objects_without_preserve(ap, &format!("{path}.*"), out);
+    }
+}
+
+#[test]
+fn every_object_node_preserves_unknown_fields() {
+    // design §13: the API server never prunes, so the validating webhook sees what was written
+    let crd = custom_resource_definition();
+    let root = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"];
+    let mut missing = Vec::new();
+    objects_without_preserve(root, "", &mut missing);
+    assert_eq!(
+        missing,
+        [".metadata"],
+        "only the root metadata, where Kubernetes allows nothing but name/generateName rules"
+    );
+    // the walk does reach nested objects: maps, list items, Option<T>, status
+    let spec = &root["properties"]["spec"]["properties"];
+    for node in [
+        root,
+        &root["properties"]["spec"],
+        &spec["service"],
+        &spec["mesh"],
+        &spec["mesh"]["properties"]["peers"],
+        &spec["agents"]["items"],
+        &spec["agents"]["items"]["properties"]["budgets"],
+        &spec["agents"]["items"]["properties"]["harness"],
+        &spec["agents"]["items"]["properties"]["learning"],
+        &spec["agents"]["items"]["properties"]["tools"]["items"],
+        &spec["skills"]["items"],
+        &spec["telemetry"],
+        &spec["guardrails"]["properties"]["allowed_tools"],
+        &spec["guardrails"]["properties"]["input_deny"]["items"],
+        &spec["authz"]["properties"]["callers"]["items"],
+        &spec["audit"],
+        &root["properties"]["status"],
+        &root["properties"]["status"]["properties"]["conditions"]["items"],
+    ] {
+        assert_eq!(node["type"], "object", "{node}");
+        assert_eq!(node["x-kubernetes-preserve-unknown-fields"], true, "{node}");
+    }
+    // the committed file says the same
+    let on_disk: Value = serde_yaml_ng::from_str(ON_DISK).unwrap();
+    let mut missing = Vec::new();
+    objects_without_preserve(
+        &on_disk["spec"]["versions"][0]["schema"]["openAPIV3Schema"],
+        "",
+        &mut missing,
+    );
+    assert_eq!(missing, [".metadata"]);
+}
+
 #[test]
 fn structural_conversion_handles_refs_options_enums_and_free_form_values() {
     let schema = json!({
@@ -150,11 +222,15 @@ fn structural_conversion_handles_refs_options_enums_and_free_form_values() {
     });
     let s = crd::structural(&schema);
     let p = &s["properties"];
+    // a closed object (`additionalProperties: false`) still keeps unknown fields: the validator,
+    // not pruning, rejects them
     assert_eq!(
         p["a"],
-        json!({"type": "object", "description": "own text", "properties": {"x": {"type": "integer"}}, "required": ["x"]})
+        json!({"type": "object", "description": "own text", "properties": {"x": {"type": "integer"}},
+               "required": ["x"], "x-kubernetes-preserve-unknown-fields": true})
     );
     assert_eq!(p["b"]["nullable"], true);
+    assert_eq!(p["b"]["x-kubernetes-preserve-unknown-fields"], true);
     assert_eq!(p["b"]["properties"]["x"]["type"], "integer");
     assert_eq!(
         p["c"],
@@ -183,9 +259,30 @@ fn structural_conversion_handles_refs_options_enums_and_free_form_values() {
     );
     assert_eq!(
         p["j"],
-        json!({"type": "object", "additionalProperties": {"type": "integer"}})
+        json!({"type": "object", "additionalProperties": {"type": "integer"},
+               "x-kubernetes-preserve-unknown-fields": true})
     );
     assert!(s.get("additionalProperties").is_none());
+    assert_eq!(s["x-kubernetes-preserve-unknown-fields"], true);
+    // an object with `properties` and a schema for the others keeps them all
+    let mixed = crd::structural(
+        &json!({"type": "object", "properties": {"x": {"type": "string"}},
+                                        "additionalProperties": {"type": "integer"}}),
+    );
+    assert_eq!(
+        mixed,
+        json!({"type": "object", "properties": {"x": {"type": "string"}},
+               "x-kubernetes-preserve-unknown-fields": true})
+    );
+    // the flag is for objects only
+    assert!(
+        crd::structural(&json!({"type": "string", "additionalProperties": true}))
+            .get("x-kubernetes-preserve-unknown-fields")
+            .is_none()
+    );
+    let mut missing = Vec::new();
+    objects_without_preserve(&s, "", &mut missing);
+    assert_eq!(missing, Vec::<String>::new());
     assert_structural(&s, "");
 }
 
@@ -322,10 +419,43 @@ fn real_charters_in_resource_form_pass_the_crd_schema() {
         "skills[0].name: \"Refund_Policy\" does not match",
         "otlp_endpoint: \"http://otel:4318/v1/traces\" does not match",
         "service.app_port: not an integer",
-        "guardrails.pii_redaction: unknown",
     ] {
         assert!(errs.contains(needle), "{needle} in:\n{errs}");
     }
+}
+
+#[test]
+fn unknown_fields_reach_the_validator_instead_of_being_pruned() {
+    // anywhere in the resource: the schema keeps them (no "would be pruned"), the validator
+    // behind the webhook refuses them with their path
+    for (at, field) in [
+        ("/spec/guardrails", "pii_redaction"),
+        ("/spec/agents/0/learning", "auto_approve"),
+        ("/spec/agents/0/tools/0", "timeout"),
+        ("/spec/skills/0", "version"),
+        ("/spec/service", "replicas"),
+        ("/spec", "agent"),
+        ("", "specs"),
+    ] {
+        let mut cr = serde_json::to_value(v02().to_resource()).unwrap();
+        cr.pointer_mut(at)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert(field.into(), json!(true));
+        assert_eq!(errors(&cr), Vec::<String>::new(), "{at}/{field} is kept");
+        let err = Charter::from_value(&cr).unwrap_err().to_string();
+        assert!(
+            err.contains(&format!("unknown field `{field}`")),
+            "{at}: {err}"
+        );
+    }
+    // status is embassy's and free-form below its declared fields
+    let mut cr = serde_json::to_value(v02().to_resource()).unwrap();
+    cr["status"] = json!({"appliedVersion": "3", "lastPush": "x",
+                          "conditions": [{"type": "Valid", "status": "True", "extra": 1}]});
+    assert_eq!(errors(&cr), Vec::<String>::new());
+    Charter::from_value(&cr).unwrap();
 }
 
 #[test]

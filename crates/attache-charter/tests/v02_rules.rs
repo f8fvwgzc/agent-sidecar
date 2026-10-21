@@ -209,6 +209,90 @@ fn rule4_fallback_model() {
     let mut c = v02();
     c.agents[0].model = "claude opus".into();
     rejects(&c, "agents[0] (support): model is not a model id");
+    for bad in [
+        "claude-opus-5-5\t",
+        "claude\u{1}opus",
+        "claude-opus\u{85}",
+        "claude\u{feff}",
+    ] {
+        rejects(&set(bad), "harness.fallback_model is not a model id");
+    }
+    accepts(&set(&"m".repeat(MAX_MODEL_BYTES)));
+    rejects(
+        &set(&"m".repeat(MAX_MODEL_BYTES + 1)),
+        "harness.fallback_model is not a model id",
+    );
+    let mut c = v02();
+    c.agents[0].model = "é".repeat(65); // 65 characters, 130 bytes
+    rejects(&c, "agents[0] (support): model is not a model id");
+}
+
+// --- the JSON Schema mirrors rules 3 and 4 --------------------------------------------------------
+
+#[test]
+fn the_schema_mirrors_the_tool_name_and_model_rules() {
+    let schema = json_schema();
+    let defs = &schema["$defs"];
+    let name = &defs["ToolSpec"]["properties"]["name"];
+    assert_eq!(name["pattern"], TOOL_NAME_PATTERN);
+    assert_eq!(name["not"], serde_json::json!({"const": LOAD_SKILL_TOOL}));
+    for node in [
+        &defs["AgentSpec"]["properties"]["model"],
+        &defs["HarnessSpec"]["properties"]["fallback_model"],
+    ] {
+        assert_eq!(node["pattern"], MODEL_PATTERN, "{node}");
+        assert_eq!(node["maxLength"], 128, "{node}");
+    }
+    // the patterns say what the validator says
+    let tool = regex::Regex::new(TOOL_NAME_PATTERN).unwrap();
+    for (t, ok) in [
+        ("lookup_parcel", true),
+        ("get-parcel-2", true),
+        ("x", true),
+        ("", false),
+        ("get order", false),
+        ("get.order", false),
+        ("é", false),
+    ] {
+        assert_eq!(tool.is_match(t), ok, "{t:?}");
+        let mut c = v02();
+        c.guardrails.allowed_tools.clear();
+        c.agents[0].tools[3].name = t.into();
+        assert_eq!(c.validate().is_ok(), ok, "{t:?}");
+    }
+    assert!(tool.is_match(&"a".repeat(64)) && !tool.is_match(&"a".repeat(65)));
+    let model = regex::Regex::new(MODEL_PATTERN).unwrap();
+    for (m, ok) in [
+        ("claude-opus-5-5", true),
+        ("mock", true),
+        ("us.anthropic.claude-opus-5-5-v1:0", true),
+        ("", false),
+        ("claude opus", false),
+        ("claude-opus\t", false),
+        (" claude", false),
+        ("claude\u{1}", false),
+        ("claude\u{85}", false),
+        ("claude\u{3000}", false),
+    ] {
+        assert_eq!(model.is_match(m), ok, "{m:?}");
+        let mut c = v02();
+        c.agents[0].model = m.into();
+        assert_eq!(c.validate().is_ok(), ok, "{m:?}");
+    }
+    // and the CRD carries them (minus `not`, which a structural schema leaves to the webhook)
+    let crd = crd::custom_resource_definition();
+    let agent = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["properties"]
+        ["agents"]["items"]["properties"];
+    assert_eq!(agent["model"]["pattern"], MODEL_PATTERN);
+    assert_eq!(agent["model"]["maxLength"], 128);
+    assert_eq!(
+        agent["harness"]["properties"]["fallback_model"]["pattern"],
+        MODEL_PATTERN
+    );
+    assert_eq!(
+        agent["tools"]["items"]["properties"]["name"]["pattern"],
+        TOOL_NAME_PATTERN
+    );
 }
 
 // --- rule 5: telemetry.otlp_endpoint ----------------------------------------------------------
@@ -244,6 +328,84 @@ fn rule5_otlp_endpoint_is_an_origin() {
         rejects(&set(bad), "telemetry.otlp_endpoint");
         let err = check_otlp_endpoint(bad).unwrap_err();
         assert!(err.contains(why), "{bad}: {err}");
+    }
+}
+
+#[test]
+fn rule5_otlp_endpoint_has_no_whitespace_or_control_characters() {
+    // the URL parser would drop these quietly (trim the ends, delete tabs and newlines inside),
+    // so they are refused before parsing
+    for bad in [
+        "http://otel-collector:4318 ",
+        "http://otel-collector:4318\t",
+        " http://otel-collector:4318",
+        "http://otel-\tcollector:4318",
+        "http://otel-collector:4318/\n",
+        "http://otel-collector\r:4318",
+        "http://otel collector:4318",
+        "http://otel-collector:4318\u{0}",
+        "http://otel-collector:4318\u{7f}",
+        "http://otel-collector:4318\u{85}",
+        "http://otel-collector\u{a0}:4318",
+        "http://otel-collector\u{3000}:4318",
+        "http://otel-\u{feff}collector:4318",
+    ] {
+        let err = check_otlp_endpoint(bad).unwrap_err();
+        assert_eq!(
+            err, "may not contain whitespace or control characters",
+            "{bad:?}"
+        );
+        let mut c = v02();
+        c.telemetry.as_mut().unwrap().otlp_endpoint = Some(bad.into());
+        rejects(&c, "may not contain whitespace or control characters");
+    }
+    // the YAML way in: a quoted trailing space or tab
+    for quoted in [
+        "\"http://otel-collector:4318 \"",
+        "\"http://otel-collector:4318\\t\"",
+    ] {
+        let text = V02.replace(
+            "otlp_endpoint: http://otel-collector:4318",
+            &format!("otlp_endpoint: {quoted}"),
+        );
+        let err = Charter::from_yaml(&text).unwrap_err().to_string();
+        assert!(err.contains("whitespace or control characters"), "{err}");
+    }
+}
+
+#[test]
+fn rule5_the_schema_pattern_agrees_with_the_validator() {
+    let schema = json_schema();
+    let pattern = schema["$defs"]["TelemetrySpec"]["properties"]["otlp_endpoint"]["pattern"]
+        .as_str()
+        .unwrap();
+    assert_eq!(pattern, OTLP_ENDPOINT_PATTERN);
+    let re = regex::Regex::new(pattern).unwrap();
+    for e in [
+        "http://otel-collector:4318",
+        "https://otel.example.com/",
+        "http://10.0.0.7:4318",
+        "http://otel-collector:4318 ",
+        "http://otel-collector:4318\t",
+        " http://otel-collector:4318",
+        "http://otel-\tcollector:4318",
+        "http://otel-collector:4318\n",
+        "http://otel-collector:4318\u{1}",
+        "http://otel-collector:4318\u{7f}",
+        "http://otel-collector:4318\u{85}",
+        "http://otel-collector\u{a0}:4318",
+        "http://otel-collector\u{3000}:4318",
+        "http://otel:4318/v1/traces",
+        "http://otel:4318?x=1",
+        "http://otel:4318#f",
+        "http://user@otel:4318",
+        "ftp://otel:21",
+    ] {
+        assert_eq!(
+            re.is_match(e),
+            check_otlp_endpoint(e).is_ok(),
+            "schema and validator disagree on {e:?}"
+        );
     }
 }
 
@@ -336,6 +498,37 @@ fn rule7_memory_limit_counts_learning_agents() {
     );
     // an agent with learning off holds no notes
     c.agents[1].learning.as_mut().unwrap().enabled = false;
+    accepts(&c);
+}
+
+#[test]
+fn rule7_memory_limit_is_in_characters_at_the_boundary() {
+    assert_eq!(MAX_MEMORY_CHARS, 262_144);
+    assert_eq!(
+        MAX_MEMORY_BYTES, MAX_MEMORY_CHARS,
+        "the old name, same limit"
+    );
+    let set = |notes: u32, chars: u32| {
+        let mut c = v02();
+        let l = c.agents[0].learning.as_mut().unwrap();
+        (l.max_notes, l.max_note_chars) = (notes, chars);
+        c
+    };
+    accepts(&set(128, 2048)); // exactly 262144 characters
+    rejects(
+        &set(129, 2048),
+        "may keep 264192 characters of notes (max_notes × max_note_chars), more than the 262144 characters",
+    );
+    // agents without a learning block, or with learning off, add nothing
+    let mut c = set(128, 2048);
+    c.agents[1].learning = None;
+    accepts(&c);
+    c.agents[1].learning = Some(LearningSpec {
+        enabled: false,
+        max_notes: 200,
+        max_note_chars: 4000,
+        ..LearningSpec::default()
+    });
     accepts(&c);
 }
 

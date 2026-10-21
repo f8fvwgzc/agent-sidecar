@@ -42,6 +42,7 @@ spec:
       openAPIV3Schema:
         type: object
         description: 'Charter: the agents and policy of one service, applied by its attache sidecars.'
+        x-kubernetes-preserve-unknown-fields: true
         properties:
           apiVersion:
             type: string
@@ -82,6 +83,7 @@ spec:
                 required:
                 - name
                 - app_port
+                x-kubernetes-preserve-unknown-fields: true
               mesh:
                 type: object
                 properties:
@@ -94,6 +96,8 @@ spec:
                     description: service name → `host:port` override of `<service>.<namespace>.svc.cluster.local:50002`.
                     additionalProperties:
                       type: string
+                    x-kubernetes-preserve-unknown-fields: true
+                x-kubernetes-preserve-unknown-fields: true
               skills:
                 type: array
                 description: Skills agents can use (`agents[].skills`), by name.
@@ -125,6 +129,7 @@ spec:
                   - name
                   - description
                   - instructions
+                  x-kubernetes-preserve-unknown-fields: true
               agents:
                 type: array
                 items:
@@ -139,7 +144,11 @@ spec:
                       - orchestrator
                     model:
                       type: string
-                      description: A Claude model id (e.g. `claude-opus-5-5`) or `mock`.
+                      description: |-
+                        A Claude model id (e.g. `claude-opus-5-5`) or `mock`: not empty, no whitespace or control
+                        characters, at most 128 bytes.
+                      maxLength: 128
+                      pattern: ^[^\s\x00-\x1f\x7f-\x9f]+$
                     system:
                       type: string
                       description: System prompt, at most 32768 bytes.
@@ -151,6 +160,10 @@ spec:
                         properties:
                           name:
                             type: string
+                            description: |-
+                              The name the model sees, unique per agent: `^[a-zA-Z0-9_-]{1,64}$`, and never
+                              `load_skill` (the runtime's tool for skills).
+                            pattern: ^[a-zA-Z0-9_-]{1,64}$
                           description:
                             type: string
                           type:
@@ -182,6 +195,7 @@ spec:
                         - name
                         - description
                         - type
+                        x-kubernetes-preserve-unknown-fields: true
                     budgets:
                       type: object
                       properties:
@@ -196,6 +210,7 @@ spec:
                         max_steps:
                           type: integer
                           minimum: 0
+                      x-kubernetes-preserve-unknown-fields: true
                     skills:
                       type: array
                       description: Names of top-level `skills` this agent uses, each at most once.
@@ -218,13 +233,18 @@ spec:
                           maximum: 600
                         fallback_model:
                           type: string
-                          description: Model tried once after the last retryable failure; a valid model id other than `model`.
+                          description: |-
+                            Model tried once after the last retryable failure; a valid model id other than `model`
+                            (the `model` rules: not empty, no whitespace or control characters, at most 128 bytes).
                           nullable: true
+                          maxLength: 128
+                          pattern: ^[^\s\x00-\x1f\x7f-\x9f]+$
                         tool_result_max_chars:
                           type: integer
                           description: Tool results are cut to this many characters, 100..=200000.
                           minimum: 100
                           maximum: 200000
+                      x-kubernetes-preserve-unknown-fields: true
                       nullable: true
                     learning:
                       type: object
@@ -261,10 +281,12 @@ spec:
                           description: Lessons the agent may propose per hour, 1..=100.
                           minimum: 1
                           maximum: 100
+                      x-kubernetes-preserve-unknown-fields: true
                       nullable: true
                   required:
                   - name
                   - model
+                  x-kubernetes-preserve-unknown-fields: true
               guardrails:
                 type: object
                 properties:
@@ -285,6 +307,7 @@ spec:
                       required:
                       - name
                       - regex
+                      x-kubernetes-preserve-unknown-fields: true
                   output_deny:
                     type: array
                     items:
@@ -297,6 +320,7 @@ spec:
                       required:
                       - name
                       - regex
+                      x-kubernetes-preserve-unknown-fields: true
                   allowed_tools:
                     type: object
                     description: 'agent → tool names it may use (default: every tool it declares).'
@@ -304,6 +328,7 @@ spec:
                       type: array
                       items:
                         type: string
+                    x-kubernetes-preserve-unknown-fields: true
                   allowed_services:
                     type: object
                     description: 'agent → services it may call (default: every service its tools name).'
@@ -311,6 +336,8 @@ spec:
                       type: array
                       items:
                         type: string
+                    x-kubernetes-preserve-unknown-fields: true
+                x-kubernetes-preserve-unknown-fields: true
               authz:
                 type: object
                 properties:
@@ -342,6 +369,7 @@ spec:
                       required:
                       - identity
                       - agents
+                      x-kubernetes-preserve-unknown-fields: true
                   services:
                     type: array
                     items:
@@ -370,6 +398,8 @@ spec:
                       required:
                       - name
                       - service
+                      x-kubernetes-preserve-unknown-fields: true
+                x-kubernetes-preserve-unknown-fields: true
               audit:
                 type: object
                 properties:
@@ -386,6 +416,7 @@ spec:
                     description: Dotted paths inside `input`/`output` replaced by "[redacted]".
                     items:
                       type: string
+                x-kubernetes-preserve-unknown-fields: true
               telemetry:
                 type: object
                 description: OpenTelemetry export and what audit leaves the pod. Absent = the defaults.
@@ -396,7 +427,7 @@ spec:
                       OTLP/HTTP endpoint, `http(s)://host[:port]` with no path, query or fragment. Honoured only
                       when the sidecar allows it (`--otlp-endpoint-allow`); changing it needs a restart.
                     nullable: true
-                    pattern: ^https?://[^/?#@\s]+/?$
+                    pattern: ^https?://[^/?#@\s\x00-\x1f\x7f-\x9f]+/?$
                   traces:
                     type: boolean
                   metrics:
@@ -407,12 +438,15 @@ spec:
                   control_plane_payloads:
                     type: boolean
                     description: Audit records sent to the control plane keep their (redacted, truncated) input/output.
+                x-kubernetes-preserve-unknown-fields: true
                 nullable: true
             required:
             - service
+            x-kubernetes-preserve-unknown-fields: true
           status:
             type: object
             description: Written by embassy only.
+            x-kubernetes-preserve-unknown-fields: true
             properties:
               observedGeneration:
                 type: integer
@@ -427,6 +461,7 @@ spec:
                 - type
                 items:
                   type: object
+                  x-kubernetes-preserve-unknown-fields: true
                   required:
                   - type
                   - status

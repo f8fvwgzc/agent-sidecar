@@ -181,6 +181,66 @@ fn to_resource_round_trips() {
     }
 }
 
+/// A note text of `chars` characters.
+fn notes(chars: usize) -> serde_json::Value {
+    let note = "Orders older than 30 days are never refunded. ".repeat(10);
+    let n = chars / note.len() + 1;
+    let list: Vec<serde_json::Value> = (0..n)
+        .map(|i| json!({"id": format!("n{i}"), "text": note, "source": "review"}))
+        .collect();
+    json!({"version": "9", "agents": {"stock-analyst": list}})
+}
+
+#[test]
+fn the_size_limit_applies_to_spec_not_to_status() {
+    // design §13: embassy keeps the service's memory in status; a full memory must not make a
+    // valid resource invalid
+    let mut cr: serde_json::Value = serde_yaml_ng::from_str(CR).unwrap();
+    cr["status"] = json!({"appliedVersion": "7", "memory": notes(300_000)});
+    cr["metadata"]["annotations"] =
+        json!({"kubectl.kubernetes.io/last-applied-configuration": "x".repeat(MAX_CHARTER_BYTES)});
+    let text = serde_yaml_ng::to_string(&cr).unwrap();
+    assert!(
+        text.len() > MAX_CHARTER_BYTES + 300_000,
+        "{} bytes",
+        text.len()
+    );
+    let expected = Charter::from_yaml(CR).unwrap();
+    assert_eq!(Charter::from_yaml(&text).unwrap(), expected);
+    assert_eq!(Charter::from_value(&cr).unwrap(), expected);
+
+    // the spec itself is still limited, in both readers
+    let mut big = cr.clone();
+    big["spec"]["agents"][0]["system"] = json!("s".repeat(31 * 1024));
+    for i in 0..9 {
+        let mut a = big["spec"]["agents"][0].clone();
+        a["name"] = json!(format!("bulk-{i}"));
+        big["spec"]["agents"].as_array_mut().unwrap().push(a);
+    }
+    let e = Charter::from_value(&big).unwrap_err().to_string();
+    assert!(
+        e.contains("charter spec is") && e.contains("more than the 262144 allowed"),
+        "{e}"
+    );
+    let e = err(&serde_yaml_ng::to_string(&big).unwrap());
+    assert!(
+        e.contains("charter spec is") && e.contains("more than the 262144 allowed"),
+        "{e}"
+    );
+
+    // a plain charter of the same size as the resource above is refused
+    let plain = format!("{ORDERS}\n# {}\n", "x".repeat(MAX_CHARTER_BYTES));
+    let e = err(&plain);
+    assert!(e.contains("more than the 262144 allowed"), "{e}");
+    // and no document is parsed beyond the API server's own limit
+    let huge = format!("{CR}\n# {}\n", "x".repeat(MAX_RESOURCE_BYTES));
+    let e = err(&huge);
+    assert!(
+        e.contains(&format!("more than the {MAX_RESOURCE_BYTES} allowed")),
+        "{e}"
+    );
+}
+
 #[test]
 fn a_plain_charter_is_not_mistaken_for_a_resource() {
     assert!(!resource::is_resource(

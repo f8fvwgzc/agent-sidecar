@@ -235,7 +235,9 @@ literal segments, and one segment of one or more characters for each
 
 v0.2 rules (each has a passing and a failing test in `crates/attache-charter/tests/v02_rules.rs`;
 the JSON Schema mirrors what it can express: patterns, ranges, lengths, `maxItems`, `uniqueItems`,
-and `learning.mode: auto` ⇒ `enabled: true`):
+`learning.mode: auto` ⇒ `enabled: true`, a tool `name` that matches `^[a-zA-Z0-9_-]{1,64}$` and is
+`not` `load_skill`, and a `model` / `fallback_model` that matches `^[^\s\x00-\x1f\x7f-\x9f]+$`
+with `maxLength` 128; the validator is the authority, e.g. it counts the 128 in bytes):
 
 1. Skill names are DNS-1123 labels and unique; `agents[].skills` entries name a top-level skill
    and are not repeated.
@@ -247,15 +249,20 @@ and `learning.mode: auto` ⇒ `enabled: true`):
    `harness` ranges: `max_retries` 0..=10, `request_timeout_seconds` 1..=600,
    `tool_result_max_chars` 100..=200000.
 5. `telemetry.otlp_endpoint` is an `http://` or `https://` URL with a host and no userinfo, path
-   (other than `/`), query or fragment.
+   (other than `/`), query or fragment. Whitespace and control characters anywhere (a trailing
+   space, a tab) are refused before the URL is parsed, since the parser would quietly drop them;
+   the schema `pattern` refuses the same.
 6. `learning.mode: auto` requires `learning.enabled: true`. `learning` ranges: `max_notes`
    1..=200, `max_note_chars` 50..=4000, `note_ttl_days` 1..=365, `max_proposals_per_hour`
    1..=100.
 7. Size limits: the charter is at most 256 KiB (the YAML text before it is parsed, and its JSON
-   serialization); at most 64 skills; `agents[].system` at most 32 KiB; a skill's `instructions`
-   1 to 32768 bytes and its `description` 1 to 1024 characters; and the agents with learning
-   enabled may keep at most 256 KiB of notes: the sum of their `max_notes × max_note_chars` is at
-   most 262144 (agents with learning off or absent hold no notes and do not count).
+   serialization; in the custom resource form, §3.4, the limit applies to `spec` only, never to
+   `status` or `metadata`); at most 64 skills; `agents[].system` at most 32 KiB; a skill's
+   `instructions` 1 to 32768 bytes and its `description` 1 to 1024 characters; and a service's
+   memory is at most 262144 **characters**: the sum of `max_notes × max_note_chars` over the
+   agents with learning enabled is at most 262144 (`MAX_MEMORY_CHARS`). Memory exists only for
+   agents with learning enabled: agents with learning off or absent hold no notes, do not count,
+   and get no memory from `runtime_spec` (§4.3).
 8. `service.service_accounts` entries are DNS-1123 labels.
 
 ### 3.3 Skills, harness, learning, telemetry (v0.2)
@@ -297,7 +304,10 @@ spec:                          # the plain charter without apiVersion and kind
 
 Other `metadata` fields (labels, annotations, uid, …) are kept as they are and ignored; `status`
 is written by embassy only and ignored when the charter is read; unknown fields anywhere else are
-errors, as in the plain form. A namespace in neither place is an error.
+errors, as in the plain form. A namespace in neither place is an error. The 256 KiB limit
+(§3.2 rule 7) applies to `spec` (its JSON serialization), not to `status` (which holds the
+service's memory and proposals) or `metadata`; a resource document is not parsed beyond 3 MiB
+(`MAX_RESOURCE_BYTES`, the API server's own request limit).
 
 - `attache charter to-cr <file>` prints the resource form of a charter (`metadata` from `service`,
   `spec.service` without `namespace`); `Charter::to_resource` does the same in code.
@@ -306,8 +316,13 @@ errors, as in the plain form. A namespace in neither place is an error.
   Version, Valid, Synced, Age). Its `spec` schema is the charter's JSON Schema made structural
   (references inlined, `Option` fields `nullable`, free-form values such as a tool's `parameters`
   `x-kubernetes-preserve-unknown-fields`); `status` has `observedGeneration`, `appliedVersion`,
-  `conditions` (`Valid`, `Synced`), and free-form `memory` and `proposals`. The output is committed
-  as `deploy/crds/charters.attache.io.yaml`; a test keeps it in sync. The schema checks structure
+  `conditions` (`Valid`, `Synced`), and free-form `memory` and `proposals`. **No pruning:** every
+  object node (the root, `spec` and everything in it, `status`, the condition items) carries
+  `x-kubernetes-preserve-unknown-fields: true`, so the API server never drops a field it does not
+  know and the validating webhook, which rejects unknown fields, sees the resource exactly as
+  written. The root `metadata` is the one exception: Kubernetes allows nothing there but rules
+  for `name` and `generateName`. The output is committed as
+  `deploy/crds/charters.attache.io.yaml`; a test keeps it in sync. The schema checks structure
   and ranges only: the charter validator (the validating webhook) is the authority.
 
 ### 3.5 Schema level and restart-only fields
@@ -323,7 +338,9 @@ errors, as in the plain form. A namespace in neither place is an error.
   `config.restart_required` while instances are connected.
 - `attache_charter::diff::weakened` lists the changes that reduce protection (§6, `config`
   records) and `attache_charter::diff::required_role` the role a change needs (viewer < editor <
-  admin, with one `"<field> requires admin"` reason per field that needs admin).
+  admin, with one `"<field> requires admin"` reason per field that needs admin). A service with
+  no stored charter has nothing to diff: `attache_charter::diff::first_charter_role` says that
+  adopting a pending charter needs editor and a first `PUT` needs admin.
 
 ## 4. Wire protocol
 
@@ -422,7 +439,10 @@ exactly as far as its own `authz` rules say.
   `skills: [{name, description, instructions, inline}]` (the agent's skills
   resolved, in its order; `inline` = instructions shorter than 2048 bytes),
   `harness` and `learning` with the defaults filled (§3), and
-  `memory: [{id, text}]` (the agent's active notes, oldest first). The
+  `memory: [{id, text}]` (the agent's active notes, oldest first). Memory
+  exists only for agents with `learning.enabled`: for any other agent
+  `memory` is `[]`, whatever notes the sidecar holds, and `spec.py` drops
+  notes that arrive for an agent without learning. The
   runtime's `spec.py` parses exactly this (unknown fields are errors);
   `schemas/runtime-agent-spec.example.json` is a generated example that the
   Rust and Python tests both check.
@@ -705,6 +725,19 @@ record and shows the kind as written: `attache logs` and embassy never reject a
 record for its kind (`attache logs --kind <any>` filters on it as a string,
 `--raw` prints the line as it was read).
 
+**Reading records of other versions.** Consumers that read records another
+sidecar version may have written (the CLI, embassy, the OpenTelemetry
+exporter) use the lenient `attache_common::audit::AuditRecordView`: `kind`,
+`direction` and `decision` are strings; `tokens` (`TokensView`) accepts
+counts it does not know and keeps them; unknown top-level fields are kept in
+`extra` (`#[serde(flatten)]`) and serialized again unchanged, after the known
+fields in the order above. The fields that identify a record (`ts`, `kind`,
+`request_id`, `trace_id`, `service`, `caller`, `callee`, `direction`,
+`decision`) are required, so a JSON line that is not a record does not parse;
+the others default when absent. `AuditRecordView::from(&AuditRecord)` gives
+the same JSON as the record; `known_kind()` maps `kind` to the kinds this
+build knows.
+
 ### 6.2 Subscribing to the audit stream
 
 `AuditWriter::subscribe() → tokio::sync::broadcast::Receiver<Arc<AuditRecord>>`
@@ -714,6 +747,13 @@ order. The channel holds 4096 records: a receiver that falls further behind
 loses the oldest (`RecvError::Lagged(n)`), and the writer never waits for a
 receiver. The OpenTelemetry exporter and the control-plane client use it; what
 leaves the pod has therefore always been redacted and truncated first.
+
+`AuditWriter::set_redaction(paths, pii_redact)` replaces the `audit.redact`
+paths and the `guardrails.pii_redact` switch in place, for a charter hot
+reload: every record written after the call uses the new settings (each
+record is redacted with one consistent snapshot), and the writer, its sink,
+the values it remembered for open requests and its subscribers are unaffected.
+`AuditWriter::redaction()` returns the settings in force.
 
 ## 7. Kubernetes packaging
 
@@ -748,25 +788,38 @@ leaves the pod has therefore always been redacted and truncated first.
 ## 8. CLI
 
 ```
-attache charter validate <file>        # exit 0 "valid", exit 1 with one error per line
+attache charter validate <file>        # plain or resource form (§3.4); exit 0 "valid", exit 1 with one error per line
 attache charter schema                 # JSON Schema to stdout (== schemas/charter.schema.json)
-attache logs <svc>[,<svc>…] [-n NS] [--context C] [--agent A] [--trace T] [--request R] [--kind K] [--denied] [-f] [--raw] [--file F|-] [--tail N]
+attache charter schema --crd           # the CustomResourceDefinition charters.attache.io, YAML (== deploy/crds/charters.attache.io.yaml)
+attache charter to-cr <file>           # the charter as a `Charter` custom resource, YAML; exit 1 if the charter is invalid
+attache logs <svc>[,<svc>…] [-n NS] [--context C] [--agent A] [--trace T] [--request R] [--kind <any kind>] [--denied] [-f] [--raw] [--file F|-] [--tail N]
 attache version
 ```
+
+`attache charter to-cr` validates the file (either form) and prints the
+resource form: `metadata: {name, namespace}` from `service`, everything else
+under `spec` (`spec.service` without `namespace`); `to-cr` of its own output
+prints the same document. `attache charter schema --crd` prints the CRD of
+§3.4, generated from the Rust types.
 
 `attache logs` runs `kubectl logs -n NS -l 'attache.io/service in (<svcs>)' -c
 attached --tail N [-f]`, keeps only lines that parse as §6 records (sidecar
 diagnostics share the container log on stderr and are skipped), applies the
 filters (`--trace`/`--request` match by prefix; `--agent` matches `agent` or
 `caller_agent`), sorts by `ts` unless following, and prints one line per
-record:
+record. Records of any sidecar version are read (`AuditRecordView`, §6.1): a
+kind, direction or decision this CLI does not know is shown as written, and
+`--kind` takes any kind as a string — the v0.2 ones (`config`, `learning`)
+and kinds of newer sidecars alike. A table line:
 
 ```
 19:02:11.482 orders    ops-assistant   agent_invocation inbound  local → ops-assistant            allow            1412ms
 19:02:12.904 inventory stock-analyst   service_call     inbound  …/svc/orders → inventory POST /admin/reset   DENY authz.services.deny-admin 4ms
 ```
 
-`--file F` (or `-` for stdin) reads records from a file instead of kubectl.
+`--raw` prints each matching record's JSON exactly as it was read (unknown
+fields included) instead of the table line. `--file F` (or `-` for stdin)
+reads records from a file instead of kubectl.
 
 ## 9. Agent runtime semantics
 

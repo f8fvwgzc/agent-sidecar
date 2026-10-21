@@ -132,6 +132,34 @@ fn harness_learning_and_memory() {
 }
 
 #[test]
+fn memory_is_passed_only_to_agents_with_learning_enabled() {
+    // design §3: memory exists only for agents with learning enabled
+    let notes = [RuntimeNote {
+        id: "n1".into(),
+        text: "Ask for the order id first.".into(),
+    }];
+    let c = v02();
+    assert_eq!(
+        c.runtime_spec("support", &notes)["memory"],
+        json!([{"id": "n1", "text": "Ask for the order id first."}])
+    );
+    // triage has no learning block at all
+    assert!(c.agent("triage").unwrap().learning.is_none());
+    assert_eq!(c.runtime_spec("triage", &notes)["memory"], json!([]));
+    // learning present but switched off
+    let mut c = v02();
+    c.agents[0].learning.as_mut().unwrap().enabled = false;
+    let spec = c.runtime_spec("support", &notes);
+    assert_eq!(spec["memory"], json!([]));
+    assert_eq!(spec["learning"]["enabled"], false);
+    // a v0.1 charter: no learning, so no memory either
+    let o = orders();
+    for a in &o.agents {
+        assert_eq!(o.runtime_spec(&a.name, &notes)["memory"], json!([]));
+    }
+}
+
+#[test]
 fn an_unknown_agent_has_no_spec() {
     assert_eq!(v02().runtime_spec("ghost", &[]), Value::Null);
 }

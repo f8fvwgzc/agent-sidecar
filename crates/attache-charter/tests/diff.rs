@@ -482,3 +482,17 @@ fn every_admin_field_is_named_once() {
     assert_eq!(serde_json::to_value(Role::Admin).unwrap(), "admin");
     assert_eq!(Role::Editor.to_string(), "editor");
 }
+
+#[test]
+fn a_first_charter_needs_editor_to_adopt_and_admin_to_put() {
+    use attache_charter::diff::{FirstCharter, first_charter_role};
+    // design §8.3: adoption of a pending charter is an editor action; a first PUT is admin
+    assert_eq!(
+        first_charter_role(FirstCharter::Adopt),
+        (Role::Editor, vec![])
+    );
+    let (r, reasons) = first_charter_role(FirstCharter::Put);
+    assert_eq!(r, Role::Admin);
+    assert_eq!(reasons, ["a first charter written with PUT requires admin"]);
+    assert!(reasons.iter().all(|r| r.ends_with("requires admin")));
+}
