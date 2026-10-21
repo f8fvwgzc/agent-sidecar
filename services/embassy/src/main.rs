@@ -1,4 +1,6 @@
-//! `embassy` — CA init, leaf issuance, and in-cluster bootstrap into Secrets (CONTRACT.md §5, §7).
+//! `embassy` — the control plane (`serve`, docs/design/agent-platform.md §8), API tokens
+//! (`token create`), and the v0.1 tools: CA init, leaf issuance, and in-cluster bootstrap into
+//! Secrets (CONTRACT.md §5, §7).
 use std::path::PathBuf;
 
 use anyhow::Context;
@@ -8,7 +10,7 @@ use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 
 #[derive(Parser)]
-#[command(name = "embassy", version, about = "attache control plane: cluster CA")]
+#[command(name = "embassy", version, about = "attache control plane")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -16,6 +18,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Run the control plane: any of the components ca, webhook, controlplane, api, ui.
+    Serve(Box<embassy::serve::ServeArgs>),
+    /// API and join tokens.
+    Token {
+        #[command(subcommand)]
+        cmd: TokenCmd,
+    },
     /// Create a new CA (ca.crt, ca.key) in a directory.
     CaInit {
         #[arg(long)]
@@ -50,6 +59,12 @@ enum Cmd {
     },
 }
 
+#[derive(Subcommand)]
+enum TokenCmd {
+    /// Print a new token (att_ + 43 base64url characters) once, and its ControlPlaneConfig entry.
+    Create(embassy::token::CreateArgs),
+}
+
 fn read_bundle(dir: &std::path::Path) -> anyhow::Result<PemBundle> {
     Ok(PemBundle {
         cert_pem: std::fs::read_to_string(dir.join("ca.crt"))
@@ -66,6 +81,13 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let _ = rustls::crypto::ring::default_provider().install_default();
     match Cli::parse().cmd {
+        Cmd::Serve(args) => embassy::serve::run(*args).await?,
+        Cmd::Token {
+            cmd: TokenCmd::Create(args),
+        } => {
+            let created = embassy::token::create(&args, chrono::Utc::now())?;
+            print!("{}", created.render()?);
+        }
         Cmd::CaInit { out } => {
             let ca = attache_pki::ca_init()?;
             std::fs::create_dir_all(&out)?;

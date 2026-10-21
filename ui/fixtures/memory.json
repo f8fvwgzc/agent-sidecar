@@ -1,0 +1,17 @@
+{
+  "version": "1",
+  "agents": {
+    "ops-assistant": [
+      {
+        "id": "d9ab350b-fa45-49c8-a371-b821ca97ec94",
+        "text": "Order ids are plain numbers such as 1001; pass them to lookup_order without a '#' or other prefix.",
+        "source": "review",
+        "request_id": "91b151f2-5708-42d7-935e-881dad02a07c",
+        "trace_id": "44b966b4ec060651a950e61d52a5e5f8",
+        "approved_by": "bob",
+        "ts": "2026-10-20T17:02:31.118Z",
+        "expires_at": null
+      }
+    ]
+  }
+}
