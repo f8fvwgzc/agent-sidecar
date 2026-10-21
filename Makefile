@@ -20,7 +20,7 @@ COMPOSE_ENV := deploy/compose/.env
 PACKAGING_PYTEST := uv run --no-project --with pytest==8.4.2 --with pyyaml==6.0.2 python -m pytest -q
 .PHONY: local-demo all build-host test test-rust test-python fmt lint proto schema validate \
         minikube-up minikube-down build deploy charters undeploy demo logs logs-denied secret-anthropic clean dev-certs \
-        compose-up compose-down helm-crd helm-lint helm-template demo-helm packaging-test
+        compose-up compose-down helm-lint helm-template demo-helm packaging-test
 
 all: build-host test
 
@@ -108,18 +108,16 @@ deploy:
 undeploy:
 	$(KUBECTL) delete -k deploy/ --ignore-not-found
 
-# Optional: real Claude instead of the mock model. Pods pick the key up on their next restart.
+# Optional: real Claude instead of the mock model (make deploy and make demo-helm). Pods pick the key
+# up on their next restart. The key goes through stdin, not the command line.
 secret-anthropic:
 	@test -n "$$ANTHROPIC_API_KEY" || (echo "ANTHROPIC_API_KEY is not set" && exit 1)
-	kubectl -n $(NS) create secret generic attache-anthropic --from-literal=ANTHROPIC_API_KEY="$$ANTHROPIC_API_KEY" --dry-run=client -o yaml | $(KUBECTL) apply -f -
+	printf %s "$$ANTHROPIC_API_KEY" | kubectl -n $(NS) create secret generic attache-anthropic --from-file=ANTHROPIC_API_KEY=/dev/stdin --dry-run=client -o yaml | $(KUBECTL) apply -f -
 	$(KUBECTL) -n $(NS) rollout restart deployment/orders deployment/inventory
 
 # ---- v0.2: Helm chart (docs/design/agent-platform.md §13) ------------------------------------
-# Helm cannot read files outside the chart, so the chart carries a copy of the CRD; the packaging
-# tests fail when it drifts from deploy/crds/.
-helm-crd:
-	cp deploy/crds/charters.attache.io.yaml $(CHART)/files/crds/charters.attache.io.yaml
-
+# The chart's files/crds/charters.attache.io.yaml is a symbolic link to deploy/crds/, so the CRD it
+# renders is always the generated one (helm notes the link on stderr).
 helm-lint:
 	helm lint --strict $(CHART)
 	for f in $(CHART)/ci/*-values.yaml; do helm lint --strict $(CHART) -f "$$f" || exit 1; done
@@ -149,8 +147,9 @@ compose-up:
 compose-down:
 	if [[ -f $(COMPOSE_ENV) ]]; then $(COMPOSE) down; else docker compose -p attache down; fi
 
-# Chart (lint, render, RBAC, webhooks, CRD sync), Compose (config, flags, gen-env.sh), Dockerfile and
+# Chart (lint, render, RBAC, webhooks, CRD link), Compose (config, flags, gen-env.sh), Dockerfile and
 # release workflow checks. Needs helm and docker for the parts that use them (skipped otherwise).
+# The release workflow runs this target before it builds anything.
 PACKAGING_TESTS := docker/tests deploy/helm/tests deploy/compose/tests
 packaging-test:
 	cargo build -q -p embassy

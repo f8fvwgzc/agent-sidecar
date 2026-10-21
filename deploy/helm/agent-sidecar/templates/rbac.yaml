@@ -1,6 +1,8 @@
 {{- /*
-RBAC exactly as design §13. ClusterRole attache-embassy is bound to both control-plane service
-accounts. The Secret Role is bound to embassy-ca only, so embassy-ca is the only workload that can
+RBAC as design §13, plus `delete` on charters: §10 DELETE /services/{ns}/{svc} (admin) has the
+kubernetes store delete the service's Charter (§8.4 "delete service"; its ControllerRevisions go
+with it through their owner reference), which §13's verb list leaves out. ClusterRole
+attache-embassy is bound to both control-plane service accounts. The Secret Role is bound to embassy-ca only, so embassy-ca is the only workload that can
 read the CA key; embassy reads embassy-tls, the config and the session key as mounted volumes.
 No ConfigMap permissions anywhere.
 */ -}}
@@ -13,7 +15,7 @@ metadata:
 rules:
   - apiGroups: ["attache.io"]
     resources: ["charters"]
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["attache.io"]
     resources: ["charters/status"]
     verbs: ["get", "update", "patch"]

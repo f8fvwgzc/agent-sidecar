@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # `make demo-helm`: the v0.2 demo on minikube through the Helm chart (docs/design/agent-platform.md
 # §13). The images are already in minikube's docker (make build). This script installs the chart,
-# waits for embassy-ca to arm the webhooks, enables injection for the demo namespace, applies the
-# example charters as Charter resources, deploys the two apps without a sidecar in their spec and
-# runs the demo calls (scripts/demo.sh). Every kubectl and helm call names the context explicitly.
+# waits for embassy-ca to arm the webhooks, enables injection for the demo namespace, makes sure the
+# Secret attache-anthropic exists (ANTHROPIC_API_KEY, empty for the mock model), applies the example
+# charters as Charter resources, deploys the two apps without a sidecar in their spec and runs the
+# demo calls (scripts/demo.sh). Every kubectl and helm call names the context explicitly.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -54,6 +55,20 @@ done
 echo "▶ namespace $NS with injection enabled"
 kc create namespace "$NS" --dry-run=client -o yaml | kc apply -f -
 kc label namespace "$NS" attache.io/injection=enabled --overwrite
+
+# The apps' annotation attache.io/anthropic-secret names this Secret. It always exists so pods never
+# wait for it: with an empty key the runtime uses the mock model. A key set here, or later with
+# `make secret-anthropic`, is never overwritten by a run without one.
+if [[ -n ${ANTHROPIC_API_KEY:-} ]]; then
+  echo "▶ Secret attache-anthropic from ANTHROPIC_API_KEY (real model)"
+  # The key goes through stdin, not the command line.
+  printf %s "$ANTHROPIC_API_KEY" |
+    kc -n "$NS" create secret generic attache-anthropic --from-file=ANTHROPIC_API_KEY=/dev/stdin \
+      --dry-run=client -o yaml | kc apply -f -
+elif ! kc -n "$NS" get secret attache-anthropic >/dev/null 2>&1; then
+  echo "▶ Secret attache-anthropic, empty (mock model; make secret-anthropic switches to the real one)"
+  kc -n "$NS" create secret generic attache-anthropic --from-literal=ANTHROPIC_API_KEY=
+fi
 
 echo "▶ Charter resources from examples/charters (validated by the admission webhook)"
 for svc in orders inventory; do

@@ -29,7 +29,7 @@ imagePullSecrets: []
 clusterDomain: cluster.local
 
 crds:
-  # Render the charters.attache.io CRD (from deploy/crds/, kept in sync by `make helm-crd`). It
+  # Render the charters.attache.io CRD (files/crds links to the generated deploy/crds/ file). It
   # carries helm.sh/resource-policy: keep, so uninstalling the chart never deletes Charters.
   install: true
 
@@ -80,15 +80,19 @@ ca:
   # creates Secret attache-ca in the release namespace on first start.
   existingSecret: ""
 
+# Telemetry of injected sidecars: set as environment variables of the injected attached container
+# (through embassy-ca's ATTACHE_INJECT_TEMPLATE, see README.md).
 otlp:
-  # OTLP/HTTP endpoint for injected sidecars (OTEL_EXPORTER_OTLP_ENDPOINT), e.g.
+  # OTLP/HTTP endpoint (OTEL_EXPORTER_OTLP_ENDPOINT), e.g.
   # http://otel-collector.observability:4318. Empty: no environment endpoint.
   endpoint: ""
   # Globs of charter telemetry.otlp_endpoint values sidecars may use when no environment endpoint
-  # is set (attached --otlp-endpoint-allow). Empty: charter endpoints are refused.
+  # is set (ATTACHE_OTLP_ENDPOINT_ALLOW, attached --otlp-endpoint-allow). Empty: charter endpoints
+  # are refused.
   endpointAllow: []
 
-# Defaults for the injected `attached` native sidecar.
+# Defaults for the injected `attached` native sidecar. resources, securityContext (and
+# images.attached.pullPolicy) reach the injector as embassy-ca's ATTACHE_INJECT_TEMPLATE (README.md).
 injection:
   # failurePolicy of the mutating webhook. Fail: pods in labelled namespaces are not created while
   # embassy-ca is unavailable (never unprotected). Ignore: they start without a sidecar.

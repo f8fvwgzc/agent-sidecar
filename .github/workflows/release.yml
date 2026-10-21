@@ -1,7 +1,9 @@
 # Release on a v* tag: the attached, attache and embassy binaries for Linux (x86_64 and aarch64,
 # glibc 2.28 or newer, cross-built with cargo-zigbuild) and macOS (Apple silicon); multi-arch
 # (linux/amd64, linux/arm64) attached and embassy images on GHCR, assembled from those binaries; and
-# a GitHub release with the archives and their SHA-256 checksums.
+# a GitHub release with the archives and their SHA-256 checksums. Nothing is built until the tag
+# matches the crate and chart versions and `make packaging-test` (chart, Compose stack, Dockerfile,
+# this workflow) passes.
 #
 # Every action is pinned to a commit SHA (the tag it was taken from is in the comment). No caches:
 # a release builds from a clean slate.
@@ -27,6 +29,8 @@ env:
   # Same toolchain as docker/Dockerfile (rust:1.99-bookworm).
   RUST_TOOLCHAIN: "1.99"
   ZIG_VERSION: "0.14.1"
+  # Same uv as docker/Dockerfile (ghcr.io/astral-sh/uv:<version>), for `make packaging-test`.
+  UV_VERSION: "0.10.12"
   CARGO_ZIGBUILD_VERSION: "0.23.4"
   IMAGE_PREFIX: ghcr.io/f8fvwgzc/agent-sidecar
 
@@ -56,14 +60,59 @@ jobs:
           crate=$(sed -n '/^\[workspace\.package\]/,/^\[/ s/^version = "\(.*\)"$/\1/p' Cargo.toml)
           chart=$(sed -n 's/^appVersion: "\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' deploy/helm/agent-sidecar/Chart.yaml)
           if [[ $crate != "$version" || $chart != "$version" ]]; then
-            echo "::error::tag $TAG, but Cargo.toml workspace version is '$crate' and the chart appVersion is '$chart'"
+            echo "::error::tag $TAG, but Cargo.toml [workspace.package] version is '$crate' and the chart appVersion is '$chart': set both to $version, then tag again"
             exit 1
           fi
           echo "version=$version" >>"$GITHUB_OUTPUT"
 
+  # The packaging checks also run here because CI may not: helm lint and the rendered chart (RBAC,
+  # webhooks, the CRD link to deploy/crds), the Compose stack (docker compose config, gen-env.sh with
+  # the real embassy), the Dockerfile and this workflow. Missing tools fail the job instead of
+  # skipping the tests that need them.
+  packaging:
+    name: Packaging checks
+    needs: version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      UV_LOCKED: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+          rustc --version
+
+      # attache-proto's build script runs protoc.
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends protobuf-compiler
+          protoc --version
+
+      - name: Install uv
+        run: |
+          pipx install "uv==$UV_VERSION"
+          uv --version
+
+      - name: Tools the checks need
+        run: |
+          helm version
+          docker compose version
+          shellcheck --version
+
+      - name: make packaging-test
+        run: make packaging-test
+
   binaries:
     name: Binaries (${{ matrix.target }})
-    needs: version
+    needs: [version, packaging]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     permissions:

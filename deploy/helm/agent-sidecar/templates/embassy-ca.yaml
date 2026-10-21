@@ -91,26 +91,12 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            # Injection defaults from the chart values (design §13: resources, securityContext and
-            # telemetry of the injected attached container come from Helm values).
-            - name: ATTACHE_INJECT_CONTROL_PLANE
-              value: {{ include "agent-sidecar.grpcAddress" (dict "root" $ "name" "embassy") | quote }}
-            - name: ATTACHE_INJECT_CA_ADDRESS
-              value: {{ include "agent-sidecar.grpcAddress" (dict "root" $ "name" "embassy-ca") | quote }}
-            - name: ATTACHE_INJECT_IMAGE_PULL_POLICY
-              value: {{ .Values.images.attached.pullPolicy | quote }}
-            - name: ATTACHE_INJECT_RESOURCES
-              value: {{ .Values.injection.resources | toJson | quote }}
-            - name: ATTACHE_INJECT_SECURITY_CONTEXT
-              value: {{ .Values.injection.securityContext | toJson | quote }}
-            {{- with .Values.otlp.endpoint }}
-            - name: ATTACHE_INJECT_OTLP_ENDPOINT
-              value: {{ . | quote }}
-            {{- end }}
-            {{- with .Values.otlp.endpointAllow }}
-            - name: ATTACHE_INJECT_OTLP_ENDPOINT_ALLOW
-              value: {{ join "," . | quote }}
-            {{- end }}
+            # The Helm-value part of the injected attached container (design §13: "resources and
+            # securityContext ... from Helm values"), as one JSON object of Kubernetes Container
+            # fields. This is the chart's only input to the injector beyond the design's flags; the
+            # contract is in the chart README ("What embassy-ca reads from the chart").
+            - name: ATTACHE_INJECT_TEMPLATE
+              value: {{ include "agent-sidecar.injectTemplate" . | quote }}
           ports:
             - name: grpc
               containerPort: 15012

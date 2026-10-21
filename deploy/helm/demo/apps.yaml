@@ -3,6 +3,9 @@
 # annotations name the service and app port, and the charters come from the Charter resources
 # (attache charter to-cr examples/charters/<svc>.charter.yaml). Each pod runs as a service account
 # named like its service, which is what IssueCertificate accepts without service.service_accounts.
+# attache.io/anthropic-secret gives the injected sidecar ANTHROPIC_API_KEY from Secret
+# attache-anthropic, which demo.sh always creates (empty, so the mock model, unless ANTHROPIC_API_KEY
+# was set) and `make secret-anthropic` fills.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -43,6 +46,7 @@ spec:
       annotations:
         attache.io/service: orders
         attache.io/app-port: "8080"
+        attache.io/anthropic-secret: attache-anthropic
     spec:
       serviceAccountName: orders
       securityContext:
@@ -91,6 +95,7 @@ spec:
       annotations:
         attache.io/service: inventory
         attache.io/app-port: "8000"
+        attache.io/anthropic-secret: attache-anthropic
     spec:
       serviceAccountName: inventory
       securityContext:

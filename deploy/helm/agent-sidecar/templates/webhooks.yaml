@@ -2,6 +2,11 @@
 No caBundle here, ever: embassy-ca patches both configurations whenever their caBundle differs from
 the serving certificate's CA (every 30 s). Until then the API server cannot reach the webhooks, so
 injection in labelled namespaces and Charter writes wait for embassy-ca (failurePolicy Fail).
+
+Each configuration has exactly one webhook entry, named sidecar-injector.attache.io and
+charter-validator.attache.io (the design names only the configurations). The caBundle reconciler
+must set every entry it reads from the live object (a strategic-merge patch keyed on another name
+would add an entry instead); the names are in the README's "What embassy-ca reads from the chart".
 */ -}}
 apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingWebhookConfiguration

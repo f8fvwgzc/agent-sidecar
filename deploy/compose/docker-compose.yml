@@ -11,32 +11,34 @@
 # .env (written by deploy/compose/gen-env.sh with `embassy token create`, mode 0600) holds the admin
 # API token and one join token per service, each with its SHA-256 and expiry. Only the hashes reach
 # embassy (in its ControlPlaneConfig below); each sidecar gets its own join token as a secret file.
+#
+# The namespace is attache-demo and is not a setting: the sidecars' --namespace is authoritative,
+# and the start-up charters mounted from examples/charters name it (service.namespace, and
+# inventory's authz rule for orders' identity), so any other value breaks adoption and authz.
 name: attache
 
 services:
-  # Creates the CA once (in the embassy-data volume, readable only by embassy) and publishes its
-  # certificate to the attache-ca volume that every sidecar mounts read-only.
-  ca-init:
-    image: attache/embassy:dev
-    pull_policy: never
-    entrypoint: ["/bin/sh", "-ec"]
-    command:
-      - |
-        umask 077
-        if [ ! -f /var/lib/attache/ca/ca.key ]; then embassy ca-init --out /var/lib/attache/ca; fi
-        cp /var/lib/attache/ca/ca.crt /attache-ca/ca.crt
-        chmod 0644 /attache-ca/ca.crt
-    volumes:
-      - embassy-data:/var/lib/attache
-      - attache-ca:/attache-ca
-    restart: "no"
-
   embassy:
     image: attache/embassy:dev
     build:
       context: ../..
       dockerfile: docker/Dockerfile
       target: embassy
+    # Before serving, embassy publishes the CA certificate (never the key) to the attache-ca volume
+    # that every sidecar mounts read-only. The CA itself (ca.crt, ca.key: the --ca-dir layout) is in
+    # the embassy-data volume, which only embassy mounts; the first start creates it with
+    # `embassy ca-init`, so `serve` always finds one. A changed ca.crt (several roots during a
+    # rotation) is published again on the next start.
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        umask 077
+        [ -f /var/lib/attache/ca/ca.key ] || embassy ca-init --out /var/lib/attache/ca
+        install -m 0644 /var/lib/attache/ca/ca.crt /attache-ca/.ca.crt.tmp
+        mv -f /attache-ca/.ca.crt.tmp /attache-ca/ca.crt
+        exec embassy "$$@"
+      - embassy
     # All components (ca, webhook, controlplane, api, ui) in one process, file store, sidecar
     # start-up charters adopted automatically. --dev stays off: the API needs a token.
     command:
@@ -59,9 +61,7 @@ services:
       - "15012"
     volumes:
       - embassy-data:/var/lib/attache
-    depends_on:
-      ca-init:
-        condition: service_completed_successfully
+      - attache-ca:/attache-ca
     healthcheck:
       test: ["CMD", "attache-http-ready", "8080", "/api/v1/readyz"]
       interval: 5s
@@ -83,7 +83,7 @@ services:
       - --ca-file=/attache-ca/ca.crt
       - --join-token-file=/run/secrets/orders-join-token
       - --service=orders
-      - --namespace=${ATTACHE_NAMESPACE:-attache-demo}
+      - --namespace=attache-demo
       - --app-port=8080
       - --pod-name=orders-sidecar
       - --charter=/etc/attache/charter/charter.yaml
@@ -138,7 +138,7 @@ services:
       - --ca-file=/attache-ca/ca.crt
       - --join-token-file=/run/secrets/inventory-join-token
       - --service=inventory
-      - --namespace=${ATTACHE_NAMESPACE:-attache-demo}
+      - --namespace=attache-demo
       - --app-port=8000
       - --pod-name=inventory-sidecar
       - --charter=/etc/attache/charter/charter.yaml
@@ -207,12 +207,12 @@ configs:
         join_tokens:
           - name: compose-orders
             sha256: "${ATTACHE_JOIN_TOKEN_ORDERS_SHA256:?run 'make compose-up' to generate deploy/compose/.env}"
-            namespace: "${ATTACHE_NAMESPACE:-attache-demo}"
+            namespace: attache-demo
             services: [orders]
             expires_at: "${ATTACHE_JOIN_TOKEN_ORDERS_EXPIRES_AT:?run 'make compose-up' to generate deploy/compose/.env}"
           - name: compose-inventory
             sha256: "${ATTACHE_JOIN_TOKEN_INVENTORY_SHA256:?run 'make compose-up' to generate deploy/compose/.env}"
-            namespace: "${ATTACHE_NAMESPACE:-attache-demo}"
+            namespace: attache-demo
             services: [inventory]
             expires_at: "${ATTACHE_JOIN_TOKEN_INVENTORY_EXPIRES_AT:?run 'make compose-up' to generate deploy/compose/.env}"
       events:

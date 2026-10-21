@@ -55,9 +55,31 @@ app.kubernetes.io/component: {{ .component }}
 {{- .Values.auth.sessionKey.existingSecret | default (include "agent-sidecar.sessionKeySecretName" .) -}}
 {{- end -}}
 
-{{/* host:port of a control-plane Service's gRPC port. */}}
-{{- define "agent-sidecar.grpcAddress" -}}
-{{ .name }}.{{ .root.Release.Namespace }}.svc:15012
+{{/*
+ATTACHE_INJECT_TEMPLATE for embassy-ca: Kubernetes Container fields the injector applies to the
+attached container it generates. Only imagePullPolicy, resources, securityContext and env; env
+holds only sidecar variables of design §6.1 and §9 (OTEL_EXPORTER_OTLP_ENDPOINT,
+ATTACHE_OTLP_ENDPOINT_ALLOW). The control-plane and CA addresses are not here: the injector derives
+them from --cp-namespace and the fixed Service names (embassy.<ns>.svc:15012,
+embassy-ca.<ns>.svc:15012).
+*/}}
+{{- define "agent-sidecar.injectTemplate" -}}
+{{- $env := list -}}
+{{- with .Values.otlp.endpoint -}}
+{{- $env = append $env (dict "name" "OTEL_EXPORTER_OTLP_ENDPOINT" "value" .) -}}
+{{- end -}}
+{{- with .Values.otlp.endpointAllow -}}
+{{- $env = append $env (dict "name" "ATTACHE_OTLP_ENDPOINT_ALLOW" "value" (join "," .)) -}}
+{{- end -}}
+{{- $t := dict
+  "imagePullPolicy" .Values.images.attached.pullPolicy
+  "resources" .Values.injection.resources
+  "securityContext" .Values.injection.securityContext
+-}}
+{{- if $env -}}
+{{- $_ := set $t "env" $env -}}
+{{- end -}}
+{{- toJson $t -}}
 {{- end -}}
 
 {{/* The DNS names of a Service: pass (dict "root" $ "service" "embassy"). */}}

@@ -2,7 +2,8 @@
 
 Run with `make packaging-test`. They render the chart with `helm template` (skipped when
 helm is not installed) and check the resources against the design: RBAC, webhooks, the
-CRD copy, both Deployments and their embassy flags, Secrets, Services and NetworkPolicy.
+CRD link, both Deployments and their embassy flags, the injection template, Secrets,
+Services and NetworkPolicy.
 """
 
 from __future__ import annotations
@@ -23,6 +24,8 @@ CHART = ROOT / "deploy/helm/agent-sidecar"
 CRD_FILE = ROOT / "deploy/crds/charters.attache.io.yaml"
 CHART_CRD_FILE = CHART / "files/crds/charters.attache.io.yaml"
 DEMO_APPS = ROOT / "deploy/helm/demo/apps.yaml"
+DEMO_SCRIPT = ROOT / "deploy/helm/demo.sh"
+README = CHART / "README.md"
 NS = "attache-system"
 
 # `embassy serve` flags (design §8.1).
@@ -176,10 +179,11 @@ def test_default_render_has_exactly_the_designed_resources(default: list[dict]) 
 # ---- CRD ----------------------------------------------------------------------------------
 
 
-def test_chart_crd_copy_is_in_sync_with_deploy_crds() -> None:
-    assert CHART_CRD_FILE.read_bytes() == CRD_FILE.read_bytes(), (
-        "deploy/helm/agent-sidecar/files/crds is out of date; run make helm-crd"
-    )
+def test_chart_crd_is_a_link_to_deploy_crds() -> None:
+    # A link, not a copy: the chart cannot drift from the generated CRD.
+    assert CHART_CRD_FILE.is_symlink(), f"{CHART_CRD_FILE} must be a symbolic link to {CRD_FILE}"
+    assert os.readlink(CHART_CRD_FILE) == "../../../../crds/charters.attache.io.yaml"
+    assert CHART_CRD_FILE.resolve() == CRD_FILE.resolve()
 
 
 @needs_helm
@@ -220,7 +224,7 @@ def norm(rules: list[dict]) -> list[tuple]:
 
 
 @needs_helm
-def test_cluster_role_is_exactly_the_design(default: list[dict]) -> None:
+def test_cluster_role_is_the_design_plus_charter_delete(default: list[dict]) -> None:
     role = find(default, "ClusterRole", "attache-embassy")
     webhooks = ("attache-sidecar-injector", "attache-charter-validator")
     assert norm(role["rules"]) == norm(
@@ -228,7 +232,8 @@ def test_cluster_role_is_exactly_the_design(default: list[dict]) -> None:
             {
                 "apiGroups": ["attache.io"],
                 "resources": ["charters"],
-                "verbs": ["get", "list", "watch", "create", "update", "patch"],
+                # §13 plus delete: DELETE /services/{ns}/{svc} (§10) deletes the Charter
+                "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"],
             },
             {
                 "apiGroups": ["attache.io"],
@@ -391,6 +396,17 @@ def test_mutating_webhook_follows_the_design(default: list[dict], full: list[dic
     }
     [full_hook] = find(full, "MutatingWebhookConfiguration", "attache-sidecar-injector")["webhooks"]
     assert full_hook["failurePolicy"] == "Ignore"
+
+
+@needs_helm
+def test_webhook_entry_names_are_documented_for_the_ca_bundle_reconciler(default: list[dict]) -> None:
+    readme = README.read_text()
+    for kind, name, entry in (
+        ("MutatingWebhookConfiguration", "attache-sidecar-injector", "sidecar-injector.attache.io"),
+        ("ValidatingWebhookConfiguration", "attache-charter-validator", "charter-validator.attache.io"),
+    ):
+        assert [h["name"] for h in find(default, kind, name)["webhooks"]] == [entry]
+        assert f"`{entry}`" in readme
 
 
 @needs_helm
@@ -558,21 +574,46 @@ def test_images_default_to_app_version_and_digest_wins(default: list[dict], full
     assert deployment_flags(full, "embassy-ca")["injector-image"] == ["registry.example/attache/attached:0.2.0-rc.1"]
 
 
+def inject_template(docs: list[dict]) -> dict:
+    return json.loads(env(container(find(docs, "Deployment", "embassy-ca")))["ATTACHE_INJECT_TEMPLATE"])
+
+
 @needs_helm
-def test_injection_defaults_reach_embassy_ca(default: list[dict], full: list[dict]) -> None:
+def test_injection_defaults_reach_embassy_ca_as_one_container_template(default: list[dict], full: list[dict]) -> None:
     values = yaml.safe_load((CHART / "values.yaml").read_text())
-    e = env(container(find(default, "Deployment", "embassy-ca")))
-    assert json.loads(e["ATTACHE_INJECT_RESOURCES"]) == values["injection"]["resources"]
-    assert json.loads(e["ATTACHE_INJECT_SECURITY_CONTEXT"]) == values["injection"]["securityContext"]
-    assert e["ATTACHE_INJECT_CONTROL_PLANE"] == f"embassy.{NS}.svc:15012"
-    assert e["ATTACHE_INJECT_CA_ADDRESS"] == f"embassy-ca.{NS}.svc:15012"
-    assert e["ATTACHE_INJECT_IMAGE_PULL_POLICY"] == "IfNotPresent"
-    assert "ATTACHE_INJECT_OTLP_ENDPOINT" not in e
-    assert "ATTACHE_INJECT_OTLP_ENDPOINT_ALLOW" not in e
-    f = env(container(find(full, "Deployment", "embassy-ca")))
-    assert f["ATTACHE_INJECT_OTLP_ENDPOINT"] == "http://otel-collector.observability:4318"
-    assert f["ATTACHE_INJECT_OTLP_ENDPOINT_ALLOW"] == ("http://otel-collector.*:4318,https://otlp.example")
-    assert f["ATTACHE_INJECT_IMAGE_PULL_POLICY"] == "Always"
+    assert inject_template(default) == {
+        "imagePullPolicy": "IfNotPresent",
+        "resources": values["injection"]["resources"],
+        "securityContext": values["injection"]["securityContext"],
+    }
+    # OTLP settings become the sidecar's own variables (design §6.1, §9)
+    assert inject_template(full) == {
+        "imagePullPolicy": "Always",
+        "resources": values["injection"]["resources"],
+        "securityContext": values["injection"]["securityContext"],
+        "env": [
+            {"name": "OTEL_EXPORTER_OTLP_ENDPOINT", "value": "http://otel-collector.observability:4318"},
+            {"name": "ATTACHE_OTLP_ENDPOINT_ALLOW", "value": "http://otel-collector.*:4318,https://otlp.example"},
+        ],
+    }
+    custom = render("--set", "injection.resources.limits.memory=1Gi", "--set", "otlp.endpoint=http://c:4318")
+    t = inject_template(custom)
+    assert t["resources"]["limits"] == {"memory": "1Gi"}
+    assert t["env"] == [{"name": "OTEL_EXPORTER_OTLP_ENDPOINT", "value": "http://c:4318"}]
+
+
+@needs_helm
+def test_embassy_ca_gets_no_other_undesigned_variables(default: list[dict], full: list[dict]) -> None:
+    # Everything else reaches embassy through the design's flags; the one extra input is documented.
+    for docs in (default, full):
+        for name in ("embassy-ca", "embassy"):
+            names = set(env(container(find(docs, "Deployment", name))))
+            extra = {"ATTACHE_INJECT_TEMPLATE"} if name == "embassy-ca" else set()
+            assert names == {"RUST_LOG", "POD_NAME", "POD_NAMESPACE"} | extra, (name, names)
+    readme = README.read_text()
+    assert "`ATTACHE_INJECT_TEMPLATE`" in readme
+    for field in ("imagePullPolicy", "resources", "securityContext", "OTEL_EXPORTER_OTLP_ENDPOINT"):
+        assert field in readme
 
 
 # ---- Services and NetworkPolicy -----------------------------------------------------------
@@ -717,6 +758,8 @@ def test_demo_apps_ask_for_injection_and_match_their_charters() -> None:
         assert meta["labels"]["attache.io/service"] == name
         assert meta["annotations"]["attache.io/service"] == name
         assert meta["annotations"]["attache.io/app-port"] == str(charter["service"]["app_port"])
+        # the injected sidecar gets ANTHROPIC_API_KEY from the Secret demo.sh always creates
+        assert meta["annotations"]["attache.io/anthropic-secret"] == "attache-anthropic"
         assert pod["serviceAccountName"] == name and name in accounts
         assert [c["name"] for c in pod["containers"]] == ["app"], "the webhook adds attached"
         assert "initContainers" not in pod
@@ -726,7 +769,11 @@ def test_demo_apps_ask_for_injection_and_match_their_charters() -> None:
         assert mesh == [{"name": "mesh", "port": 50002, "targetPort": 50002}]
 
 
-def test_demo_script_parses() -> None:
-    script = ROOT / "deploy/helm/demo.sh"
-    assert os.access(script, os.X_OK)
-    subprocess.run(["bash", "-n", str(script)], check=True)
+def test_demo_script_parses_and_creates_the_anthropic_secret() -> None:
+    assert os.access(DEMO_SCRIPT, os.X_OK)
+    subprocess.run(["bash", "-n", str(DEMO_SCRIPT)], check=True)
+    text = DEMO_SCRIPT.read_text()
+    assert "create secret generic attache-anthropic" in text
+    assert not re.search(r'--from-literal=ANTHROPIC_API_KEY="?\$', text), "the key must not be on the command line"
+    # created before the apps, so their pods never wait for it
+    assert text.index("attache-anthropic") < text.index("deploy/helm/demo/apps.yaml")

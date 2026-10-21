@@ -257,6 +257,24 @@ def test_images_are_multi_arch_on_ghcr(workflow: dict) -> None:
     assert meta["with"]["images"] == "${{ env.IMAGE_PREFIX }}/${{ matrix.image }}"
 
 
+def test_release_builds_nothing_before_the_packaging_checks_pass(workflow: dict) -> None:
+    job = workflow["jobs"]["packaging"]
+    assert job["needs"] == "version"
+    assert job["permissions"] == {"contents": "read"}
+    run = "\n".join(s.get("run", "") for s in job["steps"])
+    assert "make packaging-test" in run
+    # the tools whose tests would otherwise be skipped must be present
+    for tool in ("helm version", "docker compose version", "shellcheck --version"):
+        assert tool in run
+    assert set(workflow["jobs"]["binaries"]["needs"]) == {"version", "packaging"}
+    # images and the release need binaries, so they wait for the checks too
+    for name in ("images", "release"):
+        assert "binaries" in workflow["jobs"][name]["needs"]
+    # same uv as the attached image
+    [uv_image] = re.findall(r"ghcr\.io/astral-sh/uv:(\S+)", DOCKERFILE.read_text())
+    assert workflow["env"]["UV_VERSION"] == uv_image
+
+
 def test_release_publishes_binaries_and_checksums(workflow: dict) -> None:
     job = workflow["jobs"]["release"]
     assert job["permissions"] == {"contents": "write"}

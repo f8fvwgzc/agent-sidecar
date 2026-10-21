@@ -129,9 +129,8 @@ def read_env(path: Path) -> dict[str, str]:
 
 
 def run_gen_env(env_file: Path, embassy: str, **extra: str) -> subprocess.CompletedProcess[str]:
-    env = {**os.environ, "EMBASSY": embassy, **extra}
-    env.pop("ATTACHE_NAMESPACE", None)
-    env.pop("SERVICES", None)
+    env = {k: v for k, v in os.environ.items() if k != "SERVICES"}
+    env.update({"EMBASSY": embassy, **extra})
     return subprocess.run([str(GEN_ENV), str(env_file)], capture_output=True, text=True, env=env, check=False)
 
 
@@ -147,7 +146,7 @@ def fake_embassy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, 
 
 def check_env(env: dict[str, str]) -> None:
     token = re.compile(r"att_[A-Za-z0-9_-]{43}")
-    assert env["ATTACHE_NAMESPACE"] == "attache-demo"
+    assert "ATTACHE_NAMESPACE" not in env, "the namespace is fixed, not a setting"
     names = ["ATTACHE_ADMIN_TOKEN"] + [f"ATTACHE_JOIN_TOKEN_{s.upper()}" for s in SERVICES]
     for name in names:
         assert token.fullmatch(env[name]), name
@@ -163,7 +162,8 @@ def check_env(env: dict[str, str]) -> None:
 def test_gen_env_writes_tokens_once_with_mode_0600(tmp_path: Path, fake_embassy: tuple[str, Path]) -> None:
     embassy, log = fake_embassy
     env_file = tmp_path / ".env"
-    r = run_gen_env(env_file, embassy)
+    # ATTACHE_NAMESPACE in the environment changes nothing: the example charters fix attache-demo
+    r = run_gen_env(env_file, embassy, ATTACHE_NAMESPACE="shop")
     assert r.returncode == 0, r.stderr
     assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
     env = read_env(env_file)
@@ -212,7 +212,7 @@ def test_gen_env_with_the_real_embassy(tmp_path: Path) -> None:
 @pytest.fixture(scope="module")
 def sample_env() -> dict[str, str]:
     """A .env shaped like gen-env.sh's, with random tokens that are never used."""
-    env = {"ATTACHE_NAMESPACE": "attache-demo"}
+    env = {}
     for name in ["ATTACHE_ADMIN_TOKEN"] + [f"ATTACHE_JOIN_TOKEN_{s.upper()}" for s in SERVICES]:
         token = "att_" + secrets.token_urlsafe(32)
         env[name] = token
@@ -262,7 +262,6 @@ def split_flags(command: list[str]) -> dict[str, list[str]]:
 @needs_compose
 def test_stack_has_the_designed_services(stack: dict) -> None:
     assert set(stack["services"]) == {
-        "ca-init",
         "embassy",
         "orders-sidecar",
         "orders",
@@ -302,9 +301,12 @@ def test_embassy_runs_every_component_with_the_file_store(stack: dict) -> None:
     assert Path(svc["build"]["context"]).resolve() == ROOT
     assert [(p["host_ip"], p["published"], p["target"]) for p in svc["ports"]] == [("127.0.0.1", "8080", 8080)]
     assert svc["configs"] == [{"source": "control-plane", "target": "/etc/attache/config.yaml"}]
-    assert svc["depends_on"]["ca-init"]["condition"] == "service_completed_successfully"
+    assert "depends_on" not in svc
     assert svc["healthcheck"]["test"] == ["CMD", "attache-http-ready", "8080", "/api/v1/readyz"]
-    assert {v["source"]: v["target"] for v in svc["volumes"]} == {"embassy-data": "/var/lib/attache"}
+    assert {v["source"]: v["target"] for v in svc["volumes"]} == {
+        "embassy-data": "/var/lib/attache",
+        "attache-ca": "/attache-ca",
+    }
 
     binary = os.environ.get("EMBASSY_BIN")
     if binary and Path(binary).exists():
@@ -312,22 +314,73 @@ def test_embassy_runs_every_component_with_the_file_store(stack: dict) -> None:
         assert set(flags) <= set(re.findall(r"--([a-z][a-z-]+)", help_text))
 
 
+# Stands in for embassy in the entrypoint test: `ca-init --out <dir>` writes a CA there, anything
+# else is logged (that is where `serve ...` would run).
+FAKE_EMBASSY_CA = textwrap.dedent(
+    """\
+    #!/bin/sh
+    set -e
+    if [ "$1" = ca-init ]; then
+      mkdir -p "$3"
+      echo CERT >"$3/ca.crt"
+      echo KEY >"$3/ca.key"
+      echo ca-init >>"$FAKE_LOG"
+    else
+      echo "$*" >>"$FAKE_LOG"
+    fi
+    """
+)
+
+
+def run_entrypoint(entrypoint: list[str], command: list[str], data: Path, public: Path, bin_dir: Path) -> None:
+    # `docker compose config` writes $ as $$; the shell in the container sees one $.
+    _shell, flag, script, name = entrypoint
+    script = script.replace("$$", "$").replace("/var/lib/attache", str(data)).replace("/attache-ca", str(public))
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+    subprocess.run(["sh", flag, script, name, *command], env=env, check=True)
+
+
 @needs_compose
-def test_ca_init_publishes_only_the_ca_certificate(stack: dict) -> None:
-    svc = stack["services"]["ca-init"]
-    assert svc["image"] == stack["services"]["embassy"]["image"]
-    script = svc["command"][0]
-    assert "embassy ca-init --out /var/lib/attache/ca" in script
-    assert "cp /var/lib/attache/ca/ca.crt /attache-ca/ca.crt" in script
-    assert "ca.key /attache-ca" not in script
-    assert {v["source"]: v["target"] for v in svc["volumes"]} == {
-        "embassy-data": "/var/lib/attache",
-        "attache-ca": "/attache-ca",
-    }
+def test_embassy_publishes_only_the_ca_certificate_then_serves(
+    stack: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    svc = stack["services"]["embassy"]
+    entrypoint = svc["entrypoint"]
+    assert entrypoint[:2] == ["/bin/sh", "-ec"] and entrypoint[3] == "embassy"
+    # the CA is created in the --ca-dir that serve reads
+    assert "embassy ca-init --out /var/lib/attache/ca" in entrypoint[2]
+    assert split_flags(svc["command"][1:])["ca-dir"] == ["/var/lib/attache/ca"]
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "embassy"
+    fake.write_text(FAKE_EMBASSY_CA)
+    fake.chmod(0o755)
+    log = tmp_path / "calls.log"
+    monkeypatch.setenv("FAKE_LOG", str(log))
+    data, public = tmp_path / "data", tmp_path / "public"
+    data.mkdir(mode=0o700)
+    public.mkdir()
+
+    run_entrypoint(entrypoint, svc["command"], data, public, bin_dir)
+    assert sorted(p.name for p in public.iterdir()) == ["ca.crt"], "only the certificate is published"
+    assert (public / "ca.crt").read_bytes() == (data / "ca/ca.crt").read_bytes()
+    assert stat.S_IMODE((public / "ca.crt").stat().st_mode) == 0o644
+    assert stat.S_IMODE((data / "ca/ca.key").stat().st_mode) == 0o600
+    assert log.read_text().splitlines() == ["ca-init", " ".join(svc["command"])]
+
+    # a restart keeps the CA and publishes its (possibly changed) certificate again
+    (data / "ca/ca.crt").write_text("ROTATED\n")
+    run_entrypoint(entrypoint, svc["command"], data, public, bin_dir)
+    assert (public / "ca.crt").read_text() == "ROTATED\n"
+    assert log.read_text().splitlines().count("ca-init") == 1
+
     for name, other in stack["services"].items():
         for v in other.get("volumes", []):
             if v.get("source") == "embassy-data":
-                assert name in {"ca-init", "embassy"}, f"{name} must not see the CA key"
+                assert name == "embassy", f"{name} must not see the CA key"
+            if v.get("source") == "attache-ca" and name != "embassy":
+                assert v["read_only"] is True, f"{name} mounts attache-ca writable"
 
 
 @needs_compose
@@ -355,7 +408,9 @@ def test_control_plane_config_holds_only_hashes(stack: dict, sample_env: dict[st
         assert joins[s] == {
             "name": f"compose-{s}",
             "sha256": sample_env[f"ATTACHE_JOIN_TOKEN_{s.upper()}_SHA256"],
-            "namespace": "attache-demo",
+            "namespace": yaml.safe_load((ROOT / f"examples/charters/{s}.charter.yaml").read_text())["service"][
+                "namespace"
+            ],
             "services": [s],
             "expires_at": "2027-10-21T10:00:00Z",
         }
@@ -430,6 +485,17 @@ def test_collector_config_receives_otlp_http_and_exports_to_jaeger() -> None:
     assert exporter.startswith("otlp_grpc/")
     assert cfg["exporters"][exporter]["endpoint"] == "jaeger:4317"
     assert cfg["service"]["pipelines"]["metrics"]["receivers"] == ["otlp"]
+
+
+def test_namespace_is_fixed_to_the_example_charters() -> None:
+    # The sidecars' --namespace is authoritative and the mounted start-up charters name attache-demo
+    # (service.namespace, inventory's authz identity for orders): it cannot be a setting.
+    for s in SERVICES:
+        charter = yaml.safe_load((ROOT / f"examples/charters/{s}.charter.yaml").read_text())
+        assert charter["service"]["namespace"] == "attache-demo"
+    assert "ATTACHE_NAMESPACE" not in COMPOSE_FILE.read_text()
+    assert "ATTACHE_NAMESPACE" not in GEN_ENV.read_text()
+    assert "NAMESPACE=attache-demo\n" in GEN_ENV.read_text()
 
 
 def test_env_file_is_git_ignored() -> None:
