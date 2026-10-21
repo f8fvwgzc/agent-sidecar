@@ -4,6 +4,8 @@ description = "CA and SPIFFE-style leaf certificate issuance and parsing for the
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 publish.workspace = true
 
 [dependencies]

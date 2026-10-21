@@ -5,7 +5,9 @@ members = ["crates/*", "services/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "Apache-2.0"
+license = "MIT"
+repository = "https://github.com/f8fvwgzc/agent-sidecar"
+homepage = "https://f8fvwgzc.github.io/agent-sidecar/"
 publish = false
 
 [workspace.dependencies]

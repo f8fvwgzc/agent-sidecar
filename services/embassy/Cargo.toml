@@ -4,6 +4,8 @@ description = "attache control plane: the cluster CA that issues SPIFFE-style ce
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 publish.workspace = true
 
 [dependencies]

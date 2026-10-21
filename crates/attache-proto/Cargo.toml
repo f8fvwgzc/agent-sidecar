@@ -4,6 +4,8 @@ description = "Generated gRPC clients, servers and messages for attache (CONTRAC
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 publish.workspace = true
 
 [dependencies]

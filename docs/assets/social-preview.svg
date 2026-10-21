@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+  <rect width="1280" height="640" fill="#0f172a"/>
+  <text x="80" y="150" fill="#f8fafc" font-family="Helvetica, Arial, sans-serif" font-size="88" font-weight="700">agent-sidecar</text>
+  <text x="80" y="215" fill="#cbd5e1" font-family="Helvetica, Arial, sans-serif" font-size="34">Governed AI agents as a Kubernetes sidecar</text>
+  <text x="80" y="262" fill="#94a3b8" font-family="Helvetica, Arial, sans-serif" font-size="26">Policy as code · mTLS identity · budgets · guardrails · audit · any language, no SDK</text>
+  <g font-family="Helvetica, Arial, sans-serif" font-size="26" text-anchor="middle">
+    <rect x="80" y="340" width="520" height="220" rx="18" fill="none" stroke="#334155" stroke-width="3"/>
+    <text x="340" y="380" fill="#94a3b8" font-size="22">pod</text>
+    <rect x="110" y="410" width="200" height="110" rx="12" fill="#1e293b" stroke="#64748b" stroke-width="2"/>
+    <text x="210" y="472" fill="#e2e8f0">your app</text>
+    <rect x="370" y="410" width="200" height="110" rx="12" fill="#1d4ed8"/>
+    <text x="470" y="462" fill="#ffffff" font-weight="700">sidecar</text>
+    <text x="470" y="496" fill="#dbeafe" font-size="20">charter · audit</text>
+    <line x1="310" y1="465" x2="362" y2="465" stroke="#94a3b8" stroke-width="3"/>
+    <polygon points="370,465 356,457 356,473" fill="#94a3b8"/>
+    <rect x="680" y="340" width="520" height="220" rx="18" fill="none" stroke="#334155" stroke-width="3"/>
+    <text x="940" y="380" fill="#94a3b8" font-size="22">peer pod</text>
+    <rect x="710" y="410" width="200" height="110" rx="12" fill="#1d4ed8"/>
+    <text x="810" y="472" fill="#ffffff" font-weight="700">sidecar</text>
+    <rect x="970" y="410" width="200" height="110" rx="12" fill="#1e293b" stroke="#64748b" stroke-width="2"/>
+    <text x="1070" y="472" fill="#e2e8f0">peer app</text>
+    <line x1="570" y1="465" x2="702" y2="465" stroke="#38bdf8" stroke-width="3" stroke-dasharray="10 8"/>
+    <polygon points="710,465 696,457 696,473" fill="#38bdf8"/>
+    <text x="640" y="450" fill="#38bdf8" font-size="22">mTLS</text>
+    <line x1="910" y1="465" x2="962" y2="465" stroke="#94a3b8" stroke-width="3"/>
+    <polygon points="970,465 956,457 956,473" fill="#94a3b8"/>
+  </g>
+</svg>

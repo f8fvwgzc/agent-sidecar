@@ -564,7 +564,6 @@ These gaps are real in the current code. Plan around them.
 - **No NetworkPolicy is shipped.**
 - **No UI.** The charter JSON Schema is the interface a UI could be built on.
 - **No CI configuration** is in the repository.
-- **No LICENSE file** is in the repository.
 - **No refusal fallback.** A model refusal is returned as `model.refusal`.
 
 See also [Operations: known limitations](operations.md#known-limitations) and [CONTRACT.md section 11](../CONTRACT.md#11-known-gaps-mvp).

@@ -775,11 +775,10 @@ These are true for the current code. "Not built yet" means there is no code for 
 10. **No NetworkPolicy is shipped.**
 11. **No UI.** The charter schema (`schemas/charter.schema.json`) is the API.
 12. **No CI config in the repo.**
-13. **No LICENSE file.**
-14. **Audit output is basic.** There are two sinks (stdout and file). There is no shipping, no file rotation, and write errors are ignored.
-15. **No metrics and no trace export.** There is no metrics endpoint. Trace ids are propagated, but spans are not exported to a tracing backend. They exist only in the audit records.
-16. **The manifests are a demo.** The namespace `attache-demo` and the services `orders,inventory` are hard-coded in the Job and the kustomization. The images are `:dev` tags built inside minikube. No images are published.
-17. **The readiness probe uses a fixed address.** `attache-ready` always calls `127.0.0.1:3500`.
+13. **Audit output is basic.** There are two sinks (stdout and file). There is no shipping, no file rotation, and write errors are ignored.
+14. **No metrics and no trace export.** There is no metrics endpoint. Trace ids are propagated, but spans are not exported to a tracing backend. They exist only in the audit records.
+15. **The manifests are a demo.** The namespace `attache-demo` and the services `orders,inventory` are hard-coded in the Job and the kustomization. The images are `:dev` tags built inside minikube. No images are published.
+16. **The readiness probe uses a fixed address.** `attache-ready` always calls `127.0.0.1:3500`.
 
 Fixed limits and timeouts in the code:
 

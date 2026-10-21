@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "agent-sidecar: governed AI agents as a Kubernetes sidecar"
+abstract: >-
+  agent-sidecar runs governed AI agents next to any service on Kubernetes.
+  The app calls its sidecar on localhost over HTTP or gRPC, with no SDK.
+  Every model call, tool call and service call is authorized against a YAML
+  charter, bounded by budgets and guardrails, and written as one JSONL audit
+  record. Services authenticate each other with mTLS and SPIFFE identities.
+authors:
+  - alias: f8fvwgzc
+repository-code: "https://github.com/f8fvwgzc/agent-sidecar"
+url: "https://f8fvwgzc.github.io/agent-sidecar/"
+license: MIT
+version: 0.1.0
+keywords:
+  - ai-agents
+  - llm
+  - kubernetes
+  - sidecar
+  - agent-governance
+  - policy-as-code
+  - mtls
+  - spiffe
+  - audit-logging
+  - guardrails

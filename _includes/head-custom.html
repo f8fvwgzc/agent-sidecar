@@ -1,0 +1,20 @@
+<!-- Render ```mermaid blocks on the Pages site, the same way GitHub renders them in Markdown. -->
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs";
+  const render = async () => {
+    document.querySelectorAll("div.language-mermaid, pre > code.language-mermaid").forEach((el) => {
+      const block = el.matches("div") ? el : el.parentElement;
+      const pre = document.createElement("pre");
+      pre.className = "mermaid";
+      pre.textContent = (el.querySelector("code") || el).textContent;
+      block.replaceWith(pre);
+    });
+    mermaid.initialize({ startOnLoad: false, theme: "default" });
+    await mermaid.run({ querySelector: "pre.mermaid" });
+  };
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", render);
+  } else {
+    render();
+  }
+</script>

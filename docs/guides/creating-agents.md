@@ -1107,7 +1107,7 @@ An unknown id gets the highest price, so the budget never counts too little. Thi
 
 The JSON Schema of the charter is [schemas/charter.schema.json](../../schemas/charter.schema.json). The Rust types generate it (`attache charter schema`), and a test keeps the file in sync.
 
-Editors that use `yaml-language-server` (for example the YAML extension for VS Code) read a `$schema` comment at the top of the file. Point it to the schema in the repository. This URL works only when the GitHub repository is public:
+Editors that use `yaml-language-server` (for example the YAML extension for VS Code) read a `$schema` comment at the top of the file. Point it to the schema in the repository:
 
 ```text
 # yaml-language-server: $schema=https://raw.githubusercontent.com/f8fvwgzc/agent-sidecar/main/schemas/charter.schema.json

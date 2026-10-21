@@ -3,13 +3,31 @@ name = "attache-runtime"
 version = "0.1.0"
 description = "attache agent runtime: executes charter-declared agents next to a service, every tool call through the sidecar."
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.12"
+keywords = ["ai-agents", "llm", "kubernetes", "sidecar", "agent-governance", "claude", "anthropic", "grpc"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Security",
+    "Topic :: System :: Distributed Computing",
+]
 dependencies = [
     "anthropic>=1.11.0",
     "grpcio>=1.70.0",
     "protobuf>=5.29.0",
     "pydantic>=2.10.0",
 ]
+
+[project.urls]
+Homepage = "https://f8fvwgzc.github.io/agent-sidecar/"
+Repository = "https://github.com/f8fvwgzc/agent-sidecar"
+Documentation = "https://github.com/f8fvwgzc/agent-sidecar/tree/main/docs"
+Issues = "https://github.com/f8fvwgzc/agent-sidecar/issues"
 
 [project.scripts]
 attache-runtime = "attache_runtime.main:main"

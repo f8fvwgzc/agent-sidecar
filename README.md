@@ -1,6 +1,15 @@
 # agent-sidecar
 
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-website-0f172a.svg)](https://f8fvwgzc.github.io/agent-sidecar/)
+![Rust](https://img.shields.io/badge/sidecar-Rust-orange.svg)
+![Python](https://img.shields.io/badge/runtime-Python%203.12-3776ab.svg)
+![Kubernetes](https://img.shields.io/badge/runs%20on-Kubernetes-326ce5.svg)
+![Status](https://img.shields.io/badge/status-v1alpha1%20MVP-yellow.svg)
+
 **Governed AI agents that run as a sidecar next to your service. The agent is a sidecar of the service, not a service of its own.**
+
+agent-sidecar brings AgentSecOps to LLM agents: identity, policy, budgets, guardrails and audit, owned by the platform instead of by each app. Agents run on Claude, or on a built-in mock model for offline tests.
 
 **Naming.** The code still uses its working name, attache: the sidecar is `attached`, the CLI is `attache`, the CA is `embassy`, the runtime is `attache-runtime`, charters use `apiVersion: attache.io/v1alpha1`, and identities look like `spiffe://attache/ns/<ns>/svc/<svc>`.
 
@@ -105,6 +114,14 @@ This is a `v1alpha1` MVP. It is **not production-ready**. The most important lim
 - The runtime runs as a child process in the same container as the sidecar.
 - The runtime calls the model API directly. These calls are audited, not proxied. `pii_redact` only rewrites the agent's final output and the audit records. It does not change prompts sent to the model.
 - The charter is loaded once at startup. A ConfigMap change needs a pod restart.
-- There is no NetworkPolicy, no UI, no CI config and no LICENSE file in the repo yet.
+- There is no NetworkPolicy, no UI and no CI config in the repo yet.
 
 More detail is in [docs/operations.md](docs/operations.md) and [CONTRACT.md §11](CONTRACT.md#11-known-gaps-mvp).
+
+## Contributing and security
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) to build, test and send a change. Report security problems privately, as [SECURITY.md](SECURITY.md) explains.
+
+## License
+
+[MIT](LICENSE)

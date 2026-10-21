@@ -1,0 +1,36 @@
+# GitHub Pages site for the docs: https://f8fvwgzc.github.io/agent-sidecar/
+# README.md is the home page; every Markdown file in the repo becomes a page.
+title: agent-sidecar
+description: >-
+  Governed AI agents as a Kubernetes sidecar. Policy-as-code charters, mTLS and
+  SPIFFE identity, budgets, guardrails and JSONL audit for LLM agents, in any
+  language with no SDK.
+url: https://f8fvwgzc.github.io
+baseurl: /agent-sidecar
+lang: en
+author: f8fvwgzc
+image: /docs/assets/social-preview.png
+logo: /docs/assets/social-preview.png
+twitter:
+  card: summary_large_image
+theme: jekyll-theme-cayman
+show_downloads: false
+markdown: kramdown
+kramdown:
+  input: GFM
+plugins:
+  - jekyll-seo-tag
+  - jekyll-sitemap
+  - jekyll-relative-links
+  - jekyll-readme-index
+  - jekyll-titles-from-headings
+  - jekyll-optional-front-matter
+  - jekyll-default-layout
+relative_links:
+  enabled: true
+exclude:
+  - target
+  - runtime/.venv
+  - .local
+  - Cargo.lock
+  - runtime/uv.lock
