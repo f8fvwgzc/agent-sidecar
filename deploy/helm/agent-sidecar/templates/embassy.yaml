@@ -1,0 +1,143 @@
+{{- $component := "embassy" }}
+{{- $ns := .Release.Namespace }}
+{{- $dnsNames := concat (include "agent-sidecar.serviceDNSNames" (dict "root" $ "service" "embassy") | fromJsonArray) .Values.embassy.dnsNames | uniq }}
+{{- $scheme := ternary "HTTPS" "HTTP" .Values.embassy.httpTLS }}
+# embassy: Connect (:15012, mTLS with the serving certificate embassy-ca writes to Secret
+# embassy-tls), the REST/SSE API and the console (:8080). One replica, replaced (not rolled) on
+# upgrade: sidecars keep their running charter and reconnect.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: embassy
+  namespace: {{ $ns }}
+  labels:
+    {{- include "agent-sidecar.componentLabels" (dict "root" $ "component" $component) | nindent 4 }}
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "agent-sidecar.selectorLabels" (dict "root" $ "component" $component) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "agent-sidecar.componentLabels" (dict "root" $ "component" $component) | nindent 8 }}
+      {{- with .Values.embassy.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: embassy
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.embassy.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.embassy.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.embassy.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: embassy
+          image: {{ include "agent-sidecar.image" (dict "image" .Values.images.embassy "root" $) }}
+          imagePullPolicy: {{ .Values.images.embassy.pullPolicy }}
+          args:
+            - serve
+            - --components=controlplane,api,ui
+            - --http-addr=0.0.0.0:8080
+            - --grpc-addr=0.0.0.0:15012
+            - --tls-dir=/etc/attache/tls
+            - --store=kubernetes
+            - --config=/etc/attache/config/config.yaml
+            {{- range $dnsNames }}
+            - --dns-name={{ . }}
+            {{- end }}
+            - --cp-namespace={{ $ns }}
+            {{- if .Values.embassy.httpTLS }}
+            - --http-tls
+            {{- end }}
+          env:
+            - name: RUST_LOG
+              value: {{ .Values.embassy.logLevel | quote }}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: grpc
+              containerPort: 15012
+              protocol: TCP
+          # The Host check answers 421 to unknown hosts, probes included: send Host: localhost.
+          livenessProbe:
+            httpGet:
+              path: /api/v1/healthz
+              port: http
+              scheme: {{ $scheme }}
+              httpHeaders:
+                - name: Host
+                  value: localhost
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /api/v1/readyz
+              port: http
+              scheme: {{ $scheme }}
+              httpHeaders:
+                - name: Host
+                  value: localhost
+            periodSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.embassy.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/attache/config
+              readOnly: true
+            - name: session-key
+              mountPath: /etc/attache/session
+              readOnly: true
+            - name: tls
+              mountPath: /etc/attache/tls
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          secret:
+            secretName: {{ include "agent-sidecar.configSecretName" . }}
+        - name: session-key
+          secret:
+            secretName: {{ include "agent-sidecar.sessionKeySecret" . }}
+            items:
+              - key: key
+                path: key
+        # Created and renewed by embassy-ca; the pod starts once it exists, and renewals reach the
+        # mounted files without a restart.
+        - name: tls
+          secret:
+            secretName: {{ include "agent-sidecar.tlsSecretName" . }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

@@ -1,0 +1,189 @@
+# agent-sidecar chart values (docs/design/agent-platform.md §13).
+#
+# Install into the control-plane namespace (attache-system by convention; the release namespace is
+# passed to embassy as --cp-namespace and is never injected or issued workload certificates):
+#   helm install agent-sidecar deploy/helm/agent-sidecar -n attache-system --create-namespace
+#
+# Object names are fixed (embassy-ca, embassy, attache-ca, embassy-tls, attache-session-key and the
+# two webhook configurations) because the RBAC rules and embassy's flags name them: install the
+# chart once per cluster.
+
+images:
+  # Both control-plane Deployments run this image (embassy serve --components ...).
+  embassy:
+    repository: ghcr.io/f8fvwgzc/agent-sidecar/embassy
+    tag: ""          # default: the chart's appVersion
+    digest: ""       # sha256:<64 hex>; wins over tag
+    pullPolicy: IfNotPresent
+  # The image the injector adds to labelled pods as the `attached` native sidecar
+  # (embassy-ca --injector-image; a pod may override it with annotation attache.io/sidecar-image).
+  attached:
+    repository: ghcr.io/f8fvwgzc/agent-sidecar/attached
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# Kubernetes cluster DNS domain, for the Service DNS names embassy serves as.
+clusterDomain: cluster.local
+
+crds:
+  # Render the charters.attache.io CRD (files/crds links to the generated deploy/crds/ file). It
+  # carries helm.sh/resource-policy: keep, so uninstalling the chart never deletes Charters.
+  install: true
+
+# The ControlPlaneConfig (Secret embassy-config, mounted by both Deployments; embassy reloads it
+# when it changes).
+auth:
+  # API and console tokens, stored as SHA-256 only. Create one with
+  #   embassy token create --name alice --role admin --payloads
+  # and copy the printed entry (never the token) here:
+  #   - name: alice                 # DNS-1123 label, the actor in audit records
+  #     role: admin                 # viewer | editor | admin
+  #     sha256: "<64 lowercase hex>"
+  #     namespaces: ["*"]           # namespaces the token may see and change
+  #     payloads: true              # may see audit request/response payloads
+  tokens: []
+  sessionKey:
+    # A Secret in the release namespace with key `key` (32+ random bytes): the HMAC key for
+    # session cookies. Empty: the chart creates Secret attache-session-key with a random key and
+    # keeps it across upgrades (it reads the live Secret with `lookup`; tools that cannot, such as
+    # Argo CD, should set this instead).
+    existingSecret: ""
+
+issuance:
+  # Accept Kubernetes projected service-account tokens (TokenReview, audience attache).
+  kubernetes: true
+  workloadCertTTL: 24h          # 1h..720h
+  # Join tokens for sidecars outside the cluster, SHA-256 only (embassy token create --join ...):
+  #   - name: vm-orders
+  #     sha256: "<64 lowercase hex>"
+  #     namespace: shop
+  #     services: [orders]
+  #     expires_at: "2027-01-01T00:00:00Z"
+  joinTokens: []
+
+# Optional write policy, checked after the charter validator (ControlPlaneConfig `policy`).
+policy: {}
+#  require_authz_default_deny: true
+#  http_origin_allowlist: ["https://api.partner.example"]
+#  forbid_learning_auto: false
+
+events:
+  retainBytes: 67108864         # ring of recent audit records for the UI (1 MiB..16 GiB)
+
+ca:
+  # Reuse an existing CA Secret (keys ca.crt, ca.key) as "<namespace>/<name>", e.g. the v0.1
+  # attache-demo/attache-ca. embassy-ca then gets read access to that one Secret and never creates
+  # a CA. ca.crt may hold several roots; the first one matching ca.key signs. Empty: embassy-ca
+  # creates Secret attache-ca in the release namespace on first start.
+  existingSecret: ""
+
+# Telemetry of injected sidecars: set as environment variables of the injected attached container
+# (through embassy-ca's ATTACHE_INJECT_TEMPLATE, see README.md).
+otlp:
+  # OTLP/HTTP endpoint (OTEL_EXPORTER_OTLP_ENDPOINT), e.g.
+  # http://otel-collector.observability:4318. Empty: no environment endpoint.
+  endpoint: ""
+  # Globs of charter telemetry.otlp_endpoint values sidecars may use when no environment endpoint
+  # is set (ATTACHE_OTLP_ENDPOINT_ALLOW, attached --otlp-endpoint-allow). Empty: charter endpoints
+  # are refused.
+  endpointAllow: []
+
+# Defaults for the injected `attached` native sidecar. resources, securityContext (and
+# images.attached.pullPolicy) reach the injector as embassy-ca's ATTACHE_INJECT_TEMPLATE (README.md).
+injection:
+  # failurePolicy of the mutating webhook. Fail: pods in labelled namespaces are not created while
+  # embassy-ca is unavailable (never unprotected). Ignore: they start without a sidecar.
+  failurePolicy: Fail
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    readOnlyRootFilesystem: true
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+    seccompProfile:
+      type: RuntimeDefault
+
+# embassy-ca: components ca and webhook. The only workload that can read the CA key.
+embassyCa:
+  replicas: 2
+  # Rendered only when replicas > 1.
+  podDisruptionBudget:
+    minAvailable: 1
+  # soft: prefer different nodes (single-node clusters still schedule both); hard: require them.
+  antiAffinity: soft
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+  # Extra serving-certificate DNS names (--dns-name).
+  dnsNames: []
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  logLevel: info
+
+# embassy: components controlplane, api and ui. One replica (the registry and event ring are in
+# memory); upgrades recreate it, and sidecars keep their charter while it is away.
+embassy:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+  # Serve the HTTP API and UI over TLS with the control-plane serving certificate (--http-tls).
+  httpTLS: false
+  # Extra Host names the API answers to (--dns-name), e.g. the Ingress host. The Service names,
+  # localhost, 127.0.0.1 and [::1] are always accepted.
+  dnsNames: []
+  service:
+    type: ClusterIP
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  logLevel: info
+
+networkPolicy:
+  # Restrict ingress to embassy: Connect (15012) stays open to sidecars in every namespace; the
+  # API/UI port 8080 only admits the peers below (kubectl port-forward is unaffected).
+  enabled: false
+  # NetworkPolicyPeer list allowed to reach 8080, e.g. the ingress controller:
+  #   - namespaceSelector:
+  #       matchLabels:
+  #         kubernetes.io/metadata.name: ingress-nginx
+  httpFrom: []
+
+rbac:
+  # Aggregate attache-charter-view into the built-in view, edit and admin ClusterRoles, and
+  # attache-charter-edit into the roles listed below. Writing a Charter is equivalent to the attache
+  # admin role for that service (the webhook validates it, but no role-on-diff check applies).
+  aggregate: true
+  charterEditAggregatesTo: ["admin"]
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]

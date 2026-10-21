@@ -1,0 +1,30 @@
+# Build context of docker/Dockerfile. BuildKit reads this file instead of the root .dockerignore
+# for builds with this Dockerfile (docker build -f docker/Dockerfile, docker compose, the release
+# workflow). It is an allowlist: only what the images need, so worktrees, target/ directories,
+# virtual environments and local state never enter the context.
+*
+!Cargo.toml
+!Cargo.lock
+!crates
+!services
+!proto
+!schemas
+!examples/charters
+!deploy/crds
+!docs/api
+!ui
+!runtime/pyproject.toml
+!runtime/uv.lock
+!runtime/README.md
+!runtime/src
+!docker/attache-ready
+!docker/attache-http-ready
+# BINARIES=prebuilt: dist/linux-<arch>/{attached,attache,embassy}
+!dist/linux-*
+
+**/target
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+**/*.pyc

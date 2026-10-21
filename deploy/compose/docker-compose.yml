@@ -1,0 +1,233 @@
+# agent-sidecar on one machine (docs/design/agent-platform.md §14): embassy with every component, the
+# two demo services each with its attached sidecar, and an OpenTelemetry collector feeding Jaeger.
+#
+#   make compose-up     # generates deploy/compose/.env (tokens), builds the images, starts everything
+#   make compose-down
+#
+#   console   http://localhost:8080    sign in with ATTACHE_ADMIN_TOKEN from deploy/compose/.env
+#   orders    http://localhost:8081    POST /ask {"question": "..."}
+#   jaeger    http://localhost:16686
+#
+# .env (written by deploy/compose/gen-env.sh with `embassy token create`, mode 0600) holds the admin
+# API token and one join token per service, each with its SHA-256 and expiry. Only the hashes reach
+# embassy (in its ControlPlaneConfig below); each sidecar gets its own join token as a secret file.
+#
+# The namespace is attache-demo and is not a setting: the sidecars' --namespace is authoritative,
+# and the start-up charters mounted from examples/charters name it (service.namespace, and
+# inventory's authz rule for orders' identity), so any other value breaks adoption and authz.
+name: attache
+
+services:
+  embassy:
+    image: attache/embassy:dev
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile
+      target: embassy
+    # Before serving, embassy publishes the CA certificate (never the key) to the attache-ca volume
+    # that every sidecar mounts read-only. The CA itself (ca.crt, ca.key: the --ca-dir layout) is in
+    # the embassy-data volume, which only embassy mounts; the first start creates it with
+    # `embassy ca-init`, so `serve` always finds one. A changed ca.crt (several roots during a
+    # rotation) is published again on the next start.
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        umask 077
+        [ -f /var/lib/attache/ca/ca.key ] || embassy ca-init --out /var/lib/attache/ca
+        install -m 0644 /var/lib/attache/ca/ca.crt /attache-ca/.ca.crt.tmp
+        mv -f /attache-ca/.ca.crt.tmp /attache-ca/ca.crt
+        exec embassy "$$@"
+      - embassy
+    # All components (ca, webhook, controlplane, api, ui) in one process, file store, sidecar
+    # start-up charters adopted automatically. --dev stays off: the API needs a token.
+    command:
+      - serve
+      - --http-addr=0.0.0.0:8080
+      - --grpc-addr=0.0.0.0:15012
+      - --ca-dir=/var/lib/attache/ca
+      - --store=file:/var/lib/attache/store
+      - --config=/etc/attache/config.yaml
+      - --auto-adopt
+      - --dns-name=embassy
+    configs:
+      - source: control-plane
+        target: /etc/attache/config.yaml
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+    ports:
+      - "127.0.0.1:8080:8080"
+    expose:
+      - "15012"
+    volumes:
+      - embassy-data:/var/lib/attache
+      - attache-ca:/attache-ca
+    healthcheck:
+      test: ["CMD", "attache-http-ready", "8080", "/api/v1/readyz"]
+      interval: 5s
+      timeout: 6s
+      retries: 24
+      start_period: 10s
+    restart: unless-stopped
+
+  # orders: the sidecar owns the network namespace; the app joins it and calls the sidecar on
+  # 127.0.0.1:3500. The app port 8080 is published on localhost:8081 (the console has 8080).
+  orders-sidecar:
+    image: attache/attached:dev
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile
+      target: attached
+    command:
+      - --control-plane=embassy:15012
+      - --ca-file=/attache-ca/ca.crt
+      - --join-token-file=/run/secrets/orders-join-token
+      - --service=orders
+      - --namespace=attache-demo
+      - --app-port=8080
+      - --pod-name=orders-sidecar
+      - --charter=/etc/attache/charter/charter.yaml
+      - --peer-address-template={service}-sidecar:{port}
+    environment: &sidecar-env
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      RUST_LOG: ${RUST_LOG:-info}
+    secrets:
+      - orders-join-token
+    ports:
+      - "127.0.0.1:8081:8080"
+    expose:
+      - "8080"
+      - "50002"
+    volumes:
+      - attache-ca:/attache-ca:ro
+      - ../../examples/charters/orders.charter.yaml:/etc/attache/charter/charter.yaml:ro
+      - orders-state:/run/attache/state
+    depends_on: &sidecar-depends
+      embassy:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    healthcheck: &sidecar-health
+      test: ["CMD", "attache-ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 15s
+    restart: unless-stopped
+
+  orders:
+    image: attache/orders:dev
+    build: ../../examples/orders
+    network_mode: service:orders-sidecar
+    environment:
+      ATTACHE_URL: http://127.0.0.1:3500
+    depends_on:
+      orders-sidecar:
+        condition: service_started
+        restart: true
+    restart: unless-stopped
+
+  # inventory: the app listens on 127.0.0.1:8000 inside the shared network namespace, so only its
+  # sidecar reaches it; peers come in through the mesh port 50002.
+  inventory-sidecar:
+    image: attache/attached:dev
+    pull_policy: never
+    command:
+      - --control-plane=embassy:15012
+      - --ca-file=/attache-ca/ca.crt
+      - --join-token-file=/run/secrets/inventory-join-token
+      - --service=inventory
+      - --namespace=attache-demo
+      - --app-port=8000
+      - --pod-name=inventory-sidecar
+      - --charter=/etc/attache/charter/charter.yaml
+      - --peer-address-template={service}-sidecar:{port}
+    environment: *sidecar-env
+    secrets:
+      - inventory-join-token
+    expose:
+      - "8000"
+      - "50002"
+    volumes:
+      - attache-ca:/attache-ca:ro
+      - ../../examples/charters/inventory.charter.yaml:/etc/attache/charter/charter.yaml:ro
+      - inventory-state:/run/attache/state
+    depends_on: *sidecar-depends
+    healthcheck: *sidecar-health
+    restart: unless-stopped
+
+  inventory:
+    image: attache/inventory:dev
+    build: ../../examples/inventory
+    network_mode: service:inventory-sidecar
+    depends_on:
+      inventory-sidecar:
+        condition: service_started
+        restart: true
+    restart: unless-stopped
+
+  # OTLP/HTTP in (4318), traces to Jaeger over OTLP/gRPC, metrics to the collector log.
+  otel-collector:
+    image: otel/opentelemetry-collector:0.162.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    configs:
+      - source: otel-collector
+        target: /etc/otelcol/config.yaml
+    expose:
+      - "4318"
+    depends_on:
+      - jaeger
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/jaeger:2.21.0
+    ports:
+      - "127.0.0.1:16686:16686"
+    expose:
+      - "4317"
+    restart: unless-stopped
+
+configs:
+  control-plane:
+    content: |
+      apiVersion: attache.io/v1alpha1
+      kind: ControlPlaneConfig
+      auth:
+        tokens:
+          - name: compose-admin
+            role: admin
+            sha256: "${ATTACHE_ADMIN_TOKEN_SHA256:?run 'make compose-up' to generate deploy/compose/.env}"
+            namespaces: ["*"]
+            payloads: true
+        anonymous: none
+      issuance:
+        kubernetes: false
+        workload_cert_ttl: 24h
+        join_tokens:
+          - name: compose-orders
+            sha256: "${ATTACHE_JOIN_TOKEN_ORDERS_SHA256:?run 'make compose-up' to generate deploy/compose/.env}"
+            namespace: attache-demo
+            services: [orders]
+            expires_at: "${ATTACHE_JOIN_TOKEN_ORDERS_EXPIRES_AT:?run 'make compose-up' to generate deploy/compose/.env}"
+          - name: compose-inventory
+            sha256: "${ATTACHE_JOIN_TOKEN_INVENTORY_SHA256:?run 'make compose-up' to generate deploy/compose/.env}"
+            namespace: attache-demo
+            services: [inventory]
+            expires_at: "${ATTACHE_JOIN_TOKEN_INVENTORY_EXPIRES_AT:?run 'make compose-up' to generate deploy/compose/.env}"
+      events:
+        retain_bytes: 67108864
+  otel-collector:
+    file: ./otel-collector.yaml
+
+secrets:
+  orders-join-token:
+    environment: ATTACHE_JOIN_TOKEN_ORDERS
+  inventory-join-token:
+    environment: ATTACHE_JOIN_TOKEN_INVENTORY
+
+volumes:
+  embassy-data:
+  attache-ca:
+  orders-state:
+  inventory-state:

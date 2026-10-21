@@ -1,0 +1,22 @@
+apiVersion: v2
+name: agent-sidecar
+description: >-
+  The agent-sidecar control plane for Kubernetes: the Charter CRD, sidecar injection and charter
+  validation webhooks, the certificate authority (embassy-ca) and embassy (Connect, REST/SSE API
+  and console UI).
+type: application
+version: 0.2.0
+appVersion: "0.2.0"
+# Injected sidecars are native sidecars (init containers with restartPolicy: Always).
+kubeVersion: ">=1.29.0-0"
+home: https://f8fvwgzc.github.io/agent-sidecar/
+sources:
+  - https://github.com/f8fvwgzc/agent-sidecar
+keywords:
+  - ai-agents
+  - sidecar
+  - mtls
+  - admission-webhook
+  - opentelemetry
+annotations:
+  artifacthub.io/license: MIT

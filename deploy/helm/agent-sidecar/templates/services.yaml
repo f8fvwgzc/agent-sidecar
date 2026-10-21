@@ -1,0 +1,43 @@
+# IssueCertificate for sidecars (15012) and the admission webhooks for the API server (443 -> 9443).
+apiVersion: v1
+kind: Service
+metadata:
+  name: embassy-ca
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "agent-sidecar.componentLabels" (dict "root" $ "component" "embassy-ca") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "agent-sidecar.selectorLabels" (dict "root" $ "component" "embassy-ca") | nindent 4 }}
+  ports:
+    - name: grpc
+      port: 15012
+      targetPort: grpc
+      protocol: TCP
+    - name: webhook
+      port: 443
+      targetPort: webhook
+      protocol: TCP
+---
+# Connect for sidecars (15012) and the API/UI (8080).
+apiVersion: v1
+kind: Service
+metadata:
+  name: embassy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "agent-sidecar.componentLabels" (dict "root" $ "component" "embassy") | nindent 4 }}
+spec:
+  type: {{ .Values.embassy.service.type }}
+  selector:
+    {{- include "agent-sidecar.selectorLabels" (dict "root" $ "component" "embassy") | nindent 4 }}
+  ports:
+    - name: grpc
+      port: 15012
+      targetPort: grpc
+      protocol: TCP
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
