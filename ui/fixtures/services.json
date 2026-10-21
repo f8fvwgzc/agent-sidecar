@@ -1,0 +1,60 @@
+[
+  {
+    "namespace": "attache-demo",
+    "service": "inventory",
+    "status": "connected",
+    "epoch": "83439e23-6c3c-4605-9802-87a8a51882b2",
+    "charter_version": "1",
+    "memory_version": "0",
+    "pending_adoption": null,
+    "instances": [
+      {
+        "instance_id": "b4925a54-7cda-46c0-8635-a2f2552a4600",
+        "pod": "inventory-6d8f7c9b54-q7w2m",
+        "sidecar_version": "0.2.0",
+        "connected_at": "2026-10-21T09:30:01.517Z",
+        "last_heartbeat": "2026-10-21T09:59:51.640Z",
+        "runtime_ready": true,
+        "acked_version": "1",
+        "ack_error": null,
+        "cert_expires_in_s": 70841,
+        "audit_dropped": 0
+      }
+    ]
+  },
+  {
+    "namespace": "attache-demo",
+    "service": "orders",
+    "status": "connected",
+    "epoch": "c0cca7fc-c070-413e-a239-8544313185b0",
+    "charter_version": "3",
+    "memory_version": "1",
+    "pending_adoption": null,
+    "instances": [
+      {
+        "instance_id": "78758ff3-eb06-4430-ac61-ff803ae148ed",
+        "pod": "orders-5f7c9d8b6-k2x9p",
+        "sidecar_version": "0.2.0",
+        "connected_at": "2026-10-21T09:41:07.882Z",
+        "last_heartbeat": "2026-10-21T09:59:58.904Z",
+        "runtime_ready": true,
+        "acked_version": "3",
+        "ack_error": null,
+        "cert_expires_in_s": 81244,
+        "audit_dropped": 0
+      },
+      {
+        "instance_id": "05dc9e9a-e269-4fd6-ab88-f0b724ca23c3",
+        "pod": "orders-5f7c9d8b6-w8m4t",
+        "sidecar_version": "0.2.0",
+        "connected_at": "2026-10-21T09:43:52.117Z",
+        "last_heartbeat": "2026-10-21T09:59:53.270Z",
+        "runtime_ready": true,
+        "acked_version": "3",
+        "ack_error": null,
+        "cert_expires_in_s": 83011,
+        "audit_dropped": 0
+      }
+    ]
+  }
+]

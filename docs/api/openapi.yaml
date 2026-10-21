@@ -1,0 +1,2601 @@
+openapi: 3.1.0
+info:
+  title: attache control plane API (embassy)
+  version: 0.2.0
+  license:
+    name: MIT
+    identifier: MIT
+  description: |
+    The REST, SSE and session API that `embassy serve` exposes with the `api` component
+    (design: docs/design/agent-platform.md §8 and §10). Golden example data for every
+    response lives in `ui/fixtures/`; the Rust types are `services/embassy/src/api/types.rs`,
+    and a test keeps the fixtures and those types in step.
+
+    ## Transport and Host check
+
+    All paths below are relative to `/api/v1`. Plain HTTP is allowed (Kubernetes users front it
+    with an Ingress or a port-forward); `--http-tls` serves the same API over TLS with the
+    control-plane serving certificate.
+
+    The server answers **421** (`misdirected_request`) to every request whose `Host` header is
+    not one of the `--dns-name` values, `localhost`, `127.0.0.1` or `[::1]`, with any port. This
+    includes `/healthz` and `/readyz`: Kubernetes probes must send `Host: localhost`
+    (`httpGet.httpHeaders`).
+
+    Every response, errors included, carries:
+
+    - `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`
+    - `X-Content-Type-Options: nosniff`
+    - `Referrer-Policy: no-referrer`
+    - `X-Frame-Options: DENY`
+
+    No `Access-Control-Allow-*` header is ever sent (no CORS). Static UI files are served outside
+    `/api/v1`; `.js` files as `text/javascript; charset=utf-8`.
+
+    ## Authentication
+
+    Two equivalent credentials (security schemes `bearer` and `session`):
+
+    - `Authorization: Bearer att_<43 base64url characters>`. A token is 32 random bytes,
+      base64url-encoded without padding, prefixed with `att_` (`embassy token create`). The
+      ControlPlaneConfig stores only the lowercase hex SHA-256 of the whole token text
+      (`att_` included); the server compares hashes in constant time.
+    - The session cookie `attache_session`, set by `POST /login`. Its value is an
+      HMAC-SHA256-signed `{token_name, exp}` (lifetime 12 h) under the configured
+      `auth.session_key_file` key. Attributes: `HttpOnly; SameSite=Strict; Path=/`, plus
+      `Secure` when served over TLS. A session dies when its token is removed from the
+      config (the server re-resolves `token_name` on every request).
+
+    Without either credential the API answers 401 (`unauthenticated`), except with
+    `embassy serve --dev` and `auth.anonymous: viewer`, where an anonymous viewer is allowed.
+    `/healthz` and `/readyz` need no credential.
+
+    ## CSRF and content type
+
+    Every mutating request (`POST`, `PUT`, `DELETE`; `/login`, `/logout` and
+    `/charter/validate` included) must carry `X-Attache-CSRF: 1` (else 403 `forbidden`) and
+    `Content-Type: application/json` (else 400 `invalid`). A request without a body (a
+    `DELETE`, `/logout`) still sends the header.
+
+    ## Roles, scopes and payloads
+
+    - Roles `viewer` < `editor` < `admin`. Each operation names its minimum role in
+      `x-required-role`. Charter writes are additionally checked **on the diff** between the
+      stored and the new charter (`x-role-on-diff: true`), design §8.3; a write that needs a
+      higher role answers 403 `{"error":"forbidden","details":["authz.default requires admin", ...]}`.
+    - **Namespace scope**: every endpoint, graph node and SSE event is filtered to the token's
+      `namespaces` (`["*"]` = all). A service outside the scope answers 404, exactly like a
+      service that does not exist.
+    - **Payloads**: a token without `payloads: true` receives every audit record with `input` and
+      `output` set to null (the `*_sha256` hashes are kept), in `/events/recent` and on `/events`.
+
+    ## Versions and optimistic concurrency
+
+    Versions are decimal strings of a `u64` counter, monotonic per service and never reused;
+    each service also has an `epoch` (a UUID, new when the service's charter is deleted and
+    recreated). Memory has its own version counter per service. GETs of a charter, an agent or a
+    memory document return `ETag: "<version>"` (quoted). Every mutating call carries
+    `If-Match: "<version>"`: the charter version, or the memory version for memory and proposal
+    decisions. Creating the first charter of a service uses `If-None-Match: *` instead. A missing
+    precondition is 400 `invalid`; a stale one is 409
+    `{"error":"version_conflict","details":[...],"current_version":"<v>"}`.
+
+    Every write passes, in this order: charter validator → `policy` → role on diff →
+    version-skew check (the lowest `charter_schema_level` among connected instances) → store.
+
+    ## Errors
+
+    Every error body is an `Error`: `{"error": "<code>", "details": ["..."], "current_version": "<v>"?}`.
+    Codes: 400 `invalid` | `config.restart_required` | `version_skew`; 401 `unauthenticated`;
+    403 `forbidden`; 404 `not_found`; 409 `version_conflict` | `in_use`; 421 `misdirected_request`;
+    429 `rate_limited`; 500 `internal`.
+servers:
+  - url: /api/v1
+security:
+  - bearer: []
+  - session: []
+tags:
+  - name: session
+  - name: graph
+  - name: services
+  - name: charter
+  - name: agents
+  - name: memory
+  - name: proposals
+  - name: events
+  - name: health
+
+paths:
+  /login:
+    post:
+      tags: [session]
+      operationId: login
+      summary: Exchange a token for a session cookie.
+      description: |
+        Rate-limited to 5 failed attempts per minute per client IP (429 `rate_limited` with
+        `Retry-After`). Audited as `login` / `login_failed`.
+      security: []
+      x-required-role: none
+      parameters:
+        - $ref: "#/components/parameters/Csrf"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Signed in. The body is the identity the session carries.
+          headers:
+            Set-Cookie:
+              $ref: "#/components/headers/SetSessionCookie"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WhoAmI"
+        "400":
+          $ref: "#/components/responses/Invalid"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /logout:
+    post:
+      tags: [session]
+      operationId: logout
+      summary: End the session (clears the cookie).
+      x-required-role: none
+      parameters:
+        - $ref: "#/components/parameters/Csrf"
+      responses:
+        "204":
+          description: Signed out; the cookie is cleared (`Max-Age=0`).
+          headers:
+            Set-Cookie:
+              $ref: "#/components/headers/SetSessionCookie"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+
+  /whoami:
+    get:
+      tags: [session]
+      operationId: whoami
+      summary: The identity of the caller.
+      x-required-role: viewer
+      x-fixture: ui/fixtures/whoami.json
+      responses:
+        "200":
+          description: The caller.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WhoAmI"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+
+  /graph:
+    get:
+      tags: [graph]
+      operationId: getGraph
+      summary: The node graph of services, apps, agents, model providers and external origins.
+      description: |
+        Design §10.1. Filtered to the caller's namespaces. `version` increases whenever
+        topology or stats change; the SSE `graph` event announces a new version.
+      x-required-role: viewer
+      x-fixture: ui/fixtures/graph.json
+      responses:
+        "200":
+          description: The graph.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Graph"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+
+  /services:
+    get:
+      tags: [services]
+      operationId: listServices
+      summary: Every service the control plane knows, with its connected instances.
+      description: |
+        A service is listed when the store has a charter for it, or when an instance is
+        connected for it, or both. Sorted by namespace, then service.
+      x-required-role: viewer
+      x-fixture: ui/fixtures/services.json
+      responses:
+        "200":
+          description: The services.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ServiceSummary"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+
+  /services/{ns}/{svc}:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Service"
+    delete:
+      tags: [services]
+      operationId: deleteService
+      summary: Delete a service's charter, history, memory and proposals.
+      description: Audited as `delete_service`. A later charter for the same service gets a new epoch.
+      x-required-role: admin
+      parameters:
+        - $ref: "#/components/parameters/Csrf"
+        - $ref: "#/components/parameters/IfMatch"
+      responses:
+        "204":
+          description: Deleted.
+        "400":
+          $ref: "#/components/responses/Invalid"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+
+  /services/{ns}/{svc}/charter:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Service"
+    get:
+      tags: [charter]
+      operationId: getCharter
+      summary: The stored charter.
+      x-required-role: viewer
+      x-fixture: [ui/fixtures/charter-orders.json, ui/fixtures/charter-inventory.json]
+      responses:
+        "200":
+          description: The charter, as YAML text and as JSON.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CharterDoc"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+    put:
+      tags: [charter]
+      operationId: putCharter
+      summary: Replace (or create) the service's charter.
+      description: |
+        The YAML is a plain Charter document or the Charter custom-resource form; it is stored
+        as given. Audited as `charter_put`. 400 `config.restart_required` when the write changes
+        a restart-only field while instances are connected; 400 `version_skew` when a connected
+        instance's `charter_schema_level` cannot load it (`details` name the fields and pods).
+      x-required-role: editor
+      x-role-on-diff: true
+      parameters:
+        - $ref: "#/components/parameters/Csrf"
+        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IfNoneMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CharterYaml"
+      responses:
+        "200":
+          description: Stored; the new charter version.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VersionResult"
+        "400":
+          $ref: "#/components/responses/Invalid"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+
+  /services/{ns}/{svc}/charter/validate:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Service"
+    post:
+      tags: [charter]
+      operationId: validateCharter
+      summary: Validate a candidate charter without storing it.
+      description: |
+        Runs the validator, the policy and the skew check, and reports the role the write
+        would need against the stored charter and the changes that weaken protection.
+      x-required-role: editor
+      parameters:
+        - $ref: "#/components/parameters/Csrf"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CharterYaml"
+      responses:
+        "200":
+          description: Valid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidateResult"
+        "400":
+          $ref: "#/components/responses/Invalid"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+
+  /services/{ns}/{svc}/charter/history:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Service"
+    get:
+      tags: [charter]
+      operationId: listCharterHistory
+      summary: Every stored version of the charter, newest first.
+      description: The Kubernetes store keeps the last 20 versions.
+      x-required-role: viewer
+      x-fixture: ui/fixtures/history.json
+      responses:
+        "200":
+          description: The history.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/HistoryEntry"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+
+  /services/{ns}/{svc}/charter/history/{version}:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Service"
+      - $ref: "#/components/parameters/Version"
+    get:
+      tags: [charter]
+      operationId: getCharterRevision
+      summary: One stored version of the charter.
+      x-required-role: viewer
+      responses:
+        "200":
+          description: The YAML of that version.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CharterYaml"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+
+  /services/{ns}/{svc}/charter/rollback:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Service"
+    post:
+      tags: [charter]
+      operationId: rollbackCharter
+      summary: Store an earlier version's YAML as a new version.
+      description: The old YAML is validated again like any write. Audited as `rollback`.
+      x-required-role: admin
+      parameters:
+        - $ref: "#/components/parameters/Csrf"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RollbackRequest"
+      responses:
+        "200":
+          description: The new version.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VersionResult"
+        "400":
+          $ref: "#/components/responses/Invalid"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+
+  /services/{ns}/{svc}/adopt:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Service"
+    post:
+      tags: [charter]
+      operationId: adoptPending
+      summary: Store a sidecar's start-up charter as the service's first charter.
+      description: |
+        Only for a service with a pending adoption (`GET /services`) and no stored charter;
+        `sha256` must equal the pending adoption's. The charter passes the full write chain.
+        Audited as `adopt_approve`. 409 `version_conflict` when the service has a charter by now,
+        404 when no pending adoption has that hash.
+      x-required-role: editor
+      parameters:
+        - $ref: "#/components/parameters/Csrf"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdoptRequest"
+      responses:
+        "200":
+          description: Adopted; the new charter version.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VersionResult"
+        "400":
+          $ref: "#/components/responses/Invalid"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+
+  /services/{ns}/{svc}/agents:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Service"
+    post:
+      tags: [agents]
+      operationId: createAgent
+      summary: Add an agent to the service's charter.
+      description: |
+        Without `callers` the agent is added to the `identity: local` caller rule (created as
+        `{identity: local, agents: [<name>]}` when there is none). Audited as `agent_post`.
+      x-required-role: editor
+      x-role-on-diff: true
+      parameters:
+        - $ref: "#/components/parameters/Csrf"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentView"
+      responses:
+        "201":
+          description: Created; the new charter version.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VersionResult"
+        "400":
+          $ref: "#/components/responses/Invalid"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+
+  /services/{ns}/{svc}/agents/{agent}:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Service"
+      - $ref: "#/components/parameters/Agent"
+    get:
+      tags: [agents]
+      operationId: getAgent
+      summary: One agent with the policy around it.
+      x-required-role: viewer
+      x-fixture: ui/fixtures/agent-view.json
+      responses:
+        "200":
+          description: The agent view. The ETag is the charter version.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentView"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+    put:
+      tags: [agents]
+      operationId: putAgent
+      summary: Replace one agent and the policy around it.
+      description: |
+        `agent.name` must equal the path. Entries of `allowed_tools` naming removed tools are
+        pruned. Audited as `agent_put`.
+      x-required-role: editor
+      x-role-on-diff: true
+      parameters:
+        - $ref: "#/components/parameters/Csrf"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentView"
+      responses:
+        "200":
+          description: Stored; the new charter version.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VersionResult"
+        "400":
+          $ref: "#/components/responses/Invalid"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+    delete:
+      tags: [agents]
+      operationId: deleteAgent
+      summary: Remove an agent.
+      description: |
+        Removes the agent's `guardrails.allowed_*` keys and its name from every
+        `authz.callers[].agents` (dropping rules left empty). 409 `in_use` while a local
+        orchestrator's `agent` tool still targets it. Audited as `agent_delete`.
+      x-required-role: editor
+      x-role-on-diff: true
+      parameters:
+        - $ref: "#/components/parameters/Csrf"
+        - $ref: "#/components/parameters/IfMatch"
+      responses:
+        "200":
+          description: Removed; the new charter version.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VersionResult"
+        "400":
+          $ref: "#/components/responses/Invalid"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+
+  /services/{ns}/{svc}/skills/{skill}:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Service"
+      - $ref: "#/components/parameters/Skill"
+    put:
+      tags: [agents]
+      operationId: putSkill
+      summary: Create or replace one top-level skill.
+      description: "`name` must equal the path. Audited as `skill_put`."
+      x-required-role: editor
+      x-role-on-diff: true
+      parameters:
+        - $ref: "#/components/parameters/Csrf"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Skill"
+      responses:
+        "200":
+          description: Stored; the new charter version.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VersionResult"
+        "400":
+          $ref: "#/components/responses/Invalid"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+    delete:
+      tags: [agents]
+      operationId: deleteSkill
+      summary: Remove one top-level skill.
+      description: 409 `in_use` while an agent still lists it in `skills`. Audited as `skill_delete`.
+      x-required-role: editor
+      x-role-on-diff: true
+      parameters:
+        - $ref: "#/components/parameters/Csrf"
+        - $ref: "#/components/parameters/IfMatch"
+      responses:
+        "200":
+          description: Removed; the new charter version.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VersionResult"
+        "400":
+          $ref: "#/components/responses/Invalid"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+
+  /links:
+    post:
+      tags: [agents]
+      operationId: createLink
+      summary: Let one orchestrator call another agent (adds an `agent` tool and the authz around it).
+      description: |
+        Same service: editor. Across services: admin (it adds an `authz.callers` rule for a
+        non-local identity). Cross-namespace targets are refused (400 `invalid`). The target's
+        `authz.callers` is edited first, then the source's tools and `guardrails.allowed_*`;
+        each charter is one write with its own `if_match` entry, and a failure after the first
+        write is reported in `failed` without undoing `applied`. Audited as `link_post`.
+      x-required-role: editor
+      x-role-on-diff: true
+      parameters:
+        - $ref: "#/components/parameters/Csrf"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LinkRequest"
+      responses:
+        "200":
+          description: What was applied and what failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LinkResult"
+        "400":
+          $ref: "#/components/responses/Invalid"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+
+  /services/{ns}/{svc}/memory:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Service"
+    get:
+      tags: [memory]
+      operationId: getMemory
+      summary: The service's learned notes, per agent.
+      x-required-role: viewer
+      x-fixture: ui/fixtures/memory.json
+      responses:
+        "200":
+          description: The memory document. The ETag is the memory version.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryDoc"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+    put:
+      tags: [memory]
+      operationId: putMemory
+      summary: Replace the service's notes (full replacement, pushed to every instance).
+      description: |
+        If-Match is the memory version. Agents must exist in the stored charter; per agent at
+        most `learning.max_notes` notes of at most `learning.max_note_chars` characters; at most
+        256 KiB in total. New notes written here get `source: manual`. Audited as `memory_put`.
+      x-required-role: editor
+      parameters:
+        - $ref: "#/components/parameters/Csrf"
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MemoryPut"
+      responses:
+        "200":
+          description: Stored; the new memory version.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VersionResult"
+        "400":
+          $ref: "#/components/responses/Invalid"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+
+  /proposals:
+    get:
+      tags: [proposals]
+      operationId: listProposals
+      summary: Lessons agents proposed, newest first.
+      x-required-role: viewer
+      x-fixture: ui/fixtures/proposals.json
+      parameters:
+        - name: status
+          in: query
+          description: Only proposals with this status (default all).
+          schema:
+            $ref: "#/components/schemas/ProposalStatus"
+        - name: namespace
+          in: query
+          schema:
+            $ref: "#/components/schemas/DnsLabel"
+        - name: service
+          in: query
+          schema:
+            $ref: "#/components/schemas/DnsLabel"
+      responses:
+        "200":
+          description: The proposals.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Proposal"
+        "400":
+          $ref: "#/components/responses/Invalid"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+
+  /proposals/{id}/approve:
+    parameters:
+      - $ref: "#/components/parameters/ProposalId"
+    post:
+      tags: [proposals]
+      operationId: approveProposal
+      summary: Approve a pending proposal; its note joins the agent's memory.
+      description: |
+        If-Match is the service's memory version. The note gets `source: review` and
+        `approved_by` = the caller. 409 `version_conflict` when the proposal is no longer
+        pending. Audited as `proposal_approve`.
+      x-required-role: editor
+      parameters:
+        - $ref: "#/components/parameters/Csrf"
+        - $ref: "#/components/parameters/IfMatch"
+      responses:
+        "200":
+          description: The decided proposal and the new memory version.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProposalDecision"
+        "400":
+          $ref: "#/components/responses/Invalid"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+
+  /proposals/{id}/reject:
+    parameters:
+      - $ref: "#/components/parameters/ProposalId"
+    post:
+      tags: [proposals]
+      operationId: rejectProposal
+      summary: Reject a pending proposal (memory is unchanged).
+      description: If-Match is the service's memory version. Audited as `proposal_reject`.
+      x-required-role: editor
+      parameters:
+        - $ref: "#/components/parameters/Csrf"
+        - $ref: "#/components/parameters/IfMatch"
+      responses:
+        "200":
+          description: The decided proposal and the (unchanged) memory version.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProposalDecision"
+        "400":
+          $ref: "#/components/responses/Invalid"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+
+  /events/recent:
+    get:
+      tags: [events]
+      operationId: recentEvents
+      summary: Recent audit records from the in-memory ring, newest first.
+      description: |
+        The ring holds at most `events.retain_bytes` of records. Filters combine with AND;
+        `agent` matches the record's `agent` or `caller_agent`; `trace_id` and `request_id`
+        match exactly. Payloads per the token (see Roles, scopes and payloads).
+      x-required-role: viewer
+      x-fixture: ui/fixtures/events-recent.json
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+        - name: namespace
+          in: query
+          schema:
+            $ref: "#/components/schemas/DnsLabel"
+        - name: service
+          in: query
+          schema:
+            $ref: "#/components/schemas/DnsLabel"
+        - name: agent
+          in: query
+          schema:
+            $ref: "#/components/schemas/DnsLabel"
+        - name: trace_id
+          in: query
+          schema:
+            type: string
+            pattern: "^[0-9a-f]{32}$"
+        - name: request_id
+          in: query
+          schema:
+            type: string
+        - name: kind
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The records.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AuditRecord"
+        "400":
+          $ref: "#/components/responses/Invalid"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+
+  /events:
+    get:
+      tags: [events]
+      operationId: streamEvents
+      summary: Live events (Server-Sent Events).
+      description: |
+        `text/event-stream`, one JSON object per `data:` line. Every event has
+        `id: <seq>`, where `seq` is one monotonic counter per server process across every
+        event type. Ids a client receives can have gaps (events outside its namespaces, or
+        `cp_audit` for a non-admin, are never sent to it); a gap is not a loss. Loss is
+        signalled only by `lagged` and `reset`.
+
+        **Reconnect.** A client that reconnects sends `Last-Event-ID` (browsers do so
+        automatically). If every event after that id is still in the server's ring, the server
+        first replays them (filtered as above), then continues live. Otherwise (the id is older
+        than the ring, or newer than the current counter, e.g. after a server restart) it sends
+        one `reset` event, whose `id` is the current counter, and continues live; the client
+        then refetches `/graph` and `/services`.
+
+        **Back-pressure.** Each client has a queue of 1024 events. When it overflows, the queued
+        events are dropped and a `lagged` event `{dropped}` is sent; the client refetches like
+        after `reset`.
+
+        **Keep-alive.** A comment line (`: keepalive`) every 15 s.
+
+        Event types and their `data` schemas are listed in `x-sse-events` below and in the
+        `SseEvent*` schemas. A golden transcript is `ui/fixtures/events.sse`.
+      x-required-role: viewer
+      x-fixture: ui/fixtures/events.sse
+      x-sse-events:
+        audit:
+          $ref: "#/components/schemas/AuditEvent"
+        graph:
+          $ref: "#/components/schemas/GraphEvent"
+        registry:
+          $ref: "#/components/schemas/RegistryEvent"
+        config:
+          $ref: "#/components/schemas/ConfigEvent"
+        ack:
+          $ref: "#/components/schemas/AckEvent"
+        proposal:
+          $ref: "#/components/schemas/Proposal"
+        cp_audit:
+          $ref: "#/components/schemas/CpAuditRecord"
+        lagged:
+          $ref: "#/components/schemas/LaggedEvent"
+        reset:
+          $ref: "#/components/schemas/ResetEvent"
+      parameters:
+        - name: namespace
+          in: query
+          schema:
+            $ref: "#/components/schemas/DnsLabel"
+        - name: service
+          in: query
+          schema:
+            $ref: "#/components/schemas/DnsLabel"
+        - name: payloads
+          in: query
+          description: "`false` sets `input`/`output` of every audit record to null, whatever the token allows."
+          schema:
+            type: boolean
+            default: true
+        - $ref: "#/components/parameters/LastEventId"
+      responses:
+        "200":
+          description: The event stream.
+          headers:
+            Cache-Control:
+              description: Always `no-store`.
+              schema:
+                type: string
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  Events separated by a blank line:
+
+                      id: 48214
+                      event: audit
+                      data: {"record":{...},"edge_id":"edge:model:...","animate":true}
+
+                  The `data` of each event type is one of the `SseEvent*` schemas.
+              x-sse-event:
+                $ref: "#/components/schemas/SseEvent"
+        "400":
+          $ref: "#/components/responses/Invalid"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+
+  /healthz:
+    get:
+      tags: [health]
+      operationId: healthz
+      summary: Process is up.
+      security: []
+      x-required-role: none
+      responses:
+        "200":
+          description: Always `ok`.
+          content:
+            text/plain:
+              schema:
+                type: string
+                const: ok
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+
+  /readyz:
+    get:
+      tags: [health]
+      operationId: readyz
+      summary: Every enabled component is serving.
+      security: []
+      x-required-role: none
+      responses:
+        "200":
+          description: Ready.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadyStatus"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+        "503":
+          description: Not ready; `components` says which one is not.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadyStatus"
+
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      bearerFormat: "att_ followed by 43 base64url characters (32 random bytes)"
+      description: A token from the ControlPlaneConfig (`auth.tokens`, stored as SHA-256 only).
+    session:
+      type: apiKey
+      in: cookie
+      name: attache_session
+      description: Session cookie from `POST /login` (HMAC-SHA256 signed `{token_name, exp}`, 12 h).
+
+  parameters:
+    Namespace:
+      name: ns
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/DnsLabel"
+    Service:
+      name: svc
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/DnsLabel"
+    Agent:
+      name: agent
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/DnsLabel"
+    Skill:
+      name: skill
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/DnsLabel"
+    Version:
+      name: version
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Version"
+    ProposalId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    Csrf:
+      name: X-Attache-CSRF
+      in: header
+      required: true
+      description: Must be exactly `1` on every mutating request (403 `forbidden` otherwise).
+      schema:
+        type: string
+        const: "1"
+    IfMatch:
+      name: If-Match
+      in: header
+      required: false
+      description: |
+        `"<version>"` (quoted): the charter version, or the memory version for memory and
+        proposal calls. Required (400 `invalid` when missing) except for the first charter of a
+        service, which sends `If-None-Match: *` instead.
+      schema:
+        type: string
+        pattern: '^"[0-9]+"$'
+        examples: ['"3"']
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      required: false
+      description: "`*`: create the service's first charter; 409 `version_conflict` if one exists."
+      schema:
+        type: string
+        const: "*"
+    LastEventId:
+      name: Last-Event-ID
+      in: header
+      required: false
+      description: The `id` of the last event the client saw (reconnect replay, see `/events`).
+      schema:
+        type: string
+        pattern: "^[0-9]+$"
+
+  headers:
+    ETag:
+      description: '`"<version>"` (quoted decimal): the charter version, or the memory version for memory and proposal responses.'
+      schema:
+        type: string
+        pattern: '^"[0-9]+"$'
+    SetSessionCookie:
+      description: |
+        `attache_session=<signed>; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200` (plus
+        `Secure` over TLS); cleared with `Max-Age=0` on logout.
+      schema:
+        type: string
+    RetryAfter:
+      description: Seconds until another login attempt is accepted.
+      schema:
+        type: integer
+        minimum: 1
+
+  responses:
+    Invalid:
+      description: "`invalid`, `config.restart_required` or `version_skew`; `details` lists every problem."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: invalid
+            details: ["agents[0].learning.mode: auto requires enabled: true"]
+    Unauthenticated:
+      description: No valid token or session.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: unauthenticated
+            details: []
+    Forbidden:
+      description: The role is not enough for this request or this diff, or the CSRF header is missing.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: forbidden
+            details: ["authz.default requires admin"]
+    NotFound:
+      description: No such resource, or one outside the caller's namespaces.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: not_found
+            details: ["no charter for attache-demo/billing"]
+    Conflict:
+      description: "`version_conflict` (stale If-Match; `current_version` is set) or `in_use`."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: version_conflict
+            details: ["If-Match \"2\" does not match the current version"]
+            current_version: "3"
+    MisdirectedRequest:
+      description: The Host header is not an allowed name.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: misdirected_request
+            details: ["host evil.example is not served here"]
+    TooManyRequests:
+      description: Too many failed logins from this client IP.
+      headers:
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: rate_limited
+            details: ["too many failed logins; retry in 42 s"]
+
+  schemas:
+    # ---- shared scalars ----------------------------------------------------------------------
+    DnsLabel:
+      type: string
+      description: A DNS-1123 label.
+      pattern: "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"
+    Version:
+      type: string
+      description: Decimal string of a u64 counter.
+      pattern: "^[0-9]+$"
+    Timestamp:
+      type: string
+      format: date-time
+      description: RFC 3339, UTC, milliseconds (`2026-10-21T10:00:00.000Z`).
+    Sha256Hex:
+      type: string
+      pattern: "^[0-9a-f]{64}$"
+    Role:
+      type: string
+      enum: [viewer, editor, admin]
+    NodeId:
+      type: string
+      description: |
+        `svc:<ns>/<svc>`, `app:<ns>/<svc>`, `agent:<ns>/<svc>/<agent>`, `model:anthropic`,
+        `model:mock`, `external:<scheme>://<host>[:<port>]`.
+      pattern: "^(svc:[a-z0-9-]+/[a-z0-9-]+|app:[a-z0-9-]+/[a-z0-9-]+|agent:[a-z0-9-]+/[a-z0-9-]+/[a-z0-9-]+|model:(anthropic|mock)|external:https?://[^/?#]+)$"
+
+    # ---- errors and small bodies ---------------------------------------------------------------
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error, details]
+      properties:
+        error:
+          type: string
+          enum:
+            - invalid
+            - config.restart_required
+            - version_skew
+            - unauthenticated
+            - forbidden
+            - not_found
+            - version_conflict
+            - in_use
+            - misdirected_request
+            - rate_limited
+            - internal
+        details:
+          type: array
+          items:
+            type: string
+        current_version:
+          description: Only with `version_conflict`.
+          $ref: "#/components/schemas/Version"
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [token]
+      properties:
+        token:
+          type: string
+          pattern: "^att_[A-Za-z0-9_-]{43}$"
+    WhoAmI:
+      type: object
+      additionalProperties: false
+      required: [name, role, namespaces, payloads]
+      properties:
+        name:
+          type: string
+          description: The token name (`anonymous` for the `--dev` anonymous viewer).
+        role:
+          $ref: "#/components/schemas/Role"
+        namespaces:
+          type: array
+          description: Namespaces this identity may see and change; `["*"]` = all.
+          items:
+            type: string
+        payloads:
+          type: boolean
+          description: Whether audit `input`/`output` are visible to this identity.
+    VersionResult:
+      type: object
+      additionalProperties: false
+      required: [version]
+      properties:
+        version:
+          $ref: "#/components/schemas/Version"
+    CharterYaml:
+      type: object
+      additionalProperties: false
+      required: [yaml]
+      properties:
+        yaml:
+          type: string
+          maxLength: 262144
+          description: A charter document (plain Charter or the Charter custom-resource form).
+    RollbackRequest:
+      type: object
+      additionalProperties: false
+      required: [version]
+      properties:
+        version:
+          $ref: "#/components/schemas/Version"
+    AdoptRequest:
+      type: object
+      additionalProperties: false
+      required: [sha256]
+      properties:
+        sha256:
+          $ref: "#/components/schemas/Sha256Hex"
+    ReadyStatus:
+      type: object
+      additionalProperties: false
+      required: [ready, components]
+      properties:
+        ready:
+          type: boolean
+        components:
+          type: object
+          description: Readiness per enabled component (`ca`, `webhook`, `controlplane`, `api`, `ui`, `store`).
+          additionalProperties:
+            type: boolean
+
+    # ---- graph (design §10.1) ------------------------------------------------------------------
+    Graph:
+      type: object
+      additionalProperties: false
+      required: [version, generated_at, nodes, edges]
+      properties:
+        version:
+          $ref: "#/components/schemas/Version"
+        generated_at:
+          $ref: "#/components/schemas/Timestamp"
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/Node"
+        edges:
+          type: array
+          description: Every `source` and `target` is the id of a node in `nodes`.
+          items:
+            $ref: "#/components/schemas/Edge"
+    Node:
+      description: |
+        One of the node types. Placeholder nodes stand for peers the control plane does not
+        know (an agent tool naming a service without a charter or instances): they carry
+        `placeholder: true` and `status: disconnected` and nothing else type-specific.
+      oneOf:
+        - $ref: "#/components/schemas/ServiceNode"
+        - $ref: "#/components/schemas/AppNode"
+        - $ref: "#/components/schemas/AgentNode"
+        - $ref: "#/components/schemas/ModelProviderNode"
+        - $ref: "#/components/schemas/ExternalNode"
+        - $ref: "#/components/schemas/PlaceholderNode"
+    Ports:
+      type: object
+      additionalProperties: false
+      required: [in, out]
+      description: |
+        Port names. Agent: `in: ["invoke"]`, `out: [tool names in declaration order..., "model"]`.
+        App: `in: ["service"]` when a service tool targets it (else `[]`), `out: ["invoke"]`.
+        Model provider: `in: ["model"]`. External: `in: ["http"]`.
+      properties:
+        in:
+          type: array
+          items:
+            type: string
+        out:
+          type: array
+          items:
+            type: string
+    ServiceStatus:
+      type: string
+      description: |
+        `connected`: at least one instance connected and every connected instance acked the
+        stored version without error; `degraded`: connected, but an instance has an ack error,
+        lags the stored version or its runtime is not ready; `disconnected`: a stored charter and
+        no instance; `no_charter`: instances but no stored charter (see `pending_adoption`).
+      enum: [connected, degraded, disconnected, no_charter]
+    ServiceNode:
+      type: object
+      additionalProperties: false
+      required: [id, type, label, namespace, service, status, instances, charter_version]
+      properties:
+        id:
+          type: string
+          pattern: "^svc:"
+        type:
+          const: service
+        label:
+          type: string
+        namespace:
+          $ref: "#/components/schemas/DnsLabel"
+        service:
+          $ref: "#/components/schemas/DnsLabel"
+        status:
+          $ref: "#/components/schemas/ServiceStatus"
+        instances:
+          type: integer
+          minimum: 0
+          description: Connected instances.
+        charter_version:
+          description: Null when the service has no stored charter.
+          oneOf:
+            - $ref: "#/components/schemas/Version"
+            - type: "null"
+    AppNode:
+      type: object
+      additionalProperties: false
+      required: [id, type, parent, label, port, ports, stats]
+      properties:
+        id:
+          type: string
+          pattern: "^app:"
+        type:
+          const: app
+        parent:
+          type: string
+          pattern: "^svc:"
+        label:
+          type: string
+        port:
+          description: "`service.app_port`; null when unknown."
+          oneOf:
+            - type: integer
+              minimum: 1
+              maximum: 65535
+            - type: "null"
+        ports:
+          $ref: "#/components/schemas/Ports"
+        stats:
+          $ref: "#/components/schemas/AppStats"
+    AgentStatus:
+      type: string
+      description: |
+        Over the stats window: `errors` when an invocation ended with an error; else `denied`
+        when an invocation was denied; else `ok` when there was any invocation; else `idle`.
+      enum: [ok, errors, denied, idle]
+    AgentNode:
+      type: object
+      additionalProperties: false
+      required: [id, type, parent, label, agent_type, model, skills, status, ports, tools, learning, stats]
+      properties:
+        id:
+          type: string
+          pattern: "^agent:"
+        type:
+          const: agent
+        parent:
+          type: string
+          pattern: "^svc:"
+        label:
+          type: string
+        agent_type:
+          type: string
+          enum: [agent, orchestrator]
+        model:
+          type: string
+        skills:
+          type: array
+          items:
+            $ref: "#/components/schemas/DnsLabel"
+        status:
+          $ref: "#/components/schemas/AgentStatus"
+        ports:
+          $ref: "#/components/schemas/Ports"
+        tools:
+          type: array
+          items:
+            $ref: "#/components/schemas/ToolRef"
+        learning:
+          $ref: "#/components/schemas/LearningSummary"
+        stats:
+          $ref: "#/components/schemas/AgentStats"
+    ToolRef:
+      type: object
+      additionalProperties: false
+      required: [name, type, target, allowed]
+      description: |
+        A declared tool. `target`: agent tool → `agent:<caller ns>/<tool.service or own svc>/<tool.agent>`;
+        service tool → `app:<caller ns>/<tool.service>`; http tool → `external:<origin>`.
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+          enum: [agent, service, http]
+        target:
+          $ref: "#/components/schemas/NodeId"
+        allowed:
+          type: boolean
+          description: False when `guardrails.allowed_tools` excludes the tool (the model never sees it).
+    LearningSummary:
+      type: object
+      additionalProperties: false
+      required: [enabled, mode, notes, pending]
+      properties:
+        enabled:
+          type: boolean
+        mode:
+          type: string
+          enum: [review, auto]
+        notes:
+          type: integer
+          minimum: 0
+          description: Active notes in memory.
+        pending:
+          type: integer
+          minimum: 0
+          description: Pending proposals.
+    AgentStats:
+      type: object
+      additionalProperties: false
+      required: [invocations, denied, errors, p50_ms, p95_ms, tokens_in, tokens_out, cost_usd]
+      description: |
+        Server-side, over a sliding 15 minutes in one-minute buckets. `invocations`, `p50_ms`,
+        `p95_ms`: the agent's `agent_invocation` records (any caller). `denied` / `errors`: its
+        `agent_invocation` and `tool_call` records with decision `deny` / with `error` set.
+        `tokens_*` and `cost_usd`: its own `model_call` records (sub-agents count on their own
+        node).
+      properties:
+        invocations:
+          type: integer
+          minimum: 0
+        denied:
+          type: integer
+          minimum: 0
+        errors:
+          type: integer
+          minimum: 0
+        p50_ms:
+          type: integer
+          minimum: 0
+        p95_ms:
+          type: integer
+          minimum: 0
+        tokens_in:
+          type: integer
+          minimum: 0
+        tokens_out:
+          type: integer
+          minimum: 0
+        cost_usd:
+          type: number
+          minimum: 0
+    AppStats:
+      type: object
+      additionalProperties: false
+      required: [calls, denied, errors, avg_ms]
+      description: The app's inbound (callee-side) `service_call` records from peers, same window as `AgentStats`.
+      properties:
+        calls:
+          type: integer
+          minimum: 0
+        denied:
+          type: integer
+          minimum: 0
+        errors:
+          type: integer
+          minimum: 0
+        avg_ms:
+          type: integer
+          minimum: 0
+    ModelProviderNode:
+      type: object
+      additionalProperties: false
+      required: [id, type, label, ports]
+      properties:
+        id:
+          type: string
+          enum: ["model:anthropic", "model:mock"]
+        type:
+          const: model_provider
+        label:
+          type: string
+        ports:
+          $ref: "#/components/schemas/Ports"
+    ExternalNode:
+      type: object
+      additionalProperties: false
+      required: [id, type, label, ports]
+      properties:
+        id:
+          type: string
+          pattern: "^external:https?://[^/?#]+$"
+        type:
+          const: external
+        label:
+          type: string
+          description: The host (and port, when not the scheme's default).
+        ports:
+          $ref: "#/components/schemas/Ports"
+    PlaceholderNode:
+      type: object
+      additionalProperties: false
+      required: [id, type, label, placeholder, status, ports]
+      properties:
+        id:
+          $ref: "#/components/schemas/NodeId"
+        type:
+          type: string
+          enum: [service, app, agent]
+        parent:
+          type: string
+          pattern: "^svc:"
+          description: For app and agent placeholders, the (placeholder) service node.
+        label:
+          type: string
+        placeholder:
+          const: true
+        status:
+          const: disconnected
+        ports:
+          $ref: "#/components/schemas/Ports"
+    Edge:
+      type: object
+      additionalProperties: false
+      required: [id, kind, source, source_port, target, target_port, declared, stats]
+      description: |
+        `id` = `edge:<kind>:<source>-><target>`, plus `#<tool name>` for tool edges; stable across
+        reloads. Declared edges come from the stored charters: `invoke` app → agent for every
+        agent the `identity: local` caller rule admits; `tool` agent → tool target for every
+        declared tool (`source_port` = the tool name); `model` agent → `model:mock` when the
+        agent's model is `mock`, else `model:anthropic`. A record that maps to an edge not in the
+        graph adds an undeclared edge (`declared: false`, at most 200 per service, oldest
+        evicted); its `source_port` may name a tool the source node no longer declares, and the
+        UI then draws it from the node's border.
+
+        Record → edge mapping (one animating record per hop): `agent_invocation` with caller
+        `local` and no `caller_agent` → the `invoke` edge; `agent_call` (caller side) → the
+        agent tool edge; `service_call` outbound or internal (caller side) → the service tool
+        edge; `http_call` → the http tool edge; `model_call` → the `model` edge (provider from
+        the callee: `mock` → `model:mock`, else `model:anthropic`). Everything else animates
+        nothing.
+      properties:
+        id:
+          type: string
+          pattern: "^edge:(invoke|tool|model):"
+        kind:
+          type: string
+          enum: [invoke, tool, model]
+        source:
+          $ref: "#/components/schemas/NodeId"
+        source_port:
+          type: string
+        target:
+          $ref: "#/components/schemas/NodeId"
+        target_port:
+          type: string
+        declared:
+          type: boolean
+        stats:
+          $ref: "#/components/schemas/EdgeStats"
+    EdgeStats:
+      type: object
+      additionalProperties: false
+      required: [calls, denied, errors, avg_ms, last_ts]
+      description: Records mapped to this edge, same window as `AgentStats`. `last_ts` is the newest record's `ts` (it may be older than the window).
+      properties:
+        calls:
+          type: integer
+          minimum: 0
+        denied:
+          type: integer
+          minimum: 0
+        errors:
+          type: integer
+          minimum: 0
+        avg_ms:
+          type: integer
+          minimum: 0
+        last_ts:
+          oneOf:
+            - $ref: "#/components/schemas/Timestamp"
+            - type: "null"
+
+    # ---- services and instances ----------------------------------------------------------------
+    ServiceSummary:
+      type: object
+      additionalProperties: false
+      required: [namespace, service, status, epoch, charter_version, memory_version, pending_adoption, instances]
+      properties:
+        namespace:
+          $ref: "#/components/schemas/DnsLabel"
+        service:
+          $ref: "#/components/schemas/DnsLabel"
+        status:
+          $ref: "#/components/schemas/ServiceStatus"
+        epoch:
+          description: Null when the service has no stored charter.
+          oneOf:
+            - type: string
+              format: uuid
+            - type: "null"
+        charter_version:
+          oneOf:
+            - $ref: "#/components/schemas/Version"
+            - type: "null"
+        memory_version:
+          description: Null when the service has no stored charter.
+          oneOf:
+            - $ref: "#/components/schemas/Version"
+            - type: "null"
+        pending_adoption:
+          oneOf:
+            - $ref: "#/components/schemas/PendingAdoption"
+            - type: "null"
+        instances:
+          type: array
+          items:
+            $ref: "#/components/schemas/Instance"
+    PendingAdoption:
+      type: object
+      additionalProperties: false
+      required: [sha256, pod, ts]
+      description: A sidecar's valid start-up charter waiting for `POST .../adopt`.
+      properties:
+        sha256:
+          $ref: "#/components/schemas/Sha256Hex"
+        pod:
+          type: string
+        ts:
+          $ref: "#/components/schemas/Timestamp"
+    Instance:
+      type: object
+      additionalProperties: false
+      required:
+        - instance_id
+        - pod
+        - sidecar_version
+        - connected_at
+        - last_heartbeat
+        - runtime_ready
+        - acked_version
+        - ack_error
+        - cert_expires_in_s
+        - audit_dropped
+      description: One connected `Connect` stream (a pod's sidecar). A reconnect is a new instance.
+      properties:
+        instance_id:
+          type: string
+          format: uuid
+        pod:
+          type: string
+        sidecar_version:
+          type: string
+        connected_at:
+          $ref: "#/components/schemas/Timestamp"
+        last_heartbeat:
+          oneOf:
+            - $ref: "#/components/schemas/Timestamp"
+            - type: "null"
+        runtime_ready:
+          type: boolean
+        acked_version:
+          description: The last charter version this instance acknowledged (applied or not).
+          oneOf:
+            - $ref: "#/components/schemas/Version"
+            - type: "null"
+        ack_error:
+          description: The error of the last charter ack, null when it applied.
+          oneOf:
+            - type: string
+            - type: "null"
+        cert_expires_in_s:
+          description: From the last heartbeat; negative once expired.
+          oneOf:
+            - type: integer
+            - type: "null"
+        audit_dropped:
+          type: integer
+          minimum: 0
+          description: Audit records the sidecar dropped before sending (from heartbeats).
+
+    # ---- charter ---------------------------------------------------------------------------------
+    CharterDoc:
+      type: object
+      additionalProperties: false
+      required: [epoch, version, yaml, charter]
+      properties:
+        epoch:
+          type: string
+          format: uuid
+        version:
+          $ref: "#/components/schemas/Version"
+        yaml:
+          type: string
+          description: The stored YAML text, exactly as written (comments kept).
+        charter:
+          type: object
+          description: |
+            The same document as JSON: the YAML converted as written (comments dropped,
+            defaults not filled in). Its schema is `schemas/charter.schema.json`.
+    ValidateResult:
+      type: object
+      additionalProperties: false
+      required: [charter, needs_role, weakened]
+      properties:
+        charter:
+          type: object
+          description: The candidate as JSON (see `CharterDoc.charter`).
+        needs_role:
+          $ref: "#/components/schemas/Role"
+        weakened:
+          type: array
+          description: |
+            Dotted paths of changes that reduce protection: removed `audit.redact` paths,
+            `pii_redact` true→false, `export_payloads` false→true, `authz.default` deny→allow,
+            removed `input_deny`/`output_deny` rules.
+          items:
+            type: string
+    HistoryEntry:
+      type: object
+      additionalProperties: false
+      required: [version, ts, actor, sha256]
+      properties:
+        version:
+          $ref: "#/components/schemas/Version"
+        ts:
+          $ref: "#/components/schemas/Timestamp"
+        actor:
+          type: string
+          description: Token name, `sidecar:<spiffe id>/<pod>`, `k8s:<field manager>` or `system`.
+        sha256:
+          description: SHA-256 of that version's YAML text.
+          $ref: "#/components/schemas/Sha256Hex"
+
+    # ---- agents and skills ----------------------------------------------------------------------
+    AgentView:
+      type: object
+      additionalProperties: false
+      required: [agent]
+      description: |
+        An agent with the policy around it. On GET every field is present. On POST, a missing
+        `callers` adds the agent to the `identity: local` caller rule; a missing or null
+        `allowed_tools` / `allowed_services` means "no entry" (every declared tool / every
+        service its tools name).
+      properties:
+        agent:
+          $ref: "#/components/schemas/CharterAgent"
+        allowed_tools:
+          description: "`guardrails.allowed_tools[<agent>]`, null when there is no entry."
+          oneOf:
+            - type: array
+              items:
+                type: string
+            - type: "null"
+        allowed_services:
+          description: "`guardrails.allowed_services[<agent>]`, null when there is no entry."
+          oneOf:
+            - type: array
+              items:
+                $ref: "#/components/schemas/DnsLabel"
+            - type: "null"
+        callers:
+          type: array
+          description: The `authz.callers` rules that admit this agent (by name or `"*"`).
+          items:
+            $ref: "#/components/schemas/CallerRef"
+    CallerRef:
+      type: object
+      additionalProperties: false
+      required: [identity, caller_agents]
+      properties:
+        identity:
+          type: string
+          description: "`local` or `spiffe://attache/ns/<ns>/svc/<svc>`."
+        caller_agents:
+          oneOf:
+            - type: array
+              items:
+                $ref: "#/components/schemas/DnsLabel"
+            - type: "null"
+    CharterAgent:
+      type: object
+      additionalProperties: false
+      required: [name, model]
+      description: One `agents[]` entry of a charter (CONTRACT.md §3 and design §4).
+      properties:
+        name:
+          $ref: "#/components/schemas/DnsLabel"
+        type:
+          type: string
+          enum: [agent, orchestrator]
+          default: agent
+        model:
+          type: string
+          description: A Claude model id or `mock`.
+        system:
+          type: string
+          maxLength: 32768
+        tools:
+          type: array
+          items:
+            $ref: "#/components/schemas/CharterTool"
+        budgets:
+          $ref: "#/components/schemas/Budgets"
+        skills:
+          type: array
+          items:
+            $ref: "#/components/schemas/DnsLabel"
+        harness:
+          $ref: "#/components/schemas/Harness"
+        learning:
+          $ref: "#/components/schemas/Learning"
+    CharterTool:
+      type: object
+      additionalProperties: false
+      required: [name, description, type]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        type:
+          type: string
+          enum: [service, agent, http]
+        parameters:
+          type: object
+          description: JSON Schema object for the tool input.
+        service:
+          $ref: "#/components/schemas/DnsLabel"
+        method:
+          type: string
+        path:
+          type: string
+        agent:
+          $ref: "#/components/schemas/DnsLabel"
+        url:
+          type: string
+    Budgets:
+      type: object
+      additionalProperties: false
+      properties:
+        max_tokens_per_call:
+          type: integer
+          minimum: 1
+          maximum: 128000
+        max_calls_per_minute:
+          type: integer
+          minimum: 1
+        max_cost_usd_per_day:
+          type: number
+          exclusiveMinimum: 0
+        max_steps:
+          type: integer
+          minimum: 1
+    Harness:
+      type: object
+      additionalProperties: false
+      properties:
+        max_retries:
+          type: integer
+          minimum: 0
+          maximum: 10
+        request_timeout_seconds:
+          type: integer
+          minimum: 1
+          maximum: 600
+        fallback_model:
+          type: string
+        tool_result_max_chars:
+          type: integer
+          minimum: 100
+          maximum: 200000
+    Learning:
+      type: object
+      additionalProperties: false
+      properties:
+        enabled:
+          type: boolean
+        mode:
+          type: string
+          enum: [review, auto]
+        max_notes:
+          type: integer
+          minimum: 1
+          maximum: 200
+        max_note_chars:
+          type: integer
+          minimum: 50
+          maximum: 4000
+        note_ttl_days:
+          type: integer
+          minimum: 1
+          maximum: 365
+        from_peers:
+          type: boolean
+        max_proposals_per_hour:
+          type: integer
+          minimum: 1
+          maximum: 100
+    Skill:
+      type: object
+      additionalProperties: false
+      required: [name, description, instructions]
+      description: One top-level `skills[]` entry of a charter (design §4).
+      properties:
+        name:
+          $ref: "#/components/schemas/DnsLabel"
+        description:
+          type: string
+          minLength: 1
+          maxLength: 1024
+        instructions:
+          type: string
+          minLength: 1
+          maxLength: 32768
+        tools:
+          type: array
+          items:
+            type: string
+
+    # ---- links ---------------------------------------------------------------------------------
+    LinkRequest:
+      type: object
+      additionalProperties: false
+      required: [from, to, tool, if_match]
+      properties:
+        from:
+          type: string
+          description: The calling orchestrator's node id (`agent:<ns>/<svc>/<agent>`).
+          pattern: "^agent:"
+        to:
+          type: string
+          description: The target agent's node id, in the same namespace.
+          pattern: "^agent:"
+        tool:
+          $ref: "#/components/schemas/LinkTool"
+        if_match:
+          type: object
+          description: "`{\"<ns>/<svc>\": \"<charter version>\"}` for every charter the link edits."
+          additionalProperties:
+            $ref: "#/components/schemas/Version"
+    LinkTool:
+      type: object
+      additionalProperties: false
+      required: [name, description]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+    LinkResult:
+      type: object
+      additionalProperties: false
+      required: [applied, failed]
+      properties:
+        applied:
+          type: array
+          items:
+            $ref: "#/components/schemas/LinkApplied"
+        failed:
+          type: object
+          description: "`\"<ns>/<svc>\"` → the error of that charter's write."
+          additionalProperties:
+            $ref: "#/components/schemas/Error"
+    LinkApplied:
+      type: object
+      additionalProperties: false
+      required: [service, version]
+      properties:
+        service:
+          type: string
+          description: "`<ns>/<svc>`."
+        version:
+          $ref: "#/components/schemas/Version"
+
+    # ---- memory and proposals --------------------------------------------------------------------
+    MemoryDoc:
+      type: object
+      additionalProperties: false
+      required: [version, agents]
+      properties:
+        version:
+          $ref: "#/components/schemas/Version"
+        agents:
+          type: object
+          description: Agent name → its active notes, oldest first.
+          additionalProperties:
+            type: array
+            items:
+              $ref: "#/components/schemas/Note"
+    MemoryPut:
+      type: object
+      additionalProperties: false
+      required: [agents]
+      properties:
+        agents:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              $ref: "#/components/schemas/Note"
+    NoteSource:
+      type: string
+      description: "`review` (an approved proposal), `auto` (stored at once, expires), `manual` (written with `PUT /memory`)."
+      enum: [review, auto, manual]
+    Note:
+      type: object
+      additionalProperties: false
+      required: [id, text, source, request_id, trace_id, approved_by, ts, expires_at]
+      description: The proto `Note` (design §7) in JSON; empty proto strings are null here.
+      properties:
+        id:
+          type: string
+          format: uuid
+        text:
+          type: string
+        source:
+          $ref: "#/components/schemas/NoteSource"
+        request_id:
+          oneOf:
+            - type: string
+            - type: "null"
+        trace_id:
+          oneOf:
+            - type: string
+            - type: "null"
+        approved_by:
+          description: Who approved it; null for `auto` notes.
+          oneOf:
+            - type: string
+            - type: "null"
+        ts:
+          $ref: "#/components/schemas/Timestamp"
+        expires_at:
+          description: Set for `auto` notes (`ts + note_ttl_days`), else null.
+          oneOf:
+            - $ref: "#/components/schemas/Timestamp"
+            - type: "null"
+    ProposalStatus:
+      type: string
+      enum: [pending, approved, rejected]
+    Proposal:
+      type: object
+      additionalProperties: false
+      required: [id, namespace, service, agent, note, rationale, request_id, trace_id, ts, status, auto]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Assigned by the control plane (UUIDv4).
+        namespace:
+          $ref: "#/components/schemas/DnsLabel"
+        service:
+          $ref: "#/components/schemas/DnsLabel"
+        agent:
+          $ref: "#/components/schemas/DnsLabel"
+        note:
+          type: string
+        rationale:
+          type: string
+        request_id:
+          type: string
+        trace_id:
+          type: string
+        ts:
+          $ref: "#/components/schemas/Timestamp"
+        status:
+          $ref: "#/components/schemas/ProposalStatus"
+        auto:
+          type: boolean
+          description: Stored at once (learning mode `auto`); such proposals are `approved` from the start.
+    ProposalDecision:
+      type: object
+      additionalProperties: false
+      required: [proposal, memory_version]
+      properties:
+        proposal:
+          $ref: "#/components/schemas/Proposal"
+        memory_version:
+          $ref: "#/components/schemas/Version"
+
+    # ---- audit -----------------------------------------------------------------------------------
+    AuditRecord:
+      type: object
+      description: |
+        CONTRACT.md §6, with the v0.2 kinds `config` and `learning` (design §5). A consumer keeps
+        records of kinds it does not know and shows the kind as-is. `service`/`namespace` are the
+        identity of the Connect stream the record arrived on.
+      required:
+        - ts
+        - kind
+        - request_id
+        - trace_id
+        - span_id
+        - parent_span_id
+        - service
+        - namespace
+        - agent
+        - caller
+        - caller_agent
+        - callee
+        - direction
+        - input
+        - output
+        - input_sha256
+        - output_sha256
+        - tokens
+        - cost_usd
+        - latency_ms
+        - decision
+        - rule
+        - reason
+        - error
+      properties:
+        ts:
+          $ref: "#/components/schemas/Timestamp"
+        kind:
+          type: string
+          description: "`agent_invocation`, `model_call`, `tool_call`, `agent_call`, `service_call`, `http_call`, `authz`, `guardrail`, `budget`, `config`, `learning`, or a later kind."
+          examples: [agent_invocation, config, learning]
+        request_id:
+          type: string
+        trace_id:
+          type: string
+        span_id:
+          type: string
+        parent_span_id:
+          oneOf:
+            - type: string
+            - type: "null"
+        service:
+          type: string
+        namespace:
+          type: string
+        agent:
+          oneOf:
+            - type: string
+            - type: "null"
+        caller:
+          type: string
+          description: "`local`, a SPIFFE id, `unknown`, or for `config` records `control-plane` / `file`."
+        caller_agent:
+          oneOf:
+            - type: string
+            - type: "null"
+        callee:
+          type: string
+        direction:
+          type: string
+          enum: [inbound, outbound, internal]
+        input:
+          description: Redacted and truncated payload (any JSON); null when hidden by the token or `payloads=false`.
+        output:
+          description: Redacted and truncated payload (any JSON); null when denied or hidden.
+        input_sha256:
+          oneOf:
+            - $ref: "#/components/schemas/Sha256Hex"
+            - type: "null"
+        output_sha256:
+          oneOf:
+            - $ref: "#/components/schemas/Sha256Hex"
+            - type: "null"
+        tokens:
+          oneOf:
+            - $ref: "#/components/schemas/Tokens"
+            - type: "null"
+        cost_usd:
+          oneOf:
+            - type: number
+              minimum: 0
+            - type: "null"
+        latency_ms:
+          type: integer
+          minimum: 0
+        decision:
+          type: string
+          enum: [allow, deny]
+        rule:
+          oneOf:
+            - type: string
+            - type: "null"
+        reason:
+          oneOf:
+            - type: string
+            - type: "null"
+        error:
+          oneOf:
+            - type: string
+            - type: "null"
+    Tokens:
+      type: object
+      additionalProperties: false
+      required: [input, output]
+      properties:
+        input:
+          type: integer
+          minimum: 0
+        output:
+          type: integer
+          minimum: 0
+    CpAuditRecord:
+      type: object
+      additionalProperties: false
+      description: One control-plane action (design §8.5). Also one JSON line on stdout and in the file store's `.audit.jsonl`.
+      required: [ts, actor, actor_kind, role, action, namespace, service, agent, from_version, to_version, sha256_before, sha256_after, result, reason]
+      properties:
+        ts:
+          $ref: "#/components/schemas/Timestamp"
+        actor:
+          type: string
+          description: Token name, `sidecar:<spiffe id>/<pod>`, `k8s:<field manager>` or `system`.
+        actor_kind:
+          type: string
+          enum: [session, token, sidecar, k8s, system]
+        role:
+          oneOf:
+            - $ref: "#/components/schemas/Role"
+            - type: "null"
+        action:
+          type: string
+          enum:
+            - login
+            - login_failed
+            - logout
+            - charter_put
+            - agent_post
+            - agent_put
+            - agent_delete
+            - skill_put
+            - skill_delete
+            - link_post
+            - rollback
+            - delete_service
+            - adopt_pending
+            - adopt_approve
+            - proposal_approve
+            - proposal_reject
+            - memory_put
+            - note_auto
+            - cert_issue
+            - cert_denied
+            - connect
+            - connect_denied
+            - cr_external_edit
+        namespace:
+          oneOf:
+            - type: string
+            - type: "null"
+        service:
+          oneOf:
+            - type: string
+            - type: "null"
+        agent:
+          oneOf:
+            - type: string
+            - type: "null"
+        from_version:
+          oneOf:
+            - $ref: "#/components/schemas/Version"
+            - type: "null"
+        to_version:
+          oneOf:
+            - $ref: "#/components/schemas/Version"
+            - type: "null"
+        sha256_before:
+          oneOf:
+            - $ref: "#/components/schemas/Sha256Hex"
+            - type: "null"
+        sha256_after:
+          oneOf:
+            - $ref: "#/components/schemas/Sha256Hex"
+            - type: "null"
+        result:
+          type: string
+          enum: [ok, denied, invalid, error]
+        reason:
+          oneOf:
+            - type: string
+            - type: "null"
+
+    # ---- SSE event data (design §10.2) -----------------------------------------------------------
+    SseEvent:
+      description: The `data` of one SSE event; the SSE `event:` field names which.
+      oneOf:
+        - $ref: "#/components/schemas/AuditEvent"
+        - $ref: "#/components/schemas/GraphEvent"
+        - $ref: "#/components/schemas/RegistryEvent"
+        - $ref: "#/components/schemas/ConfigEvent"
+        - $ref: "#/components/schemas/AckEvent"
+        - $ref: "#/components/schemas/Proposal"
+        - $ref: "#/components/schemas/CpAuditRecord"
+        - $ref: "#/components/schemas/LaggedEvent"
+        - $ref: "#/components/schemas/ResetEvent"
+    AuditEvent:
+      type: object
+      additionalProperties: false
+      required: [record, edge_id, animate]
+      description: "`event: audit` — one audit record as it arrived (payloads per the token and `payloads`)."
+      properties:
+        record:
+          $ref: "#/components/schemas/AuditRecord"
+        edge_id:
+          description: The graph edge the record maps to (see `Edge`), null when none.
+          oneOf:
+            - type: string
+            - type: "null"
+        animate:
+          type: boolean
+          description: True when the UI should run a dot along `edge_id` (green allow, red deny, amber error).
+    GraphEvent:
+      type: object
+      additionalProperties: false
+      required: [version]
+      description: "`event: graph` — the graph changed; refetch `/graph`. At most one every 2 s."
+      properties:
+        version:
+          $ref: "#/components/schemas/Version"
+    RegistryEvent:
+      type: object
+      additionalProperties: false
+      required: [namespace, service, instance_id, pod, status]
+      description: "`event: registry` — an instance connected or disconnected."
+      properties:
+        namespace:
+          $ref: "#/components/schemas/DnsLabel"
+        service:
+          $ref: "#/components/schemas/DnsLabel"
+        instance_id:
+          type: string
+          format: uuid
+        pod:
+          type: string
+        status:
+          type: string
+          enum: [connected, disconnected]
+    ConfigEvent:
+      type: object
+      additionalProperties: false
+      required: [namespace, service, version, actor, source]
+      description: "`event: config` — a new charter version was stored."
+      properties:
+        namespace:
+          $ref: "#/components/schemas/DnsLabel"
+        service:
+          $ref: "#/components/schemas/DnsLabel"
+        version:
+          $ref: "#/components/schemas/Version"
+        actor:
+          type: string
+        source:
+          type: string
+          enum: [api, kubernetes, adopt, rollback, file]
+    AckEvent:
+      type: object
+      additionalProperties: false
+      required: [namespace, service, instance_id, pod, kind, version, applied, error]
+      description: "`event: ack` — an instance acknowledged a charter or memory update."
+      properties:
+        namespace:
+          $ref: "#/components/schemas/DnsLabel"
+        service:
+          $ref: "#/components/schemas/DnsLabel"
+        instance_id:
+          type: string
+          format: uuid
+        pod:
+          type: string
+        kind:
+          type: string
+          enum: [charter, memory]
+        version:
+          $ref: "#/components/schemas/Version"
+        applied:
+          type: boolean
+        error:
+          oneOf:
+            - type: string
+            - type: "null"
+    LaggedEvent:
+      type: object
+      additionalProperties: false
+      required: [dropped]
+      description: "`event: lagged` — this client's queue (1024 events) overflowed; refetch `/graph` and `/services`."
+      properties:
+        dropped:
+          type: integer
+          minimum: 1
+    ResetEvent:
+      type: object
+      additionalProperties: false
+      description: "`event: reset` — `Last-Event-ID` could not be replayed; refetch `/graph` and `/services`. The data is `{}`."

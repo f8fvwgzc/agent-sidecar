@@ -1,0 +1,142 @@
+{
+  "epoch": "c0cca7fc-c070-413e-a239-8544313185b0",
+  "version": "3",
+  "yaml": "# charter.yaml for the `orders` service (CONTRACT.md §3).\napiVersion: attache.io/v1alpha1\nkind: Charter\nservice:\n  name: orders\n  namespace: attache-demo\n  app_port: 8080\nagents:\n  - name: ops-assistant\n    type: orchestrator\n    model: claude-opus-5-5\n    system: |\n      You are the operations assistant embedded in the orders service.\n      Answer questions about orders and stock. Use lookup_order for order\n      details, stock_analyst for anything about inventory levels or reorders,\n      and inventory_admin_reset only when explicitly asked to reset admin\n      counters. Be concise and state which tools you used.\n    tools:\n      - name: lookup_order\n        description: Look up an order by id in the orders service.\n        type: service\n        service: orders\n        method: GET\n        path: /orders/{order_id}\n        parameters:\n          type: object\n          properties:\n            order_id: { type: string, description: \"Order id such as 1001\" }\n          required: [order_id]\n      - name: stock_analyst\n        description: Ask the inventory service's stock analyst agent about stock levels, SKUs and reorder advice.\n        type: agent\n        agent: stock-analyst\n        service: inventory\n      - name: order_triage\n        description: Ask the local order triage agent to classify an order problem by urgency.\n        type: agent\n        agent: order-triage\n      - name: inventory_admin_reset\n        description: Reset the inventory admin counters (administrative, destructive).\n        type: service\n        service: inventory\n        method: POST\n        path: /admin/reset\n    budgets:\n      max_tokens_per_call: 2048      # room for adaptive thinking on real Claude\n      max_calls_per_minute: 30\n      max_cost_usd_per_day: 5.0\n      max_steps: 6\n  - name: order-triage\n    type: agent\n    model: claude-opus-5-5\n    system: |\n      You classify order problems into urgency P1 (blocked revenue), P2\n      (customer waiting) or P3 (cosmetic). Answer with the level and one line.\n    budgets:\n      max_tokens_per_call: 1024\n      max_calls_per_minute: 60\n      max_cost_usd_per_day: 1.0\n      max_steps: 2\nguardrails:\n  max_input_bytes: 8192\n  pii_redact: true\n  input_deny:\n    - name: no-secrets\n      regex: \"(?i)(api[_-]?key|password|secret)\\\\s*[:=]\"\n  allowed_tools:\n    ops-assistant: [lookup_order, stock_analyst, order_triage, inventory_admin_reset]\n  allowed_services:\n    ops-assistant: [orders, inventory]\nauthz:\n  default: deny\n  callers:\n    - identity: local\n      agents: [\"*\"]\n  services:\n    - name: self-orders\n      agent: ops-assistant\n      service: orders\n      allow: [\"GET /orders/*\"]\n    - name: egress-inventory\n      agent: ops-assistant\n      service: inventory\n      allow: [\"GET /stock\", \"GET /stock/*\", \"POST /admin/*\"]   # egress allows /admin on purpose: the inventory charter is the one that denies it\naudit:\n  sink: stdout\n  redact: []\n",
+  "charter": {
+    "apiVersion": "attache.io/v1alpha1",
+    "kind": "Charter",
+    "service": {
+      "name": "orders",
+      "namespace": "attache-demo",
+      "app_port": 8080
+    },
+    "agents": [
+      {
+        "name": "ops-assistant",
+        "type": "orchestrator",
+        "model": "claude-opus-5-5",
+        "system": "You are the operations assistant embedded in the orders service.\nAnswer questions about orders and stock. Use lookup_order for order\ndetails, stock_analyst for anything about inventory levels or reorders,\nand inventory_admin_reset only when explicitly asked to reset admin\ncounters. Be concise and state which tools you used.\n",
+        "tools": [
+          {
+            "name": "lookup_order",
+            "description": "Look up an order by id in the orders service.",
+            "type": "service",
+            "service": "orders",
+            "method": "GET",
+            "path": "/orders/{order_id}",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "order_id": {
+                  "type": "string",
+                  "description": "Order id such as 1001"
+                }
+              },
+              "required": [
+                "order_id"
+              ]
+            }
+          },
+          {
+            "name": "stock_analyst",
+            "description": "Ask the inventory service's stock analyst agent about stock levels, SKUs and reorder advice.",
+            "type": "agent",
+            "agent": "stock-analyst",
+            "service": "inventory"
+          },
+          {
+            "name": "order_triage",
+            "description": "Ask the local order triage agent to classify an order problem by urgency.",
+            "type": "agent",
+            "agent": "order-triage"
+          },
+          {
+            "name": "inventory_admin_reset",
+            "description": "Reset the inventory admin counters (administrative, destructive).",
+            "type": "service",
+            "service": "inventory",
+            "method": "POST",
+            "path": "/admin/reset"
+          }
+        ],
+        "budgets": {
+          "max_tokens_per_call": 2048,
+          "max_calls_per_minute": 30,
+          "max_cost_usd_per_day": 5.0,
+          "max_steps": 6
+        }
+      },
+      {
+        "name": "order-triage",
+        "type": "agent",
+        "model": "claude-opus-5-5",
+        "system": "You classify order problems into urgency P1 (blocked revenue), P2\n(customer waiting) or P3 (cosmetic). Answer with the level and one line.\n",
+        "budgets": {
+          "max_tokens_per_call": 1024,
+          "max_calls_per_minute": 60,
+          "max_cost_usd_per_day": 1.0,
+          "max_steps": 2
+        }
+      }
+    ],
+    "guardrails": {
+      "max_input_bytes": 8192,
+      "pii_redact": true,
+      "input_deny": [
+        {
+          "name": "no-secrets",
+          "regex": "(?i)(api[_-]?key|password|secret)\\s*[:=]"
+        }
+      ],
+      "allowed_tools": {
+        "ops-assistant": [
+          "lookup_order",
+          "stock_analyst",
+          "order_triage",
+          "inventory_admin_reset"
+        ]
+      },
+      "allowed_services": {
+        "ops-assistant": [
+          "orders",
+          "inventory"
+        ]
+      }
+    },
+    "authz": {
+      "default": "deny",
+      "callers": [
+        {
+          "identity": "local",
+          "agents": [
+            "*"
+          ]
+        }
+      ],
+      "services": [
+        {
+          "name": "self-orders",
+          "agent": "ops-assistant",
+          "service": "orders",
+          "allow": [
+            "GET /orders/*"
+          ]
+        },
+        {
+          "name": "egress-inventory",
+          "agent": "ops-assistant",
+          "service": "inventory",
+          "allow": [
+            "GET /stock",
+            "GET /stock/*",
+            "POST /admin/*"
+          ]
+        }
+      ]
+    },
+    "audit": {
+      "sink": "stdout",
+      "redact": []
+    }
+  }
+}

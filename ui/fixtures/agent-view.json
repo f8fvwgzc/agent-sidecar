@@ -1,0 +1,73 @@
+{
+  "agent": {
+    "name": "ops-assistant",
+    "type": "orchestrator",
+    "model": "claude-opus-5-5",
+    "system": "You are the operations assistant embedded in the orders service.\nAnswer questions about orders and stock. Use lookup_order for order\ndetails, stock_analyst for anything about inventory levels or reorders,\nand inventory_admin_reset only when explicitly asked to reset admin\ncounters. Be concise and state which tools you used.\n",
+    "tools": [
+      {
+        "name": "lookup_order",
+        "description": "Look up an order by id in the orders service.",
+        "type": "service",
+        "service": "orders",
+        "method": "GET",
+        "path": "/orders/{order_id}",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "order_id": {
+              "type": "string",
+              "description": "Order id such as 1001"
+            }
+          },
+          "required": [
+            "order_id"
+          ]
+        }
+      },
+      {
+        "name": "stock_analyst",
+        "description": "Ask the inventory service's stock analyst agent about stock levels, SKUs and reorder advice.",
+        "type": "agent",
+        "agent": "stock-analyst",
+        "service": "inventory"
+      },
+      {
+        "name": "order_triage",
+        "description": "Ask the local order triage agent to classify an order problem by urgency.",
+        "type": "agent",
+        "agent": "order-triage"
+      },
+      {
+        "name": "inventory_admin_reset",
+        "description": "Reset the inventory admin counters (administrative, destructive).",
+        "type": "service",
+        "service": "inventory",
+        "method": "POST",
+        "path": "/admin/reset"
+      }
+    ],
+    "budgets": {
+      "max_tokens_per_call": 2048,
+      "max_calls_per_minute": 30,
+      "max_cost_usd_per_day": 5.0,
+      "max_steps": 6
+    }
+  },
+  "allowed_tools": [
+    "lookup_order",
+    "stock_analyst",
+    "order_triage",
+    "inventory_admin_reset"
+  ],
+  "allowed_services": [
+    "orders",
+    "inventory"
+  ],
+  "callers": [
+    {
+      "identity": "local",
+      "caller_agents": null
+    }
+  ]
+}

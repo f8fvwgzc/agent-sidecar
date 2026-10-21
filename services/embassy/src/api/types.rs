@@ -1,0 +1,1047 @@
+//! Every JSON shape of the REST/SSE API (`docs/api/openapi.yaml`; schema names match). The
+//! golden data in `ui/fixtures/` deserializes into these types and serializes back to equal
+//! JSON (`tests/fixtures.rs`).
+//!
+//! Structs refuse unknown fields, except [`AuditRecord`]: records come from sidecars, which may
+//! be one minor version newer or older than the control plane (design §7, version skew), so a
+//! record keeps working when a sidecar adds a field, and `kind` is an open string (design §5).
+//! Charter objects (`CharterDoc::charter`, `AgentView::agent`) are plain JSON values: their
+//! schema is the charter's (`schemas/charter.schema.json`).
+use std::collections::BTreeMap;
+
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::Value;
+
+pub use crate::config::Role;
+pub use crate::store::{
+    ActorKind, ChangeSource, HistoryEntry, MemoryDoc, Note, NoteSource, Proposal, ProposalStatus,
+};
+
+// ---- errors and small bodies --------------------------------------------------------------------
+
+/// The error codes (`Error.error`) and their HTTP statuses (design §10, Errors).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ErrorCode {
+    #[serde(rename = "invalid")]
+    Invalid,
+    #[serde(rename = "config.restart_required")]
+    RestartRequired,
+    #[serde(rename = "version_skew")]
+    VersionSkew,
+    #[serde(rename = "unauthenticated")]
+    Unauthenticated,
+    #[serde(rename = "forbidden")]
+    Forbidden,
+    #[serde(rename = "not_found")]
+    NotFound,
+    #[serde(rename = "version_conflict")]
+    VersionConflict,
+    #[serde(rename = "in_use")]
+    InUse,
+    #[serde(rename = "misdirected_request")]
+    MisdirectedRequest,
+    #[serde(rename = "rate_limited")]
+    RateLimited,
+    #[serde(rename = "internal")]
+    Internal,
+}
+
+impl ErrorCode {
+    pub fn http_status(self) -> u16 {
+        match self {
+            ErrorCode::Invalid | ErrorCode::RestartRequired | ErrorCode::VersionSkew => 400,
+            ErrorCode::Unauthenticated => 401,
+            ErrorCode::Forbidden => 403,
+            ErrorCode::NotFound => 404,
+            ErrorCode::VersionConflict | ErrorCode::InUse => 409,
+            ErrorCode::MisdirectedRequest => 421,
+            ErrorCode::RateLimited => 429,
+            ErrorCode::Internal => 500,
+        }
+    }
+}
+
+/// `{"error": "<code>", "details": [...], "current_version": "<v>"?}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApiError {
+    pub error: ErrorCode,
+    pub details: Vec<String>,
+    /// Only with `version_conflict`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_version: Option<String>,
+}
+
+impl ApiError {
+    pub fn new(error: ErrorCode, details: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            error,
+            details: details.into_iter().map(Into::into).collect(),
+            current_version: None,
+        }
+    }
+
+    pub fn version_conflict(current: impl Into<String>) -> Self {
+        let current = current.into();
+        Self {
+            error: ErrorCode::VersionConflict,
+            details: vec![format!(
+                "If-Match does not match the current version {current}"
+            )],
+            current_version: Some(current),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoginRequest {
+    pub token: String,
+}
+
+/// `GET /whoami`, and the body of a successful `POST /login`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WhoAmI {
+    pub name: String,
+    pub role: Role,
+    pub namespaces: Vec<String>,
+    pub payloads: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VersionResult {
+    pub version: String,
+}
+
+/// `{yaml}`: the body of `PUT .../charter` and `POST .../charter/validate`, and the response of
+/// `GET .../charter/history/{version}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CharterYaml {
+    pub yaml: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RollbackRequest {
+    pub version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdoptRequest {
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadyStatus {
+    pub ready: bool,
+    pub components: BTreeMap<String, bool>,
+}
+
+// ---- graph (design §10.1) ------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Graph {
+    pub version: String,
+    pub generated_at: String,
+    pub nodes: Vec<Node>,
+    pub edges: Vec<Edge>,
+}
+
+/// A graph node. On the wire every node has a `type` (`service`, `app`, `agent`,
+/// `model_provider`, `external`); placeholder nodes (unknown peers) carry `type` too, plus
+/// `placeholder: true` and `status: disconnected`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Node {
+    Service(ServiceNode),
+    App(AppNode),
+    Agent(AgentNode),
+    ModelProvider(ModelProviderNode),
+    External(ExternalNode),
+    Placeholder(PlaceholderNode),
+}
+
+impl Node {
+    pub fn id(&self) -> &str {
+        match self {
+            Node::Service(n) => &n.id,
+            Node::App(n) => &n.id,
+            Node::Agent(n) => &n.id,
+            Node::ModelProvider(n) => &n.id,
+            Node::External(n) => &n.id,
+            Node::Placeholder(n) => &n.id,
+        }
+    }
+
+    pub fn ports(&self) -> Option<&Ports> {
+        match self {
+            Node::Service(_) => None,
+            Node::App(n) => Some(&n.ports),
+            Node::Agent(n) => Some(&n.ports),
+            Node::ModelProvider(n) => Some(&n.ports),
+            Node::External(n) => Some(&n.ports),
+            Node::Placeholder(n) => Some(&n.ports),
+        }
+    }
+}
+
+/// The non-placeholder nodes, tagged by `type`.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum TaggedNode<S, A, G, M, E> {
+    Service(S),
+    App(A),
+    Agent(G),
+    ModelProvider(M),
+    External(E),
+}
+
+impl Serialize for Node {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        type Ref<'a> = TaggedNode<
+            &'a ServiceNode,
+            &'a AppNode,
+            &'a AgentNode,
+            &'a ModelProviderNode,
+            &'a ExternalNode,
+        >;
+        match self {
+            Node::Service(n) => Ref::Service(n).serialize(s),
+            Node::App(n) => Ref::App(n).serialize(s),
+            Node::Agent(n) => Ref::Agent(n).serialize(s),
+            Node::ModelProvider(n) => Ref::ModelProvider(n).serialize(s),
+            Node::External(n) => Ref::External(n).serialize(s),
+            Node::Placeholder(n) => n.serialize(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Node {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        type Owned = TaggedNode<ServiceNode, AppNode, AgentNode, ModelProviderNode, ExternalNode>;
+        let v = Value::deserialize(d)?;
+        if v.get("placeholder").is_some() {
+            return serde_json::from_value(v)
+                .map(Node::Placeholder)
+                .map_err(D::Error::custom);
+        }
+        Ok(
+            match serde_json::from_value::<Owned>(v).map_err(D::Error::custom)? {
+                TaggedNode::Service(n) => Node::Service(n),
+                TaggedNode::App(n) => Node::App(n),
+                TaggedNode::Agent(n) => Node::Agent(n),
+                TaggedNode::ModelProvider(n) => Node::ModelProvider(n),
+                TaggedNode::External(n) => Node::External(n),
+            },
+        )
+    }
+}
+
+/// Port names (see `Ports` in the OpenAPI document for which node gets which).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Ports {
+    #[serde(rename = "in")]
+    pub inputs: Vec<String>,
+    #[serde(rename = "out")]
+    pub outputs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceStatus {
+    Connected,
+    Degraded,
+    Disconnected,
+    NoCharter,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceNode {
+    pub id: String,
+    pub label: String,
+    pub namespace: String,
+    pub service: String,
+    pub status: ServiceStatus,
+    pub instances: u32,
+    pub charter_version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppNode {
+    pub id: String,
+    pub parent: String,
+    pub label: String,
+    pub port: Option<u16>,
+    pub ports: Ports,
+    pub stats: AppStats,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentStatus {
+    Ok,
+    Errors,
+    Denied,
+    Idle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentType {
+    Agent,
+    Orchestrator,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentNode {
+    pub id: String,
+    pub parent: String,
+    pub label: String,
+    pub agent_type: AgentType,
+    pub model: String,
+    pub skills: Vec<String>,
+    pub status: AgentStatus,
+    pub ports: Ports,
+    pub tools: Vec<ToolRef>,
+    pub learning: LearningSummary,
+    pub stats: AgentStats,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolType {
+    Agent,
+    Service,
+    Http,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolRef {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub tool_type: ToolType,
+    /// The node id the tool reaches.
+    pub target: String,
+    /// False when `guardrails.allowed_tools` excludes it.
+    pub allowed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LearningMode {
+    Review,
+    Auto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LearningSummary {
+    pub enabled: bool,
+    pub mode: LearningMode,
+    /// Active notes.
+    pub notes: u32,
+    /// Pending proposals.
+    pub pending: u32,
+}
+
+/// Over a sliding 15 minutes (see `AgentStats` in the OpenAPI document).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentStats {
+    pub invocations: u64,
+    pub denied: u64,
+    pub errors: u64,
+    pub p50_ms: u64,
+    pub p95_ms: u64,
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    pub cost_usd: f64,
+}
+
+/// Inbound (callee-side) service calls from peers.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppStats {
+    pub calls: u64,
+    pub denied: u64,
+    pub errors: u64,
+    pub avg_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelProviderNode {
+    pub id: String,
+    pub label: String,
+    pub ports: Ports,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalNode {
+    pub id: String,
+    pub label: String,
+    pub ports: Ports,
+}
+
+/// The `type` a placeholder stands in for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaceholderType {
+    Service,
+    App,
+    Agent,
+}
+
+/// A node for a peer the control plane does not know (an agent tool naming a service without a
+/// charter or instances), so that every edge endpoint is a node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlaceholderNode {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub node_type: PlaceholderType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    pub label: String,
+    pub placeholder: True,
+    pub status: Disconnected,
+    pub ports: Ports,
+}
+
+/// The JSON literal `true` (and nothing else).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct True;
+
+impl Serialize for True {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_bool(true)
+    }
+}
+
+impl<'de> Deserialize<'de> for True {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        if bool::deserialize(d)? {
+            Ok(True)
+        } else {
+            Err(D::Error::custom("expected true"))
+        }
+    }
+}
+
+/// The string `"disconnected"` (a placeholder's only status).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Disconnected {
+    #[default]
+    Disconnected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeKind {
+    Invoke,
+    Tool,
+    Model,
+}
+
+impl EdgeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EdgeKind::Invoke => "invoke",
+            EdgeKind::Tool => "tool",
+            EdgeKind::Model => "model",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Edge {
+    /// [`super::ids::edge`].
+    pub id: String,
+    pub kind: EdgeKind,
+    pub source: String,
+    pub source_port: String,
+    pub target: String,
+    pub target_port: String,
+    /// False for edges seen only in traffic (not derived from a stored charter).
+    pub declared: bool,
+    pub stats: EdgeStats,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EdgeStats {
+    pub calls: u64,
+    pub denied: u64,
+    pub errors: u64,
+    pub avg_ms: u64,
+    pub last_ts: Option<String>,
+}
+
+// ---- services --------------------------------------------------------------------------------------
+
+/// One row of `GET /services`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceSummary {
+    pub namespace: String,
+    pub service: String,
+    pub status: ServiceStatus,
+    pub epoch: Option<String>,
+    pub charter_version: Option<String>,
+    pub memory_version: Option<String>,
+    pub pending_adoption: Option<PendingAdoption>,
+    pub instances: Vec<Instance>,
+}
+
+/// A pending adoption as the API shows it (the store keeps the YAML too).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingAdoption {
+    pub sha256: String,
+    pub pod: String,
+    pub ts: String,
+}
+
+impl From<&crate::store::PendingAdoption> for PendingAdoption {
+    fn from(p: &crate::store::PendingAdoption) -> Self {
+        Self {
+            sha256: p.sha256.clone(),
+            pod: p.pod.clone(),
+            ts: p.ts.clone(),
+        }
+    }
+}
+
+/// One connected `Connect` stream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Instance {
+    pub instance_id: String,
+    pub pod: String,
+    pub sidecar_version: String,
+    pub connected_at: String,
+    pub last_heartbeat: Option<String>,
+    pub runtime_ready: bool,
+    pub acked_version: Option<String>,
+    pub ack_error: Option<String>,
+    pub cert_expires_in_s: Option<i64>,
+    pub audit_dropped: u64,
+}
+
+// ---- charter ---------------------------------------------------------------------------------------
+
+/// `GET .../charter`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CharterDoc {
+    pub epoch: String,
+    pub version: String,
+    pub yaml: String,
+    pub charter: Value,
+}
+
+impl From<crate::store::StoredCharter> for CharterDoc {
+    fn from(c: crate::store::StoredCharter) -> Self {
+        Self {
+            epoch: c.epoch,
+            version: c.version,
+            yaml: c.yaml,
+            charter: c.charter_json,
+        }
+    }
+}
+
+/// `POST .../charter/validate`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidateResult {
+    pub charter: Value,
+    pub needs_role: Role,
+    /// Dotted paths of changes that reduce protection (design §5).
+    pub weakened: Vec<String>,
+}
+
+// ---- agents, skills, links -------------------------------------------------------------------------
+
+/// An agent with the policy around it (design §10). On input, a missing `callers` means "add the
+/// agent to the `identity: local` caller rule"; missing `allowed_*` mean "no entry".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentView {
+    /// The charter's `agents[]` entry.
+    pub agent: Value,
+    #[serde(default)]
+    pub allowed_tools: Option<Vec<String>>,
+    #[serde(default)]
+    pub allowed_services: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callers: Option<Vec<CallerRef>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CallerRef {
+    pub identity: String,
+    pub caller_agents: Option<Vec<String>>,
+}
+
+/// A top-level charter skill (design §4): the body of `PUT .../skills/{skill}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Skill {
+    pub name: String,
+    pub description: String,
+    pub instructions: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
+}
+
+/// `POST /links`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkRequest {
+    /// The calling orchestrator's node id.
+    pub from: String,
+    /// The target agent's node id.
+    pub to: String,
+    pub tool: LinkTool,
+    /// `"<ns>/<svc>"` → the charter version the caller saw.
+    pub if_match: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkTool {
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkResult {
+    pub applied: Vec<LinkApplied>,
+    /// `"<ns>/<svc>"` → why that charter's write failed.
+    pub failed: BTreeMap<String, ApiError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LinkApplied {
+    /// `<ns>/<svc>`.
+    pub service: String,
+    pub version: String,
+}
+
+// ---- memory and proposals ------------------------------------------------------------------------
+
+/// `PUT .../memory`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryPut {
+    pub agents: BTreeMap<String, Vec<Note>>,
+}
+
+/// `POST /proposals/{id}/approve|reject`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProposalDecision {
+    pub proposal: Proposal,
+    pub memory_version: String,
+}
+
+// ---- audit ---------------------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Direction {
+    Inbound,
+    Outbound,
+    Internal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Decision {
+    Allow,
+    Deny,
+}
+
+/// A sidecar audit record (CONTRACT.md §6) as the API serves it. Not `deny_unknown_fields`, and
+/// `kind` is any string (see the module docs).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AuditRecord {
+    pub ts: String,
+    pub kind: String,
+    pub request_id: String,
+    pub trace_id: String,
+    pub span_id: String,
+    pub parent_span_id: Option<String>,
+    pub service: String,
+    pub namespace: String,
+    pub agent: Option<String>,
+    pub caller: String,
+    pub caller_agent: Option<String>,
+    pub callee: String,
+    pub direction: Direction,
+    pub input: Value,
+    pub output: Value,
+    pub input_sha256: Option<String>,
+    pub output_sha256: Option<String>,
+    pub tokens: Option<Tokens>,
+    pub cost_usd: Option<f64>,
+    pub latency_ms: u64,
+    pub decision: Decision,
+    pub rule: Option<String>,
+    pub reason: Option<String>,
+    pub error: Option<String>,
+}
+
+impl AuditRecord {
+    /// The record as a token without `payloads: true` (or `?payloads=false`) sees it.
+    pub fn without_payloads(mut self) -> Self {
+        self.input = Value::Null;
+        self.output = Value::Null;
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Tokens {
+    pub input: u64,
+    pub output: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CpAction {
+    Login,
+    LoginFailed,
+    Logout,
+    CharterPut,
+    AgentPost,
+    AgentPut,
+    AgentDelete,
+    SkillPut,
+    SkillDelete,
+    LinkPost,
+    Rollback,
+    DeleteService,
+    AdoptPending,
+    AdoptApprove,
+    ProposalApprove,
+    ProposalReject,
+    MemoryPut,
+    NoteAuto,
+    CertIssue,
+    CertDenied,
+    Connect,
+    ConnectDenied,
+    CrExternalEdit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CpResult {
+    Ok,
+    Denied,
+    Invalid,
+    Error,
+}
+
+/// One control-plane audit line (design §8.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CpAuditRecord {
+    pub ts: String,
+    pub actor: String,
+    pub actor_kind: ActorKind,
+    pub role: Option<Role>,
+    pub action: CpAction,
+    pub namespace: Option<String>,
+    pub service: Option<String>,
+    pub agent: Option<String>,
+    pub from_version: Option<String>,
+    pub to_version: Option<String>,
+    pub sha256_before: Option<String>,
+    pub sha256_after: Option<String>,
+    pub result: CpResult,
+    pub reason: Option<String>,
+}
+
+// ---- SSE events (design §10.2) --------------------------------------------------------------------
+
+/// `event: audit`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditEvent {
+    pub record: AuditRecord,
+    pub edge_id: Option<String>,
+    pub animate: bool,
+}
+
+/// `event: graph`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphEvent {
+    pub version: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistryStatus {
+    Connected,
+    Disconnected,
+}
+
+/// `event: registry`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegistryEvent {
+    pub namespace: String,
+    pub service: String,
+    pub instance_id: String,
+    pub pod: String,
+    pub status: RegistryStatus,
+}
+
+/// `event: config`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigEvent {
+    pub namespace: String,
+    pub service: String,
+    pub version: String,
+    pub actor: String,
+    pub source: ChangeSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AckKind {
+    Charter,
+    Memory,
+}
+
+/// `event: ack`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AckEvent {
+    pub namespace: String,
+    pub service: String,
+    pub instance_id: String,
+    pub pod: String,
+    pub kind: AckKind,
+    pub version: String,
+    pub applied: bool,
+    pub error: Option<String>,
+}
+
+/// `event: lagged`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaggedEvent {
+    pub dropped: u64,
+}
+
+/// `event: reset` (data `{}`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResetEvent {}
+
+/// One SSE event: the `event:` name and the `data:` JSON.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SseEvent {
+    /// Boxed: an audit record is several times larger than the other events.
+    Audit(Box<AuditEvent>),
+    Graph(GraphEvent),
+    Registry(RegistryEvent),
+    Config(ConfigEvent),
+    Ack(AckEvent),
+    Proposal(Proposal),
+    /// Sent to admins only.
+    CpAudit(CpAuditRecord),
+    Lagged(LaggedEvent),
+    Reset(ResetEvent),
+}
+
+impl SseEvent {
+    /// Every event name, in the order of design §10.2.
+    pub const NAMES: [&'static str; 9] = [
+        "audit", "graph", "registry", "config", "ack", "proposal", "cp_audit", "lagged", "reset",
+    ];
+
+    /// The SSE `event:` field.
+    pub fn name(&self) -> &'static str {
+        match self {
+            SseEvent::Audit(_) => "audit",
+            SseEvent::Graph(_) => "graph",
+            SseEvent::Registry(_) => "registry",
+            SseEvent::Config(_) => "config",
+            SseEvent::Ack(_) => "ack",
+            SseEvent::Proposal(_) => "proposal",
+            SseEvent::CpAudit(_) => "cp_audit",
+            SseEvent::Lagged(_) => "lagged",
+            SseEvent::Reset(_) => "reset",
+        }
+    }
+
+    /// The SSE `data:` field (one line of JSON).
+    pub fn data(&self) -> serde_json::Result<String> {
+        match self {
+            SseEvent::Audit(e) => serde_json::to_string(e),
+            SseEvent::Graph(e) => serde_json::to_string(e),
+            SseEvent::Registry(e) => serde_json::to_string(e),
+            SseEvent::Config(e) => serde_json::to_string(e),
+            SseEvent::Ack(e) => serde_json::to_string(e),
+            SseEvent::Proposal(e) => serde_json::to_string(e),
+            SseEvent::CpAudit(e) => serde_json::to_string(e),
+            SseEvent::Lagged(e) => serde_json::to_string(e),
+            SseEvent::Reset(e) => serde_json::to_string(e),
+        }
+    }
+
+    /// Parse an event from its `event:` name and `data:` JSON.
+    pub fn parse(name: &str, data: &str) -> serde_json::Result<Self> {
+        Ok(match name {
+            "audit" => SseEvent::Audit(serde_json::from_str(data)?),
+            "graph" => SseEvent::Graph(serde_json::from_str(data)?),
+            "registry" => SseEvent::Registry(serde_json::from_str(data)?),
+            "config" => SseEvent::Config(serde_json::from_str(data)?),
+            "ack" => SseEvent::Ack(serde_json::from_str(data)?),
+            "proposal" => SseEvent::Proposal(serde_json::from_str(data)?),
+            "cp_audit" => SseEvent::CpAudit(serde_json::from_str(data)?),
+            "lagged" => SseEvent::Lagged(serde_json::from_str(data)?),
+            "reset" => SseEvent::Reset(serde_json::from_str(data)?),
+            other => {
+                return Err(serde_json::Error::custom(format!(
+                    "unknown SSE event {other:?}"
+                )));
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn error_codes_map_to_statuses() {
+        let e = ApiError::version_conflict("3");
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["error"], "version_conflict");
+        assert_eq!(v["current_version"], "3");
+        assert_eq!(e.error.http_status(), 409);
+        let e = ApiError::new(ErrorCode::RestartRequired, ["service.app_port"]);
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(
+            v,
+            json!({"error": "config.restart_required", "details": ["service.app_port"]})
+        );
+        assert_eq!(e.error.http_status(), 400);
+        assert_eq!(ErrorCode::MisdirectedRequest.http_status(), 421);
+        assert_eq!(ErrorCode::RateLimited.http_status(), 429);
+    }
+
+    #[test]
+    fn nodes_round_trip_and_refuse_unknown_fields() {
+        let agent = json!({
+            "id": "agent:shop/orders/ops-assistant", "type": "agent", "parent": "svc:shop/orders",
+            "label": "ops-assistant", "agent_type": "orchestrator", "model": "claude-opus-5-5",
+            "skills": ["triage"], "status": "ok",
+            "ports": {"in": ["invoke"], "out": ["stock_analyst", "model"]},
+            "tools": [{"name": "stock_analyst", "type": "agent", "target": "agent:shop/inventory/stock-analyst", "allowed": true}],
+            "learning": {"enabled": true, "mode": "review", "notes": 3, "pending": 1},
+            "stats": {"invocations": 120, "denied": 3, "errors": 1, "p50_ms": 840, "p95_ms": 2900, "tokens_in": 51200, "tokens_out": 9100, "cost_usd": 0.41}
+        });
+        let n: Node = serde_json::from_value(agent.clone()).unwrap();
+        assert!(matches!(n, Node::Agent(_)));
+        assert_eq!(n.id(), "agent:shop/orders/ops-assistant");
+        assert_eq!(serde_json::to_value(&n).unwrap(), agent);
+
+        let mut bad = agent.clone();
+        bad["colour"] = json!("red");
+        let err = serde_json::from_value::<Node>(bad).unwrap_err().to_string();
+        assert!(err.contains("colour"), "{err}");
+
+        let placeholder = json!({
+            "id": "agent:shop/billing/payer", "type": "agent", "parent": "svc:shop/billing",
+            "label": "payer", "placeholder": true, "status": "disconnected",
+            "ports": {"in": ["invoke"], "out": []}
+        });
+        let n: Node = serde_json::from_value(placeholder.clone()).unwrap();
+        assert!(matches!(n, Node::Placeholder(_)));
+        assert_eq!(serde_json::to_value(&n).unwrap(), placeholder);
+
+        let mut not_true = placeholder.clone();
+        not_true["placeholder"] = json!(false);
+        assert!(serde_json::from_value::<Node>(not_true).is_err());
+        let mut connected = placeholder;
+        connected["status"] = json!("connected");
+        assert!(serde_json::from_value::<Node>(connected).is_err());
+        assert!(serde_json::from_value::<Node>(json!({"id": "x", "type": "planet"})).is_err());
+    }
+
+    #[test]
+    fn audit_records_keep_unknown_kinds_and_fields() {
+        let rec = json!({
+            "ts": "2026-10-21T10:00:00.000Z", "kind": "telepathy", "request_id": "r", "trace_id": "t",
+            "span_id": "s", "parent_span_id": null, "service": "orders", "namespace": "attache-demo",
+            "agent": null, "caller": "control-plane", "caller_agent": null, "callee": "charter",
+            "direction": "internal", "input": {"version": "3"}, "output": null, "input_sha256": null,
+            "output_sha256": null, "tokens": null, "cost_usd": null, "latency_ms": 0,
+            "decision": "allow", "rule": "config.applied", "reason": null, "error": null,
+            "added_in_v0_3": 1
+        });
+        let r: AuditRecord = serde_json::from_value(rec).unwrap();
+        assert_eq!(r.kind, "telepathy");
+        let r = r.without_payloads();
+        assert!(r.input.is_null() && r.output.is_null());
+    }
+
+    #[test]
+    fn sse_events_parse_by_name() {
+        for name in SseEvent::NAMES {
+            let data = match name {
+                "graph" => r#"{"version":"7"}"#,
+                "lagged" => r#"{"dropped":12}"#,
+                "reset" => "{}",
+                _ => continue,
+            };
+            let e = SseEvent::parse(name, data).unwrap();
+            assert_eq!(e.name(), name);
+            assert_eq!(e.data().unwrap(), data);
+        }
+        assert!(SseEvent::parse("gossip", "{}").is_err());
+        assert!(SseEvent::parse("reset", r#"{"x":1}"#).is_err());
+        assert!(SseEvent::parse("lagged", r#"{"dropped":-1}"#).is_err());
+    }
+
+    #[test]
+    fn agent_view_inputs_may_omit_policy() {
+        let v: AgentView =
+            serde_json::from_value(json!({"agent": {"name": "a", "model": "mock"}})).unwrap();
+        assert!(v.callers.is_none() && v.allowed_tools.is_none());
+        let back = serde_json::to_value(&v).unwrap();
+        assert_eq!(
+            back,
+            json!({"agent": {"name": "a", "model": "mock"}, "allowed_tools": null, "allowed_services": null})
+        );
+    }
+}

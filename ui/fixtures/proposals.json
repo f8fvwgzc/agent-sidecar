@@ -1,0 +1,28 @@
+[
+  {
+    "id": "784722e9-e727-4c29-9f39-e116fd9afcd5",
+    "namespace": "attache-demo",
+    "service": "orders",
+    "agent": "ops-assistant",
+    "note": "When stock_analyst reports on_hand below reorder_point, lead the answer with the reorder recommendation.",
+    "rationale": "The user asked a follow-up about reordering after an answer that put the recommendation last.",
+    "request_id": "12d5043f-2d82-44c3-bcf3-9954d9b1ca4d",
+    "trace_id": "72095cc669d2499a5b113684357d42a4",
+    "ts": "2026-10-21T09:12:44.870Z",
+    "status": "pending",
+    "auto": false
+  },
+  {
+    "id": "9054acc5-9141-46f5-b1fc-4f9ad6799191",
+    "namespace": "attache-demo",
+    "service": "orders",
+    "agent": "ops-assistant",
+    "note": "Order ids are plain numbers such as 1001; pass them to lookup_order without a '#' or other prefix.",
+    "rationale": "lookup_order returned 404 for '#1001' and succeeded for '1001' in the same run.",
+    "request_id": "91b151f2-5708-42d7-935e-881dad02a07c",
+    "trace_id": "44b966b4ec060651a950e61d52a5e5f8",
+    "ts": "2026-10-20T16:41:55.630Z",
+    "status": "approved",
+    "auto": false
+  }
+]

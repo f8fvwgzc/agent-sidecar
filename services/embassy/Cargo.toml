@@ -1,6 +1,6 @@
 [package]
 name = "embassy"
-description = "attache control plane: the cluster CA that issues SPIFFE-style certificates (CONTRACT.md §5, §7)."
+description = "attache control plane: CA, certificate issuance, Connect, REST/SSE API and UI (CONTRACT.md §5, §7; docs/design/agent-platform.md §7-§10)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,9 +15,20 @@ tokio.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml_ng.workspace = true
 base64.workspace = true
 clap.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+sha2.workspace = true
+hex.workspace = true
+rand.workspace = true
+url.workspace = true
 rustls.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

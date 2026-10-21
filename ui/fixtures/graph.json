@@ -1,0 +1,426 @@
+{
+  "version": "412",
+  "generated_at": "2026-10-21T10:00:00.000Z",
+  "nodes": [
+    {
+      "id": "svc:attache-demo/orders",
+      "type": "service",
+      "label": "orders",
+      "namespace": "attache-demo",
+      "service": "orders",
+      "status": "connected",
+      "instances": 2,
+      "charter_version": "3"
+    },
+    {
+      "id": "app:attache-demo/orders",
+      "type": "app",
+      "parent": "svc:attache-demo/orders",
+      "label": "orders app",
+      "port": 8080,
+      "ports": {
+        "in": [
+          "service"
+        ],
+        "out": [
+          "invoke"
+        ]
+      },
+      "stats": {
+        "calls": 0,
+        "denied": 0,
+        "errors": 0,
+        "avg_ms": 0
+      }
+    },
+    {
+      "id": "agent:attache-demo/orders/ops-assistant",
+      "type": "agent",
+      "parent": "svc:attache-demo/orders",
+      "label": "ops-assistant",
+      "agent_type": "orchestrator",
+      "model": "claude-opus-5-5",
+      "skills": [],
+      "status": "denied",
+      "ports": {
+        "in": [
+          "invoke"
+        ],
+        "out": [
+          "lookup_order",
+          "stock_analyst",
+          "order_triage",
+          "inventory_admin_reset",
+          "model"
+        ]
+      },
+      "tools": [
+        {
+          "name": "lookup_order",
+          "type": "service",
+          "target": "app:attache-demo/orders",
+          "allowed": true
+        },
+        {
+          "name": "stock_analyst",
+          "type": "agent",
+          "target": "agent:attache-demo/inventory/stock-analyst",
+          "allowed": true
+        },
+        {
+          "name": "order_triage",
+          "type": "agent",
+          "target": "agent:attache-demo/orders/order-triage",
+          "allowed": true
+        },
+        {
+          "name": "inventory_admin_reset",
+          "type": "service",
+          "target": "app:attache-demo/inventory",
+          "allowed": true
+        }
+      ],
+      "learning": {
+        "enabled": false,
+        "mode": "review",
+        "notes": 1,
+        "pending": 1
+      },
+      "stats": {
+        "invocations": 8,
+        "denied": 3,
+        "errors": 0,
+        "p50_ms": 2415,
+        "p95_ms": 5247,
+        "tokens_in": 19292,
+        "tokens_out": 1113,
+        "cost_usd": 0.099428
+      }
+    },
+    {
+      "id": "agent:attache-demo/orders/order-triage",
+      "type": "agent",
+      "parent": "svc:attache-demo/orders",
+      "label": "order-triage",
+      "agent_type": "agent",
+      "model": "claude-opus-5-5",
+      "skills": [],
+      "status": "ok",
+      "ports": {
+        "in": [
+          "invoke"
+        ],
+        "out": [
+          "model"
+        ]
+      },
+      "tools": [],
+      "learning": {
+        "enabled": false,
+        "mode": "review",
+        "notes": 0,
+        "pending": 0
+      },
+      "stats": {
+        "invocations": 1,
+        "denied": 0,
+        "errors": 0,
+        "p50_ms": 717,
+        "p95_ms": 717,
+        "tokens_in": 167,
+        "tokens_out": 22,
+        "cost_usd": 0.001108
+      }
+    },
+    {
+      "id": "svc:attache-demo/inventory",
+      "type": "service",
+      "label": "inventory",
+      "namespace": "attache-demo",
+      "service": "inventory",
+      "status": "connected",
+      "instances": 1,
+      "charter_version": "1"
+    },
+    {
+      "id": "app:attache-demo/inventory",
+      "type": "app",
+      "parent": "svc:attache-demo/inventory",
+      "label": "inventory app",
+      "port": 8000,
+      "ports": {
+        "in": [
+          "service"
+        ],
+        "out": [
+          "invoke"
+        ]
+      },
+      "stats": {
+        "calls": 1,
+        "denied": 1,
+        "errors": 0,
+        "avg_ms": 0
+      }
+    },
+    {
+      "id": "agent:attache-demo/inventory/stock-analyst",
+      "type": "agent",
+      "parent": "svc:attache-demo/inventory",
+      "label": "stock-analyst",
+      "agent_type": "agent",
+      "model": "claude-opus-5-5",
+      "skills": [],
+      "status": "ok",
+      "ports": {
+        "in": [
+          "invoke"
+        ],
+        "out": [
+          "get_stock",
+          "model"
+        ]
+      },
+      "tools": [
+        {
+          "name": "get_stock",
+          "type": "service",
+          "target": "app:attache-demo/inventory",
+          "allowed": true
+        }
+      ],
+      "learning": {
+        "enabled": false,
+        "mode": "review",
+        "notes": 0,
+        "pending": 0
+      },
+      "stats": {
+        "invocations": 3,
+        "denied": 0,
+        "errors": 0,
+        "p50_ms": 2475,
+        "p95_ms": 2526,
+        "tokens_in": 4359,
+        "tokens_out": 567,
+        "cost_usd": 0.028776
+      }
+    },
+    {
+      "id": "model:anthropic",
+      "type": "model_provider",
+      "label": "Anthropic",
+      "ports": {
+        "in": [
+          "model"
+        ],
+        "out": []
+      }
+    },
+    {
+      "id": "external:https://api.partner.example",
+      "type": "external",
+      "label": "api.partner.example",
+      "ports": {
+        "in": [
+          "http"
+        ],
+        "out": []
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge:invoke:app:attache-demo/orders->agent:attache-demo/orders/ops-assistant",
+      "kind": "invoke",
+      "source": "app:attache-demo/orders",
+      "source_port": "invoke",
+      "target": "agent:attache-demo/orders/ops-assistant",
+      "target_port": "invoke",
+      "declared": true,
+      "stats": {
+        "calls": 8,
+        "denied": 1,
+        "errors": 0,
+        "avg_ms": 3170,
+        "last_ts": "2026-10-21T09:59:20.001Z"
+      }
+    },
+    {
+      "id": "edge:tool:agent:attache-demo/orders/ops-assistant->app:attache-demo/orders#lookup_order",
+      "kind": "tool",
+      "source": "agent:attache-demo/orders/ops-assistant",
+      "source_port": "lookup_order",
+      "target": "app:attache-demo/orders",
+      "target_port": "service",
+      "declared": true,
+      "stats": {
+        "calls": 1,
+        "denied": 0,
+        "errors": 0,
+        "avg_ms": 3,
+        "last_ts": "2026-10-21T09:54:41.117Z"
+      }
+    },
+    {
+      "id": "edge:tool:agent:attache-demo/orders/ops-assistant->agent:attache-demo/inventory/stock-analyst#stock_analyst",
+      "kind": "tool",
+      "source": "agent:attache-demo/orders/ops-assistant",
+      "source_port": "stock_analyst",
+      "target": "agent:attache-demo/inventory/stock-analyst",
+      "target_port": "invoke",
+      "declared": true,
+      "stats": {
+        "calls": 3,
+        "denied": 0,
+        "errors": 0,
+        "avg_ms": 2501,
+        "last_ts": "2026-10-21T09:57:33.817Z"
+      }
+    },
+    {
+      "id": "edge:tool:agent:attache-demo/orders/ops-assistant->agent:attache-demo/orders/order-triage#order_triage",
+      "kind": "tool",
+      "source": "agent:attache-demo/orders/ops-assistant",
+      "source_port": "order_triage",
+      "target": "agent:attache-demo/orders/order-triage",
+      "target_port": "invoke",
+      "declared": true,
+      "stats": {
+        "calls": 1,
+        "denied": 0,
+        "errors": 0,
+        "avg_ms": 720,
+        "last_ts": "2026-10-21T09:56:03.793Z"
+      }
+    },
+    {
+      "id": "edge:tool:agent:attache-demo/orders/ops-assistant->app:attache-demo/inventory#inventory_admin_reset",
+      "kind": "tool",
+      "source": "agent:attache-demo/orders/ops-assistant",
+      "source_port": "inventory_admin_reset",
+      "target": "app:attache-demo/inventory",
+      "target_port": "service",
+      "declared": true,
+      "stats": {
+        "calls": 1,
+        "denied": 1,
+        "errors": 0,
+        "avg_ms": 3,
+        "last_ts": "2026-10-21T09:58:45.117Z"
+      }
+    },
+    {
+      "id": "edge:model:agent:attache-demo/orders/ops-assistant->model:anthropic",
+      "kind": "model",
+      "source": "agent:attache-demo/orders/ops-assistant",
+      "source_port": "model",
+      "target": "model:anthropic",
+      "target_port": "model",
+      "declared": true,
+      "stats": {
+        "calls": 14,
+        "denied": 0,
+        "errors": 0,
+        "avg_ms": 1213,
+        "last_ts": "2026-10-21T09:58:46.410Z"
+      }
+    },
+    {
+      "id": "edge:invoke:app:attache-demo/orders->agent:attache-demo/orders/order-triage",
+      "kind": "invoke",
+      "source": "app:attache-demo/orders",
+      "source_port": "invoke",
+      "target": "agent:attache-demo/orders/order-triage",
+      "target_port": "invoke",
+      "declared": true,
+      "stats": {
+        "calls": 0,
+        "denied": 0,
+        "errors": 0,
+        "avg_ms": 0,
+        "last_ts": null
+      }
+    },
+    {
+      "id": "edge:model:agent:attache-demo/orders/order-triage->model:anthropic",
+      "kind": "model",
+      "source": "agent:attache-demo/orders/order-triage",
+      "source_port": "model",
+      "target": "model:anthropic",
+      "target_port": "model",
+      "declared": true,
+      "stats": {
+        "calls": 1,
+        "denied": 0,
+        "errors": 0,
+        "avg_ms": 712,
+        "last_ts": "2026-10-21T09:56:03.789Z"
+      }
+    },
+    {
+      "id": "edge:invoke:app:attache-demo/inventory->agent:attache-demo/inventory/stock-analyst",
+      "kind": "invoke",
+      "source": "app:attache-demo/inventory",
+      "source_port": "invoke",
+      "target": "agent:attache-demo/inventory/stock-analyst",
+      "target_port": "invoke",
+      "declared": true,
+      "stats": {
+        "calls": 0,
+        "denied": 0,
+        "errors": 0,
+        "avg_ms": 0,
+        "last_ts": null
+      }
+    },
+    {
+      "id": "edge:tool:agent:attache-demo/inventory/stock-analyst->app:attache-demo/inventory#get_stock",
+      "kind": "tool",
+      "source": "agent:attache-demo/inventory/stock-analyst",
+      "source_port": "get_stock",
+      "target": "app:attache-demo/inventory",
+      "target_port": "service",
+      "declared": true,
+      "stats": {
+        "calls": 3,
+        "denied": 0,
+        "errors": 0,
+        "avg_ms": 5,
+        "last_ts": "2026-10-21T09:57:32.319Z"
+      }
+    },
+    {
+      "id": "edge:model:agent:attache-demo/inventory/stock-analyst->model:anthropic",
+      "kind": "model",
+      "source": "agent:attache-demo/inventory/stock-analyst",
+      "source_port": "model",
+      "target": "model:anthropic",
+      "target_port": "model",
+      "declared": true,
+      "stats": {
+        "calls": 6,
+        "denied": 0,
+        "errors": 0,
+        "avg_ms": 1225,
+        "last_ts": "2026-10-21T09:57:33.802Z"
+      }
+    },
+    {
+      "id": "edge:tool:agent:attache-demo/orders/ops-assistant->external:https://api.partner.example#partner_eta",
+      "kind": "tool",
+      "source": "agent:attache-demo/orders/ops-assistant",
+      "source_port": "partner_eta",
+      "target": "external:https://api.partner.example",
+      "target_port": "http",
+      "declared": false,
+      "stats": {
+        "calls": 1,
+        "denied": 1,
+        "errors": 0,
+        "avg_ms": 0,
+        "last_ts": "2026-10-21T09:47:30.141Z"
+      }
+    }
+  ]
+}

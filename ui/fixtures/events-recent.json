@@ -1,0 +1,894 @@
+[
+  {
+    "ts": "2026-10-21T09:59:20.001Z",
+    "kind": "guardrail",
+    "request_id": "a6cd1b82-8713-4940-a670-ea20303e6b47",
+    "trace_id": "c8b314edc10d8422d5f4e619ab46c92c",
+    "span_id": "38ef8ef1b0663af9",
+    "parent_span_id": null,
+    "service": "orders",
+    "namespace": "attache-demo",
+    "agent": "ops-assistant",
+    "caller": "local",
+    "caller_agent": null,
+    "callee": "ops-assistant",
+    "direction": "internal",
+    "input": "[redacted:guardrail.input_deny.no-secrets]",
+    "output": null,
+    "input_sha256": "aadbccdaf46c53de7601911f584e0839778c4438a9ba608b1177c82f690ba53e",
+    "output_sha256": null,
+    "tokens": null,
+    "cost_usd": null,
+    "latency_ms": 0,
+    "decision": "deny",
+    "rule": "guardrail.input_deny.no-secrets",
+    "reason": "input matches deny rule no-secrets",
+    "error": null
+  },
+  {
+    "ts": "2026-10-21T09:59:20.001Z",
+    "kind": "agent_invocation",
+    "request_id": "a6cd1b82-8713-4940-a670-ea20303e6b47",
+    "trace_id": "c8b314edc10d8422d5f4e619ab46c92c",
+    "span_id": "38ef8ef1b0663af9",
+    "parent_span_id": null,
+    "service": "orders",
+    "namespace": "attache-demo",
+    "agent": "ops-assistant",
+    "caller": "local",
+    "caller_agent": null,
+    "callee": "ops-assistant",
+    "direction": "inbound",
+    "input": "[redacted:guardrail.input_deny.no-secrets]",
+    "output": null,
+    "input_sha256": "aadbccdaf46c53de7601911f584e0839778c4438a9ba608b1177c82f690ba53e",
+    "output_sha256": null,
+    "tokens": null,
+    "cost_usd": null,
+    "latency_ms": 1,
+    "decision": "deny",
+    "rule": "guardrail.input_deny.no-secrets",
+    "reason": "input matches deny rule no-secrets",
+    "error": null
+  },
+  {
+    "ts": "2026-10-21T09:58:46.415Z",
+    "kind": "agent_invocation",
+    "request_id": "6d3e3a28-4a91-4ed9-b0f6-f6ea336b6784",
+    "trace_id": "ff598158a173077b115f5e5921c0a75f",
+    "span_id": "d64568ce7de413ea",
+    "parent_span_id": null,
+    "service": "orders",
+    "namespace": "attache-demo",
+    "agent": "ops-assistant",
+    "caller": "local",
+    "caller_agent": null,
+    "callee": "ops-assistant",
+    "direction": "inbound",
+    "input": {
+      "input": "Reset the inventory admin counters",
+      "context": {
+        "source": "orders /ask"
+      }
+    },
+    "output": {
+      "status": "ok",
+      "request_id": "6d3e3a28-4a91-4ed9-b0f6-f6ea336b6784",
+      "trace_id": "ff598158a173077b115f5e5921c0a75f",
+      "agent": "ops-assistant",
+      "output": "I could not reset the inventory admin counters: the inventory service denied POST /admin/reset (rule authz.services.deny-admin). Tools used: inventory_admin_reset.",
+      "usage": {
+        "input_tokens": 2727,
+        "output_tokens": 130,
+        "cost_usd": 0.013508
+      },
+      "steps": [
+        {
+          "kind": "model_call",
+          "name": "claude-opus-5-5",
+          "decision": "allow",
+          "latency_ms": 1104,
+          "summary": "stop=tool_use"
+        },
+        {
+          "kind": "service_call",
+          "name": "inventory POST /admin/reset",
+          "decision": "deny",
+          "latency_ms": 3,
+          "rule": "authz.services.deny-admin"
+        },
+        {
+          "kind": "model_call",
+          "name": "claude-opus-5-5",
+          "decision": "allow",
+          "latency_ms": 1288,
+          "summary": "stop=end_turn"
+        }
+      ]
+    },
+    "input_sha256": "5294f7fa48e32a6d986aca1b95d78077b7efb10d61590139b73b8dab041f68b3",
+    "output_sha256": "257f30488a84f4a74d1775dd1ff2c9d482c950f8cf1a09831425daf7ec674f0b",
+    "tokens": {
+      "input": 2727,
+      "output": 130
+    },
+    "cost_usd": 0.013508,
+    "latency_ms": 2415,
+    "decision": "allow",
+    "rule": "authz.callers.local",
+    "reason": null,
+    "error": null
+  },
+  {
+    "ts": "2026-10-21T09:58:46.410Z",
+    "kind": "model_call",
+    "request_id": "6d3e3a28-4a91-4ed9-b0f6-f6ea336b6784",
+    "trace_id": "ff598158a173077b115f5e5921c0a75f",
+    "span_id": "cd461bd269c98aa2",
+    "parent_span_id": "d64568ce7de413ea",
+    "service": "orders",
+    "namespace": "attache-demo",
+    "agent": "ops-assistant",
+    "caller": "local",
+    "caller_agent": null,
+    "callee": "anthropic:claude-opus-5-5",
+    "direction": "outbound",
+    "input": {
+      "system": "You are the operations assistant embedded in the orders service.\nAnswer questions about orders and stock. Use lookup_order for order\ndetails, stock_analyst for anything about inventory levels or reorders,\nand inventory_admin_reset only when explicitly asked to reset admin\ncounters. Be concise and state which tools you used.\n",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Reset the inventory admin counters\n\n<context>\n{\"source\":\"orders /ask\"}\n</context>"
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "You asked explicitly, so I'll reset the inventory admin counters."
+            },
+            {
+              "type": "tool_use",
+              "id": "toolu_01EX2wUnKbXakxiPTKYkMgrv",
+              "name": "inventory_admin_reset",
+              "input": {}
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "toolu_01EX2wUnKbXakxiPTKYkMgrv",
+              "content": "denied by authz.services.deny-admin: denied by inventory: POST /admin/reset on inventory matches deny pattern \"* /admin/*\"",
+              "is_error": true
+            }
+          ]
+        }
+      ],
+      "tools": [
+        "lookup_order",
+        "stock_analyst",
+        "order_triage",
+        "inventory_admin_reset"
+      ]
+    },
+    "output": [
+      {
+        "type": "text",
+        "text": "I could not reset the inventory admin counters: the inventory service denied POST /admin/reset (rule authz.services.deny-admin). Tools used: inventory_admin_reset."
+      }
+    ],
+    "input_sha256": "727448c6c90231c8872d3524c0f266aa3a5c921fca0df886441bfe00517fa42d",
+    "output_sha256": "ca2a241090df07bef4271f3e3c2caf29e11a5f727d086ab572332ace17be0e7a",
+    "tokens": {
+      "input": 1488,
+      "output": 61
+    },
+    "cost_usd": 0.007172,
+    "latency_ms": 1288,
+    "decision": "allow",
+    "rule": null,
+    "reason": null,
+    "error": null
+  },
+  {
+    "ts": "2026-10-21T09:58:45.117Z",
+    "kind": "tool_call",
+    "request_id": "6d3e3a28-4a91-4ed9-b0f6-f6ea336b6784",
+    "trace_id": "ff598158a173077b115f5e5921c0a75f",
+    "span_id": "6ebd2e35fb3a61b0",
+    "parent_span_id": "d64568ce7de413ea",
+    "service": "orders",
+    "namespace": "attache-demo",
+    "agent": "ops-assistant",
+    "caller": "local",
+    "caller_agent": "ops-assistant",
+    "callee": "inventory_admin_reset",
+    "direction": "internal",
+    "input": {
+      "service": "inventory",
+      "method": "POST",
+      "path": "/admin/reset",
+      "body": null
+    },
+    "output": null,
+    "input_sha256": "7a4a6a5ea99e06c440f4da38dd9f850713213458e9426cf1289d2a0eeba405e4",
+    "output_sha256": null,
+    "tokens": null,
+    "cost_usd": null,
+    "latency_ms": 3,
+    "decision": "deny",
+    "rule": "authz.services.deny-admin",
+    "reason": "denied by inventory: POST /admin/reset on inventory matches deny pattern \"* /admin/*\"",
+    "error": null
+  },
+  {
+    "ts": "2026-10-21T09:58:45.117Z",
+    "kind": "service_call",
+    "request_id": "6d3e3a28-4a91-4ed9-b0f6-f6ea336b6784",
+    "trace_id": "ff598158a173077b115f5e5921c0a75f",
+    "span_id": "3c30388fa15e5468",
+    "parent_span_id": "6ebd2e35fb3a61b0",
+    "service": "orders",
+    "namespace": "attache-demo",
+    "agent": "ops-assistant",
+    "caller": "local",
+    "caller_agent": "ops-assistant",
+    "callee": "inventory POST /admin/reset",
+    "direction": "outbound",
+    "input": {
+      "service": "inventory",
+      "method": "POST",
+      "path": "/admin/reset",
+      "body": null
+    },
+    "output": null,
+    "input_sha256": "7a4a6a5ea99e06c440f4da38dd9f850713213458e9426cf1289d2a0eeba405e4",
+    "output_sha256": null,
+    "tokens": null,
+    "cost_usd": null,
+    "latency_ms": 3,
+    "decision": "deny",
+    "rule": "authz.services.deny-admin",
+    "reason": "denied by inventory: POST /admin/reset on inventory matches deny pattern \"* /admin/*\"",
+    "error": null
+  },
+  {
+    "ts": "2026-10-21T09:58:45.116Z",
+    "kind": "service_call",
+    "request_id": "6d3e3a28-4a91-4ed9-b0f6-f6ea336b6784",
+    "trace_id": "ff598158a173077b115f5e5921c0a75f",
+    "span_id": "f491d64d5178de31",
+    "parent_span_id": "3c30388fa15e5468",
+    "service": "inventory",
+    "namespace": "attache-demo",
+    "agent": "ops-assistant",
+    "caller": "spiffe://attache/ns/attache-demo/svc/orders",
+    "caller_agent": "ops-assistant",
+    "callee": "inventory POST /admin/reset",
+    "direction": "inbound",
+    "input": {
+      "method": "POST",
+      "path": "/admin/reset",
+      "body": null
+    },
+    "output": null,
+    "input_sha256": "8365a2b50c5e44a10cf493adc0d53d2afee2cd0951c7e3ab7b16fdd96da74945",
+    "output_sha256": null,
+    "tokens": null,
+    "cost_usd": null,
+    "latency_ms": 0,
+    "decision": "deny",
+    "rule": "authz.services.deny-admin",
+    "reason": "POST /admin/reset on inventory matches deny pattern \"* /admin/*\"",
+    "error": null
+  },
+  {
+    "ts": "2026-10-21T09:58:45.108Z",
+    "kind": "model_call",
+    "request_id": "6d3e3a28-4a91-4ed9-b0f6-f6ea336b6784",
+    "trace_id": "ff598158a173077b115f5e5921c0a75f",
+    "span_id": "5d5da845575bcb81",
+    "parent_span_id": "d64568ce7de413ea",
+    "service": "orders",
+    "namespace": "attache-demo",
+    "agent": "ops-assistant",
+    "caller": "local",
+    "caller_agent": null,
+    "callee": "anthropic:claude-opus-5-5",
+    "direction": "outbound",
+    "input": {
+      "system": "You are the operations assistant embedded in the orders service.\nAnswer questions about orders and stock. Use lookup_order for order\ndetails, stock_analyst for anything about inventory levels or reorders,\nand inventory_admin_reset only when explicitly asked to reset admin\ncounters. Be concise and state which tools you used.\n",
+      "messages": [
+        {
+          "role": "user",
+          "content": "Reset the inventory admin counters\n\n<context>\n{\"source\":\"orders /ask\"}\n</context>"
+        }
+      ],
+      "tools": [
+        "lookup_order",
+        "stock_analyst",
+        "order_triage",
+        "inventory_admin_reset"
+      ]
+    },
+    "output": [
+      {
+        "type": "text",
+        "text": "You asked explicitly, so I'll reset the inventory admin counters."
+      },
+      {
+        "type": "tool_use",
+        "id": "toolu_01EX2wUnKbXakxiPTKYkMgrv",
+        "name": "inventory_admin_reset",
+        "input": {}
+      }
+    ],
+    "input_sha256": "9c4f0ab68785b4379160b60039068bfd83c5895d1ac50c7aff31c37fe6827974",
+    "output_sha256": "1b2ae94a9e4705664219a8ef3023ff407549e6eb614fd6b8f7b9c282833c2ddd",
+    "tokens": {
+      "input": 1239,
+      "output": 69
+    },
+    "cost_usd": 0.006336,
+    "latency_ms": 1104,
+    "decision": "allow",
+    "rule": null,
+    "reason": null,
+    "error": null
+  },
+  {
+    "ts": "2026-10-21T09:57:35.247Z",
+    "kind": "agent_invocation",
+    "request_id": "cf874e49-e4b5-45ad-84fe-0d3521eb0fb5",
+    "trace_id": "1bfb4c6c4dad62ab84a1b3d6ff7e14e9",
+    "span_id": "0ae47ead43682cb4",
+    "parent_span_id": null,
+    "service": "orders",
+    "namespace": "attache-demo",
+    "agent": "ops-assistant",
+    "caller": "local",
+    "caller_agent": null,
+    "callee": "ops-assistant",
+    "direction": "inbound",
+    "input": {
+      "input": "How many WIDGET-1 are in stock?",
+      "context": {
+        "source": "orders /ask"
+      }
+    },
+    "output": {
+      "status": "ok",
+      "request_id": "cf874e49-e4b5-45ad-84fe-0d3521eb0fb5",
+      "trace_id": "1bfb4c6c4dad62ab84a1b3d6ff7e14e9",
+      "agent": "ops-assistant",
+      "output": "WIDGET-1 has 42 units on hand in the north warehouse, below its reorder point of 50; the stock analyst recommends reordering at least 8 units now. Tools used: stock_analyst.",
+      "usage": {
+        "input_tokens": 4219,
+        "output_tokens": 381,
+        "cost_usd": 0.024496
+      },
+      "steps": [
+        {
+          "kind": "model_call",
+          "name": "claude-opus-5-5",
+          "decision": "allow",
+          "latency_ms": 1254,
+          "summary": "stop=tool_use"
+        },
+        {
+          "kind": "agent_call",
+          "name": "inventory/stock-analyst",
+          "decision": "allow",
+          "latency_ms": 2552,
+          "rule": "guardrail.allowed_services"
+        },
+        {
+          "kind": "model_call",
+          "name": "claude-opus-5-5",
+          "decision": "allow",
+          "latency_ms": 1418,
+          "summary": "stop=end_turn"
+        }
+      ]
+    },
+    "input_sha256": "ffd53cabd57234abf5d24430bab22a1077c6e5a640e5406b990ce5b1b3e14e45",
+    "output_sha256": "d4aca3e3400836e8fe7031d403522bc5b17a000040f2a162ef95755f02c593f7",
+    "tokens": {
+      "input": 4219,
+      "output": 381
+    },
+    "cost_usd": 0.024496,
+    "latency_ms": 5247,
+    "decision": "allow",
+    "rule": "authz.callers.local",
+    "reason": null,
+    "error": null
+  },
+  {
+    "ts": "2026-10-21T09:57:35.241Z",
+    "kind": "model_call",
+    "request_id": "cf874e49-e4b5-45ad-84fe-0d3521eb0fb5",
+    "trace_id": "1bfb4c6c4dad62ab84a1b3d6ff7e14e9",
+    "span_id": "bae02047faee2954",
+    "parent_span_id": "0ae47ead43682cb4",
+    "service": "orders",
+    "namespace": "attache-demo",
+    "agent": "ops-assistant",
+    "caller": "local",
+    "caller_agent": null,
+    "callee": "anthropic:claude-opus-5-5",
+    "direction": "outbound",
+    "input": {
+      "system": "You are the operations assistant embedded in the orders service.\nAnswer questions about orders and stock. Use lookup_order for order\ndetails, stock_analyst for anything about inventory levels or reorders,\nand inventory_admin_reset only when explicitly asked to reset admin\ncounters. Be concise and state which tools you used.\n",
+      "messages": [
+        {
+          "role": "user",
+          "content": "How many WIDGET-1 are in stock?\n\n<context>\n{\"source\":\"orders /ask\"}\n</context>"
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "I'll ask the inventory stock analyst."
+            },
+            {
+              "type": "tool_use",
+              "id": "toolu_01y2tSJ6qY6xDcTTnRGs3VxS",
+              "name": "stock_analyst",
+              "input": {
+                "input": "How many WIDGET-1 are in stock?"
+              }
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "toolu_01y2tSJ6qY6xDcTTnRGs3VxS",
+              "content": "WIDGET-1: 42 on hand in the north warehouse, below the reorder point of 50. Reorder at least 8 units now to get back to the reorder point; contact [redacted:email] to confirm the delivery slot.",
+              "is_error": false
+            }
+          ]
+        }
+      ],
+      "tools": [
+        "lookup_order",
+        "stock_analyst",
+        "order_triage",
+        "inventory_admin_reset"
+      ]
+    },
+    "output": [
+      {
+        "type": "text",
+        "text": "WIDGET-1 has 42 units on hand in the north warehouse, below its reorder point of 50; the stock analyst recommends reordering at least 8 units now. Tools used: stock_analyst."
+      }
+    ],
+    "input_sha256": "aaf1b0e4adbbec100cfbadc318eb9c4871056706e71a18a291dc8d32207feee8",
+    "output_sha256": "e982625bbb8d3584d869c2447cf13d9c408b58824e4b917115af145d5f8d362e",
+    "tokens": {
+      "input": 1519,
+      "output": 104
+    },
+    "cost_usd": 0.008156,
+    "latency_ms": 1418,
+    "decision": "allow",
+    "rule": null,
+    "reason": null,
+    "error": null
+  },
+  {
+    "ts": "2026-10-21T09:57:33.817Z",
+    "kind": "tool_call",
+    "request_id": "cf874e49-e4b5-45ad-84fe-0d3521eb0fb5",
+    "trace_id": "1bfb4c6c4dad62ab84a1b3d6ff7e14e9",
+    "span_id": "001691d691080e4b",
+    "parent_span_id": "0ae47ead43682cb4",
+    "service": "orders",
+    "namespace": "attache-demo",
+    "agent": "ops-assistant",
+    "caller": "local",
+    "caller_agent": "ops-assistant",
+    "callee": "stock_analyst",
+    "direction": "internal",
+    "input": "How many WIDGET-1 are in stock?",
+    "output": "WIDGET-1: 42 on hand in the north warehouse, below the reorder point of 50. Reorder at least 8 units now to get back to the reorder point; contact [redacted:email] to confirm the delivery slot.",
+    "input_sha256": "4095737fc3cc0c13be1d4ef4997a5caf53cee7cd25a0c353d31ed6df5f8d5465",
+    "output_sha256": "41a8d952a6434e2996ce259281cf0a2a9a4149564bc95fbdd3e18d4fcf4c0edd",
+    "tokens": null,
+    "cost_usd": null,
+    "latency_ms": 2553,
+    "decision": "allow",
+    "rule": "guardrail.allowed_services",
+    "reason": null,
+    "error": null
+  },
+  {
+    "ts": "2026-10-21T09:57:33.817Z",
+    "kind": "agent_call",
+    "request_id": "cf874e49-e4b5-45ad-84fe-0d3521eb0fb5",
+    "trace_id": "1bfb4c6c4dad62ab84a1b3d6ff7e14e9",
+    "span_id": "96879117105399e2",
+    "parent_span_id": "001691d691080e4b",
+    "service": "orders",
+    "namespace": "attache-demo",
+    "agent": "ops-assistant",
+    "caller": "local",
+    "caller_agent": "ops-assistant",
+    "callee": "inventory/stock-analyst",
+    "direction": "outbound",
+    "input": "How many WIDGET-1 are in stock?",
+    "output": "WIDGET-1: 42 on hand in the north warehouse, below the reorder point of 50. Reorder at least 8 units now to get back to the reorder point; contact [redacted:email] to confirm the delivery slot.",
+    "input_sha256": "4095737fc3cc0c13be1d4ef4997a5caf53cee7cd25a0c353d31ed6df5f8d5465",
+    "output_sha256": "41a8d952a6434e2996ce259281cf0a2a9a4149564bc95fbdd3e18d4fcf4c0edd",
+    "tokens": {
+      "input": 1453,
+      "output": 189
+    },
+    "cost_usd": 0.009592,
+    "latency_ms": 2552,
+    "decision": "allow",
+    "rule": "guardrail.allowed_services",
+    "reason": null,
+    "error": null
+  },
+  {
+    "ts": "2026-10-21T09:57:33.805Z",
+    "kind": "agent_invocation",
+    "request_id": "cf874e49-e4b5-45ad-84fe-0d3521eb0fb5",
+    "trace_id": "1bfb4c6c4dad62ab84a1b3d6ff7e14e9",
+    "span_id": "ff41d6b270e19c4f",
+    "parent_span_id": "96879117105399e2",
+    "service": "inventory",
+    "namespace": "attache-demo",
+    "agent": "stock-analyst",
+    "caller": "spiffe://attache/ns/attache-demo/svc/orders",
+    "caller_agent": "ops-assistant",
+    "callee": "stock-analyst",
+    "direction": "inbound",
+    "input": "How many WIDGET-1 are in stock?",
+    "output": {
+      "status": "ok",
+      "request_id": "cf874e49-e4b5-45ad-84fe-0d3521eb0fb5",
+      "trace_id": "1bfb4c6c4dad62ab84a1b3d6ff7e14e9",
+      "agent": "stock-analyst",
+      "output": "WIDGET-1: 42 on hand in the north warehouse, below the reorder point of 50. Reorder at least 8 units now to get back to the reorder point; contact [redacted:email] to confirm the delivery slot.",
+      "usage": {
+        "input_tokens": 1453,
+        "output_tokens": 189,
+        "cost_usd": 0.009592
+      },
+      "steps": [
+        {
+          "kind": "model_call",
+          "name": "claude-opus-5-5",
+          "decision": "allow",
+          "latency_ms": 1022,
+          "summary": "stop=tool_use"
+        },
+        {
+          "kind": "service_call",
+          "name": "inventory GET /stock/WIDGET-1",
+          "decision": "allow",
+          "latency_ms": 6,
+          "rule": "authz.services.self-stock"
+        },
+        {
+          "kind": "model_call",
+          "name": "claude-opus-5-5",
+          "decision": "allow",
+          "latency_ms": 1478,
+          "summary": "stop=end_turn"
+        },
+        {
+          "kind": "guardrail",
+          "name": "stock-analyst",
+          "decision": "allow",
+          "latency_ms": 0,
+          "rule": "guardrail.pii_redact",
+          "summary": "1 PII value(s) redacted from output"
+        }
+      ]
+    },
+    "input_sha256": "4095737fc3cc0c13be1d4ef4997a5caf53cee7cd25a0c353d31ed6df5f8d5465",
+    "output_sha256": "102dc1bd6f8815494d85f330a409afac21ecb0a96cb585261286217b353b9a17",
+    "tokens": {
+      "input": 1453,
+      "output": 189
+    },
+    "cost_usd": 0.009592,
+    "latency_ms": 2526,
+    "decision": "allow",
+    "rule": "authz.callers.orders",
+    "reason": null,
+    "error": null
+  },
+  {
+    "ts": "2026-10-21T09:57:33.804Z",
+    "kind": "guardrail",
+    "request_id": "cf874e49-e4b5-45ad-84fe-0d3521eb0fb5",
+    "trace_id": "1bfb4c6c4dad62ab84a1b3d6ff7e14e9",
+    "span_id": "ff41d6b270e19c4f",
+    "parent_span_id": "96879117105399e2",
+    "service": "inventory",
+    "namespace": "attache-demo",
+    "agent": "stock-analyst",
+    "caller": "spiffe://attache/ns/attache-demo/svc/orders",
+    "caller_agent": "ops-assistant",
+    "callee": "stock-analyst",
+    "direction": "internal",
+    "input": null,
+    "output": {
+      "redactions": 1
+    },
+    "input_sha256": null,
+    "output_sha256": "a0ba6bb9d93235ec68e85382a52ec294b07e7b7ab869cdf14f88545ca5a0a675",
+    "tokens": null,
+    "cost_usd": null,
+    "latency_ms": 0,
+    "decision": "allow",
+    "rule": "guardrail.pii_redact",
+    "reason": "1 PII value(s) redacted from output",
+    "error": null
+  },
+  {
+    "ts": "2026-10-21T09:57:33.802Z",
+    "kind": "model_call",
+    "request_id": "cf874e49-e4b5-45ad-84fe-0d3521eb0fb5",
+    "trace_id": "1bfb4c6c4dad62ab84a1b3d6ff7e14e9",
+    "span_id": "69fbf4f3475ca2bb",
+    "parent_span_id": "ff41d6b270e19c4f",
+    "service": "inventory",
+    "namespace": "attache-demo",
+    "agent": "stock-analyst",
+    "caller": "spiffe://attache/ns/attache-demo/svc/orders",
+    "caller_agent": "ops-assistant",
+    "callee": "anthropic:claude-opus-5-5",
+    "direction": "outbound",
+    "input": {
+      "system": "You are the stock analyst of the inventory service. Use get_stock to read\ncurrent stock levels, then answer with on-hand quantity, the reorder\npoint and a clear reorder recommendation. Keep it to three sentences.\n",
+      "messages": [
+        {
+          "role": "user",
+          "content": "How many WIDGET-1 are in stock?"
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "toolu_012hcQM5xo77acBrrDvGcce3",
+              "name": "get_stock",
+              "input": {
+                "sku": "WIDGET-1"
+              }
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "toolu_012hcQM5xo77acBrrDvGcce3",
+              "content": "{\"status\":200,\"body\":{\"sku\":\"WIDGET-1\",\"on_hand\":42,\"reorder_point\":50,\"warehouse\":\"north\",\"warehouse_contact\":\"[redacted:email]\"}}",
+              "is_error": false
+            }
+          ]
+        }
+      ],
+      "tools": [
+        "get_stock"
+      ]
+    },
+    "output": [
+      {
+        "type": "text",
+        "text": "WIDGET-1: 42 on hand in the north warehouse, below the reorder point of 50. Reorder at least 8 units now to get back to the reorder point; contact [redacted:email] to confirm the delivery slot."
+      }
+    ],
+    "input_sha256": "5da0ffbdcb441fda237867654a5457263cc168590be41634d561a0edcee5bdf1",
+    "output_sha256": "4e8fc064e4903e5dee843f455d40538c563b9807e7097651beac738cdbfe2149",
+    "tokens": {
+      "input": 811,
+      "output": 118
+    },
+    "cost_usd": 0.005604,
+    "latency_ms": 1478,
+    "decision": "allow",
+    "rule": null,
+    "reason": null,
+    "error": null
+  },
+  {
+    "ts": "2026-10-21T09:57:32.319Z",
+    "kind": "tool_call",
+    "request_id": "cf874e49-e4b5-45ad-84fe-0d3521eb0fb5",
+    "trace_id": "1bfb4c6c4dad62ab84a1b3d6ff7e14e9",
+    "span_id": "a95ef536073e51af",
+    "parent_span_id": "ff41d6b270e19c4f",
+    "service": "inventory",
+    "namespace": "attache-demo",
+    "agent": "stock-analyst",
+    "caller": "local",
+    "caller_agent": "stock-analyst",
+    "callee": "get_stock",
+    "direction": "internal",
+    "input": {
+      "service": "inventory",
+      "method": "GET",
+      "path": "/stock/WIDGET-1",
+      "body": null
+    },
+    "output": {
+      "status": 200,
+      "body": {
+        "sku": "WIDGET-1",
+        "on_hand": 42,
+        "reorder_point": 50,
+        "warehouse": "north",
+        "warehouse_contact": "[redacted:email]"
+      }
+    },
+    "input_sha256": "fa5dae72dccdc7cc8e1c673a74d79e6f510434ad1bb907256556610fb230d4eb",
+    "output_sha256": "5f1d1a570852e94738147b5391911b729e497aca36da6d377afea15bf5c6a6e1",
+    "tokens": null,
+    "cost_usd": null,
+    "latency_ms": 7,
+    "decision": "allow",
+    "rule": "authz.services.self-stock",
+    "reason": null,
+    "error": null
+  },
+  {
+    "ts": "2026-10-21T09:57:32.319Z",
+    "kind": "service_call",
+    "request_id": "cf874e49-e4b5-45ad-84fe-0d3521eb0fb5",
+    "trace_id": "1bfb4c6c4dad62ab84a1b3d6ff7e14e9",
+    "span_id": "45eb00b4293e9d8b",
+    "parent_span_id": "a95ef536073e51af",
+    "service": "inventory",
+    "namespace": "attache-demo",
+    "agent": "stock-analyst",
+    "caller": "local",
+    "caller_agent": "stock-analyst",
+    "callee": "inventory GET /stock/WIDGET-1",
+    "direction": "internal",
+    "input": {
+      "service": "inventory",
+      "method": "GET",
+      "path": "/stock/WIDGET-1",
+      "body": null
+    },
+    "output": {
+      "status": 200,
+      "body": {
+        "sku": "WIDGET-1",
+        "on_hand": 42,
+        "reorder_point": 50,
+        "warehouse": "north",
+        "warehouse_contact": "[redacted:email]"
+      }
+    },
+    "input_sha256": "fa5dae72dccdc7cc8e1c673a74d79e6f510434ad1bb907256556610fb230d4eb",
+    "output_sha256": "5f1d1a570852e94738147b5391911b729e497aca36da6d377afea15bf5c6a6e1",
+    "tokens": null,
+    "cost_usd": null,
+    "latency_ms": 6,
+    "decision": "allow",
+    "rule": "authz.services.self-stock",
+    "reason": null,
+    "error": null
+  },
+  {
+    "ts": "2026-10-21T09:57:32.306Z",
+    "kind": "model_call",
+    "request_id": "cf874e49-e4b5-45ad-84fe-0d3521eb0fb5",
+    "trace_id": "1bfb4c6c4dad62ab84a1b3d6ff7e14e9",
+    "span_id": "f15e33f35d80a7b4",
+    "parent_span_id": "ff41d6b270e19c4f",
+    "service": "inventory",
+    "namespace": "attache-demo",
+    "agent": "stock-analyst",
+    "caller": "spiffe://attache/ns/attache-demo/svc/orders",
+    "caller_agent": "ops-assistant",
+    "callee": "anthropic:claude-opus-5-5",
+    "direction": "outbound",
+    "input": {
+      "system": "You are the stock analyst of the inventory service. Use get_stock to read\ncurrent stock levels, then answer with on-hand quantity, the reorder\npoint and a clear reorder recommendation. Keep it to three sentences.\n",
+      "messages": [
+        {
+          "role": "user",
+          "content": "How many WIDGET-1 are in stock?"
+        }
+      ],
+      "tools": [
+        "get_stock"
+      ]
+    },
+    "output": [
+      {
+        "type": "tool_use",
+        "id": "toolu_012hcQM5xo77acBrrDvGcce3",
+        "name": "get_stock",
+        "input": {
+          "sku": "WIDGET-1"
+        }
+      }
+    ],
+    "input_sha256": "d541a3fd87cccb351104d386aba1f7380bc83425b668a8551851aed97613225d",
+    "output_sha256": "b651a724a3a449ed7efdc421fdebc190000d9f7adf862484fca7baa31551f348",
+    "tokens": {
+      "input": 642,
+      "output": 71
+    },
+    "cost_usd": 0.003988,
+    "latency_ms": 1022,
+    "decision": "allow",
+    "rule": null,
+    "reason": null,
+    "error": null
+  },
+  {
+    "ts": "2026-10-21T09:57:31.258Z",
+    "kind": "model_call",
+    "request_id": "cf874e49-e4b5-45ad-84fe-0d3521eb0fb5",
+    "trace_id": "1bfb4c6c4dad62ab84a1b3d6ff7e14e9",
+    "span_id": "0a11b4a49efddfd1",
+    "parent_span_id": "0ae47ead43682cb4",
+    "service": "orders",
+    "namespace": "attache-demo",
+    "agent": "ops-assistant",
+    "caller": "local",
+    "caller_agent": null,
+    "callee": "anthropic:claude-opus-5-5",
+    "direction": "outbound",
+    "input": {
+      "system": "You are the operations assistant embedded in the orders service.\nAnswer questions about orders and stock. Use lookup_order for order\ndetails, stock_analyst for anything about inventory levels or reorders,\nand inventory_admin_reset only when explicitly asked to reset admin\ncounters. Be concise and state which tools you used.\n",
+      "messages": [
+        {
+          "role": "user",
+          "content": "How many WIDGET-1 are in stock?\n\n<context>\n{\"source\":\"orders /ask\"}\n</context>"
+        }
+      ],
+      "tools": [
+        "lookup_order",
+        "stock_analyst",
+        "order_triage",
+        "inventory_admin_reset"
+      ]
+    },
+    "output": [
+      {
+        "type": "text",
+        "text": "I'll ask the inventory stock analyst."
+      },
+      {
+        "type": "tool_use",
+        "id": "toolu_01y2tSJ6qY6xDcTTnRGs3VxS",
+        "name": "stock_analyst",
+        "input": {
+          "input": "How many WIDGET-1 are in stock?"
+        }
+      }
+    ],
+    "input_sha256": "cb958a0710bbb673f9ed58cbb4cf8ba28f173b3ef44c2056ae3c6bb61bd80985",
+    "output_sha256": "b5eb4e08333fe6af7aad20a6ef375384e9764b3430a409dbb76d03b22a3e6e22",
+    "tokens": {
+      "input": 1247,
+      "output": 88
+    },
+    "cost_usd": 0.006748,
+    "latency_ms": 1254,
+    "decision": "allow",
+    "rule": null,
+    "reason": null,
+    "error": null
+  }
+]

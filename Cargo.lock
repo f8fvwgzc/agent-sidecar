@@ -594,17 +594,26 @@ name = "embassy"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "attache-common",
  "attache-pki",
  "base64 0.22.1",
+ "chrono",
  "clap",
+ "hex",
+ "rand 0.9.5",
  "reqwest",
  "rustls",
  "serde",
  "serde_json",
+ "serde_yaml_ng",
+ "sha2",
+ "tempfile",
+ "thiserror",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]

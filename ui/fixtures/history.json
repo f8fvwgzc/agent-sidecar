@@ -1,0 +1,20 @@
+[
+  {
+    "version": "3",
+    "ts": "2026-10-21T09:51:12.304Z",
+    "actor": "alice",
+    "sha256": "91e5e959bafbe8b64cb13614780a3f76f9b53f966921b637be961f865d6f8ed4"
+  },
+  {
+    "version": "2",
+    "ts": "2026-10-20T16:05:47.118Z",
+    "actor": "alice",
+    "sha256": "1e672db6e19243fba77f0dab1846e86d7e9892fe798747f41fb9fc9dda64fd74"
+  },
+  {
+    "version": "1",
+    "ts": "2026-10-19T08:30:02.951Z",
+    "actor": "bob",
+    "sha256": "91e5e959bafbe8b64cb13614780a3f76f9b53f966921b637be961f865d6f8ed4"
+  }
+]
