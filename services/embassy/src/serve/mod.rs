@@ -655,12 +655,22 @@ pub async fn start(
         } else {
             ClientAuth::Required
         };
+        // one process (`ca` and `controlplane` together, the Compose default): IssueCertificate
+        // shares the Connect listener, since `ca_components` binds --grpc-addr only without
+        // `controlplane` (see `ca_components::serves_grpc`)
+        let extra = if args.has(Ca) {
+            Some(tonic::service::Routes::new(
+                crate::issuance::issuance_service(&ctx)?,
+            ))
+        } else {
+            None
+        };
         let (bound, task) = crate::controlplane::bind_and_serve(
             h.clone(),
             args.grpc_addr,
             serving,
             auth,
-            None,
+            extra,
             shutdown.clone(),
         )
         .await?;

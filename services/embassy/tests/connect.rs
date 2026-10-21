@@ -808,6 +808,25 @@ async fn connect_shares_the_grpc_address_with_the_ca_component() {
         .unwrap();
     assert!(sc.next_within(Duration::from_millis(200)).await.is_none());
     assert_eq!(service(&env, "orders").await.unwrap().instances.len(), 1);
+
+    // IssueCertificate answers on the same address (one-process mode, design §2): a request with
+    // an unknown join token reaches the issuer and is refused by it, not by tonic's router
+    // (which would answer UNIMPLEMENTED when the service is not served here).
+    let mut ca =
+        agentsc_proto::v1alpha1::certificate_authority_client::CertificateAuthorityClient::new(
+            env.channel(None).await,
+        );
+    let err = ca
+        .issue_certificate(agentsc_proto::v1alpha1::CertificateRequest {
+            csr_pem: String::new(),
+            kubernetes_token: String::new(),
+            join_token: "att_not-a-configured-token".into(),
+            namespace: NS.into(),
+            service: "orders".into(),
+        })
+        .await
+        .expect_err("refused");
+    assert_ne!(err.code(), tonic::Code::Unimplemented, "{err:?}");
     env.stop().await;
 }
 
