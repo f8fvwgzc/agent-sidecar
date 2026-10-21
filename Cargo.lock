@@ -77,6 +77,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "arc-swap"
+version = "1.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "380962b3d93b99642e50b9febf72c071e97e8b32d86eae9cf4ef582bb960ae6e"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "asn1-rs"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -200,7 +209,9 @@ name = "attache-pki"
 version = "0.1.0"
 dependencies = [
  "attache-common",
+ "base64 0.22.1",
  "rcgen",
+ "ring",
  "rustls-pki-types",
  "thiserror",
  "time",
@@ -617,6 +628,7 @@ name = "embassy"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "async-trait",
  "attache-common",
  "attache-pki",
@@ -625,8 +637,10 @@ dependencies = [
  "clap",
  "hex",
  "rand 0.9.5",
+ "rcgen",
  "reqwest",
  "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -634,6 +648,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "url",
