@@ -85,7 +85,10 @@ def model_call_record(
     output_tokens: int,
     latency_ms: int,
     error: str | None = None,
+    meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """`meta` adds fields to `input`: `attempt` (1-based) and `fallback` for harness attempts, or
+    `purpose: "reflection"` for the learning reflection (design §6.5, §11.1, §12)."""
     callee = model.name if model.provider == "mock" else f"{model.provider}:{model.name}"
     denied = stop_reason == "refusal"
     return {
@@ -102,7 +105,7 @@ def model_call_record(
         "caller_agent": caller_agent or None,
         "callee": callee,
         "direction": "outbound",
-        "input": {"system": system, "messages": messages, "tools": [t["name"] for t in tools]},
+        "input": {"system": system, "messages": messages, "tools": [t["name"] for t in tools], **(meta or {})},
         "output": content,
         "input_sha256": None,
         "output_sha256": None,
@@ -189,6 +192,7 @@ async def _model_turn(
     max_tokens: int,
     timeout: float,
     abandoned: asyncio.Event,
+    meta: dict[str, Any] | None = None,
 ) -> _Turn:
     """One model call and its ReportEvent. The provider bills the call whether or not anyone still waits
     for it, so this runs to the end even when the Execute that started it is cancelled."""
@@ -219,12 +223,24 @@ async def _model_turn(
         turn.output_tokens,
         turn.latency_ms,
         error=error,
+        meta=meta,
     )
     outcome = await sidecar.report_event(record)
     turn.sidecar_rule = outcome.rule if isinstance(outcome, ReportOutcome) else None
     if isinstance(outcome, ReportOutcome) and outcome.rejected:
         warn_unreported(record, outcome)
     return turn
+
+
+def _attempt_meta(label: str) -> dict[str, Any]:
+    """`attempt n/N` -> {attempt: n, fallback: False}; `fallback` -> {attempt: <none>, fallback: True}."""
+    if label == "fallback":
+        return {"fallback": True}
+    try:
+        n = int(label.split()[1].split("/")[0])
+    except (IndexError, ValueError):
+        n = 1
+    return {"attempt": n, "fallback": False}
 
 
 def warn_unreported(record: dict[str, Any], outcome: ReportOutcome) -> None:
@@ -288,6 +304,7 @@ class _Run:
                 self.max_tokens,
                 timeout,
                 self.abandoned,
+                _attempt_meta(label),
             )
         )
         _in_flight.add(call)

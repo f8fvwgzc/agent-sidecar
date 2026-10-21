@@ -180,6 +180,7 @@ async def _report(
         output_tokens,
         latency_ms,
         error=error,
+        meta={"purpose": "reflection"},
     )
     outcome = await job.sidecar.report_event(record)
     if isinstance(outcome, ReportOutcome) and outcome.rejected:
