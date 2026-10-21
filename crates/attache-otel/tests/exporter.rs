@@ -1,9 +1,10 @@
 //! The exporter end to end against a local OTLP/HTTP receiver (axum): the JSON it posts, batching,
-//! periodic metrics, retry, timeout, drop counting, and a lagging audit stream.
+//! periodic metrics, retry, timeout, drop counting, a lagging audit stream, flag changes while
+//! running, and the design's default timing.
 mod common;
 
 use attache_common::audit::{AuditRecord, Direction, Kind};
-use attache_otel::{ExportTiming, Exporter, OtelConfig};
+use attache_otel::{ExportFlags, ExportTiming, Exporter, OtelConfig};
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::State;
@@ -467,14 +468,38 @@ async fn after_the_retry_fails_the_batch_is_dropped_and_counted() {
     }
 }
 
+/// Design §9: "one retry; then drop and count" — for every failure, not only the statuses the
+/// OTLP specification calls retryable.
 #[tokio::test]
-async fn a_non_retryable_status_is_not_retried() {
-    for status in [StatusCode::BAD_REQUEST, StatusCode::INTERNAL_SERVER_ERROR] {
+async fn every_failing_status_is_retried_once_then_dropped() {
+    for status in [
+        StatusCode::BAD_REQUEST,
+        StatusCode::UNAUTHORIZED,
+        StatusCode::FORBIDDEN,
+        StatusCode::NOT_FOUND,
+        StatusCode::INTERNAL_SERVER_ERROR,
+    ] {
         let plan: Plan = Arc::new(move |_, _| (status, Duration::ZERO));
         let (posts, dropped) = run_against(plan, timing(), 2).await;
-        assert_eq!(traces_posts(&posts).len(), 1, "{status}");
+        let t = traces_posts(&posts);
+        assert_eq!(t.len(), 2, "{status}: one attempt and one retry");
+        assert_eq!(t[0].body, t[1].body, "{status}");
         assert_eq!(dropped, 2, "{status}");
     }
+}
+
+#[tokio::test]
+async fn a_retry_after_a_server_error_can_deliver() {
+    let plan: Plan = Arc::new(|_, n| {
+        if n == 0 {
+            (StatusCode::INTERNAL_SERVER_ERROR, Duration::ZERO)
+        } else {
+            (StatusCode::OK, Duration::ZERO)
+        }
+    });
+    let (posts, dropped) = run_against(plan, timing(), 2).await;
+    assert_eq!(traces_posts(&posts).len(), 2);
+    assert_eq!(dropped, 0);
 }
 
 #[tokio::test]
@@ -657,4 +682,263 @@ async fn zero_intervals_do_not_stop_the_exporter() {
         paths.insert(next(&mut posts).await.path);
     }
     handle.shutdown().await;
+}
+
+fn attribute_keys(span: &Value) -> Vec<String> {
+    span["attributes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|a| a["key"].as_str().map(str::to_string))
+        .collect()
+}
+
+#[tokio::test]
+async fn the_status_message_is_the_rule_only_without_export_payloads() {
+    let (url, mut posts) = receiver(ok()).await;
+    let (tx, rx) = broadcast::channel(16);
+    let handle = Exporter::spawn_with(
+        OtelConfig {
+            metrics: false,
+            ..config(&url)
+        },
+        rx,
+        timing(),
+    );
+    let mut denied = base(Kind::Authz, Direction::Inbound);
+    denied.decision = "deny".into();
+    denied.rule = Some("authz.services.deny-admin".into());
+    denied.reason = Some("POST /admin/reset?token=s3cr3t on orders matches deny pattern".into());
+    send(&tx, denied);
+    let mut failed = base(Kind::HttpCall, Direction::Outbound);
+    failed.callee = "GET https://api.partner.example/v1/rates?key=s3cr3t".into();
+    failed.error = Some(
+        "error sending request for url (https://api.partner.example/v1/rates?key=s3cr3t)".into(),
+    );
+    send(&tx, failed);
+    handle.shutdown().await;
+    let got = all(&mut posts);
+    let t = traces_posts(&got);
+    assert_eq!(t.len(), 1);
+    let s = spans(t[0]);
+    assert_eq!(
+        s[0]["status"],
+        json!({"message": "authz.services.deny-admin", "code": 2})
+    );
+    assert_eq!(s[1]["status"], json!({"code": 2}));
+    let body = t[0].body.to_string();
+    assert!(!body.contains("s3cr3t"), "{body}");
+    assert!(!body.contains("/admin/reset"), "{body}");
+    assert!(!body.contains("/v1/rates"), "{body}");
+}
+
+#[tokio::test]
+async fn turning_payload_export_off_applies_to_the_batch_being_collected() {
+    let (url, mut posts) = receiver(ok()).await;
+    let (tx, rx) = broadcast::channel(16);
+    let handle = Exporter::spawn_with(
+        OtelConfig {
+            export_payloads: true,
+            metrics: false,
+            ..config(&url)
+        },
+        rx,
+        timing(),
+    );
+    send(&tx, records()["http_call"].clone());
+    tokio::task::yield_now().await;
+    let off = ExportFlags {
+        traces: true,
+        metrics: false,
+        export_payloads: false,
+    };
+    handle.set_flags(off);
+    assert_eq!(handle.flags(), off);
+    send(&tx, records()["service_call"].clone());
+    handle.shutdown().await;
+    let got = all(&mut posts);
+    let t = traces_posts(&got);
+    assert_eq!(t.len(), 1, "one batch, not a respawn");
+    let s = spans(t[0]);
+    assert_eq!(s.len(), 2);
+    for span in &s {
+        let keys = attribute_keys(span);
+        for key in ["url.full", "url.path", "attache.input", "attache.output"] {
+            assert!(!keys.iter().any(|k| k == key), "{key} in {span}");
+        }
+    }
+    assert_eq!(s[0]["status"], json!({"code": 2}), "http_call: no rule");
+    assert_eq!(
+        s[1]["status"]["message"], "authz.services.deny-admin",
+        "service_call: the rule, not the reason"
+    );
+}
+
+#[tokio::test]
+async fn turning_payload_export_on_takes_effect_without_a_restart() {
+    let (url, mut posts) = receiver(ok()).await;
+    let (tx, rx) = broadcast::channel(16);
+    let handle = Exporter::spawn_with(
+        OtelConfig {
+            metrics: false,
+            ..config(&url)
+        },
+        rx,
+        timing(),
+    );
+    handle.set_flags(ExportFlags {
+        traces: true,
+        metrics: false,
+        export_payloads: true,
+    });
+    send(&tx, records()["http_call"].clone());
+    handle.shutdown().await;
+    let got = all(&mut posts);
+    let keys = attribute_keys(&spans(traces_posts(&got)[0])[0]);
+    for key in ["url.full", "url.path", "attache.input"] {
+        assert!(keys.iter().any(|k| k == key), "{key}: {keys:?}");
+    }
+}
+
+#[tokio::test]
+async fn traces_and_metrics_can_be_switched_while_running() {
+    let (url, mut posts) = receiver(ok()).await;
+    let (tx, rx) = broadcast::channel(16);
+    let handle = Exporter::spawn_with(config(&url), rx, timing());
+    handle.set_flags(ExportFlags {
+        traces: false,
+        metrics: false,
+        export_payloads: false,
+    });
+    // both off: an idle exporter that still drains the stream (and keeps aggregating)
+    send(&tx, base(Kind::AgentInvocation, Direction::Inbound));
+    tokio::task::yield_now().await;
+    handle.set_flags(ExportFlags {
+        traces: false,
+        metrics: true,
+        export_payloads: false,
+    });
+    send(&tx, base(Kind::AgentInvocation, Direction::Inbound));
+    assert_eq!(handle.shutdown().await, 0);
+    let got = all(&mut posts);
+    assert!(traces_posts(&got).is_empty(), "traces were off: {got:?}");
+    let metrics: Vec<&Post> = got.iter().filter(|p| p.path == "/v1/metrics").collect();
+    assert_eq!(metrics.len(), 1, "the final push, metrics being on again");
+    let ms = metrics[0].body["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let inv = ms
+        .iter()
+        .find(|m| m["name"] == "attache.invocations")
+        .expect("invocations");
+    assert_eq!(
+        inv["sum"]["dataPoints"][0]["asInt"], "2",
+        "complete totals: records seen while metrics were off count too"
+    );
+}
+
+#[tokio::test]
+async fn metrics_switched_off_and_on_keep_one_cumulative_window() {
+    let (url, mut posts) = receiver(ok()).await;
+    let (tx, rx) = broadcast::channel(16);
+    let handle = Exporter::spawn_with(
+        OtelConfig {
+            traces: false,
+            ..config(&url)
+        },
+        rx,
+        ExportTiming {
+            metrics_interval: Duration::from_millis(50),
+            ..timing()
+        },
+    );
+    let invocations = |p: &Post| -> (Value, Value) {
+        let ms = p.body["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let inv = ms.iter().find(|m| m["name"] == "attache.invocations");
+        let point = inv.map(|m| m["sum"]["dataPoints"][0].clone());
+        let point = point.unwrap_or(Value::Null);
+        (point["asInt"].clone(), point["startTimeUnixNano"].clone())
+    };
+    send(&tx, base(Kind::AgentInvocation, Direction::Inbound));
+    let (count, start) = loop {
+        let p = next(&mut posts).await;
+        let (count, start) = invocations(&p);
+        if count == json!("1") {
+            break (count, start);
+        }
+    };
+    assert_eq!(count, "1");
+    handle.set_flags(ExportFlags {
+        traces: false,
+        metrics: false,
+        export_payloads: false,
+    });
+    // let a push queued before the change arrive, then expect silence
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    while posts.try_recv().is_ok() {}
+    send(&tx, base(Kind::AgentInvocation, Direction::Inbound));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(posts.try_recv().is_err(), "a push while metrics are off");
+    handle.set_flags(ExportFlags {
+        traces: false,
+        metrics: true,
+        export_payloads: false,
+    });
+    let p = next(&mut posts).await;
+    assert_eq!(
+        invocations(&p),
+        (json!("2"), start),
+        "same window, full total"
+    );
+    handle.shutdown().await;
+}
+
+#[test]
+fn the_default_timing_is_the_designs() {
+    // design §9: batch 256 records or 2 s; metrics every 15 s; 5 s timeout; one retry
+    assert_eq!(
+        ExportTiming::default(),
+        ExportTiming {
+            batch_size: 256,
+            batch_interval: Duration::from_secs(2),
+            metrics_interval: Duration::from_secs(15),
+            request_timeout: Duration::from_secs(5),
+            retry_delay: Duration::from_millis(500),
+            queue_capacity: 2,
+        }
+    );
+}
+
+/// `Exporter::spawn` (no explicit timing) batches 256 records and flushes the rest after about
+/// 2 s, without a shutdown.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn spawn_uses_the_design_timing() {
+    let (url, mut posts) = receiver(ok()).await;
+    let (tx, rx) = broadcast::channel(4096);
+    let started = std::time::Instant::now();
+    let handle = Exporter::spawn(
+        OtelConfig {
+            metrics: false,
+            ..config(&url)
+        },
+        rx,
+    );
+    for _ in 0..300 {
+        send(&tx, base(Kind::ToolCall, Direction::Internal));
+    }
+    let full = next(&mut posts).await;
+    assert_eq!(spans(&full).len(), 256, "a full batch is 256 spans");
+    let rest = next(&mut posts).await;
+    assert_eq!(spans(&rest).len(), 44, "the rest, on the batch timer");
+    let waited = started.elapsed();
+    assert!(
+        waited >= Duration::from_millis(1900) && waited < Duration::from_secs(8),
+        "the partial batch went out after {waited:?}, not about 2 s"
+    );
+    assert_eq!(handle.shutdown().await, 0);
 }

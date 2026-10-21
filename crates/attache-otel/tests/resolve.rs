@@ -1,7 +1,7 @@
 //! `OtelConfig::resolve`: every branch of the endpoint rule (design §9), the flags, headers and
 //! resource attributes.
 use attache_charter::TelemetrySpec;
-use attache_otel::OtelConfig;
+use attache_otel::{ExportFlags, OtelConfig};
 use std::collections::HashMap;
 
 fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
@@ -226,6 +226,26 @@ fn charter_flags_are_carried() {
     )
     .expect("export on");
     assert!(!c.traces && c.metrics && c.export_payloads);
+    // the hot-reload flags of the same charter are the resolved config's
+    let flags = ExportFlags {
+        traces: false,
+        metrics: true,
+        export_payloads: true,
+    };
+    assert_eq!(c.flags(), flags);
+    assert_eq!(ExportFlags::from_telemetry(Some(&t)), flags);
+}
+
+#[test]
+fn no_telemetry_block_means_the_default_flags() {
+    assert_eq!(
+        ExportFlags::from_telemetry(None),
+        ExportFlags {
+            traces: true,
+            metrics: true,
+            export_payloads: false,
+        }
+    );
 }
 
 #[test]

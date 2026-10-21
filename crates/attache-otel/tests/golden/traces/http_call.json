@@ -77,7 +77,6 @@
                 }
               ],
               "status": {
-                "message": "timed out after 10s",
                 "code": 2
               }
             }

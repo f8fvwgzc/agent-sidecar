@@ -70,7 +70,7 @@
                 }
               ],
               "status": {
-                "message": "CA unreachable",
+                "message": "cert.renew_failed",
                 "code": 2
               }
             }

@@ -233,10 +233,100 @@ fn status_is_error_for_denials_and_errors_only() {
     let mut errored = base(Kind::ModelCall, Direction::Outbound);
     errored.error = Some("overloaded".into());
     errored.reason = Some("ignored when error is set".into());
-    let s = span_from_record(&errored, 1, false)
+    let s = span_from_record(&errored, 1, true)
         .status
         .expect("error status");
     assert_eq!((s.code, s.message.as_str()), (2, "overloaded"));
+    // without payloads only the rule (here none) is the message
+    let s = span_from_record(&errored, 1, false)
+        .status
+        .expect("error status");
+    assert_eq!((s.code, s.message.as_str()), (2, ""));
+}
+
+/// The texts the sidecar writes into `reason` and `error` quote paths and URLs (authz deny
+/// reasons, the http tool's mismatch, reqwest's "error sending request for url (…)").
+fn records_quoting_the_request() -> Vec<(&'static str, attache_common::audit::AuditRecord)> {
+    let mut out = Vec::new();
+
+    let mut r = base(Kind::Authz, Direction::Inbound);
+    r.decision = "deny".into();
+    r.rule = Some("authz.services.deny-admin".into());
+    r.reason =
+        Some("POST /admin/reset?token=s3cr3t on inventory matches deny pattern /admin/*".into());
+    out.push(("authz deny with a rule", r));
+
+    let mut r = base(Kind::ServiceCall, Direction::Inbound);
+    r.callee = "orders GET /customers/42/cards?full=1".into();
+    r.decision = "deny".into();
+    r.rule = None;
+    r.reason = Some("no rule allows GET /customers/42/cards?full=1 for inventory".into());
+    out.push(("service_call deny without a rule", r));
+
+    let mut r = base(Kind::ToolCall, Direction::Internal);
+    r.callee = "get_rates".into();
+    r.decision = "deny".into();
+    r.rule = Some("tools.http.mismatch".into());
+    r.reason = Some(
+        "GET https://api.partner.example/v1/rates?key=s3cr3t does not match tool get_rates".into(),
+    );
+    out.push(("http tool mismatch", r));
+
+    let mut r = base(Kind::HttpCall, Direction::Outbound);
+    r.callee = "GET https://api.partner.example/v1/rates?key=s3cr3t".into();
+    r.error = Some(
+        "error sending request for url (https://api.partner.example/v1/rates?key=s3cr3t)".into(),
+    );
+    out.push(("http_call transport error", r));
+
+    let mut r = base(Kind::ToolCall, Direction::Internal);
+    r.callee = "get_rates".into();
+    r.rule = Some("tools.http.error".into());
+    r.error = Some(
+        "error sending request for url (https://api.partner.example/v1/rates?key=s3cr3t)".into(),
+    );
+    r.reason = Some("GET /v1/rates?key=s3cr3t".into());
+    out.push(("tool_call error with a rule", r));
+
+    out
+}
+
+#[test]
+fn the_status_message_carries_no_request_text_without_export_payloads() {
+    let mut cases = records_quoting_the_request();
+    cases.extend(one_of_every_kind());
+    for (name, rec) in cases {
+        let error = rec.decision == "deny" || rec.error.is_some();
+        let off = span_from_record(&rec, 1, false);
+        assert_eq!(off.status.is_some(), error, "{name}");
+        if let Some(s) = &off.status {
+            assert_eq!(s.code, 2, "{name}");
+            assert_eq!(
+                s.message,
+                rec.rule.clone().unwrap_or_default(),
+                "{name}: only the rule"
+            );
+            for leak in ["/", "s3cr3t", "?"] {
+                assert!(!s.message.contains(leak), "{name}: {leak:?} in {s:?}");
+            }
+        }
+        // the whole span, serialized, quotes none of it
+        let json = serde_json::to_string(&off).expect("json");
+        assert!(!json.contains("s3cr3t"), "{name}: {json}");
+        assert!(!json.contains("/admin/reset"), "{name}: {json}");
+        assert!(!json.contains("/customers/42"), "{name}: {json}");
+        // with payloads the full text is there to debug with
+        let on = span_from_record(&rec, 1, true);
+        if let Some(s) = &on.status {
+            let full = rec
+                .error
+                .clone()
+                .or_else(|| rec.reason.clone())
+                .or_else(|| rec.rule.clone())
+                .unwrap_or_default();
+            assert_eq!(s.message, full, "{name}");
+        }
+    }
 }
 
 #[test]

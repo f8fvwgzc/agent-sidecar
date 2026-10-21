@@ -83,7 +83,7 @@
                 }
               ],
               "status": {
-                "message": "60 calls in the last minute",
+                "message": "budget.max_calls_per_minute",
                 "code": 2
               }
             }

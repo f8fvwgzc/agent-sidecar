@@ -119,6 +119,13 @@ fn goldens_follow_the_span_rules() {
         }
         let error = rec.decision == "deny" || rec.error.is_some();
         assert_eq!(span["status"]["code"] == json!(2), error, "{name}");
+        // without export_payloads the status message is the rule or nothing, never the free
+        // text of `reason` or `error`
+        assert_eq!(
+            span["status"].get("message").cloned(),
+            rec.rule.clone().filter(|_| error).map(Value::String),
+            "{name}"
+        );
         let end: u64 = span["endTimeUnixNano"]
             .as_str()
             .and_then(|s| s.parse().ok())

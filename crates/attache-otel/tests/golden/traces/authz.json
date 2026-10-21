@@ -77,7 +77,7 @@
                 }
               ],
               "status": {
-                "message": "client certificate has no SPIFFE id",
+                "message": "authz.identity.invalid",
                 "code": 2
               }
             }

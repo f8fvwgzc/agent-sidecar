@@ -16,8 +16,43 @@ pub struct OtelConfig {
     pub resource: Vec<(String, String)>,
     pub traces: bool,
     pub metrics: bool,
-    /// Spans carry `url.full`, `url.path`, inputs and outputs only if true.
+    /// Spans carry `url.full`, `url.path`, inputs, outputs and the free text of `reason` /
+    /// `error` (as the status message) only if true.
     pub export_payloads: bool,
+}
+
+/// The part of [`OtelConfig`] a hot reload may change while the exporter runs: design §4 makes
+/// only `telemetry.otlp_endpoint` restart-only, so `traces`, `metrics` and `export_payloads`
+/// are applied with [`ExporterHandle::set_flags`](crate::ExporterHandle::set_flags).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExportFlags {
+    pub traces: bool,
+    pub metrics: bool,
+    pub export_payloads: bool,
+}
+
+impl ExportFlags {
+    /// The flags of a charter's `telemetry` block (`None`: no block, the defaults).
+    pub fn from_telemetry(charter_telemetry: Option<&TelemetrySpec>) -> Self {
+        let defaults = TelemetrySpec::default();
+        let t = charter_telemetry.unwrap_or(&defaults);
+        Self {
+            traces: t.traces,
+            metrics: t.metrics,
+            export_payloads: t.export_payloads,
+        }
+    }
+}
+
+impl OtelConfig {
+    /// This config's [`ExportFlags`].
+    pub fn flags(&self) -> ExportFlags {
+        ExportFlags {
+            traces: self.traces,
+            metrics: self.metrics,
+            export_payloads: self.export_payloads,
+        }
+    }
 }
 
 impl std::fmt::Debug for OtelConfig {
@@ -79,6 +114,10 @@ impl OtelConfig {
     ///   `http(s)://host[:port]` URL (no userinfo, path, query or fragment) that matches one of
     ///   `allow_globs` (`--otlp-endpoint-allow`), and it gets **no** environment headers.
     /// - Otherwise, or when the charter turns off both traces and metrics, export is off: `None`.
+    ///
+    /// On a hot reload, a running exporter takes the new flags through
+    /// [`ExporterHandle::set_flags`](crate::ExporterHandle::set_flags) (see there for the
+    /// contract); `resolve` is only needed again when no exporter is running.
     ///
     /// `charter_telemetry` `None` means the charter has no `telemetry` block (the defaults).
     /// `resource` is the sidecar's own attributes (`service.name`, `service.namespace`,

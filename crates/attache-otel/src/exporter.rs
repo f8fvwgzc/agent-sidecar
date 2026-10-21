@@ -1,23 +1,27 @@
 //! The background exporter: audit stream in, OTLP/HTTP JSON out (design §9).
 //!
-//! Two tasks. The *collector* drains the audit broadcast receiver, turns records into spans
-//! (batched: [`ExportTiming::batch_size`] spans or every [`ExportTiming::batch_interval`]) and
-//! aggregates metrics (pushed every [`ExportTiming::metrics_interval`]). It never awaits the
-//! network: a finished batch goes to a small queue with `try_send`, and a batch that does not fit
-//! is dropped and counted. The *sender* posts each queued payload with a
-//! [`ExportTiming::request_timeout`] timeout and one retry, then drops and counts it.
+//! Two tasks. The *collector* drains the audit broadcast receiver, batches records for traces
+//! ([`ExportTiming::batch_size`] records or every [`ExportTiming::batch_interval`]; a batch
+//! becomes spans when it is flushed) and aggregates metrics (pushed every
+//! [`ExportTiming::metrics_interval`]). It never awaits the network: a finished batch goes to a
+//! small queue with `try_send`, and a batch that does not fit is dropped and counted. The
+//! *sender* posts each queued payload with a [`ExportTiming::request_timeout`] timeout and, after
+//! any failure, one retry; then it drops and counts it.
 //!
 //! The audit writer never waits for any of this: `tokio::sync::broadcast` drops the oldest
 //! records for a receiver that falls behind, and the collector counts them (`Lagged(n)`) as
 //! dropped. The count is [`ExporterHandle::dropped`] and the metric `attache.otel.dropped`.
-use crate::config::{OtelConfig, mask_password};
+//!
+//! `traces`, `metrics` and `export_payloads` can change while the exporter runs
+//! ([`ExporterHandle::set_flags`], for hot reload); the endpoint, headers and resource cannot.
+use crate::config::{ExportFlags, OtelConfig, mask_password};
 use crate::metrics::MetricsState;
 use crate::otlp::{ExportMetricsServiceRequest, ExportTraceServiceRequest, Metric, Span};
 use crate::spans::{next_sequence, now_unix_nanos, span_from_record};
 use attache_common::audit::AuditRecord;
 use attache_common::audit::SUBSCRIBE_CAPACITY;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -27,7 +31,7 @@ use tokio::time::{Instant, MissedTickBehavior, interval_at};
 /// Batching, timing and queueing. [`Default`] is the design's values; tests shorten them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportTiming {
-    /// Spans per traces request (256).
+    /// Records (spans) per traces request (256).
     pub batch_size: usize,
     /// A partial batch is sent after at most this long (2 s).
     pub batch_interval: Duration,
@@ -80,37 +84,67 @@ impl Exporter {
         timing: ExportTiming,
     ) -> ExporterHandle {
         let counters = Arc::new(Counters::default());
+        let flags = Arc::new(SharedFlags::new(config.flags()));
         let (stop_tx, stop_rx) = oneshot::channel();
         let (queue_tx, queue_rx) = mpsc::channel(timing.queue_capacity.max(1));
         let sender = Sender::new(&config, &timing, counters.clone());
         let sender_task = tokio::spawn(sender.run(queue_rx));
         let collector = Collector {
             start_unix_nano: now_unix_nanos(),
-            spans: Vec::new(),
+            pending: Vec::new(),
             metrics: MetricsState::new(),
             counters: counters.clone(),
+            flags: flags.clone(),
             queue: queue_tx,
-            config,
             timing,
         };
         let task = tokio::spawn(collector.run(rx, stop_rx, sender_task));
         ExporterHandle {
             counters,
+            flags,
             stop: Some(stop_tx),
             task: Some(task),
         }
     }
 }
 
-/// A running exporter. Dropping the handle detaches it: the exporter keeps running until the
-/// audit writer (the broadcast sender) is gone, then flushes and stops.
+/// A running exporter. Dropping the handle detaches it: the exporter keeps running (with the
+/// flags it had) until the audit writer (the broadcast sender) is gone, then flushes and stops.
 pub struct ExporterHandle {
     counters: Arc<Counters>,
+    flags: Arc<SharedFlags>,
     stop: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<()>>,
 }
 
 impl ExporterHandle {
+    /// Apply a hot reload's `traces`, `metrics` and `export_payloads` without restarting the
+    /// exporter: the cumulative metrics and their start time carry on, and the change itself
+    /// neither loses nor duplicates a record. It applies to every record not yet handed to the
+    /// sender, including the batch being collected (records still in the broadcast channel,
+    /// written just before the change, get the new flags too); spans already queued or in
+    /// flight are sent as they were built.
+    ///
+    /// - `traces: false` stops making spans (records already batched are still sent).
+    /// - `metrics: false` stops the pushes; aggregation goes on, so turning metrics back on
+    ///   reports complete totals over the same cumulative window.
+    /// - Both off leaves an idle exporter that keeps draining the audit stream.
+    ///
+    /// The endpoint, headers and resource are fixed for the exporter's life: the endpoint is a
+    /// restart-only field (design §4). The integration contract on reload is therefore: with a
+    /// running exporter, call `set_flags(ExportFlags::from_telemetry(new.telemetry.as_ref()))`;
+    /// without one (start-up [`OtelConfig::resolve`] returned `None`), resolve again with the
+    /// new charter and spawn if it now returns `Some` — that only happens when the start-up
+    /// charter had both signals off, since the endpoint inputs cannot change.
+    pub fn set_flags(&self, flags: ExportFlags) {
+        self.flags.store(flags);
+    }
+
+    /// The flags in effect.
+    pub fn flags(&self) -> ExportFlags {
+        self.flags.load()
+    }
+
     /// Audit records lost so far: missed because the receiver lagged, or in a span batch that
     /// was not delivered (queue full, timeout, or failure after the retry). A failed metrics push
     /// is not counted: metrics are cumulative and the next push carries the same totals.
@@ -149,6 +183,38 @@ impl Counters {
     }
 }
 
+/// [`ExportFlags`] in one atomic byte, so a reader never sees half of an update.
+struct SharedFlags(AtomicU8);
+
+impl SharedFlags {
+    const TRACES: u8 = 1;
+    const METRICS: u8 = 2;
+    const PAYLOADS: u8 = 4;
+
+    fn new(flags: ExportFlags) -> Self {
+        Self(AtomicU8::new(Self::bits(flags)))
+    }
+
+    fn bits(f: ExportFlags) -> u8 {
+        (if f.traces { Self::TRACES } else { 0 })
+            | (if f.metrics { Self::METRICS } else { 0 })
+            | (if f.export_payloads { Self::PAYLOADS } else { 0 })
+    }
+
+    fn store(&self, flags: ExportFlags) {
+        self.0.store(Self::bits(flags), Ordering::Relaxed);
+    }
+
+    fn load(&self) -> ExportFlags {
+        let b = self.0.load(Ordering::Relaxed);
+        ExportFlags {
+            traces: b & Self::TRACES != 0,
+            metrics: b & Self::METRICS != 0,
+            export_payloads: b & Self::PAYLOADS != 0,
+        }
+    }
+}
+
 enum Payload {
     Traces(Vec<Span>),
     Metrics(Vec<Metric>),
@@ -156,11 +222,13 @@ enum Payload {
 
 struct Collector {
     start_unix_nano: u64,
-    spans: Vec<Span>,
+    /// Records of the traces batch being collected; they become spans when it is flushed, with
+    /// the `export_payloads` in effect then.
+    pending: Vec<Arc<AuditRecord>>,
     metrics: MetricsState,
     counters: Arc<Counters>,
+    flags: Arc<SharedFlags>,
     queue: mpsc::Sender<Payload>,
-    config: OtelConfig,
     timing: ExportTiming,
 }
 
@@ -185,12 +253,12 @@ impl Collector {
                     Err(_) => detached = true,
                 },
                 r = rx.recv() => match r {
-                    Ok(rec) => self.ingest(&rec),
+                    Ok(rec) => self.ingest(rec),
                     Err(RecvError::Lagged(n)) => self.lagged(n),
                     Err(RecvError::Closed) => break,
                 },
                 _ = batch_tick.tick() => self.flush_spans(),
-                _ = metrics_tick.tick(), if self.config.metrics => self.push_metrics(),
+                _ = metrics_tick.tick() => self.push_metrics(),
             }
         }
         self.finish(sender_task).await;
@@ -209,34 +277,39 @@ impl Collector {
     fn drain(&mut self, rx: &mut broadcast::Receiver<Arc<AuditRecord>>) {
         for _ in 0..=SUBSCRIBE_CAPACITY {
             match rx.try_recv() {
-                Ok(rec) => self.ingest(&rec),
+                Ok(rec) => self.ingest(rec),
                 Err(TryRecvError::Lagged(n)) => self.lagged(n),
                 Err(TryRecvError::Empty | TryRecvError::Closed) => break,
             }
         }
     }
 
-    fn ingest(&mut self, rec: &AuditRecord) {
-        if self.config.traces {
-            self.spans.push(span_from_record(
-                rec,
-                next_sequence(),
-                self.config.export_payloads,
-            ));
-            if self.spans.len() >= self.timing.batch_size.max(1) {
+    fn ingest(&mut self, rec: Arc<AuditRecord>) {
+        // Aggregated whatever `metrics` is, so that turning it on later reports complete totals
+        // over the one cumulative window (bounded by `MAX_SERIES` per metric).
+        self.metrics.record(&rec);
+        if self.flags.load().traces {
+            self.pending.push(rec);
+            if self.pending.len() >= self.timing.batch_size.max(1) {
                 self.flush_spans();
             }
         }
-        if self.config.metrics {
-            self.metrics.record(rec);
-        }
+    }
+
+    /// The pending batch as spans, with the `export_payloads` in effect now.
+    fn take_spans(&mut self) -> Vec<Span> {
+        let export_payloads = self.flags.load().export_payloads;
+        std::mem::take(&mut self.pending)
+            .iter()
+            .map(|rec| span_from_record(rec, next_sequence(), export_payloads))
+            .collect()
     }
 
     fn flush_spans(&mut self) {
-        if self.spans.is_empty() {
+        if self.pending.is_empty() {
             return;
         }
-        let spans = std::mem::take(&mut self.spans);
+        let spans = self.take_spans();
         let n = spans.len() as u64;
         // Counted before the send: the sender may finish the batch before `try_send` returns.
         self.counters.in_flight.fetch_add(n, Ordering::Relaxed);
@@ -259,6 +332,9 @@ impl Collector {
     }
 
     fn push_metrics(&mut self) {
+        if !self.flags.load().metrics {
+            return;
+        }
         if self.queue.try_send(self.metrics_payload()).is_err() {
             tracing::debug!("OpenTelemetry export queue full; metrics push skipped");
         }
@@ -268,8 +344,8 @@ impl Collector {
     /// drain it (bounded too). Whatever is still undelivered when time is up counts as dropped.
     async fn finish(mut self, sender_task: JoinHandle<()>) {
         let deadline = Instant::now() + self.timing.shutdown_grace();
-        if !self.spans.is_empty() {
-            let spans = std::mem::take(&mut self.spans);
+        if !self.pending.is_empty() {
+            let spans = self.take_spans();
             let n = spans.len() as u64;
             self.counters.in_flight.fetch_add(n, Ordering::Relaxed);
             let sent =
@@ -279,7 +355,7 @@ impl Collector {
                 self.counters.drop_records(n);
             }
         }
-        if self.config.metrics {
+        if self.flags.load().metrics {
             let payload = self.metrics_payload();
             let _ = tokio::time::timeout_at(deadline, self.queue.send(payload)).await;
         }
@@ -316,12 +392,6 @@ struct Sender {
     retry_delay: Duration,
     counters: Arc<Counters>,
     failing: bool,
-}
-
-enum Attempt {
-    Done,
-    Retryable(String),
-    Fatal(String),
 }
 
 impl Sender {
@@ -384,23 +454,29 @@ impl Sender {
         }
     }
 
-    /// One attempt and, after a retryable failure (transport error, timeout, or HTTP 429, 502,
-    /// 503, 504 as the OTLP specification lists), one retry.
+    /// One attempt and, after any failure (transport error, timeout or a non-2xx status), one
+    /// retry after [`ExportTiming::retry_delay`]; then the payload is given up (design §9: "5 s
+    /// timeout; one retry; then drop and count"). This is wider than the OTLP specification's
+    /// retryable list (429, 502, 503, 504): a 400 or 500 is retried once too.
     async fn post(&mut self, url: &str, body: Vec<u8>) -> bool {
-        match self.attempt(url, body.clone()).await {
-            Attempt::Done => return self.succeeded(),
-            Attempt::Retryable(_) => tokio::time::sleep(self.retry_delay).await,
-            Attempt::Fatal(e) => return self.failed(url, &e),
+        if self.client.is_none() {
+            return self.failed(url, "no HTTP client");
         }
+        let first = match self.attempt(url, body.clone()).await {
+            Ok(()) => return self.succeeded(),
+            Err(e) => e,
+        };
+        tracing::debug!(url = %mask_password(url), error = %first, "OpenTelemetry export failed; retrying once");
+        tokio::time::sleep(self.retry_delay).await;
         match self.attempt(url, body).await {
-            Attempt::Done => self.succeeded(),
-            Attempt::Retryable(e) | Attempt::Fatal(e) => self.failed(url, &e),
+            Ok(()) => self.succeeded(),
+            Err(e) => self.failed(url, &e),
         }
     }
 
-    async fn attempt(&self, url: &str, body: Vec<u8>) -> Attempt {
+    async fn attempt(&self, url: &str, body: Vec<u8>) -> Result<(), String> {
         let Some(client) = &self.client else {
-            return Attempt::Fatal("no HTTP client".into());
+            return Err("no HTTP client".into());
         };
         let resp = client
             .post(url)
@@ -410,17 +486,9 @@ impl Sender {
             .send()
             .await;
         match resp {
-            Ok(r) if r.status().is_success() => Attempt::Done,
-            Ok(r) => {
-                let status = r.status();
-                let msg = format!("HTTP {status}");
-                if matches!(status.as_u16(), 429 | 502 | 503 | 504) {
-                    Attempt::Retryable(msg)
-                } else {
-                    Attempt::Fatal(msg)
-                }
-            }
-            Err(e) => Attempt::Retryable(e.without_url().to_string()),
+            Ok(r) if r.status().is_success() => Ok(()),
+            Ok(r) => Err(format!("HTTP {}", r.status())),
+            Err(e) => Err(e.without_url().to_string()),
         }
     }
 

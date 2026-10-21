@@ -259,18 +259,26 @@ fn attributes(rec: &AuditRecord, export_payloads: bool) -> Vec<KeyValue> {
     a
 }
 
-/// ERROR when the decision is `deny` or `error` is set; the message is the error, else the
-/// reason, else the rule.
-fn status(rec: &AuditRecord) -> Option<Status> {
+/// ERROR when the decision is `deny` or `error` is set.
+///
+/// With `export_payloads` the message is the error, else the reason, else the rule. Without it
+/// the message is the rule only (or none): `error` and `reason` are free text that quotes the
+/// request, e.g. an authz deny reason `"{method} {path} on {service} …"`, an http tool mismatch
+/// `"{method} {url} does not match …"`, or a reqwest error with the full URL and its query — the
+/// same `url.path` / `url.full` the attributes leave out.
+fn status(rec: &AuditRecord, export_payloads: bool) -> Option<Status> {
     if rec.decision != "deny" && rec.error.is_none() {
         return None;
     }
-    let message = rec
-        .error
-        .clone()
-        .or_else(|| rec.reason.clone())
-        .or_else(|| rec.rule.clone())
-        .unwrap_or_default();
+    let message = if export_payloads {
+        rec.error
+            .clone()
+            .or_else(|| rec.reason.clone())
+            .or_else(|| rec.rule.clone())
+    } else {
+        rec.rule.clone()
+    }
+    .unwrap_or_default();
     Some(Status {
         message,
         code: STATUS_CODE_ERROR,
@@ -309,7 +317,7 @@ pub fn span_from_record(rec: &AuditRecord, seq: u64, export_payloads: bool) -> S
         start_time_unix_nano: start.to_string(),
         end_time_unix_nano: end.to_string(),
         attributes: attributes(rec, export_payloads),
-        status: status(rec),
+        status: status(rec, export_payloads),
     }
 }
 

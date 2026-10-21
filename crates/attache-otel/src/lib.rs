@@ -8,17 +8,21 @@
 //!   headers, or an allow-listed charter endpoint without them, or nothing).
 //! - [`Exporter::spawn`] subscribes to the audit stream and exports in the background; it never
 //!   blocks the audit writer and counts what it loses ([`ExporterHandle::dropped`],
-//!   `attache.otel.dropped`).
+//!   `attache.otel.dropped`). A hot reload's `traces`, `metrics` and `export_payloads` go to
+//!   [`ExporterHandle::set_flags`]; the endpoint is restart-only.
 //! - [`spans`] holds the stateless record → span rule, [`metrics`] the aggregation and
 //!   [`otlp`] the hand-written wire types.
 //!
 //! ```no_run
 //! # async fn example(writer: &attache_common::AuditWriter, charter: &attache_charter::Charter) {
-//! use attache_otel::{Exporter, OtelConfig, process_env, sidecar_resource};
+//! use attache_otel::{ExportFlags, Exporter, OtelConfig, process_env, sidecar_resource};
 //! let resource = sidecar_resource("orders", "shop", "0.2.0", "spiffe://attache/ns/shop/svc/orders");
 //! let allow = vec!["http://otel-collector.*:4318".to_string()]; // --otlp-endpoint-allow
 //! if let Some(config) = OtelConfig::resolve(charter.telemetry.as_ref(), process_env, &allow, resource) {
 //!     let handle = Exporter::spawn(config, writer.subscribe());
+//!     // ... on a hot reload (`new` is the reloaded charter):
+//!     # let new = charter;
+//!     handle.set_flags(ExportFlags::from_telemetry(new.telemetry.as_ref()));
 //!     // ... on shutdown:
 //!     handle.shutdown().await;
 //! }
@@ -30,5 +34,5 @@ pub mod metrics;
 pub mod otlp;
 pub mod spans;
 
-pub use config::{OtelConfig, process_env, sidecar_resource};
+pub use config::{ExportFlags, OtelConfig, process_env, sidecar_resource};
 pub use exporter::{ExportTiming, Exporter, ExporterHandle};

@@ -89,7 +89,7 @@
                 }
               ],
               "status": {
-                "message": "POST /admin/reset is denied for inventory",
+                "message": "authz.services.deny-admin",
                 "code": 2
               }
             }
