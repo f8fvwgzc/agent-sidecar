@@ -5,21 +5,21 @@ from typing import Any
 
 import pytest
 
-from attache_runtime.spec import AgentSpec
-from attache_runtime.tools import RULE_REPORT_REJECTED, CallContext, LessonOutcome, ReportOutcome, ToolDenied
+from agentsc_runtime.spec import AgentSpec
+from agentsc_runtime.tools import RULE_REPORT_REJECTED, CallContext, LessonOutcome, ReportOutcome, ToolDenied
 
 STOCK = {"sku": "WIDGET-1", "on_hand": 42, "reorder_point": 50, "warehouse_contact": "ops-lead@example.com"}
 
 
 class FakeSidecar:
-    """Stands in for attached: records every call, denies /admin like the inventory charter does."""
+    """Stands in for agentscd: records every call, denies /admin like the inventory charter does."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, Any]] = []
         self.events: list[dict[str, Any]] = []
         self.contexts: list[CallContext] = []  # the ToolContext of every tool call
         self.lessons: list[tuple[CallContext, str, str, str]] = []
-        self.report_rule: str | None = None  # what ReportEvent answers with (x-attache-rule)
+        self.report_rule: str | None = None  # what ReportEvent answers with (x-agentsc-rule)
         # Set: ReportEvent keeps to design §6.5 and refuses records of an Execute not in this set.
         self.in_flight: set[str] | None = None
         self.rejected: list[dict[str, Any]] = []

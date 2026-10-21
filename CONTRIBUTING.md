@@ -33,7 +33,7 @@ If you change a proto file, run `make proto` and commit the regenerated Python s
 
 ## Naming
 
-The project is published as agent-sidecar. The code uses the working name attache (`attached`, `attache`, `embassy`, `attache.io/v1alpha1`). Please keep the code names in code and commands.
+The project is agent-sidecar; its short name in code is agentsc (`agentscd`, `agentsc`, `embassy`, `agentsc.io/v1alpha1`). Please use the short names in code and commands.
 
 ## License
 

@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from attache_runtime.spec import LOAD_SKILL_TOOL, AgentSpec, Harness, Learning
+from agentsc_runtime.spec import LOAD_SKILL_TOOL, AgentSpec, Harness, Learning
 
 # Written by the Rust side (`Charter::runtime_spec`, kept in sync by a cargo test): the same file
 # is what the sidecar sends, so the two sides cannot drift apart unnoticed.

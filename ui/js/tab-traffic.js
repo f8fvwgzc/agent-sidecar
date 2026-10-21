@@ -169,7 +169,7 @@ export class TrafficTab {
       else this.openGroups.delete(g.request_id);
     });
     const agentLabel = root ? root.agent : g.records[0].agent;
-    const caller = root && root.caller !== 'local' ? `from ${root.caller_agent || root.caller.replace(/^spiffe:\/\/attache\/ns\//, '')}` : null;
+    const caller = root && root.caller !== 'local' ? `from ${root.caller_agent || root.caller.replace(/^spiffe:\/\/agentsc\/ns\//, '')}` : null;
     details.append(
       h(
         'summary',

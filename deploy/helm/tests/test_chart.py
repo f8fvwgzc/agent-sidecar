@@ -21,12 +21,12 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
 CHART = ROOT / "deploy/helm/agent-sidecar"
-CRD_FILE = ROOT / "deploy/crds/charters.attache.io.yaml"
-CHART_CRD_FILE = CHART / "files/crds/charters.attache.io.yaml"
+CRD_FILE = ROOT / "deploy/crds/charters.agentsc.io.yaml"
+CHART_CRD_FILE = CHART / "files/crds/charters.agentsc.io.yaml"
 DEMO_APPS = ROOT / "deploy/helm/demo/apps.yaml"
 DEMO_SCRIPT = ROOT / "deploy/helm/demo.sh"
 README = CHART / "README.md"
-NS = "attache-system"
+NS = "agentsc-system"
 
 # `embassy serve` flags (design §8.1).
 SERVE_FLAGS = {
@@ -146,24 +146,24 @@ def test_kubernetes_1_29_is_the_floor() -> None:
 @needs_helm
 def test_default_render_has_exactly_the_designed_resources(default: list[dict]) -> None:
     assert kinds(default) == {
-        ("CustomResourceDefinition", "charters.attache.io"),
+        ("CustomResourceDefinition", "charters.agentsc.io"),
         ("ServiceAccount", "embassy-ca"),
         ("ServiceAccount", "embassy"),
-        ("ClusterRole", "attache-embassy"),
-        ("ClusterRoleBinding", "attache-embassy"),
-        ("Role", "attache-embassy-secrets"),
-        ("RoleBinding", "attache-embassy-secrets"),
-        ("ClusterRole", "attache-charter-view"),
-        ("ClusterRole", "attache-charter-edit"),
+        ("ClusterRole", "agentsc-embassy"),
+        ("ClusterRoleBinding", "agentsc-embassy"),
+        ("Role", "agentsc-embassy-secrets"),
+        ("RoleBinding", "agentsc-embassy-secrets"),
+        ("ClusterRole", "agentsc-charter-view"),
+        ("ClusterRole", "agentsc-charter-edit"),
         ("Secret", "embassy-config"),
-        ("Secret", "attache-session-key"),
+        ("Secret", "agentsc-session-key"),
         ("Deployment", "embassy-ca"),
         ("PodDisruptionBudget", "embassy-ca"),
         ("Deployment", "embassy"),
         ("Service", "embassy-ca"),
         ("Service", "embassy"),
-        ("MutatingWebhookConfiguration", "attache-sidecar-injector"),
-        ("ValidatingWebhookConfiguration", "attache-charter-validator"),
+        ("MutatingWebhookConfiguration", "agentsc-sidecar-injector"),
+        ("ValidatingWebhookConfiguration", "agentsc-charter-validator"),
     }
     for d in default:
         if d["kind"] not in {
@@ -182,16 +182,16 @@ def test_default_render_has_exactly_the_designed_resources(default: list[dict]) 
 def test_chart_crd_is_a_link_to_deploy_crds() -> None:
     # A link, not a copy: the chart cannot drift from the generated CRD.
     assert CHART_CRD_FILE.is_symlink(), f"{CHART_CRD_FILE} must be a symbolic link to {CRD_FILE}"
-    assert os.readlink(CHART_CRD_FILE) == "../../../../crds/charters.attache.io.yaml"
+    assert os.readlink(CHART_CRD_FILE) == "../../../../crds/charters.agentsc.io.yaml"
     assert CHART_CRD_FILE.resolve() == CRD_FILE.resolve()
 
 
 @needs_helm
 def test_crd_is_rendered_unchanged_and_kept_on_uninstall(default: list[dict]) -> None:
-    rendered = find(default, "CustomResourceDefinition", "charters.attache.io")
+    rendered = find(default, "CustomResourceDefinition", "charters.agentsc.io")
     source = yaml.safe_load(CRD_FILE.read_text())
     assert rendered["metadata"]["annotations"]["helm.sh/resource-policy"] == "keep"
-    assert rendered["metadata"]["labels"]["app.kubernetes.io/part-of"] == "attache"
+    assert rendered["metadata"]["labels"]["app.kubernetes.io/part-of"] == "agentsc"
     for doc in (rendered, source):
         doc["metadata"].pop("annotations", None)
         doc["metadata"].pop("labels", None)
@@ -225,18 +225,18 @@ def norm(rules: list[dict]) -> list[tuple]:
 
 @needs_helm
 def test_cluster_role_is_the_design_plus_charter_delete(default: list[dict]) -> None:
-    role = find(default, "ClusterRole", "attache-embassy")
-    webhooks = ("attache-sidecar-injector", "attache-charter-validator")
+    role = find(default, "ClusterRole", "agentsc-embassy")
+    webhooks = ("agentsc-sidecar-injector", "agentsc-charter-validator")
     assert norm(role["rules"]) == norm(
         [
             {
-                "apiGroups": ["attache.io"],
+                "apiGroups": ["agentsc.io"],
                 "resources": ["charters"],
                 # §13 plus delete: DELETE /services/{ns}/{svc} (§10) deletes the Charter
                 "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"],
             },
             {
-                "apiGroups": ["attache.io"],
+                "apiGroups": ["agentsc.io"],
                 "resources": ["charters/status"],
                 "verbs": ["get", "update", "patch"],
             },
@@ -262,8 +262,8 @@ def test_cluster_role_is_the_design_plus_charter_delete(default: list[dict]) -> 
             },
         ]
     )
-    binding = find(default, "ClusterRoleBinding", "attache-embassy")
-    assert binding["roleRef"]["name"] == "attache-embassy"
+    binding = find(default, "ClusterRoleBinding", "agentsc-embassy")
+    assert binding["roleRef"]["name"] == "agentsc-embassy"
     assert {(s["name"], s["namespace"]) for s in binding["subjects"]} == {
         ("embassy-ca", NS),
         ("embassy", NS),
@@ -272,8 +272,8 @@ def test_cluster_role_is_the_design_plus_charter_delete(default: list[dict]) -> 
 
 @needs_helm
 def test_only_embassy_ca_can_read_the_ca_and_tls_secrets(default: list[dict]) -> None:
-    role = find(default, "Role", "attache-embassy-secrets")
-    names = ["attache-ca", "embassy-tls", "attache-session-key"]
+    role = find(default, "Role", "agentsc-embassy-secrets")
+    names = ["agentsc-ca", "embassy-tls", "agentsc-session-key"]
     assert norm(role["rules"]) == norm(
         [
             {
@@ -286,14 +286,14 @@ def test_only_embassy_ca_can_read_the_ca_and_tls_secrets(default: list[dict]) ->
             {"apiGroups": [""], "resources": ["secrets"], "verbs": ["create"]},
         ]
     )
-    binding = find(default, "RoleBinding", "attache-embassy-secrets")
+    binding = find(default, "RoleBinding", "agentsc-embassy-secrets")
     assert binding["subjects"] == [{"kind": "ServiceAccount", "name": "embassy-ca", "namespace": NS}]
     # embassy gets the serving certificate, config and session key only as mounted volumes
     embassy = find(default, "Deployment", "embassy")
     pod = embassy["spec"]["template"]["spec"]
     assert pod["serviceAccountName"] == "embassy"
     secrets = {v["secret"]["secretName"] for v in pod["volumes"] if "secret" in v}
-    assert secrets == {"embassy-config", "attache-session-key", "embassy-tls"}
+    assert secrets == {"embassy-config", "agentsc-session-key", "embassy-tls"}
 
 
 @needs_helm
@@ -308,31 +308,31 @@ def test_no_configmap_permissions_anywhere(full: list[dict]) -> None:
 
 @needs_helm
 def test_existing_ca_secret_is_only_read(full: list[dict]) -> None:
-    role = find(full, "Role", "attache-embassy-existing-ca")
-    assert role["metadata"]["namespace"] == "attache-demo"
+    role = find(full, "Role", "agentsc-embassy-existing-ca")
+    assert role["metadata"]["namespace"] == "agentsc-demo"
     assert role["rules"] == [
         {
             "apiGroups": [""],
             "resources": ["secrets"],
-            "resourceNames": ["attache-ca"],
+            "resourceNames": ["agentsc-ca"],
             "verbs": ["get"],
         }
     ]
-    binding = find(full, "RoleBinding", "attache-embassy-existing-ca")
-    assert binding["metadata"]["namespace"] == "attache-demo"
+    binding = find(full, "RoleBinding", "agentsc-embassy-existing-ca")
+    assert binding["metadata"]["namespace"] == "agentsc-demo"
     assert binding["subjects"] == [{"kind": "ServiceAccount", "name": "embassy-ca", "namespace": NS}]
-    assert deployment_flags(full, "embassy-ca")["ca-secret"] == ["attache-demo/attache-ca"]
+    assert deployment_flags(full, "embassy-ca")["ca-secret"] == ["agentsc-demo/agentsc-ca"]
 
 
 @needs_helm
 def test_bad_existing_ca_secret_is_refused() -> None:
-    assert "existingSecret" in render_fails("--set", "ca.existingSecret=attache-ca")
+    assert "existingSecret" in render_fails("--set", "ca.existingSecret=agentsc-ca")
 
 
 @needs_helm
 def test_user_cluster_roles_aggregate(default: list[dict], full: list[dict]) -> None:
-    view = find(default, "ClusterRole", "attache-charter-view")
-    edit = find(default, "ClusterRole", "attache-charter-edit")
+    view = find(default, "ClusterRole", "agentsc-charter-view")
+    edit = find(default, "ClusterRole", "agentsc-charter-edit")
     agg = "rbac.authorization.k8s.io/aggregate-to-"
     assert {k for k in view["metadata"]["labels"] if k.startswith(agg)} == {
         agg + "view",
@@ -344,13 +344,13 @@ def test_user_cluster_roles_aggregate(default: list[dict], full: list[dict]) -> 
         assert set(rule["verbs"]) == {"get", "list", "watch"}
     status_rules = [r for r in edit["rules"] if "charters/status" in r["resources"]]
     assert all(set(r["verbs"]) == {"get", "list", "watch"} for r in status_rules)
-    full_edit = find(full, "ClusterRole", "attache-charter-edit")
+    full_edit = find(full, "ClusterRole", "agentsc-charter-edit")
     assert {k for k in full_edit["metadata"]["labels"] if k.startswith(agg)} == {
         agg + "admin",
         agg + "edit",
     }
     off = render("-f", str(CHART / "ci/no-crd-values.yaml"))
-    for name in ("attache-charter-view", "attache-charter-edit"):
+    for name in ("agentsc-charter-view", "agentsc-charter-edit"):
         labels = find(off, "ClusterRole", name)["metadata"]["labels"]
         assert not [k for k in labels if k.startswith(agg)]
 
@@ -366,7 +366,7 @@ def test_webhooks_never_carry_a_ca_bundle(default: list[dict], full: list[dict])
 
 @needs_helm
 def test_mutating_webhook_follows_the_design(default: list[dict], full: list[dict]) -> None:
-    cfg = find(default, "MutatingWebhookConfiguration", "attache-sidecar-injector")
+    cfg = find(default, "MutatingWebhookConfiguration", "agentsc-sidecar-injector")
     [hook] = cfg["webhooks"]
     assert hook["admissionReviewVersions"] == ["v1"]
     assert hook["sideEffects"] == "None"
@@ -383,10 +383,10 @@ def test_mutating_webhook_follows_the_design(default: list[dict], full: list[dic
             "scope": "Namespaced",
         }
     ]
-    assert hook["objectSelector"] == {"matchLabels": {"attache.io/inject": "true"}}
+    assert hook["objectSelector"] == {"matchLabels": {"agentsc.io/inject": "true"}}
     assert hook["namespaceSelector"] == {
         "matchExpressions": [
-            {"key": "attache.io/injection", "operator": "In", "values": ["enabled"]},
+            {"key": "agentsc.io/injection", "operator": "In", "values": ["enabled"]},
             {
                 "key": "kubernetes.io/metadata.name",
                 "operator": "NotIn",
@@ -394,7 +394,7 @@ def test_mutating_webhook_follows_the_design(default: list[dict], full: list[dic
             },
         ]
     }
-    [full_hook] = find(full, "MutatingWebhookConfiguration", "attache-sidecar-injector")["webhooks"]
+    [full_hook] = find(full, "MutatingWebhookConfiguration", "agentsc-sidecar-injector")["webhooks"]
     assert full_hook["failurePolicy"] == "Ignore"
 
 
@@ -402,8 +402,8 @@ def test_mutating_webhook_follows_the_design(default: list[dict], full: list[dic
 def test_webhook_entry_names_are_documented_for_the_ca_bundle_reconciler(default: list[dict]) -> None:
     readme = README.read_text()
     for kind, name, entry in (
-        ("MutatingWebhookConfiguration", "attache-sidecar-injector", "sidecar-injector.attache.io"),
-        ("ValidatingWebhookConfiguration", "attache-charter-validator", "charter-validator.attache.io"),
+        ("MutatingWebhookConfiguration", "agentsc-sidecar-injector", "sidecar-injector.agentsc.io"),
+        ("ValidatingWebhookConfiguration", "agentsc-charter-validator", "charter-validator.agentsc.io"),
     ):
         assert [h["name"] for h in find(default, kind, name)["webhooks"]] == [entry]
         assert f"`{entry}`" in readme
@@ -411,7 +411,7 @@ def test_webhook_entry_names_are_documented_for_the_ca_bundle_reconciler(default
 
 @needs_helm
 def test_validating_webhook_follows_the_design(default: list[dict]) -> None:
-    cfg = find(default, "ValidatingWebhookConfiguration", "attache-charter-validator")
+    cfg = find(default, "ValidatingWebhookConfiguration", "agentsc-charter-validator")
     [hook] = cfg["webhooks"]
     assert hook["failurePolicy"] == "Fail"
     assert hook["sideEffects"] == "None"
@@ -424,7 +424,7 @@ def test_validating_webhook_follows_the_design(default: list[dict]) -> None:
     }
     assert hook["rules"] == [
         {
-            "apiGroups": ["attache.io"],
+            "apiGroups": ["agentsc.io"],
             "apiVersions": ["v1alpha1"],
             "operations": ["CREATE", "UPDATE"],
             "resources": ["charters"],
@@ -453,13 +453,13 @@ def test_embassy_ca_runs_ca_and_webhook_highly_available(default: list[dict]) ->
     assert flags["components"] == ["ca,webhook"]
     assert flags["grpc-addr"] == ["0.0.0.0:15012"]
     assert flags["webhook-addr"] == ["0.0.0.0:9443"]
-    assert flags["ca-secret"] == [f"{NS}/attache-ca"]
+    assert flags["ca-secret"] == [f"{NS}/agentsc-ca"]
     assert flags["tls-secret"] == [f"{NS}/embassy-tls"]
     assert flags["store"] == ["kubernetes"]
-    assert flags["config"] == ["/etc/attache/config/config.yaml"]
-    assert flags["webhook-config-name"] == ["attache-sidecar-injector"]
-    assert flags["validating-webhook-name"] == ["attache-charter-validator"]
-    assert flags["injector-image"] == ["ghcr.io/f8fvwgzc/agent-sidecar/attached:0.2.0"]
+    assert flags["config"] == ["/etc/agentsc/config/config.yaml"]
+    assert flags["webhook-config-name"] == ["agentsc-sidecar-injector"]
+    assert flags["validating-webhook-name"] == ["agentsc-charter-validator"]
+    assert flags["injector-image"] == ["ghcr.io/f8fvwgzc/agent-sidecar/agentscd:0.2.0"]
     assert flags["cp-namespace"] == [NS]
     # the webhook Service name must be in the serving certificate the API server checks
     assert f"embassy-ca.{NS}.svc" in flags["dns-name"]
@@ -469,7 +469,7 @@ def test_embassy_ca_runs_ca_and_webhook_highly_available(default: list[dict]) ->
     c = container(dep)
     assert {p["name"]: p["containerPort"] for p in c["ports"]} == {"grpc": 15012, "webhook": 9443}
     mounts = {m["mountPath"] for m in c["volumeMounts"]}
-    assert mounts == {"/etc/attache/config", "/tmp"}, "embassy-ca mounts no session key or CA"
+    assert mounts == {"/etc/agentsc/config", "/tmp"}, "embassy-ca mounts no session key or CA"
 
 
 @needs_helm
@@ -490,7 +490,7 @@ def test_embassy_runs_one_replica_with_probes_on_the_api(default: list[dict]) ->
     assert flags["components"] == ["controlplane,api,ui"]
     assert flags["http-addr"] == ["0.0.0.0:8080"]
     assert flags["grpc-addr"] == ["0.0.0.0:15012"]
-    assert flags["tls-dir"] == ["/etc/attache/tls"]
+    assert flags["tls-dir"] == ["/etc/agentsc/tls"]
     assert flags["store"] == ["kubernetes"]
     assert flags["cp-namespace"] == [NS]
     assert set(flags["dns-name"]) == {
@@ -515,9 +515,9 @@ def test_embassy_runs_one_replica_with_probes_on_the_api(default: list[dict]) ->
     }
     assert {p["name"]: p["containerPort"] for p in c["ports"]} == {"http": 8080, "grpc": 15012}
     mounts = {m["name"]: m["mountPath"] for m in c["volumeMounts"]}
-    assert mounts["tls"] == "/etc/attache/tls"
-    assert mounts["session-key"] == "/etc/attache/session"
-    assert mounts["config"] == "/etc/attache/config"
+    assert mounts["tls"] == "/etc/agentsc/tls"
+    assert mounts["session-key"] == "/etc/agentsc/session"
+    assert mounts["config"] == "/etc/agentsc/config"
     volumes = {v["name"]: v for v in dep["spec"]["template"]["spec"]["volumes"]}
     assert volumes["tls"]["secret"]["secretName"] == "embassy-tls"
 
@@ -526,8 +526,8 @@ def test_embassy_runs_one_replica_with_probes_on_the_api(default: list[dict]) ->
 def test_http_tls_switches_flag_and_probe_scheme(full: list[dict]) -> None:
     flags = deployment_flags(full, "embassy")
     assert flags["http-tls"] == [""]
-    assert "attache.example.com" in flags["dns-name"]
-    assert "attache.example.com" in deployment_flags(full, "embassy-ca")["dns-name"]
+    assert "agentsc.example.com" in flags["dns-name"]
+    assert "agentsc.example.com" in deployment_flags(full, "embassy-ca")["dns-name"]
     c = container(find(full, "Deployment", "embassy"))
     assert c["livenessProbe"]["httpGet"]["scheme"] == "HTTPS"
     assert c["readinessProbe"]["httpGet"]["scheme"] == "HTTPS"
@@ -569,13 +569,13 @@ def test_images_default_to_app_version_and_digest_wins(default: list[dict], full
             f"ghcr.io/f8fvwgzc/agent-sidecar/embassy:{chart['appVersion']}"
         )
         assert container(find(full, "Deployment", name))["image"] == (
-            "registry.example/attache/embassy@sha256:" + "0" * 63 + "1"
+            "registry.example/agentsc/embassy@sha256:" + "0" * 63 + "1"
         )
-    assert deployment_flags(full, "embassy-ca")["injector-image"] == ["registry.example/attache/attached:0.2.0-rc.1"]
+    assert deployment_flags(full, "embassy-ca")["injector-image"] == ["registry.example/agentsc/agentscd:0.2.0-rc.1"]
 
 
 def inject_template(docs: list[dict]) -> dict:
-    return json.loads(env(container(find(docs, "Deployment", "embassy-ca")))["ATTACHE_INJECT_TEMPLATE"])
+    return json.loads(env(container(find(docs, "Deployment", "embassy-ca")))["AGENTSC_INJECT_TEMPLATE"])
 
 
 @needs_helm
@@ -593,7 +593,7 @@ def test_injection_defaults_reach_embassy_ca_as_one_container_template(default: 
         "securityContext": values["injection"]["securityContext"],
         "env": [
             {"name": "OTEL_EXPORTER_OTLP_ENDPOINT", "value": "http://otel-collector.observability:4318"},
-            {"name": "ATTACHE_OTLP_ENDPOINT_ALLOW", "value": "http://otel-collector.*:4318,https://otlp.example"},
+            {"name": "AGENTSC_OTLP_ENDPOINT_ALLOW", "value": "http://otel-collector.*:4318,https://otlp.example"},
         ],
     }
     custom = render("--set", "injection.resources.limits.memory=1Gi", "--set", "otlp.endpoint=http://c:4318")
@@ -608,10 +608,10 @@ def test_embassy_ca_gets_no_other_undesigned_variables(default: list[dict], full
     for docs in (default, full):
         for name in ("embassy-ca", "embassy"):
             names = set(env(container(find(docs, "Deployment", name))))
-            extra = {"ATTACHE_INJECT_TEMPLATE"} if name == "embassy-ca" else set()
+            extra = {"AGENTSC_INJECT_TEMPLATE"} if name == "embassy-ca" else set()
             assert names == {"RUST_LOG", "POD_NAME", "POD_NAMESPACE"} | extra, (name, names)
     readme = README.read_text()
-    assert "`ATTACHE_INJECT_TEMPLATE`" in readme
+    assert "`AGENTSC_INJECT_TEMPLATE`" in readme
     for field in ("imagePullPolicy", "resources", "securityContext", "OTEL_EXPORTER_OTLP_ENDPOINT"):
         assert field in readme
 
@@ -660,12 +660,12 @@ def config(docs: list[dict]) -> dict:
 @needs_helm
 def test_config_secret_holds_the_control_plane_config(default: list[dict], full: list[dict]) -> None:
     assert config(default) == {
-        "apiVersion": "attache.io/v1alpha1",
+        "apiVersion": "agentsc.io/v1alpha1",
         "kind": "ControlPlaneConfig",
         "auth": {
             "tokens": [],
             "anonymous": "none",
-            "session_key_file": "/etc/attache/session/key",
+            "session_key_file": "/etc/agentsc/session/key",
         },
         "issuance": {"kubernetes": True, "workload_cert_ttl": "24h", "join_tokens": []},
         "events": {"retain_bytes": 67108864},
@@ -683,7 +683,7 @@ def test_config_secret_holds_the_control_plane_config(default: list[dict], full:
             "name": "ci",
             "role": "viewer",
             "sha256": "2" * 64,
-            "namespaces": ["shop", "attache-demo"],
+            "namespaces": ["shop", "agentsc-demo"],
             "payloads": False,
         },
     ]
@@ -731,11 +731,11 @@ def test_values_schema_refuses_bad_values(bad: list[str]) -> None:
 
 @needs_helm
 def test_session_key_is_random_or_existing(default: list[dict], full: list[dict]) -> None:
-    key = base64.b64decode(find(default, "Secret", "attache-session-key")["data"]["key"])
+    key = base64.b64decode(find(default, "Secret", "agentsc-session-key")["data"]["key"])
     assert len(key) >= 32
-    again = base64.b64decode(find(render(), "Secret", "attache-session-key")["data"]["key"])
+    again = base64.b64decode(find(render(), "Secret", "agentsc-session-key")["data"]["key"])
     assert again != key, "a fresh install gets a fresh key"
-    assert ("Secret", "attache-session-key") not in kinds(full)
+    assert ("Secret", "agentsc-session-key") not in kinds(full)
     volumes = find(full, "Deployment", "embassy")["spec"]["template"]["spec"]["volumes"]
     session = next(v for v in volumes if v["name"] == "session-key")
     assert session["secret"]["secretName"] == "my-session-key"
@@ -754,14 +754,14 @@ def test_demo_apps_ask_for_injection_and_match_their_charters() -> None:
         meta = dep["spec"]["template"]["metadata"]
         pod = dep["spec"]["template"]["spec"]
         assert dep["metadata"]["namespace"] == charter["service"]["namespace"]
-        assert meta["labels"]["attache.io/inject"] == "true"
-        assert meta["labels"]["attache.io/service"] == name
-        assert meta["annotations"]["attache.io/service"] == name
-        assert meta["annotations"]["attache.io/app-port"] == str(charter["service"]["app_port"])
+        assert meta["labels"]["agentsc.io/inject"] == "true"
+        assert meta["labels"]["agentsc.io/service"] == name
+        assert meta["annotations"]["agentsc.io/service"] == name
+        assert meta["annotations"]["agentsc.io/app-port"] == str(charter["service"]["app_port"])
         # the injected sidecar gets ANTHROPIC_API_KEY from the Secret demo.sh always creates
-        assert meta["annotations"]["attache.io/anthropic-secret"] == "attache-anthropic"
+        assert meta["annotations"]["agentsc.io/anthropic-secret"] == "agentsc-anthropic"
         assert pod["serviceAccountName"] == name and name in accounts
-        assert [c["name"] for c in pod["containers"]] == ["app"], "the webhook adds attached"
+        assert [c["name"] for c in pod["containers"]] == ["app"], "the webhook adds agentscd"
         assert "initContainers" not in pod
     services = {d["metadata"]["name"]: d for d in docs if d["kind"] == "Service"}
     for name, svc in services.items():
@@ -773,7 +773,7 @@ def test_demo_script_parses_and_creates_the_anthropic_secret() -> None:
     assert os.access(DEMO_SCRIPT, os.X_OK)
     subprocess.run(["bash", "-n", str(DEMO_SCRIPT)], check=True)
     text = DEMO_SCRIPT.read_text()
-    assert "create secret generic attache-anthropic" in text
+    assert "create secret generic agentsc-anthropic" in text
     assert not re.search(r'--from-literal=ANTHROPIC_API_KEY="?\$', text), "the key must not be on the command line"
     # created before the apps, so their pods never wait for it
-    assert text.index("attache-anthropic") < text.index("deploy/helm/demo/apps.yaml")
+    assert text.index("agentsc-anthropic") < text.index("deploy/helm/demo/apps.yaml")

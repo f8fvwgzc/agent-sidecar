@@ -12,11 +12,11 @@ publish = false
 
 [workspace.dependencies]
 # Internal crates
-attache-proto = { path = "crates/attache-proto" }
-attache-charter = { path = "crates/attache-charter" }
-attache-common = { path = "crates/attache-common" }
-attache-pki = { path = "crates/attache-pki" }
-attache-otel = { path = "crates/attache-otel" }
+agentsc-proto = { path = "crates/agentsc-proto" }
+agentsc-charter = { path = "crates/agentsc-charter" }
+agentsc-common = { path = "crates/agentsc-common" }
+agentsc-pki = { path = "crates/agentsc-pki" }
+agentsc-otel = { path = "crates/agentsc-otel" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

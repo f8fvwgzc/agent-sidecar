@@ -11,9 +11,9 @@ from typing import Any
 import grpc
 import pytest
 
-from attache_runtime import learning
-from attache_runtime.agent import ExecuteResult, run_agent
-from attache_runtime.learning import (
+from agentsc_runtime import learning
+from agentsc_runtime.agent import ExecuteResult, run_agent
+from agentsc_runtime.learning import (
     Learner,
     Reflection,
     ReflectionRefused,
@@ -22,12 +22,12 @@ from attache_runtime.learning import (
     should_reflect,
     transcript,
 )
-from attache_runtime.models import MockModel, ModelError, ModelResponse
-from attache_runtime.pb.attache.v1alpha1 import common_pb2, runtime_pb2
-from attache_runtime.prompts import REFLECTION_MARKER
-from attache_runtime.server import RuntimeServicer
-from attache_runtime.sidecar import GrpcSidecar
-from attache_runtime.tools import RULE_COST_BUDGET, RULE_REPORT_REJECTED, CallContext, LessonOutcome, ReportOutcome
+from agentsc_runtime.models import MockModel, ModelError, ModelResponse
+from agentsc_runtime.pb.agentsc.v1alpha1 import common_pb2, runtime_pb2
+from agentsc_runtime.prompts import REFLECTION_MARKER
+from agentsc_runtime.server import RuntimeServicer
+from agentsc_runtime.sidecar import GrpcSidecar
+from agentsc_runtime.tools import RULE_COST_BUDGET, RULE_REPORT_REJECTED, CallContext, LessonOutcome, ReportOutcome
 
 
 @pytest.fixture
@@ -76,7 +76,7 @@ def test_runs_that_used_a_tool_or_failed_qualify(learner_spec, sidecar, ctx):
 
 def test_runs_are_skipped_without_learning_from_a_peer_or_over_budget(learner_spec, sidecar, ctx):
     used = run(learner_spec, "How many WIDGET-1 in stock?", ctx, sidecar)
-    peer = "spiffe://attache/ns/shop/svc/orders"
+    peer = "spiffe://agentsc/ns/shop/svc/orders"
     assert not should_reflect(learner_spec, used, peer), "peers only with from_peers"
     learner_spec.learning.from_peers = True
     assert should_reflect(learner_spec, used, peer)
@@ -102,7 +102,7 @@ DENIED = "denied by authz.services.deny-admin: POST /admin/reset on inventory ma
 
 
 def test_the_transcript_holds_the_run_but_not_notes_or_skill_text(learner_spec, sidecar, ctx):
-    from attache_runtime.spec import MemoryNote
+    from agentsc_runtime.spec import MemoryNote
 
     learner_spec.memory = [MemoryNote(id="n1", text="An earlier note.")]
     res = run(learner_spec, "Reset the inventory admin counters", ctx, sidecar)
@@ -398,7 +398,7 @@ def test_execute_answers_first_and_reflects_in_the_background(learner_spec, side
 
 
 def rpc_error(code, rule=None):
-    md = grpc.aio.Metadata(("x-attache-rule", rule)) if rule else grpc.aio.Metadata()
+    md = grpc.aio.Metadata(("x-agentsc-rule", rule)) if rule else grpc.aio.Metadata()
     return grpc.aio.AioRpcError(code, grpc.aio.Metadata(), md, details="nope")
 
 
@@ -463,7 +463,7 @@ class Call:
 
 
 def rule_md(rule: str) -> grpc.aio.Metadata:
-    return grpc.aio.Metadata(("x-attache-rule", rule))
+    return grpc.aio.Metadata(("x-agentsc-rule", rule))
 
 
 @pytest.mark.parametrize(

@@ -510,7 +510,7 @@ mod tests {
 
     fn doc() -> Value {
         json!({
-            "apiVersion": "attache.io/v1alpha1", "kind": "Charter",
+            "apiVersion": "agentsc.io/v1alpha1", "kind": "Charter",
             "service": {"name": "orders", "namespace": "shop", "app_port": 8080},
             "agents": [
                 {"name": "boss", "type": "orchestrator", "model": "mock",
@@ -521,7 +521,7 @@ mod tests {
             "guardrails": {"allowed_tools": {"helper": ["lookup"]}},
             "authz": {"default": "deny", "callers": [
                 {"identity": "local", "agents": ["boss", "helper"]},
-                {"identity": "spiffe://attache/ns/shop/svc/billing", "agents": ["helper"], "caller_agents": ["payer"]}
+                {"identity": "spiffe://agentsc/ns/shop/svc/billing", "agents": ["helper"], "caller_agents": ["payer"]}
             ]}
         })
     }
@@ -537,7 +537,7 @@ mod tests {
         assert_eq!(callers[1].caller_agents, Some(vec!["payer".to_string()]));
         assert!(agent_view(&doc(), "ghost").is_none());
         // the custom-resource form
-        let cr = json!({"apiVersion": "attache.io/v1alpha1", "kind": "Charter",
+        let cr = json!({"apiVersion": "agentsc.io/v1alpha1", "kind": "Charter",
             "metadata": {"name": "orders", "namespace": "shop"}, "spec": doc()});
         assert!(agent_view(&cr, "boss").is_some());
     }
@@ -569,7 +569,7 @@ mod tests {
         let mut d = doc();
         let view = AgentView {
             callers: Some(vec![CallerRef {
-                identity: "spiffe://attache/ns/shop/svc/billing".into(),
+                identity: "spiffe://agentsc/ns/shop/svc/billing".into(),
                 caller_agents: Some(vec!["payer".into()]),
             }]),
             ..view
@@ -701,7 +701,7 @@ mod tests {
         );
         // the target admits the caller's service and agent once
         let mut t = doc();
-        let id = "spiffe://attache/ns/shop/svc/support";
+        let id = "spiffe://agentsc/ns/shop/svc/support";
         assert!(link_target(&mut t, id, "support-agent", "helper").unwrap());
         assert!(!link_target(&mut t, id, "support-agent", "helper").unwrap());
         assert_eq!(

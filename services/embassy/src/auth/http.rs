@@ -1,5 +1,5 @@
 //! What every HTTP response of `embassy serve` gets (design §8.1, §8.3, §15 rule 1): the Host
-//! check (421), `X-Attache-CSRF: 1` and `Content-Type: application/json` on every mutating
+//! check (421), `X-Agentsc-CSRF: 1` and `Content-Type: application/json` on every mutating
 //! request, and the security headers. No `Access-Control-Allow-*` header is ever sent.
 use std::sync::Arc;
 
@@ -14,7 +14,7 @@ use crate::api::types::ErrorCode;
 /// The `Content-Security-Policy` of every response.
 pub const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 /// The CSRF header every mutating request carries, with the value `1`.
-pub const CSRF_HEADER: &str = "x-attache-csrf";
+pub const CSRF_HEADER: &str = "x-agentsc-csrf";
 
 /// The names a `Host` header may carry, besides `localhost`, `127.0.0.1` and `[::1]`.
 #[derive(Debug, Clone, Default)]
@@ -96,7 +96,7 @@ pub fn precheck(policy: &HostPolicy, req: &Request) -> Result<(), Fail> {
         if csrf != Some("1") {
             return Err(Fail::new(
                 ErrorCode::Forbidden,
-                ["every mutating request needs the header X-Attache-CSRF: 1"],
+                ["every mutating request needs the header X-Agentsc-CSRF: 1"],
             ));
         }
         if !is_json_content_type(req.headers()) {
@@ -151,7 +151,7 @@ mod tests {
     #[test]
     fn hosts() {
         let p = HostPolicy {
-            dns_names: vec!["embassy.attache-system.svc".into()],
+            dns_names: vec!["embassy.agentsc-system.svc".into()],
         };
         for ok in [
             "localhost",
@@ -161,8 +161,8 @@ mod tests {
             "127.0.0.1:8080",
             "[::1]",
             "[::1]:8080",
-            "embassy.attache-system.svc",
-            "Embassy.Attache-System.svc:443",
+            "embassy.agentsc-system.svc",
+            "Embassy.Agentsc-System.svc:443",
             "localhost.",
         ] {
             assert!(p.allows(ok), "{ok}");
@@ -180,7 +180,7 @@ mod tests {
             "[::1]x",
             "::1",
             "localhost@evil",
-            "embassy.attache-system.svc.evil",
+            "embassy.agentsc-system.svc.evil",
         ] {
             assert!(!p.allows(bad), "{bad}");
         }

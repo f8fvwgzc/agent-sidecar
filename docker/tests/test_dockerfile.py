@@ -24,7 +24,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 DOCKERFILE = ROOT / "docker/Dockerfile"
 DOCKERIGNORE = ROOT / "docker/Dockerfile.dockerignore"
-PROBE = ROOT / "docker/attache-http-ready"
+PROBE = ROOT / "docker/agentsc-http-ready"
 RELEASE = ROOT / ".github/workflows/release.yml"
 
 
@@ -55,15 +55,15 @@ def instruction(stage: list[str], keyword: str) -> list[str]:
 
 def test_stages_and_binary_sources() -> None:
     s = stages()
-    assert set(s) == {"", "binaries-source", "binaries-prebuilt", "binaries", "attached", "embassy"}
+    assert set(s) == {"", "binaries-source", "binaries-prebuilt", "binaries", "agentscd", "embassy"}
     assert s[""] == ["ARG BINARIES=source"]
     assert s["binaries"] == ["FROM binaries-${BINARIES} AS binaries"]
     build = " ".join(s["binaries-source"])
-    assert "cargo build --release --locked -p attached -p attache-cli -p embassy" in build
+    assert "cargo build --release --locked -p agentscd -p agentsc-cli -p embassy" in build
     # embassy embeds ui/ at compile time: the source stage must have it
     assert "ui ui" in instruction(s["binaries-source"], "COPY")
     prebuilt = " ".join(instruction(s["binaries-prebuilt"], "COPY"))
-    for binary in ("attached", "attache", "embassy"):
+    for binary in ("agentscd", "agentsc", "embassy"):
         assert f"dist/linux-${{TARGETARCH}}/{binary}" in prebuilt
 
 
@@ -74,17 +74,17 @@ def test_rust_toolchain_matches_the_release_workflow() -> None:
     assert workflow["env"]["RUST_TOOLCHAIN"] == version
 
 
-def test_attached_image_is_unchanged_plus_a_writable_state_dir() -> None:
-    s = stages()["attached"]
-    assert instruction(s, "ENTRYPOINT") == ['["attached"]']
+def test_agentscd_image_is_unchanged_plus_a_writable_state_dir() -> None:
+    s = stages()["agentscd"]
+    assert instruction(s, "ENTRYPOINT") == ['["agentscd"]']
     assert instruction(s, "USER") == ["10001:10001"]
     assert "3500 50001 50002" in instruction(s, "EXPOSE")
     run = " ".join(instruction(s, "RUN"))
-    assert "install -d -o 10001 -g 10001 -m 0700 /run/attache/state" in run
-    assert "/var/log/attache" in run
+    assert "install -d -o 10001 -g 10001 -m 0700 /run/agentsc/state" in run
+    assert "/var/log/agentsc" in run
     copies = " ".join(instruction(s, "COPY"))
-    assert "--from=binaries /out/attached /out/attache /usr/local/bin/" in copies
-    assert "docker/attache-ready" in copies
+    assert "--from=binaries /out/agentscd /out/agentsc /usr/local/bin/" in copies
+    assert "docker/agentsc-ready" in copies
 
 
 def test_embassy_image_runs_serve_by_default_as_non_root() -> None:
@@ -93,9 +93,9 @@ def test_embassy_image_runs_serve_by_default_as_non_root() -> None:
     assert instruction(s, "CMD") == ['["serve"]'], "serve only through the default arguments"
     assert instruction(s, "USER") == ["10001:10001"]
     run = " ".join(instruction(s, "RUN"))
-    assert "install -d -o 10001 -g 10001 -m 0700 /var/lib/attache" in run
-    assert "install -d -o 10001 -g 10001 -m 0755 /attache-ca" in run
-    assert "docker/attache-http-ready /usr/local/bin/attache-http-ready" in " ".join(instruction(s, "COPY"))
+    assert "install -d -o 10001 -g 10001 -m 0700 /var/lib/agentsc" in run
+    assert "install -d -o 10001 -g 10001 -m 0755 /agentsc-ca" in run
+    assert "docker/agentsc-http-ready /usr/local/bin/agentsc-http-ready" in " ".join(instruction(s, "COPY"))
 
 
 def ignore_rules() -> list[tuple[bool, str]]:
@@ -149,7 +149,7 @@ def test_build_context_allowlist_covers_every_copy() -> None:
         assert not included(path), path
 
 
-# ---- attache-http-ready -------------------------------------------------------------------
+# ---- agentsc-http-ready -------------------------------------------------------------------
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -233,17 +233,17 @@ def test_binaries_cover_the_three_targets(workflow: dict) -> None:
         "aarch64-apple-darwin",
     }
     build = next(s for _, s in steps(workflow) if s.get("name") == "Build")["run"]
-    for crate in ("attached", "attache-cli", "embassy"):
+    for crate in ("agentscd", "agentsc-cli", "embassy"):
         assert f"-p {crate}" in build
     assert "cargo zigbuild" in build
     package = next(s for _, s in steps(workflow) if s.get("name") == "Package")["run"]
-    assert "for bin in attached attache embassy" in package
+    assert "for bin in agentscd agentsc embassy" in package
 
 
 def test_images_are_multi_arch_on_ghcr(workflow: dict) -> None:
     job = workflow["jobs"]["images"]
     assert job["permissions"] == {"contents": "read", "packages": "write"}
-    assert job["strategy"]["matrix"]["image"] == ["attached", "embassy"]
+    assert job["strategy"]["matrix"]["image"] == ["agentscd", "embassy"]
     assert workflow["env"]["IMAGE_PREFIX"] == "ghcr.io/f8fvwgzc/agent-sidecar"
     push = next(s for s in job["steps"] if s.get("uses", "").startswith("docker/build-push-action@"))
     w = push["with"]
@@ -270,7 +270,7 @@ def test_release_builds_nothing_before_the_packaging_checks_pass(workflow: dict)
     # images and the release need binaries, so they wait for the checks too
     for name in ("images", "release"):
         assert "binaries" in workflow["jobs"][name]["needs"]
-    # same uv as the attached image
+    # same uv as the agentscd image
     [uv_image] = re.findall(r"ghcr\.io/astral-sh/uv:(\S+)", DOCKERFILE.read_text())
     assert workflow["env"]["UV_VERSION"] == uv_image
 

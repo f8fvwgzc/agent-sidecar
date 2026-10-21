@@ -1,7 +1,7 @@
 //! The webhook `caBundle` reconcile (design §13): the chart never renders a `caBundle`;
 //! `embassy-ca` sets `clientConfig.caBundle` on every entry of the live
-//! `attache-sidecar-injector` (entry `sidecar-injector.attache.io`) and
-//! `attache-charter-validator` (entry `charter-validator.attache.io`) whenever it differs from
+//! `agentsc-sidecar-injector` (entry `sidecar-injector.agentsc.io`) and
+//! `agentsc-charter-validator` (entry `charter-validator.agentsc.io`) whenever it differs from
 //! the serving certificate's CA bundle: every [`RECONCILE_INTERVAL`] and at once when the
 //! serving certificate changes.
 //!
@@ -19,10 +19,10 @@ use super::client::{ApiError, KubeApi, WebhookKind};
 use crate::servingcert::ServingCertSource;
 
 pub const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
-/// The one entry of `attache-sidecar-injector` (chart README, "What embassy-ca reads").
-pub const INJECTOR_ENTRY: &str = "sidecar-injector.attache.io";
-/// The one entry of `attache-charter-validator`.
-pub const VALIDATOR_ENTRY: &str = "charter-validator.attache.io";
+/// The one entry of `agentsc-sidecar-injector` (chart README, "What embassy-ca reads").
+pub const INJECTOR_ENTRY: &str = "sidecar-injector.agentsc.io";
+/// The one entry of `agentsc-charter-validator`.
+pub const VALIDATOR_ENTRY: &str = "charter-validator.agentsc.io";
 
 /// What one pass did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -149,7 +149,7 @@ mod tests {
             "apiVersion": "admissionregistration.k8s.io/v1",
             "metadata": {"name": "x"},
             "webhooks": entries.iter().map(|(n, b)| {
-                let mut cc = json!({"service": {"name": "embassy-ca", "namespace": "attache-system", "path": "/mutate", "port": 443}});
+                let mut cc = json!({"service": {"name": "embassy-ca", "namespace": "agentsc-system", "path": "/mutate", "port": 443}});
                 if let Some(b) = b {
                     cc["caBundle"] = json!(base64::engine::general_purpose::STANDARD.encode(b));
                 }
@@ -174,25 +174,25 @@ mod tests {
         let cluster = FakeCluster::new();
         cluster.put_webhook_config(
             WebhookKind::Mutating,
-            "attache-sidecar-injector",
+            "agentsc-sidecar-injector",
             config(&[(INJECTOR_ENTRY, None)]),
         );
         cluster.put_webhook_config(
             WebhookKind::Validating,
-            "attache-charter-validator",
+            "agentsc-charter-validator",
             config(&[
                 (VALIDATOR_ENTRY, Some("OLD")),
-                ("second.attache.io", Some("CA")),
+                ("second.agentsc.io", Some("CA")),
             ]),
         );
-        let targets = targets("attache-sidecar-injector", "attache-charter-validator");
+        let targets = targets("agentsc-sidecar-injector", "agentsc-charter-validator");
 
         let r = reconcile_once(&cluster, &targets, "CA").await;
         assert_eq!(
             r.patched,
             [
-                "attache-sidecar-injector/sidecar-injector.attache.io",
-                "attache-charter-validator/charter-validator.attache.io"
+                "agentsc-sidecar-injector/sidecar-injector.agentsc.io",
+                "agentsc-charter-validator/charter-validator.agentsc.io"
             ]
         );
         assert!(r.missing.is_empty() && r.errors.is_empty(), "{r:?}");
@@ -200,7 +200,7 @@ mod tests {
             bundle(
                 &cluster,
                 WebhookKind::Mutating,
-                "attache-sidecar-injector",
+                "agentsc-sidecar-injector",
                 0
             )
             .as_deref(),
@@ -210,7 +210,7 @@ mod tests {
             bundle(
                 &cluster,
                 WebhookKind::Validating,
-                "attache-charter-validator",
+                "agentsc-charter-validator",
                 0
             )
             .as_deref(),
@@ -236,7 +236,7 @@ mod tests {
             bundle(
                 &cluster,
                 WebhookKind::Validating,
-                "attache-charter-validator",
+                "agentsc-charter-validator",
                 1
             )
             .as_deref(),
@@ -254,7 +254,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_loop_follows_serving_certificate_changes_and_stops() {
-        let ca = attache_pki::ca_init().unwrap();
+        let ca = agentsc_pki::ca_init().unwrap();
         let ca = Arc::new(crate::ca::CaMaterial::from_pems(&ca.cert_pem, &ca.key_pem).unwrap());
         let leaf = ca
             .sign_server(
@@ -292,7 +292,7 @@ mod tests {
         );
 
         // a new CA in the serving material is pushed without waiting for the interval
-        let other = attache_pki::ca_init().unwrap();
+        let other = agentsc_pki::ca_init().unwrap();
         let bundle_pem = format!("{}{}", ca.roots_pem(), other.cert_pem);
         serving
             .replace(&leaf.cert_pem, &leaf.key_pem, &bundle_pem)

@@ -54,7 +54,7 @@ fn key() -> ServiceKey {
 /// A valid charter for `shop/support`: one agent `support-agent` learning in review mode.
 fn charter(model: &str, learning: bool) -> Value {
     json!({
-        "apiVersion": "attache.io/v1alpha1",
+        "apiVersion": "agentsc.io/v1alpha1",
         "kind": "Charter",
         "service": {"name": "support", "namespace": "shop", "app_port": 8080},
         "agents": [{
@@ -247,7 +247,7 @@ async fn preconditions_are_409_semantics_and_api_conflicts_are_retried() {
     r.cluster.fail_replaces_with_conflict(0);
     // an admission webhook refusal is an invalid write
     r.cluster.refuse_next_replace(
-        "admission webhook \"charter-validator.attache.io\" denied the request: policy",
+        "admission webhook \"charter-validator.agentsc.io\" denied the request: policy",
     );
     let e = r
         .store
@@ -1425,7 +1425,7 @@ fn the_spec_hash_survives_an_api_server_round_trip() {
 fn writes_are_checked_against_the_service() {
     let k = key();
     // CR form
-    let cr = json!({"apiVersion": "attache.io/v1alpha1", "kind": "Charter",
+    let cr = json!({"apiVersion": "agentsc.io/v1alpha1", "kind": "Charter",
         "metadata": {"name": "support", "namespace": "shop"}, "spec": {"service": {"name": "support"}}});
     assert_eq!(
         spec_from_write(&k, &cr).unwrap(),

@@ -1,14 +1,14 @@
-# attache-runtime
+# agentsc-runtime
 
-The Python half of the `attached` sidecar image. The sidecar spawns it with
-`--listen unix:/run/attache/runtime.sock --sidecar unix:/run/attache/sidecar.sock`;
+The Python half of the `agentscd` sidecar image. The sidecar spawns it with
+`--listen unix:/run/agentsc/runtime.sock --sidecar unix:/run/agentsc/sidecar.sock`;
 it serves `Runtime.Execute` and makes every tool call through `SidecarTools`.
 See `../CONTRACT.md` §4.3 and §9, and `../docs/design/agent-platform.md` §12.
 
 ```
 uv sync
 uv run pytest
-uv run attache-runtime --listen unix:/tmp/rt.sock --sidecar unix:/tmp/sc.sock
+uv run agentsc-runtime --listen unix:/tmp/rt.sock --sidecar unix:/tmp/sc.sock
 ```
 
 ## Modules
@@ -72,7 +72,7 @@ with each entry cut to 8 KiB; an answer other than `NONE` that fits `max_note_ch
 `SidecarTools.ProposeLesson`. At most two reflections run at once; a third is dropped.
 
 **The budget signal.** The runtime takes the daily cost budget as spent when the sidecar names
-`x-attache-rule: budget.max_cost_usd_per_day` on its answer to a `ReportEvent` of the run: in the
+`x-agentsc-rule: budget.max_cost_usd_per_day` on its answer to a `ReportEvent` of the run: in the
 response headers (what tonic sends for `Response::metadata`; a successful unary reply cannot carry
 custom trailers), in the trailers, or on an error status (e.g. `RESOURCE_EXHAUSTED`). Neither design
 §6.5 nor CONTRACT.md names this signal yet; it is the runtime's side of a channel still to be agreed

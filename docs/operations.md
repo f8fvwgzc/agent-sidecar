@@ -2,7 +2,7 @@
 
 This page explains how to run agent-sidecar day to day: where logs go, how to read the audit trail, how to fix common problems, and how to change charters and certificates. It ends with a production checklist and the full list of known limitations.
 
-Commands on this page use the names in the code: the sidecar is `attached`, the CLI is `attache`, and the CA is `embassy`. [Architecture](architecture.md#names-agent-sidecar-and-attache) explains the naming. The examples use the demo namespace `attache-demo` and the kubectl context `minikube`. Change them for your cluster.
+Commands on this page use the names in the code: the sidecar is `agentscd`, the CLI is `agentsc`, and the CA is `embassy`. [Architecture](architecture.md#names-agent-sidecar-and-agentsc) explains the naming. The examples use the demo namespace `agentsc-demo` and the kubectl context `minikube`. Change them for your cluster.
 
 - [Where logs go](#where-logs-go)
 - [The audit record](#the-audit-record)
@@ -16,33 +16,33 @@ Commands on this page use the names in the code: the sidecar is `attached`, the 
 
 ## Where logs go
 
-The `attached` container writes three kinds of lines.
+The `agentscd` container writes three kinds of lines.
 
 | Stream | Written by | Goes to | How to recognise a line |
 | --- | --- | --- | --- |
-| Audit records | `attached` | stdout when `audit.sink: stdout` (the default), or a file when `audit.sink: file` | One JSON object per line. It always starts with `{"ts":`. |
-| Sidecar logs | `attached` | stderr | A timestamp, a level such as `INFO` or `WARN`, then a message. These lines can contain ANSI colour codes. |
-| Runtime logs | `attache-runtime`, forwarded by `attached` | stderr of `attached` | Every line starts with `[runtime] `. |
+| Audit records | `agentscd` | stdout when `audit.sink: stdout` (the default), or a file when `audit.sink: file` | One JSON object per line. It always starts with `{"ts":`. |
+| Sidecar logs | `agentscd` | stderr | A timestamp, a level such as `INFO` or `WARN`, then a message. These lines can contain ANSI colour codes. |
+| Runtime logs | `agentsc-runtime`, forwarded by `agentscd` | stderr of `agentscd` | Every line starts with `[runtime] `. |
 
 The runtime is a child process of the sidecar. The sidecar reads the runtime's stdout and stderr. It writes every line to its own stderr with the prefix `[runtime] `. So stdout carries audit records only.
 
-Kubernetes keeps stdout and stderr of a container in one log. So `kubectl logs -c attached` shows all three streams mixed together. `attache logs` keeps only the lines that parse as audit records.
+Kubernetes keeps stdout and stderr of a container in one log. So `kubectl logs -c agentscd` shows all three streams mixed together. `agentsc logs` keeps only the lines that parse as audit records.
 
 ```mermaid
 flowchart LR
-  RT["attache-runtime (child process)"] -->|"model_call records"| SC["attached"]
+  RT["agentsc-runtime (child process)"] -->|"model_call records"| SC["agentscd"]
   RT -->|"stdout and stderr lines"| SC
   SC -->|"audit records, sink stdout"| OUT["stdout"]
   SC -->|"audit records, sink file"| FILE["audit file in the container"]
   SC -->|"sidecar logs and runtime lines"| ERR["stderr"]
-  OUT --> KL["kubectl logs -c attached"]
+  OUT --> KL["kubectl logs -c agentscd"]
   ERR --> KL
   FILE --> EX["kubectl exec ... cat"]
 ```
 
 ### Log level
 
-The sidecar log level comes from the `RUST_LOG` environment variable. The image and the demo Deployments set `RUST_LOG=info`. Set `RUST_LOG=debug` on the `attached` container for more detail. The runtime always logs at `INFO`. It has no setting for this.
+The sidecar log level comes from the `RUST_LOG` environment variable. The image and the demo Deployments set `RUST_LOG=info`. Set `RUST_LOG=debug` on the `agentscd` container for more detail. The runtime always logs at `INFO`. It has no setting for this.
 
 ### Audit sink: stdout or file
 
@@ -51,7 +51,7 @@ There are two sinks: `stdout` and `file`. `stdout` is the default. You set the s
 ```yaml
 audit:
   sink: file
-  file: /var/log/attache/audit.jsonl
+  file: /var/log/agentsc/audit.jsonl
   redact: []
 ```
 
@@ -59,9 +59,9 @@ What you need to know about the `file` sink:
 
 - `audit.sink: file` needs `audit.file`. Without it the charter is invalid (`audit.sink: file requires audit.file`).
 - The sidecar creates the parent directory and appends to the file. It opens the file at startup. If it cannot, it exits with `open audit file`.
-- The image makes `/var/log/attache` writable for its user (uid 10001).
-- The demo Deployments mount no volume at `/var/log/attache`. The file lives in the container's writable layer. It is lost when the container restarts. Mount a volume there if you use the file sink.
-- With the file sink, stdout has no audit records. `kubectl logs` and `attache logs <service>` show no records. Read the file with `kubectl exec` (see [Reading logs](#reading-logs)).
+- The image makes `/var/log/agentsc` writable for its user (uid 10001).
+- The demo Deployments mount no volume at `/var/log/agentsc`. The file lives in the container's writable layer. It is lost when the container restarts. Mount a volume there if you use the file sink.
+- With the file sink, stdout has no audit records. `kubectl logs` and `agentsc logs <service>` show no records. Read the file with `kubectl exec` (see [Reading logs](#reading-logs)).
 - The sidecar does not rotate the file.
 - The sidecar ignores write errors on the sink. If the disk is full, records are lost without a warning.
 
@@ -72,16 +72,16 @@ What you need to know about the `file` sink:
 | File | Content |
 | --- | --- |
 | `.local/logs/<svc>-audit.jsonl` | stdout of the sidecar: audit records only |
-| `.local/logs/<svc>-attached.log` | stderr of the sidecar: sidecar logs and `[runtime]` lines |
+| `.local/logs/<svc>-agentscd.log` | stderr of the sidecar: sidecar logs and `[runtime]` lines |
 | `.local/logs/<svc>-app.log` | output of the demo app |
 
 ```bash
-cat .local/logs/orders-audit.jsonl .local/logs/inventory-audit.jsonl | ./target/debug/attache logs --file -
+cat .local/logs/orders-audit.jsonl .local/logs/inventory-audit.jsonl | ./target/debug/agentsc logs --file -
 ```
 
 ## The audit record
 
-Each record is one JSON object on one line. Only `attached` writes records. The runtime reports its `model_call` records to the sidecar over the `ReportEvent` call, and the sidecar writes them. The field order is fixed, so `grep` and people see the same layout. The full reference is [CONTRACT.md section 6](../CONTRACT.md#6-audit-record).
+Each record is one JSON object on one line. Only `agentscd` writes records. The runtime reports its `model_call` records to the sidecar over the `ReportEvent` call, and the sidecar writes them. The field order is fixed, so `grep` and people see the same layout. The full reference is [CONTRACT.md section 6](../CONTRACT.md#6-audit-record).
 
 ### Fields
 
@@ -96,7 +96,7 @@ Each record is one JSON object on one line. Only `attached` writes records. The 
 | `service` | string | The service of the sidecar that wrote the record. |
 | `namespace` | string | The namespace of that service. |
 | `agent` | string or null | The agent this record belongs to. On a callee's inbound `service_call`, this is the calling agent from the other pod. `null` when no agent is known. |
-| `caller` | string | `local` (this pod: the app or a local agent), a SPIFFE id such as `spiffe://attache/ns/attache-demo/svc/orders`, or `unknown` (the certificate was refused). |
+| `caller` | string | `local` (this pod: the app or a local agent), a SPIFFE id such as `spiffe://agentsc/ns/agentsc-demo/svc/orders`, or `unknown` (the certificate was refused). |
 | `caller_agent` | string or null | The agent that made the call, when an agent made it. |
 | `callee` | string | What was called. The format depends on the kind. |
 | `direction` | string | `inbound`, `outbound` or `internal`. |
@@ -124,7 +124,7 @@ Each record is one JSON object on one line. Only `attached` writes records. The 
 | `http_call` | outbound | An `http` tool request was sent. | `GET https://example.com/items/1` |
 | `guardrail` | internal | An input or output guardrail denied the invocation, or `pii_redact` rewrote the output (then `decision: allow` and `rule: guardrail.pii_redact`). | the agent name |
 | `budget` | internal | `max_calls_per_minute` or `max_cost_usd_per_day` denied an invocation. | the agent name |
-| `authz` | inbound | A mesh call was refused because the client certificate has no `spiffe://attache/` URI SAN. The rule is `authz.identity.invalid` and `caller` is `unknown`. | the agent, or `<service> <METHOD> <path>` |
+| `authz` | inbound | A mesh call was refused because the client certificate has no `spiffe://agentsc/` URI SAN. The rule is `authz.identity.invalid` and `caller` is `unknown`. | the agent, or `<service> <METHOD> <path>` |
 
 Some details:
 
@@ -163,7 +163,7 @@ Some failures name a rule only in the HTTP response: `runtime.unavailable`, `mod
 
 Two ids join the records of one call, across all pods:
 
-- **`request_id`** is a UUID. The first sidecar makes a new one for every request from its app. The app cannot set it. The sidecar sends it unchanged on every hop: as `x-attache-request-id` mesh metadata to peers, and as the `x-attache-request-id` header to apps. One top-level invocation has one `request_id`.
+- **`request_id`** is a UUID. The first sidecar makes a new one for every request from its app. The app cannot set it. The sidecar sends it unchanged on every hop: as `x-agentsc-request-id` mesh metadata to peers, and as the `x-agentsc-request-id` header to apps. One top-level invocation has one `request_id`.
 - **`trace_id`** is a W3C trace id. The sidecar takes it from the app's `traceparent` header when the header is valid. Otherwise it makes a new one. Every hop makes a new `span_id`. Its `parent_span_id` is the span of the hop before it.
 
 If your gateway sends the same `traceparent` for many requests, they share one `trace_id`. Each still has its own `request_id`. Use `--request` to separate them.
@@ -176,19 +176,19 @@ sequenceDiagram
   participant IA as inventory app
   App->>O: POST /v1/agents/ops-assistant/invoke with optional traceparent
   Note over O: new request_id R. trace_id T from traceparent, or new.
-  O->>I: mesh call with traceparent (child span of T) and x-attache-request-id R
+  O->>I: mesh call with traceparent (child span of T) and x-agentsc-request-id R
   Note over I: same R and T, new span_id
-  I->>IA: GET /stock/WIDGET-1 with traceparent, x-attache-request-id, x-attache-caller, x-attache-agent
+  I->>IA: GET /stock/WIDGET-1 with traceparent, x-agentsc-request-id, x-agentsc-caller, x-agentsc-agent
   IA-->>I: 200
   I-->>O: agent output
-  O-->>App: body has request_id R and trace_id T, headers traceparent and x-attache-request-id
+  O-->>App: body has request_id R and trace_id T, headers traceparent and x-agentsc-request-id
 ```
 
 Tips:
 
-- The app gets both ids in the response body (`request_id`, `trace_id`) and in the response headers (`x-attache-request-id`, `traceparent`). Log them in your app.
-- When an agent calls your app, the request carries `traceparent`, `x-attache-request-id`, `x-attache-caller` and `x-attache-agent`. Log them too. Then you can join your app logs with the audit log.
-- Records are written when each step finishes. So step records come before the record of the step that started them. `attache logs` sorts by `ts`, except when it follows.
+- The app gets both ids in the response body (`request_id`, `trace_id`) and in the response headers (`x-agentsc-request-id`, `traceparent`). Log them in your app.
+- When an agent calls your app, the request carries `traceparent`, `x-agentsc-request-id`, `x-agentsc-caller` and `x-agentsc-agent`. Log them too. Then you can join your app logs with the audit log.
+- Records are written when each step finishes. So step records come before the record of the step that started them. `agentsc logs` sorts by `ts`, except when it follows.
 
 ### Payload redaction and hashes
 
@@ -233,9 +233,9 @@ This is the denial written by the inventory sidecar in the local demo. It is one
   "span_id": "2e77fa4388933dfb",
   "parent_span_id": "d4ab404d3c0097b1",
   "service": "inventory",
-  "namespace": "attache-demo",
+  "namespace": "agentsc-demo",
   "agent": "ops-assistant",
-  "caller": "spiffe://attache/ns/attache-demo/svc/orders",
+  "caller": "spiffe://agentsc/ns/agentsc-demo/svc/orders",
   "caller_agent": "ops-assistant",
   "callee": "inventory POST /admin/reset",
   "direction": "inbound",
@@ -270,17 +270,17 @@ On Linux, use `sha256sum` instead of `shasum -a 256`.
 
 ```bash
 # Everything the sidecar wrote: audit records, sidecar logs and runtime lines
-kubectl --context minikube -n attache-demo logs -l attache.io/service=inventory -c attached --tail=-1
+kubectl --context minikube -n agentsc-demo logs -l agentsc.io/service=inventory -c agentscd --tail=-1
 
 # Only audit records
-kubectl --context minikube -n attache-demo logs -l attache.io/service=inventory -c attached --tail=-1 \
+kubectl --context minikube -n agentsc-demo logs -l agentsc.io/service=inventory -c agentscd --tail=-1 \
   | grep '^{"ts"'
 
 # Only runtime lines (deploy/<name> picks one pod)
-kubectl --context minikube -n attache-demo logs deploy/inventory -c attached | grep '^\[runtime\]'
+kubectl --context minikube -n agentsc-demo logs deploy/inventory -c agentscd | grep '^\[runtime\]'
 
 # The previous run of the container, after a crash
-kubectl --context minikube -n attache-demo logs deploy/inventory -c attached --previous
+kubectl --context minikube -n agentsc-demo logs deploy/inventory -c agentscd --previous
 ```
 
 With `-l`, kubectl prints only the last 10 lines of each container unless you pass `--tail`. `--tail=-1` prints everything.
@@ -288,39 +288,39 @@ With `-l`, kubectl prints only the last 10 lines of each container unless you pa
 If you have `jq`, you can filter the JSON:
 
 ```bash
-kubectl --context minikube -n attache-demo logs -l attache.io/service=inventory -c attached --tail=-1 \
+kubectl --context minikube -n agentsc-demo logs -l agentsc.io/service=inventory -c agentscd --tail=-1 \
   | grep '^{"ts"' | jq -c 'select(.decision == "deny") | {ts, service, kind, rule, reason}'
 ```
 
 With the file sink, read the file inside the container:
 
 ```bash
-kubectl --context minikube -n attache-demo exec deploy/inventory -c attached -- \
-  cat /var/log/attache/audit.jsonl | ./target/debug/attache logs --file - --denied
+kubectl --context minikube -n agentsc-demo exec deploy/inventory -c agentscd -- \
+  cat /var/log/agentsc/audit.jsonl | ./target/debug/agentsc logs --file - --denied
 ```
 
-### With the attache CLI
+### With the agentsc CLI
 
-Build the CLI once with `cargo build -p attache-cli`. The binary is `./target/debug/attache`. `make logs` builds it for you if it is missing.
+Build the CLI once with `cargo build -p agentsc-cli`. The binary is `./target/debug/agentsc`. `make logs` builds it for you if it is missing.
 
 ```bash
-./target/debug/attache logs orders,inventory -n attache-demo --context minikube
+./target/debug/agentsc logs orders,inventory -n agentsc-demo --context minikube
 ```
 
 What it does:
 
-1. It runs `kubectl [--context C] logs -n NS -l <selector> -c attached --tail N --prefix=false`, with `-f` when you follow. The selector is `attache.io/service=<svc>` for one service, or `attache.io/service in (<svc>,<svc>)` for several.
+1. It runs `kubectl [--context C] logs -n NS -l <selector> -c agentscd --tail N --prefix=false`, with `-f` when you follow. The selector is `agentsc.io/service=<svc>` for one service, or `agentsc.io/service in (<svc>,<svc>)` for several.
 2. It keeps only lines that parse as audit records. Sidecar logs and `[runtime]` lines are skipped.
 3. It applies your filters.
 4. It sorts by `ts`, unless you follow.
 5. It prints one line per record.
 
-Your pods need the label `attache.io/service: <svc>`, and the sidecar container must be named `attached`. Otherwise `attache logs` finds nothing.
+Your pods need the label `agentsc.io/service: <svc>`, and the sidecar container must be named `agentscd`. Otherwise `agentsc logs` finds nothing.
 
 | Flag | Default | What it does |
 | --- | --- | --- |
-| `<service>[,<service>...]` | none | Services to read, by the label `attache.io/service`. Required unless you use `--file`. |
-| `-n`, `--namespace` | `attache-demo` | The namespace. |
+| `<service>[,<service>...]` | none | Services to read, by the label `agentsc.io/service`. Required unless you use `--file`. |
+| `-n`, `--namespace` | `agentsc-demo` | The namespace. |
 | `--context` | kubectl's current context | The kubeconfig context. |
 | `--agent A` | none | Only records whose `agent` or `caller_agent` is exactly `A`. |
 | `--trace T` | none | Only records whose `trace_id` starts with `T`. |
@@ -332,7 +332,7 @@ Your pods need the label `attache.io/service: <svc>`, and the sidecar container 
 | `--file F` | none | Read records from file `F`, or from stdin with `-`, instead of kubectl. The service argument is ignored. |
 | `--tail N` | `1000` | How many lines kubectl fetches per container. |
 
-Exit status: `attache logs` exits 1 if kubectl fails. It prints `kubectl logs failed (...); no audit records were read`. An empty table always means "no matching records". It never hides a kubectl failure.
+Exit status: `agentsc logs` exits 1 if kubectl fails. It prints `kubectl logs failed (...); no audit records were read`. An empty table always means "no matching records". It never hides a kubectl failure.
 
 The table columns are: time (UTC, `HH:MM:SS.mmm`), service, agent, kind, direction, caller, `→` callee, decision, latency. Then, when present: `tokens=<in>/<out> $<cost>`, `error=<text>`, and always `trace=<first 8 characters>`. A SPIFFE caller is shortened to `svc/<name>`. The calling agent is shown in parentheses, except on an `agent_invocation` record whose caller is `local`. A denial shows `DENY <rule>`. A `pii_redact` record shows `allow guardrail.pii_redact`.
 
@@ -340,7 +340,7 @@ This is real output for the denied call of the local demo:
 
 ```bash
 cat .local/logs/orders-audit.jsonl .local/logs/inventory-audit.jsonl \
-  | ./target/debug/attache logs --file - --trace e3af3148
+  | ./target/debug/agentsc logs --file - --trace e3af3148
 ```
 
 ```text
@@ -358,29 +358,29 @@ More examples:
 
 ```bash
 # One call across both pods
-./target/debug/attache logs orders,inventory --context minikube --trace e3af3148
+./target/debug/agentsc logs orders,inventory --context minikube --trace e3af3148
 
 # One top-level invocation
-./target/debug/attache logs orders,inventory --context minikube --request b7e5832a
+./target/debug/agentsc logs orders,inventory --context minikube --request b7e5832a
 
 # Every denial in the last 1000 lines of each pod
-./target/debug/attache logs orders,inventory --context minikube --denied
+./target/debug/agentsc logs orders,inventory --context minikube --denied
 
 # Follow one agent live
-./target/debug/attache logs inventory --context minikube --agent stock-analyst -f
+./target/debug/agentsc logs inventory --context minikube --agent stock-analyst -f
 
 # Only model calls, as raw JSON
-./target/debug/attache logs orders --context minikube --kind model_call --raw
+./target/debug/agentsc logs orders --context minikube --kind model_call --raw
 ```
 
 ### Make shortcuts
 
 | Target | Runs |
 | --- | --- |
-| `make logs` | `attache logs orders,inventory -n $(NS) --context $(KUBE_CONTEXT)`. Add `TRACE=<prefix>` for `--trace` and `AGENT=<name>` for `--agent`. |
+| `make logs` | `agentsc logs orders,inventory -n $(NS) --context $(KUBE_CONTEXT)`. Add `TRACE=<prefix>` for `--trace` and `AGENT=<name>` for `--agent`. |
 | `make logs-denied` | The same with `--denied`. |
 
-`NS` defaults to `attache-demo`. `KUBE_CONTEXT` defaults to the value of `PROFILE`, which is `minikube`. Both targets read only the two demo services.
+`NS` defaults to `agentsc-demo`. `KUBE_CONTEXT` defaults to the value of `PROFILE`, which is `minikube`. Both targets read only the two demo services.
 
 ```bash
 make logs TRACE=e3af3148
@@ -393,7 +393,7 @@ make logs-denied
 Start with the response. Note its `status`, `rule`, `reason` and `request_id`. Then read the audit records of that request in every pod it touched:
 
 ```bash
-./target/debug/attache logs orders,inventory --context minikube --request <request_id>
+./target/debug/agentsc logs orders,inventory --context minikube --request <request_id>
 ```
 
 ### HTTP errors from an invocation
@@ -418,7 +418,7 @@ These come from `POST /v1/agents/{name}/invoke`.
 | `502`, rule `budget.max_steps` | The agent did not finish within `max_steps` model calls. | Raise `max_steps`, or make the task or tools simpler. |
 | `502`, rule `budget.max_tokens_per_call` | The model hit `max_tokens` in the middle of a tool call, or with no text. | Raise `max_tokens_per_call` (at most 128000). |
 
-The gRPC app API on `127.0.0.1:50001` maps the same cases to status codes. A denial is `PERMISSION_DENIED`, or `RESOURCE_EXHAUSTED` for `budget.*`. An unknown agent is `NOT_FOUND`. Everything else is `UNAVAILABLE`. The rule is in the `x-attache-rule` metadata.
+The gRPC app API on `127.0.0.1:50001` maps the same cases to status codes. A denial is `PERMISSION_DENIED`, or `RESOURCE_EXHAUSTED` for `budget.*`. An unknown agent is `NOT_FOUND`. Everything else is `UNAVAILABLE`. The rule is in the `x-agentsc-rule` metadata.
 
 ### A tool call was denied or failed, but the invocation returned 200
 
@@ -442,24 +442,24 @@ The `tool failed: <rule>: ...` text is the tool result that the model gets. You 
 
 | Symptom | Likely cause | What to check |
 | --- | --- | --- |
-| The pod stays in `ContainerCreating`. | The Secret `attache-cert-<svc>` or the ConfigMap `<svc>-charter` does not exist. | `kubectl describe pod`. Run the embassy Job, or `make charters`. |
-| `attached` is in `CrashLoopBackOff`. The log starts with `Error: load charter`. | The charter is invalid. The sidecar exits at startup. | `kubectl logs --previous -c attached`. Run `attache charter validate` on the file. |
+| The pod stays in `ContainerCreating`. | The Secret `agentsc-cert-<svc>` or the ConfigMap `<svc>-charter` does not exist. | `kubectl describe pod`. Run the embassy Job, or `make charters`. |
+| `agentscd` is in `CrashLoopBackOff`. The log starts with `Error: load charter`. | The charter is invalid. The sidecar exits at startup. | `kubectl logs --previous -c agentscd`. Run `agentsc charter validate` on the file. |
 | The log says `tls.crt identity ... does not match charter identity ...`. | `service.name` or `service.namespace` in the charter differ from the certificate. | The mounted Secret. The Job's `--namespace` and `--services`. |
 | The log says `open audit file`. | `audit.sink: file`, but the path is not writable. | The volume at the file's directory, and `readOnlyRootFilesystem`. |
-| The pod is `Running`, but `attached` is not ready (for example `1/2`). | `/readyz` returns 503. | Read the `/readyz` body (below). |
-| `attached` restarts every few minutes. | The liveness probe runs the same `attache-ready` check. In the demo Deployments it starts after 20 seconds, runs every 20 seconds, and restarts the container after 6 failures. | Fix the readiness cause. |
+| The pod is `Running`, but `agentscd` is not ready (for example `1/2`). | `/readyz` returns 503. | Read the `/readyz` body (below). |
+| `agentscd` restarts every few minutes. | The liveness probe runs the same `agentsc-ready` check. In the demo Deployments it starts after 20 seconds, runs every 20 seconds, and restarts the container after 6 failures. | Fix the readiness cause. |
 
 A charter error at startup looks like this:
 
 ```text
-Error: load charter /etc/attache/charter/charter.yaml
+Error: load charter /etc/agentsc/charter/charter.yaml
 
 Caused by:
     charter is invalid:
       - audit.sink: file requires audit.file
 ```
 
-**What `attache-ready` checks.** `attache-ready` is a small script in the image. It calls `http://127.0.0.1:3500/readyz` and exits 0 only on HTTP 200. `/readyz` returns 200 when both are true:
+**What `agentsc-ready` checks.** `agentsc-ready` is a small script in the image. It calls `http://127.0.0.1:3500/readyz` and exits 0 only on HTTP 200. `/readyz` returns 200 when both are true:
 
 - the TLS material is loaded (`mesh: true`), and
 - the runtime answered its last `Health` call (`runtime: true`).
@@ -469,7 +469,7 @@ The charter is always loaded while the sidecar runs, because the sidecar exits w
 Read the `/readyz` body from inside the pod. The image has `python3`:
 
 ```bash
-kubectl --context minikube -n attache-demo exec deploy/orders -c attached -- python3 -c '
+kubectl --context minikube -n agentsc-demo exec deploy/orders -c agentscd -- python3 -c '
 import urllib.request, urllib.error
 try:
     print(urllib.request.urlopen("http://127.0.0.1:3500/readyz").read().decode())
@@ -496,13 +496,13 @@ The same `python3` command works for `/v1/agents` (the agents and the tools each
 
 The sidecar supervises the runtime:
 
-- It starts the runtime with `--runtime-cmd` (default `attache-runtime`). It appends `--listen unix:<socket-dir>/runtime.sock --sidecar unix:<socket-dir>/sidecar.sock`.
+- It starts the runtime with `--runtime-cmd` (default `agentsc-runtime`). It appends `--listen unix:<socket-dir>/runtime.sock --sidecar unix:<socket-dir>/sidecar.sock`.
 - When the runtime exits, the sidecar marks it not ready and starts it again. The wait starts at 1 second and doubles each time, up to 30 seconds. If the runtime ran for more than 60 seconds, the wait goes back to 1 second.
 - If the command cannot start (for example, not found), the sidecar retries with the same growing wait.
 - If `--runtime-cmd` is empty or cannot be split into words, the sidecar logs `invalid --runtime-cmd` and never starts a runtime. The pod never becomes ready.
 - The sidecar checks `Health` every 10 seconds while the runtime is healthy, and every second while it is not.
 - While the runtime is down, `/readyz` returns 503 and invocations fail with `502 runtime.unavailable`.
-- With `--no-runtime` (or `ATTACHE_NO_RUNTIME=1`), the sidecar starts no runtime. Something else must serve `runtime.sock`. Readiness still follows its `Health` answer.
+- With `--no-runtime` (or `AGENTSC_NO_RUNTIME=1`), the sidecar starts no runtime. Something else must serve `runtime.sock`. Readiness still follows its `Health` answer.
 
 Log lines to look for:
 
@@ -519,8 +519,8 @@ Log lines to look for:
 | Symptom | Likely cause | What to check |
 | --- | --- | --- |
 | A tool fails with `mesh.unavailable`, and the callee has no record of the call. | The connection or the TLS handshake failed before the callee handled the call. The peer is down, the name `<svc>.<ns>.svc.cluster.local` does not resolve, the Service has no port `mesh` (50002), or the two certificates come from different CAs. | The peer pod is ready. `kubectl get svc <svc>` shows port 50002. Both Secrets hold the same `ca.crt` (command below). |
-| The callee writes kind `authz`, rule `authz.identity.invalid`, caller `unknown`. | The client certificate is signed by the trusted CA, but has no `spiffe://attache/` URI SAN. | How that certificate was made. Leaf certificates issued by `embassy` carry the SAN. |
-| Calls to a service in another namespace fail. | Not supported out of the box. Each namespace gets its own CA, because the Job looks up `attache-ca` in its own namespace. The sidecar also checks the peer certificate for `<svc>.<own namespace>.svc.cluster.local`. | Keep services that call each other in one namespace. |
+| The callee writes kind `authz`, rule `authz.identity.invalid`, caller `unknown`. | The client certificate is signed by the trusted CA, but has no `spiffe://agentsc/` URI SAN. | How that certificate was made. Leaf certificates issued by `embassy` carry the SAN. |
+| Calls to a service in another namespace fail. | Not supported out of the box. Each namespace gets its own CA, because the Job looks up `agentsc-ca` in its own namespace. The sidecar also checks the peer certificate for `<svc>.<own namespace>.svc.cluster.local`. | Keep services that call each other in one namespace. |
 | All mesh calls fail after about one year. | Leaf certificates expire after 365 days. | The expiry date (command in [Rotating certificates](#rotating-certificates)). |
 | A tool error says `mesh disabled: no TLS material loaded`. | This sidecar started without TLS files. | `--tls-dir` and the Secret mount. |
 
@@ -528,7 +528,7 @@ Check that two services share one CA:
 
 ```bash
 for s in orders inventory; do
-  kubectl --context minikube -n attache-demo get secret attache-cert-$s \
+  kubectl --context minikube -n agentsc-demo get secret agentsc-cert-$s \
     -o jsonpath='{.data.ca\.crt}' | shasum -a 256
 done
 ```
@@ -539,17 +539,17 @@ The two hashes must be equal.
 
 | Symptom | Likely cause | What to check |
 | --- | --- | --- |
-| Answers look like `Mock answer for: ...` or `Based on <tool>: ...`. | No `ANTHROPIC_API_KEY`, so the runtime uses the mock model. An agent with `model: mock` always uses the mock. | `model_provider` in `/readyz`. Create the Secret `attache-anthropic` and restart the pods. `make secret-anthropic` does both. |
+| Answers look like `Mock answer for: ...` or `Based on <tool>: ...`. | No `ANTHROPIC_API_KEY`, so the runtime uses the mock model. An agent with `model: mock` always uses the mock. | `model_provider` in `/readyz`. Create the Secret `agentsc-anthropic` and restart the pods. `make secret-anthropic` does both. |
 | `502 model.error` | The API rejected the call or could not be reached. | `error` in the `model_call` record. The key. The model id. Egress to the API. |
 
 ### Logs
 
 | Symptom | Likely cause | What to check |
 | --- | --- | --- |
-| `attache logs` prints nothing. | Wrong namespace (default `attache-demo`) or context. The pods lack the label `attache.io/service`. The sink is `file`. The records are older than the last `--tail` lines. The filter is too narrow (`--agent` is an exact match). | Run the same `kubectl logs` command by hand. |
+| `agentsc logs` prints nothing. | Wrong namespace (default `agentsc-demo`) or context. The pods lack the label `agentsc.io/service`. The sink is `file`. The records are older than the last `--tail` lines. The filter is too narrow (`--agent` is an exact match). | Run the same `kubectl logs` command by hand. |
 | `error: kubectl logs failed (...)` | kubectl could not read the logs: context, permissions, or no pods match. | kubectl's own message, printed above it. |
-| `error: usage: attache logs <service> ...` | No service and no `--file`. | Add the service name. |
-| Lines with odd characters such as `[2m` or `[0m`. | ANSI colour codes in sidecar log lines. | These are not audit records. `attache logs` skips them. |
+| `error: usage: agentsc logs <service> ...` | No service and no `--file`. | Add the service name. |
+| Lines with odd characters such as `[2m` or `[0m`. | ANSI colour codes in sidecar log lines. | These are not audit records. `agentsc logs` skips them. |
 | A `model_call` record is missing. | The runtime could not report it. | `[runtime] report_event failed` lines. |
 
 ## Changing a charter
@@ -562,14 +562,14 @@ The sidecar reads the charter once, at startup. Kubernetes updates the files of 
 4. Check the loaded charter.
 
 ```bash
-./target/debug/attache charter validate examples/charters/inventory.charter.yaml
+./target/debug/agentsc charter validate examples/charters/inventory.charter.yaml
 
-kubectl -n attache-demo create configmap inventory-charter \
+kubectl -n agentsc-demo create configmap inventory-charter \
   --from-file=charter.yaml=examples/charters/inventory.charter.yaml \
   --dry-run=client -o yaml | kubectl --context minikube apply -f -
 
-kubectl --context minikube -n attache-demo rollout restart deployment/inventory
-kubectl --context minikube -n attache-demo rollout status deployment/inventory --timeout=300s
+kubectl --context minikube -n agentsc-demo rollout restart deployment/inventory
+kubectl --context minikube -n agentsc-demo rollout status deployment/inventory --timeout=300s
 ```
 
 For the two demo services, `make charters` validates both demo charters and updates both ConfigMaps. It does not restart the pods. `make deploy` updates the ConfigMaps and restarts both Deployments.
@@ -577,14 +577,14 @@ For the two demo services, `make charters` validates both demo charters and upda
 Check what a pod runs now:
 
 ```bash
-kubectl --context minikube -n attache-demo exec deploy/inventory -c attached -- \
+kubectl --context minikube -n agentsc-demo exec deploy/inventory -c agentscd -- \
   python3 -c 'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:3500/v1/charter").read().decode())'
 ```
 
 Things to know:
 
 - **Restart all pods of the service.** Until you do, a pod that restarts on its own (crash, liveness probe, eviction) loads the new charter. The other pods still run the old one.
-- **An invalid charter does not load.** The new pod's `attached` exits at startup and goes into `CrashLoopBackOff`. With the default rolling update and one replica, the old pod keeps serving, and `rollout status` times out. `kubectl rollout undo` does not help, because the ConfigMap still holds the bad charter. Fix the ConfigMap, then restart again. Always validate before you apply.
+- **An invalid charter does not load.** The new pod's `agentscd` exits at startup and goes into `CrashLoopBackOff`. With the default rolling update and one replica, the old pod keeps serving, and `rollout status` times out. `kubectl rollout undo` does not help, because the ConfigMap still holds the bad charter. Fix the ConfigMap, then restart again. Always validate before you apply.
 - **Budgets reset** on the restart. See [Budgets](#budgets-on-restart-and-with-replicas).
 - **Changing `service.name` or `service.namespace` changes the SPIFFE id.** The certificate must match it, or the sidecar does not start. Issue a new certificate, and update the `authz` rules in other charters that name the old id.
 
@@ -594,28 +594,28 @@ See [Creating agents](guides/creating-agents.md) for what to put in a charter.
 
 Certificate rotation is not automatic. These facts matter:
 
-- The Job `embassy-bootstrap` issues the certificates. It runs `embassy bootstrap --namespace attache-demo --services orders,inventory`.
+- The Job `embassy-bootstrap` issues the certificates. It runs `embassy bootstrap --namespace agentsc-demo --services orders,inventory`.
 - A leaf certificate is valid for 365 days. The CA is valid for 10 years.
-- There is one leaf certificate per service. All replicas share the Secret `attache-cert-<svc>`.
+- There is one leaf certificate per service. All replicas share the Secret `agentsc-cert-<svc>`.
 - The sidecar reads the TLS files once, at startup.
-- When the Job runs again, it reuses the CA in the Secret `attache-ca` (its log says `reusing existing CA`). It issues a new leaf for every service in `--services` and updates `attache-cert-<svc>`.
+- When the Job runs again, it reuses the CA in the Secret `agentsc-ca` (its log says `reusing existing CA`). It issues a new leaf for every service in `--services` and updates `agentsc-cert-<svc>`.
 - The Job issues certificates only for the services in `--services`. List every service.
 
 Check when a certificate expires:
 
 ```bash
-kubectl --context minikube -n attache-demo get secret attache-cert-orders \
+kubectl --context minikube -n agentsc-demo get secret agentsc-cert-orders \
   -o jsonpath='{.data.tls\.crt}' | base64 -d | openssl x509 -noout -enddate
 ```
 
 ### New leaf certificates, same CA
 
 ```bash
-kubectl --context minikube -n attache-demo delete job embassy-bootstrap --ignore-not-found
+kubectl --context minikube -n agentsc-demo delete job embassy-bootstrap --ignore-not-found
 kubectl --context minikube apply -k deploy/
-kubectl --context minikube -n attache-demo wait --for=condition=complete job/embassy-bootstrap --timeout=180s
-kubectl --context minikube -n attache-demo logs job/embassy-bootstrap
-kubectl --context minikube -n attache-demo rollout restart deployment/orders deployment/inventory
+kubectl --context minikube -n agentsc-demo wait --for=condition=complete job/embassy-bootstrap --timeout=180s
+kubectl --context minikube -n agentsc-demo logs job/embassy-bootstrap
+kubectl --context minikube -n agentsc-demo rollout restart deployment/orders deployment/inventory
 ```
 
 You delete the Job first because a finished Job does not run again. The Job also deletes itself one hour after it finishes (`ttlSecondsAfterFinished: 3600`). `make deploy` runs the same steps, except reading the Job log. It also updates the charter ConfigMaps.
@@ -627,7 +627,7 @@ Old and new leaf certificates chain to the same CA. So pods keep talking to each
 Do this only when you must, for example when the CA key leaked.
 
 ```bash
-kubectl --context minikube -n attache-demo delete secret attache-ca
+kubectl --context minikube -n agentsc-demo delete secret agentsc-ca
 # then run the same five commands as above
 ```
 
@@ -638,12 +638,12 @@ The Job creates a new CA (its log says `created new CA`) and new leaves. Restart
 `make dev-certs` creates a new CA in `.local/ca` every time it runs (it replaces the old one), and leaf certificates in `.local/tls/<svc>`. `make local-demo` issues new leaves on every run and keeps the CA in `.local/ca`. For one service:
 
 ```bash
-./target/debug/embassy cert-issue --ca .local/ca --namespace attache-demo --service orders --out .local/tls/orders
+./target/debug/embassy cert-issue --ca .local/ca --namespace agentsc-demo --service orders --out .local/tls/orders
 ```
 
 ## Budgets on restart and with replicas
 
-Budgets live in the memory of each `attached` process. They are counted per agent name.
+Budgets live in the memory of each `agentscd` process. They are counted per agent name.
 
 | Budget | How it is counted |
 | --- | --- |
@@ -669,7 +669,7 @@ These are recommendations. The repository does not set them up for you, except w
 - Allow the app port only from where it is needed, for example your ingress controller.
 - Let apps listen on `127.0.0.1` so that only the sidecar can reach them. The inventory example does this. The orders example keeps its port open because it is the demo's entry point.
 - Limit egress to DNS, peer pods on 50002, the model API and the hosts of your `http` tools. NetworkPolicy works with IP addresses, not host names. For host names you need an egress gateway or a CNI with DNS-based policy.
-- A NetworkPolicy applies to the whole pod. The runtime runs inside the `attached` container, so it has the same network access as the pod.
+- A NetworkPolicy applies to the whole pod. The runtime runs inside the `agentscd` container, so it has the same network access as the pod.
 - Your CNI must enforce NetworkPolicy.
 
 An example for the inventory service:
@@ -679,24 +679,24 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: inventory-mesh-only
-  namespace: attache-demo
+  namespace: agentsc-demo
 spec:
   podSelector:
     matchLabels:
-      attache.io/service: inventory
+      agentsc.io/service: inventory
   policyTypes: [Ingress]
   ingress:
     - from:
         - podSelector:
             matchExpressions:
-              - { key: attache.io/service, operator: Exists }
+              - { key: agentsc.io/service, operator: Exists }
       ports:
         - { port: 50002, protocol: TCP }
 ```
 
-**2. Set resource requests and limits.** Shipped: the `attached` container requests 50m CPU and 128Mi memory, with a 512Mi memory limit. The app containers have requests only. The sidecar and the Python runtime share the `attached` container's limits. If that container is killed for memory, both stop. Measure under real load, then set requests and limits for every container.
+**2. Set resource requests and limits.** Shipped: the `agentscd` container requests 50m CPU and 128Mi memory, with a 512Mi memory limit. The app containers have requests only. The sidecar and the Python runtime share the `agentscd` container's limits. If that container is killed for memory, both stop. Measure under real load, then set requests and limits for every container.
 
-**3. Harden the securityContext.** Shipped on `attached` only: `allowPrivilegeEscalation: false` and `runAsNonRoot: true`. The app containers have none. Consider this for every container:
+**3. Harden the securityContext.** Shipped on `agentscd` only: `allowPrivilegeEscalation: false` and `runAsNonRoot: true`. The app containers have none. Consider this for every container:
 
 ```yaml
 securityContext:
@@ -708,32 +708,32 @@ securityContext:
   seccompProfile: { type: RuntimeDefault }
 ```
 
-With `readOnlyRootFilesystem: true`, `/run/attache` is already an `emptyDir` in the demo Deployments. Mount another one at `/var/log/attache` if you use the file sink. Test the runtime with these settings before production. The sidecar does not call the Kubernetes API. If your app does not call it either, set `automountServiceAccountToken: false` on the pod.
+With `readOnlyRootFilesystem: true`, `/run/agentsc` is already an `emptyDir` in the demo Deployments. Mount another one at `/var/log/agentsc` if you use the file sink. Test the runtime with these settings before production. The sidecar does not call the Kubernetes API. If your app does not call it either, set `automountServiceAccountToken: false` on the pod.
 
 **4. Ship the audit log.** The sidecar writes records. It does not ship them.
 
-- Use your cluster's log agent (for example Fluent Bit, Vector or Fluentd) to collect the `attached` container.
+- Use your cluster's log agent (for example Fluent Bit, Vector or Fluentd) to collect the `agentscd` container.
 - Keep the lines that start with `{"ts"` and parse them as JSON.
 - Store them append-only, with the retention your rules need. Keep the `*_sha256` fields.
 - Records of one call are spread over several pods. Join them by `request_id` or `trace_id` in your log store.
 - The sidecar ignores write errors, and the file sink has no rotation. Prefer the stdout sink with a log agent.
 
-**5. Manage `ANTHROPIC_API_KEY` as a secret.** Shipped: the Secret `attache-anthropic` is referenced with `optional: true`. If it is missing, agents fall back to the mock model without an error.
+**5. Manage `ANTHROPIC_API_KEY` as a secret.** Shipped: the Secret `agentsc-anthropic` is referenced with `optional: true`. If it is missing, agents fall back to the mock model without an error.
 
 - Create the Secret from a secret manager, for example External Secrets Operator, Vault, Sealed Secrets or your cloud's secret store.
-- Set `optional: false`, so that with a missing Secret the `attached` container does not start, instead of falling back to the mock.
-- The key is an environment variable of the `attached` container. The sidecar and the runtime can read it. The app container cannot.
+- Set `optional: false`, so that with a missing Secret the `agentscd` container does not start, instead of falling back to the mock.
+- The key is an environment variable of the `agentscd` container. The sidecar and the runtime can read it. The app container cannot.
 - To rotate the key, update the Secret and restart the pods. Environment variables are read at start.
-- Protect the CA too. The CA private key is in the Secret `attache-ca`, in the same namespace. Anyone who can read it can issue identities. Limit who can `get` Secrets. The shipped `embassy` Role can get, create and update every Secret in its namespace. You can narrow `get` and `update` with `resourceNames`. Kubernetes cannot narrow `create` that way.
+- Protect the CA too. The CA private key is in the Secret `agentsc-ca`, in the same namespace. Anyone who can read it can issue identities. Limit who can `get` Secrets. The shipped `embassy` Role can get, create and update every Secret in its namespace. You can narrow `get` and `update` with `resourceNames`. Kubernetes cannot narrow `create` that way.
 
-**6. Pin image tags.** Shipped: the images are `attache/attached:dev`, `attache/embassy:dev`, `attache/orders:dev` and `attache/inventory:dev`. They are built locally into minikube's Docker, with `imagePullPolicy: IfNotPresent`. No images are published. For production, build in CI, push to your registry, and use a unique tag or a digest for each build. `docker/Dockerfile` pins its base images by tag (`rust:1.99-bookworm`, `python:3.12-slim-bookworm`, `ghcr.io/astral-sh/uv:0.10.12`, `debian:bookworm-slim`). Pin them by digest for repeatable builds.
+**6. Pin image tags.** Shipped: the images are `agentsc/agentscd:dev`, `agentsc/embassy:dev`, `agentsc/orders:dev` and `agentsc/inventory:dev`. They are built locally into minikube's Docker, with `imagePullPolicy: IfNotPresent`. No images are published. For production, build in CI, push to your registry, and use a unique tag or a digest for each build. `docker/Dockerfile` pins its base images by tag (`rust:1.99-bookworm`, `python:3.12-slim-bookworm`, `ghcr.io/astral-sh/uv:0.10.12`, `debian:bookworm-slim`). Pin them by digest for repeatable builds.
 
-**7. Review charters in CI.** There is no CI config in the repo. Validate every charter in every pull request. `attache charter validate` exits 1 and prints the errors:
+**7. Review charters in CI.** There is no CI config in the repo. Validate every charter in every pull request. `agentsc charter validate` exits 1 and prints the errors:
 
 ```bash
 # for every charter your repository holds
 for f in path/to/charters/*.charter.yaml; do
-  attache charter validate "$f" || exit 1
+  agentsc charter validate "$f" || exit 1
 done
 ```
 
@@ -755,7 +755,7 @@ Require a review for changes to `authz` and `guardrails`, for example with a COD
 
 - Every container in the pod counts as `local`. Anything in the pod's network namespace can call `127.0.0.1:3500` with the identity `local`. Do not add untrusted containers to the pod, and limit `pods/exec` permissions.
 - Set budgets per replica (see [Budgets](#budgets-on-restart-and-with-replicas)).
-- Use your own namespace and service names. The Job arguments and `deploy/kustomization.yaml` hard-code `attache-demo` and the two demo services.
+- Use your own namespace and service names. The Job arguments and `deploy/kustomization.yaml` hard-code `agentsc-demo` and the two demo services.
 
 See [Microservices](guides/microservices.md) for rollout plans for a whole system.
 
@@ -763,12 +763,12 @@ See [Microservices](guides/microservices.md) for rollout plans for a whole syste
 
 These are true for the current code. "Not built yet" means there is no code for it. [CONTRACT.md section 11](../CONTRACT.md#11-known-gaps-mvp) has the short list.
 
-1. **Sidecar injection is manual.** There is no mutating webhook. The `attached` container, the charter mount and the TLS mount are written into each Deployment. The `attache.io/inject` annotation in the demo Deployments has no effect.
+1. **Sidecar injection is manual.** There is no mutating webhook. The `agentscd` container, the charter mount and the TLS mount are written into each Deployment. The `agentsc.io/inject` annotation in the demo Deployments has no effect.
 2. **Certificates are per service, not per pod.** All replicas share one Secret. A one-shot bootstrap Job issues them. There is no rotation. Per-pod certificates and `embassy` as a running CA server are not built yet.
-3. **One CA per namespace.** The bootstrap Job looks up the CA Secret `attache-ca` in its own namespace (the one in `--namespace`, where it also writes the certificates). So each namespace gets its own CA. Mesh calls across namespaces are not supported out of the box.
+3. **One CA per namespace.** The bootstrap Job looks up the CA Secret `agentsc-ca` in its own namespace (the one in `--namespace`, where it also writes the certificates). So each namespace gets its own CA. Mesh calls across namespaces are not supported out of the box.
 4. **Budgets are in memory per replica.** They are not shared between replicas, and they reset on restart.
 5. **The runtime calls the model API directly.** The sidecar does not proxy model calls. It only writes the `model_call` records the runtime reports. The sidecar cannot block a single model call. If the runtime fails to report a call, the record and its cost are missing.
-6. **The runtime runs in the sidecar's container.** It is a child process of `attached`. It shares the container's filesystem, environment (including `ANTHROPIC_API_KEY`), resource limits and network.
+6. **The runtime runs in the sidecar's container.** It is a child process of `agentscd`. It shares the container's filesystem, environment (including `ANTHROPIC_API_KEY`), resource limits and network.
 7. **`pii_redact` has a narrow scope.** It applies to the agent's final output and to audit records. It does not apply to prompts and tool results sent to the model provider. With a real model, data such as the demo's warehouse email reaches the provider. It finds only emails and phone numbers.
 8. **Configuration is read once.** The charter, the TLS files and `ANTHROPIC_API_KEY` are read at startup. A ConfigMap or Secret change needs a pod restart.
 9. **Refusal fallbacks are not enabled.** A model refusal is returned as `model.refusal`.
@@ -777,8 +777,8 @@ These are true for the current code. "Not built yet" means there is no code for 
 12. **No CI config in the repo.**
 13. **Audit output is basic.** There are two sinks (stdout and file). There is no shipping, no file rotation, and write errors are ignored.
 14. **No metrics and no trace export.** There is no metrics endpoint. Trace ids are propagated, but spans are not exported to a tracing backend. They exist only in the audit records.
-15. **The manifests are a demo.** The namespace `attache-demo` and the services `orders,inventory` are hard-coded in the Job and the kustomization. The images are `:dev` tags built inside minikube. No images are published.
-16. **The readiness probe uses a fixed address.** `attache-ready` always calls `127.0.0.1:3500`.
+15. **The manifests are a demo.** The namespace `agentsc-demo` and the services `orders,inventory` are hard-coded in the Job and the kustomization. The images are `:dev` tags built inside minikube. No images are published.
+16. **The readiness probe uses a fixed address.** `agentsc-ready` always calls `127.0.0.1:3500`.
 
 Fixed limits and timeouts in the code:
 

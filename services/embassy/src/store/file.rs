@@ -72,7 +72,7 @@ pub fn sha256_hex(text: &str) -> String {
 /// The default external-edit check: the charter validator, and the charter names the service of
 /// its path.
 pub fn default_validator(key: &ServiceKey, yaml: &str) -> Result<Value, Vec<String>> {
-    let charter = attache_charter::Charter::from_yaml(yaml).map_err(|e| vec![e.to_string()])?;
+    let charter = agentsc_charter::Charter::from_yaml(yaml).map_err(|e| vec![e.to_string()])?;
     let mut errs = Vec::new();
     if charter.service.name != key.service {
         errs.push(format!(
@@ -1020,7 +1020,7 @@ impl Store for FileStore {
 mod tests {
     use super::*;
 
-    const YAML: &str = "apiVersion: attache.io/v1alpha1\nkind: Charter\nservice: {name: orders, namespace: shop, app_port: 8080}\n";
+    const YAML: &str = "apiVersion: agentsc.io/v1alpha1\nkind: Charter\nservice: {name: orders, namespace: shop, app_port: 8080}\n";
 
     #[tokio::test]
     async fn the_poll_takes_in_a_change_once_it_settled() {

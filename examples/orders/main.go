@@ -1,4 +1,4 @@
-// orders: a plain Go HTTP service with zero attache SDK. It talks to its sidecar on localhost.
+// orders: a plain Go HTTP service with zero agentsc SDK. It talks to its sidecar on localhost.
 package main
 
 import (
@@ -25,7 +25,7 @@ var orders = map[string]order{
 }
 
 func main() {
-	sidecar := os.Getenv("ATTACHE_URL")
+	sidecar := os.Getenv("AGENTSC_URL")
 	if sidecar == "" {
 		sidecar = "http://127.0.0.1:3500"
 	}
@@ -72,7 +72,7 @@ func main() {
 			return
 		}
 		defer resp.Body.Close()
-		for _, h := range []string{"content-type", "traceparent", "x-attache-request-id"} {
+		for _, h := range []string{"content-type", "traceparent", "x-agentsc-request-id"} {
 			if v := resp.Header.Get(h); v != "" {
 				w.Header().Set(h, v)
 			}

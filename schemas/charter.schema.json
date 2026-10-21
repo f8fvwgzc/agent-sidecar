@@ -76,7 +76,7 @@
     "kind",
     "service"
   ],
-  "title": "attache Charter (attache.io/v1alpha1)",
+  "title": "agentsc Charter (agentsc.io/v1alpha1)",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$defs": {
     "ServiceSpec": {
@@ -594,7 +594,7 @@
           "items": {
             "type": "string"
           },
-          "description": "Calling agents (the `x-attache-agent` claim of the caller's sidecar) this rule admits.\nEmpty = any calling agent, including a direct call by the caller's app."
+          "description": "Calling agents (the `x-agentsc-agent` claim of the caller's sidecar) this rule admits.\nEmpty = any calling agent, including a direct call by the caller's app."
         }
       },
       "required": [
@@ -711,5 +711,5 @@
       "description": "`telemetry` (design §4, §9)."
     }
   },
-  "$id": "https://attache.io/schemas/v1alpha1/charter.schema.json"
+  "$id": "https://agentsc.io/schemas/v1alpha1/charter.schema.json"
 }

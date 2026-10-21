@@ -12,14 +12,14 @@ from typing import Any
 import grpc
 import pytest
 
-from attache_runtime.learning import Learner
-from attache_runtime.models import MockModel
-from attache_runtime.pb.attache.v1alpha1 import common_pb2, runtime_pb2, runtime_pb2_grpc
-from attache_runtime.prompts import REFLECTION_MARKER
-from attache_runtime.server import RuntimeServicer
-from attache_runtime.sidecar import GrpcSidecar
-from attache_runtime.spec import AgentSpec
-from attache_runtime.tools import RULE_COST_BUDGET, RULE_REPORT_REJECTED
+from agentsc_runtime.learning import Learner
+from agentsc_runtime.models import MockModel
+from agentsc_runtime.pb.agentsc.v1alpha1 import common_pb2, runtime_pb2, runtime_pb2_grpc
+from agentsc_runtime.prompts import REFLECTION_MARKER
+from agentsc_runtime.server import RuntimeServicer
+from agentsc_runtime.sidecar import GrpcSidecar
+from agentsc_runtime.spec import AgentSpec
+from agentsc_runtime.tools import RULE_COST_BUDGET, RULE_REPORT_REJECTED
 
 
 class FakeTools(runtime_pb2_grpc.SidecarToolsServicer):
@@ -39,15 +39,15 @@ class FakeTools(runtime_pb2_grpc.SidecarToolsServicer):
         record = json.loads(request.json)
         if self.in_flight is not None and record["request_id"] not in self.in_flight:
             self.rejected.append(record)
-            context.set_trailing_metadata((("x-attache-rule", RULE_REPORT_REJECTED),))
+            context.set_trailing_metadata((("x-agentsc-rule", RULE_REPORT_REJECTED),))
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"no Execute in flight for {record['request_id']}")
         self.events.append(record)
         if self.report_rule and self.report_via == "headers":
-            await context.send_initial_metadata((("x-attache-rule", self.report_rule),))
+            await context.send_initial_metadata((("x-agentsc-rule", self.report_rule),))
         elif self.report_rule and self.report_via == "trailers":
-            context.set_trailing_metadata((("x-attache-rule", self.report_rule),))
+            context.set_trailing_metadata((("x-agentsc-rule", self.report_rule),))
         elif self.report_rule:
-            context.set_trailing_metadata((("x-attache-rule", self.report_rule),))
+            context.set_trailing_metadata((("x-agentsc-rule", self.report_rule),))
             await context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "daily cost budget spent")
         return common_pb2.Empty()
 

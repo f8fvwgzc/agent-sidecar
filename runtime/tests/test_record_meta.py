@@ -1,9 +1,9 @@
 """model_call records carry attempt/fallback (harness) and purpose (reflection): design §6.5, §11.1, §12."""
 
-from attache_runtime.agent import _attempt_meta, model_call_record
-from attache_runtime.models import model_for
-from attache_runtime.spec import AgentSpec
-from attache_runtime.tools import CallContext
+from agentsc_runtime.agent import _attempt_meta, model_call_record
+from agentsc_runtime.models import model_for
+from agentsc_runtime.spec import AgentSpec
+from agentsc_runtime.tools import CallContext
 
 
 def _record(meta):

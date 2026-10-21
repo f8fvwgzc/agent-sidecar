@@ -2,40 +2,40 @@
 //! serving certificate by [`crate::ca_components`]. `AdmissionReview` `admission.k8s.io/v1` in
 //! and out.
 //!
-//! **`/mutate`** (`attache-sidecar-injector`, pods labelled `attache.io/inject: "true"`): adds
-//! the `attached` native sidecar (an init container with `restartPolicy: Always` and a
+//! **`/mutate`** (`agentsc-sidecar-injector`, pods labelled `agentsc.io/inject: "true"`): adds
+//! the `agentscd` native sidecar (an init container with `restartPolicy: Always` and a
 //! `startupProbe` on the sidecar's `/readyz`) with a JSONPatch. `/readyz` is served by the app
 //! API, which listens on `127.0.0.1:3500` only (the app shares the pod's loopback; the kubelet's
 //! `httpGet` probes connect to the pod IP and cannot reach it), so the probe is an `exec` of
 //! [`READY_COMMAND`] inside the sidecar container. **Image contract:** whatever image is
-//! injected (the official `attached` image, `--injector-image`, or annotation
-//! `attache.io/sidecar-image`) must have [`READY_COMMAND`] on its `PATH`, exiting 0 exactly when
+//! injected (the official `agentscd` image, `--injector-image`, or annotation
+//! `agentsc.io/sidecar-image`) must have [`READY_COMMAND`] on its `PATH`, exiting 0 exactly when
 //! `GET http://127.0.0.1:3500/readyz` answers 200; the official image ships it
-//! (`docker/attache-ready`, which needs `python3`). An image without it never passes the probe:
+//! (`docker/agentsc-ready`, which needs `python3`). An image without it never passes the probe:
 //! the pod waits [`STARTUP_PROBE_SECONDS`] and the sidecar is restarted. The patch:
 //!
-//! - env for managed mode: `ATTACHE_CONTROL_PLANE=embassy.<cp-ns>.svc:15012`,
-//!   `ATTACHE_CA_ADDRESS=embassy-ca.<cp-ns>.svc:15012`, `ATTACHE_SERVICE`, `ATTACHE_NAMESPACE`,
-//!   `ATTACHE_APP_PORT`, `POD_NAME` and `POD_NAMESPACE` (fieldRef), `ATTACHE_CA_PEM` (the CA
-//!   bundle), `ATTACHE_K8S_TOKEN_FILE`, and `ANTHROPIC_API_KEY` from key `ANTHROPIC_API_KEY` of
-//!   the Secret named by annotation `attache.io/anthropic-secret` when present;
-//! - an `emptyDir` at `/run/attache`, a projected service-account token (audience `attache`,
-//!   `expirationSeconds: 3600`) at `/var/run/secrets/attache/token`, containerPort 50002 `mesh`;
-//! - image from annotation `attache.io/sidecar-image`, else `--injector-image`;
+//! - env for managed mode: `AGENTSC_CONTROL_PLANE=embassy.<cp-ns>.svc:15012`,
+//!   `AGENTSC_CA_ADDRESS=embassy-ca.<cp-ns>.svc:15012`, `AGENTSC_SERVICE`, `AGENTSC_NAMESPACE`,
+//!   `AGENTSC_APP_PORT`, `POD_NAME` and `POD_NAMESPACE` (fieldRef), `AGENTSC_CA_PEM` (the CA
+//!   bundle), `AGENTSC_K8S_TOKEN_FILE`, and `ANTHROPIC_API_KEY` from key `ANTHROPIC_API_KEY` of
+//!   the Secret named by annotation `agentsc.io/anthropic-secret` when present;
+//! - an `emptyDir` at `/run/agentsc`, a projected service-account token (audience `agentsc`,
+//!   `expirationSeconds: 3600`) at `/var/run/secrets/agentsc/token`, containerPort 50002 `mesh`;
+//! - image from annotation `agentsc.io/sidecar-image`, else `--injector-image`;
 //! - `imagePullPolicy`, `resources`, `securityContext` and the env `OTEL_EXPORTER_OTLP_ENDPOINT` /
-//!   `ATTACHE_OTLP_ENDPOINT_ALLOW` from env `ATTACHE_INJECT_TEMPLATE` (the chart → injector
+//!   `AGENTSC_OTLP_ENDPOINT_ALLOW` from env `AGENTSC_INJECT_TEMPLATE` (the chart → injector
 //!   contract, [`InjectTemplate`]); without it, the chart's defaults;
-//! - annotation `attache.io/injected: "true"`.
+//! - annotation `agentsc.io/injected: "true"`.
 //!
-//! Annotations `attache.io/service` (a DNS label) and `attache.io/app-port` are required; without
+//! Annotations `agentsc.io/service` (a DNS label) and `agentsc.io/app-port` are required; without
 //! them the pod is denied with a message naming what is missing. A pod that already has a
-//! container named `attached` is left alone and annotated `attache.io/injected:
+//! container named `agentscd` is left alone and annotated `agentsc.io/injected:
 //! skipped-existing`. Mutating an already mutated pod changes nothing (idempotent).
 //!
-//! **`/validate-charter`** (`attache-charter-validator`, CREATE/UPDATE of `charters`): the
-//! charter validator ([`attache_charter::Charter::from_value`] on the whole resource, so unknown
+//! **`/validate-charter`** (`agentsc-charter-validator`, CREATE/UPDATE of `charters`): the
+//! charter validator ([`agentsc_charter::Charter::from_value`] on the whole resource, so unknown
 //! fields are refused) and the `ControlPlaneConfig` policy ([`policy_violations`]). An UPDATE by
-//! anyone but embassy that changes annotation `attache.io/version` or `attache.io/spec-sha256`
+//! anyone but embassy that changes annotation `agentsc.io/version` or `agentsc.io/spec-sha256`
 //! ([`crate::k8s::store::PROTECTED_ANNOTATIONS`]) is refused: they are embassy's record of its
 //! own writes, and an old exported manifest re-applied with them would otherwise look like one
 //! (a CREATE may carry them: a new Charter is a new epoch, and the store ignores annotations it
@@ -78,25 +78,25 @@ use crate::store::{Actor, ActorKind};
 
 /// Largest admission request body (a Charter and its old object, up to 3 MiB each).
 pub const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
-pub const INJECT_LABEL: &str = "attache.io/inject";
-pub const SERVICE_ANNOTATION: &str = "attache.io/service";
-pub const APP_PORT_ANNOTATION: &str = "attache.io/app-port";
-pub const ANTHROPIC_SECRET_ANNOTATION: &str = "attache.io/anthropic-secret";
-pub const SIDECAR_IMAGE_ANNOTATION: &str = "attache.io/sidecar-image";
-pub const INJECTED_ANNOTATION: &str = "attache.io/injected";
+pub const INJECT_LABEL: &str = "agentsc.io/inject";
+pub const SERVICE_ANNOTATION: &str = "agentsc.io/service";
+pub const APP_PORT_ANNOTATION: &str = "agentsc.io/app-port";
+pub const ANTHROPIC_SECRET_ANNOTATION: &str = "agentsc.io/anthropic-secret";
+pub const SIDECAR_IMAGE_ANNOTATION: &str = "agentsc.io/sidecar-image";
+pub const INJECTED_ANNOTATION: &str = "agentsc.io/injected";
 pub const SKIPPED_EXISTING: &str = "skipped-existing";
 /// The injected container's name (and the one whose presence skips injection).
-pub const SIDECAR_CONTAINER: &str = "attached";
-pub const RUN_VOLUME: &str = "attache-run";
-pub const RUN_DIR: &str = "/run/attache";
-pub const TOKEN_VOLUME: &str = "attache-token";
-pub const TOKEN_DIR: &str = "/var/run/secrets/attache";
-pub const TOKEN_FILE: &str = "/var/run/secrets/attache/token";
-pub const TOKEN_AUDIENCE: &str = "attache";
+pub const SIDECAR_CONTAINER: &str = "agentscd";
+pub const RUN_VOLUME: &str = "agentsc-run";
+pub const RUN_DIR: &str = "/run/agentsc";
+pub const TOKEN_VOLUME: &str = "agentsc-token";
+pub const TOKEN_DIR: &str = "/var/run/secrets/agentsc";
+pub const TOKEN_FILE: &str = "/var/run/secrets/agentsc/token";
+pub const TOKEN_AUDIENCE: &str = "agentsc";
 pub const TOKEN_EXPIRATION_SECONDS: i64 = 3600;
 pub const MESH_PORT: i32 = 50002;
 /// The startup probe's command (see the module docs for the image contract).
-pub const READY_COMMAND: &str = "attache-ready";
+pub const READY_COMMAND: &str = "agentsc-ready";
 /// Probe period and failures before the sidecar is restarted: 2 s × 150 = 300 s for the first
 /// certificate, the charter and the agent runtime.
 const STARTUP_PROBE_PERIOD: i32 = 2;
@@ -105,14 +105,14 @@ pub const STARTUP_PROBE_SECONDS: i32 = STARTUP_PROBE_PERIOD * STARTUP_PROBE_FAIL
 /// The control-plane Services' gRPC port (design §13).
 pub const CONTROL_PLANE_PORT: u16 = 15012;
 /// The env var with the chart → injector template.
-pub const TEMPLATE_ENV: &str = "ATTACHE_INJECT_TEMPLATE";
+pub const TEMPLATE_ENV: &str = "AGENTSC_INJECT_TEMPLATE";
 /// The only env names the template may set (the sidecar's own telemetry settings).
 pub const TEMPLATE_ENV_ALLOWED: [&str; 2] =
-    ["OTEL_EXPORTER_OTLP_ENDPOINT", "ATTACHE_OTLP_ENDPOINT_ALLOW"];
+    ["OTEL_EXPORTER_OTLP_ENDPOINT", "AGENTSC_OTLP_ENDPOINT_ALLOW"];
 
 // ---- the chart → injector template -----------------------------------------------------------------
 
-/// `ATTACHE_INJECT_TEMPLATE`: Kubernetes `Container` fields applied to the generated `attached`
+/// `AGENTSC_INJECT_TEMPLATE`: Kubernetes `Container` fields applied to the generated `agentscd`
 /// container. Any other field, or an env name outside [`TEMPLATE_ENV_ALLOWED`], is an error at
 /// start-up. A field left out keeps the built-in default (the chart's default values).
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -211,7 +211,7 @@ pub fn default_security_context() -> SecurityContext {
 
 // ---- state ---------------------------------------------------------------------------------------
 
-/// Where `ATTACHE_CA_PEM` comes from: the CA's roots, or the serving certificate's bundle.
+/// Where `AGENTSC_CA_PEM` comes from: the CA's roots, or the serving certificate's bundle.
 #[derive(Clone)]
 pub enum CaBundle {
     Ca(Arc<CaMaterial>),
@@ -232,7 +232,7 @@ impl CaBundle {
 /// What the injector needs.
 #[derive(Clone)]
 pub struct Injector {
-    /// `--injector-image` (a pod may name another with `attache.io/sidecar-image`).
+    /// `--injector-image` (a pod may name another with `agentsc.io/sidecar-image`).
     pub image: Option<String>,
     pub template: InjectTemplate,
     pub cp_namespace: String,
@@ -247,7 +247,7 @@ pub struct WebhookState {
 }
 
 impl WebhookState {
-    /// From the serve context and env `ATTACHE_INJECT_TEMPLATE`.
+    /// From the serve context and env `AGENTSC_INJECT_TEMPLATE`.
     pub fn from_context(ctx: &ServeContext) -> anyhow::Result<Self> {
         let ca_bundle = match (&ctx.ca, &ctx.serving) {
             (Some(ca), _) => CaBundle::Ca(ca.clone()),
@@ -600,31 +600,31 @@ fn read_pod_request(
         })
     } else {
         Err(format!(
-            "attache sidecar injection ({INJECT_LABEL}=true): {}",
+            "agentsc sidecar injection ({INJECT_LABEL}=true): {}",
             problems.join("; ")
         ))
     }
 }
 
-/// The `attached` container for `p`.
+/// The `agentscd` container for `p`.
 fn sidecar_container(inj: &Injector, p: &PodRequest) -> Container {
     let cp = &inj.cp_namespace;
     let mut env_list = vec![
         env(
-            "ATTACHE_CONTROL_PLANE",
+            "AGENTSC_CONTROL_PLANE",
             format!("embassy.{cp}.svc:{CONTROL_PLANE_PORT}"),
         ),
         env(
-            "ATTACHE_CA_ADDRESS",
+            "AGENTSC_CA_ADDRESS",
             format!("embassy-ca.{cp}.svc:{CONTROL_PLANE_PORT}"),
         ),
-        env("ATTACHE_SERVICE", p.service.clone()),
-        env("ATTACHE_NAMESPACE", p.namespace.clone()),
-        env("ATTACHE_APP_PORT", p.app_port.to_string()),
+        env("AGENTSC_SERVICE", p.service.clone()),
+        env("AGENTSC_NAMESPACE", p.namespace.clone()),
+        env("AGENTSC_APP_PORT", p.app_port.to_string()),
         field_env("POD_NAME", "metadata.name"),
         field_env("POD_NAMESPACE", "metadata.namespace"),
-        env("ATTACHE_CA_PEM", inj.ca_bundle.pem()),
-        env("ATTACHE_K8S_TOKEN_FILE", TOKEN_FILE),
+        env("AGENTSC_CA_PEM", inj.ca_bundle.pem()),
+        env("AGENTSC_K8S_TOKEN_FILE", TOKEN_FILE),
     ];
     if let Some(secret) = &p.anthropic_secret {
         env_list.push(EnvVar {
@@ -787,27 +787,27 @@ pub fn mutate(inj: &Injector, req: &AdmissionRequest) -> Decision {
 /// (scheme and host lower-cased, default port dropped), the canonical form the config
 /// validation requires of every `http_origin_allowlist` entry.
 pub fn policy_violations(
-    charter: &attache_charter::Charter,
+    charter: &agentsc_charter::Charter,
     policy: Option<&PolicyConfig>,
 ) -> Vec<String> {
     let Some(policy) = policy else {
         return Vec::new();
     };
     let mut out = Vec::new();
-    if policy.require_authz_default_deny && charter.authz.default != attache_charter::Decision::Deny
+    if policy.require_authz_default_deny && charter.authz.default != agentsc_charter::Decision::Deny
     {
         out.push("policy.require_authz_default_deny: authz.default must be deny".to_string());
     }
     if let Some(allowed) = &policy.http_origin_allowlist {
         for agent in &charter.agents {
             for tool in &agent.tools {
-                if tool.tool_type != attache_charter::ToolType::Http {
+                if tool.tool_type != agentsc_charter::ToolType::Http {
                     continue;
                 }
                 let origin = tool
                     .url
                     .as_deref()
-                    .and_then(attache_charter::http_origin)
+                    .and_then(agentsc_charter::http_origin)
                     .and_then(|o| url::Url::parse(&o).ok())
                     .map(|u| u.origin().ascii_serialization());
                 match origin {
@@ -829,7 +829,7 @@ pub fn policy_violations(
             if agent
                 .learning
                 .as_ref()
-                .is_some_and(|l| l.mode == attache_charter::LearningMode::Auto)
+                .is_some_and(|l| l.mode == agentsc_charter::LearningMode::Auto)
             {
                 out.push(format!(
                     "policy.forbid_learning_auto: agent {} uses learning.mode auto",
@@ -899,7 +899,7 @@ pub async fn validate_charter(state: &WebhookState, req: &AdmissionRequest) -> D
         protected_annotation_changes(req, &object)
     };
     let checked = if protected.is_empty() {
-        attache_charter::Charter::from_value(&object).map_err(Some)
+        agentsc_charter::Charter::from_value(&object).map_err(Some)
     } else {
         Err(None)
     };
@@ -914,7 +914,7 @@ pub async fn validate_charter(state: &WebhookState, req: &AdmissionRequest) -> D
         }
         Err(Some(e)) => {
             let errors = match e {
-                attache_charter::CharterError::Invalid(list) => list.join("; "),
+                agentsc_charter::CharterError::Invalid(list) => list.join("; "),
                 other => other.to_string(),
             };
             (
@@ -999,13 +999,13 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    const IMAGE: &str = "ghcr.io/f8fvwgzc/agent-sidecar/attached:0.2.0";
+    const IMAGE: &str = "ghcr.io/f8fvwgzc/agent-sidecar/agentscd:0.2.0";
 
     fn injector(template: InjectTemplate) -> Injector {
         Injector {
             image: Some(IMAGE.into()),
             template,
-            cp_namespace: "attache-system".into(),
+            cp_namespace: "agentsc-system".into(),
             ca_bundle: CaBundle::Fixed("CA PEM".into()),
         }
     }
@@ -1068,29 +1068,29 @@ mod tests {
 
     fn expected_container(extra_env: &[Value]) -> Value {
         let mut env = vec![
-            json!({"name": "ATTACHE_CONTROL_PLANE", "value": "embassy.attache-system.svc:15012"}),
-            json!({"name": "ATTACHE_CA_ADDRESS", "value": "embassy-ca.attache-system.svc:15012"}),
-            json!({"name": "ATTACHE_SERVICE", "value": "orders"}),
-            json!({"name": "ATTACHE_NAMESPACE", "value": "shop"}),
-            json!({"name": "ATTACHE_APP_PORT", "value": "8080"}),
+            json!({"name": "AGENTSC_CONTROL_PLANE", "value": "embassy.agentsc-system.svc:15012"}),
+            json!({"name": "AGENTSC_CA_ADDRESS", "value": "embassy-ca.agentsc-system.svc:15012"}),
+            json!({"name": "AGENTSC_SERVICE", "value": "orders"}),
+            json!({"name": "AGENTSC_NAMESPACE", "value": "shop"}),
+            json!({"name": "AGENTSC_APP_PORT", "value": "8080"}),
             json!({"name": "POD_NAME", "valueFrom": {"fieldRef": {"apiVersion": "v1", "fieldPath": "metadata.name"}}}),
             json!({"name": "POD_NAMESPACE", "valueFrom": {"fieldRef": {"apiVersion": "v1", "fieldPath": "metadata.namespace"}}}),
-            json!({"name": "ATTACHE_CA_PEM", "value": "CA PEM"}),
-            json!({"name": "ATTACHE_K8S_TOKEN_FILE", "value": "/var/run/secrets/attache/token"}),
+            json!({"name": "AGENTSC_CA_PEM", "value": "CA PEM"}),
+            json!({"name": "AGENTSC_K8S_TOKEN_FILE", "value": "/var/run/secrets/agentsc/token"}),
         ];
         env.extend(extra_env.iter().cloned());
         json!({
-            "name": "attached",
+            "name": "agentscd",
             "image": IMAGE,
             "imagePullPolicy": "IfNotPresent",
             "restartPolicy": "Always",
             "ports": [{"name": "mesh", "containerPort": 50002, "protocol": "TCP"}],
             "env": env,
             "volumeMounts": [
-                {"name": "attache-run", "mountPath": "/run/attache"},
-                {"name": "attache-token", "mountPath": "/var/run/secrets/attache", "readOnly": true}
+                {"name": "agentsc-run", "mountPath": "/run/agentsc"},
+                {"name": "agentsc-token", "mountPath": "/var/run/secrets/agentsc", "readOnly": true}
             ],
-            "startupProbe": {"exec": {"command": ["attache-ready"]}, "periodSeconds": 2, "timeoutSeconds": 3, "failureThreshold": 150},
+            "startupProbe": {"exec": {"command": ["agentsc-ready"]}, "periodSeconds": 2, "timeoutSeconds": 3, "failureThreshold": 150},
             "resources": {"requests": {"cpu": "50m", "memory": "128Mi"}, "limits": {"memory": "512Mi"}},
             "securityContext": {
                 "runAsNonRoot": true, "runAsUser": 10001, "runAsGroup": 10001,
@@ -1102,9 +1102,9 @@ mod tests {
 
     fn expected_volumes() -> Value {
         json!([
-            {"name": "attache-run", "emptyDir": {}},
-            {"name": "attache-token", "projected": {"sources": [
-                {"serviceAccountToken": {"audience": "attache", "expirationSeconds": 3600, "path": "token"}}
+            {"name": "agentsc-run", "emptyDir": {}},
+            {"name": "agentsc-token", "projected": {"sources": [
+                {"serviceAccountToken": {"audience": "agentsc", "expirationSeconds": 3600, "path": "token"}}
             ]}}
         ])
     }
@@ -1119,7 +1119,7 @@ mod tests {
         assert_eq!(
             Value::Array(d.patch.clone()),
             json!([
-                {"op": "add", "path": "/metadata/annotations/attache.io~1injected", "value": "true"},
+                {"op": "add", "path": "/metadata/annotations/agentsc.io~1injected", "value": "true"},
                 {"op": "add", "path": "/spec/initContainers", "value": [expected_container(&[])]},
                 {"op": "add", "path": "/spec/volumes", "value": expected_volumes()}
             ])
@@ -1140,7 +1140,7 @@ mod tests {
         assert_eq!(
             paths,
             [
-                "/metadata/annotations/attache.io~1injected",
+                "/metadata/annotations/agentsc.io~1injected",
                 "/spec/initContainers/0",
                 "/spec/volumes/-",
                 "/spec/volumes/-"
@@ -1153,7 +1153,7 @@ mod tests {
             .iter()
             .map(|c| c["name"].as_str().unwrap())
             .collect();
-        assert_eq!(init, ["attached", "migrate"], "the sidecar starts first");
+        assert_eq!(init, ["agentscd", "migrate"], "the sidecar starts first");
         assert_eq!(p["spec"]["volumes"].as_array().unwrap().len(), 3);
         assert_eq!(p["spec"]["containers"][0]["name"], "app");
     }
@@ -1165,20 +1165,20 @@ mod tests {
                 "resources":{"requests":{"cpu":"10m"}},
                 "securityContext":{"runAsNonRoot":true},
                 "env":[{"name":"OTEL_EXPORTER_OTLP_ENDPOINT","value":"http://otel:4318"},
-                       {"name":"ATTACHE_OTLP_ENDPOINT_ALLOW","value":"http://otel:4318"}]}"#,
+                       {"name":"AGENTSC_OTLP_ENDPOINT_ALLOW","value":"http://otel:4318"}]}"#,
         )
         .unwrap();
         let mut ann = annotated();
-        ann[ANTHROPIC_SECRET_ANNOTATION] = json!("attache-anthropic");
-        ann[SIDECAR_IMAGE_ANNOTATION] = json!("registry.local/attached:dev");
+        ann[ANTHROPIC_SECRET_ANNOTATION] = json!("agentsc-anthropic");
+        ann[SIDECAR_IMAGE_ANNOTATION] = json!("registry.local/agentscd:dev");
         let d = mutate(&injector(template), &create(pod(ann)));
         let c = &d.patch[1]["value"][0];
         let mut want = expected_container(&[
-            json!({"name": "ANTHROPIC_API_KEY", "valueFrom": {"secretKeyRef": {"name": "attache-anthropic", "key": "ANTHROPIC_API_KEY", "optional": true}}}),
+            json!({"name": "ANTHROPIC_API_KEY", "valueFrom": {"secretKeyRef": {"name": "agentsc-anthropic", "key": "ANTHROPIC_API_KEY", "optional": true}}}),
             json!({"name": "OTEL_EXPORTER_OTLP_ENDPOINT", "value": "http://otel:4318"}),
-            json!({"name": "ATTACHE_OTLP_ENDPOINT_ALLOW", "value": "http://otel:4318"}),
+            json!({"name": "AGENTSC_OTLP_ENDPOINT_ALLOW", "value": "http://otel:4318"}),
         ]);
-        want["image"] = json!("registry.local/attached:dev");
+        want["image"] = json!("registry.local/agentscd:dev");
         want["imagePullPolicy"] = json!("Always");
         want["resources"] = json!({"requests": {"cpu": "10m"}});
         want["securityContext"] = json!({"runAsNonRoot": true});
@@ -1188,8 +1188,8 @@ mod tests {
     #[test]
     fn templates_may_not_reach_the_injectors_own_settings() {
         for bad in [
-            r#"{"env":[{"name":"ATTACHE_CONTROL_PLANE","value":"evil:15012"}]}"#,
-            r#"{"env":[{"name":"ATTACHE_SERVICE","value":"x"}]}"#,
+            r#"{"env":[{"name":"AGENTSC_CONTROL_PLANE","value":"evil:15012"}]}"#,
+            r#"{"env":[{"name":"AGENTSC_SERVICE","value":"x"}]}"#,
             r#"{"command":["sh"]}"#,
             r#"{"imagePullPolicy":"Sometimes"}"#,
             r#"not json"#,
@@ -1206,17 +1206,17 @@ mod tests {
     }
 
     #[test]
-    fn pods_with_an_attached_container_are_left_alone() {
+    fn pods_with_an_agentscd_container_are_left_alone() {
         let mut p = pod(annotated());
         p["spec"]["containers"]
             .as_array_mut()
             .unwrap()
-            .push(json!({"name": "attached", "image": "attache/attached:0.1"}));
+            .push(json!({"name": "agentscd", "image": "agentsc/agentscd:0.1"}));
         let d = mutate(&injector(InjectTemplate::default()), &create(p.clone()));
         assert_eq!(
             d.patch,
             [
-                json!({"op": "add", "path": "/metadata/annotations/attache.io~1injected", "value": "skipped-existing"})
+                json!({"op": "add", "path": "/metadata/annotations/agentsc.io~1injected", "value": "skipped-existing"})
             ]
         );
         apply(&mut p, &d.patch);
@@ -1230,12 +1230,12 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("annotations");
-        bare["spec"]["initContainers"] = json!([{"name": "attached"}]);
+        bare["spec"]["initContainers"] = json!([{"name": "agentscd"}]);
         let d = mutate(&injector(InjectTemplate::default()), &create(bare));
         assert_eq!(
             d.patch,
             [
-                json!({"op": "add", "path": "/metadata/annotations", "value": {"attache.io/injected": "skipped-existing"}})
+                json!({"op": "add", "path": "/metadata/annotations", "value": {"agentsc.io/injected": "skipped-existing"}})
             ]
         );
     }
@@ -1248,11 +1248,11 @@ mod tests {
         let (code, msg) = d.status.unwrap();
         assert_eq!(code, 400);
         assert!(
-            msg.contains("annotation attache.io/service is required"),
+            msg.contains("annotation agentsc.io/service is required"),
             "{msg}"
         );
         assert!(
-            msg.contains("annotation attache.io/app-port is required"),
+            msg.contains("annotation agentsc.io/app-port is required"),
             "{msg}"
         );
         assert!(d.patch.is_empty());
@@ -1294,9 +1294,9 @@ mod tests {
         assert!(d.status.unwrap().1.contains("--injector-image"));
         // a volume name the sidecar needs is taken
         let mut p = pod(annotated());
-        p["spec"]["volumes"] = json!([{"name": "attache-run", "emptyDir": {}}]);
+        p["spec"]["volumes"] = json!([{"name": "agentsc-run", "emptyDir": {}}]);
         let d = mutate(&inj, &create(p));
-        assert!(d.status.unwrap().1.contains("\"attache-run\""));
+        assert!(d.status.unwrap().1.contains("\"agentsc-run\""));
     }
 
     #[test]
@@ -1318,7 +1318,7 @@ mod tests {
         unlabelled["metadata"]["labels"][INJECT_LABEL] = json!("false");
         assert_eq!(mutate(&inj, &create(unlabelled)), Decision::allow());
         let mut in_cp = create(pod(annotated()));
-        in_cp.namespace = Some("attache-system".into());
+        in_cp.namespace = Some("agentsc-system".into());
         assert_eq!(mutate(&inj, &in_cp), Decision::allow());
         let mut update = create(pod(annotated()));
         update.operation = "UPDATE".into();
@@ -1363,7 +1363,7 @@ mod tests {
             }
         }
         json!({
-            "apiVersion": "attache.io/v1alpha1", "kind": "Charter",
+            "apiVersion": "agentsc.io/v1alpha1", "kind": "Charter",
             "metadata": {"name": "orders", "uid": "u", "resourceVersion": "5", "managedFields": []},
             "spec": spec
         })
@@ -1387,7 +1387,7 @@ mod tests {
     #[tokio::test]
     async fn a_valid_charter_is_admitted_and_audited() {
         let (st, mut rx) = state(None);
-        let annotations = json!({"attache.io/version": "4", "attache.io/spec-sha256": "ab"});
+        let annotations = json!({"agentsc.io/version": "4", "agentsc.io/spec-sha256": "ab"});
         let mut new = charter_cr(json!({}));
         new["metadata"]["annotations"] = annotations.clone();
         let mut req = charter_request(new, "alice@example.com");
@@ -1497,7 +1497,7 @@ mod tests {
             &st,
             &charter_request(
                 charter_cr(json!({})),
-                "system:serviceaccount:attache-system:embassy",
+                "system:serviceaccount:agentsc-system:embassy",
             ),
         )
         .await;
@@ -1507,7 +1507,7 @@ mod tests {
         bad["spec"]["bogus"] = json!(1);
         let d = validate_charter(
             &st,
-            &charter_request(bad, "system:serviceaccount:attache-system:embassy"),
+            &charter_request(bad, "system:serviceaccount:agentsc-system:embassy"),
         )
         .await;
         assert!(!d.allowed);
@@ -1524,10 +1524,10 @@ mod tests {
             let mut o = charter_cr(json!({}));
             let mut a = Map::new();
             if let Some(v) = version {
-                a.insert("attache.io/version".into(), json!(v));
+                a.insert("agentsc.io/version".into(), json!(v));
             }
             if let Some(h) = hash {
-                a.insert("attache.io/spec-sha256".into(), json!(h));
+                a.insert("agentsc.io/spec-sha256".into(), json!(h));
             }
             o["metadata"]["annotations"] = Value::Object(a);
             o
@@ -1550,11 +1550,11 @@ mod tests {
         assert_eq!(code, 403);
         assert!(
             msg.contains(
-                "annotation attache.io/version is written by embassy only (\"3\" → \"1\")"
+                "annotation agentsc.io/version is written by embassy only (\"3\" → \"1\")"
             ),
             "{msg}"
         );
-        assert!(msg.contains("attache.io/spec-sha256"), "{msg}");
+        assert!(msg.contains("agentsc.io/spec-sha256"), "{msg}");
         let rec = rx.recv().await.unwrap();
         assert_eq!(
             (rec.action, rec.result, rec.actor.as_str()),
@@ -1578,7 +1578,7 @@ mod tests {
                 &update(
                     current.clone(),
                     with(Some("4"), Some("h4")),
-                    "system:serviceaccount:attache-system:embassy"
+                    "system:serviceaccount:agentsc-system:embassy"
                 )
             )
             .await
@@ -1645,14 +1645,14 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(patch[1]["value"][0]["name"], "attached");
+        assert_eq!(patch[1]["value"][0]["name"], "agentscd");
 
         let (_, out) = post(
             app.clone(),
             "/validate-charter",
             review(json!({
                 "uid": "def", "namespace": "shop", "name": "orders", "operation": "CREATE",
-                "userInfo": {"username": "alice"}, "object": {"apiVersion": "attache.io/v1alpha1", "kind": "Charter", "metadata": {"name": "orders"}, "spec": {"service": {"name": "orders"}}}
+                "userInfo": {"username": "alice"}, "object": {"apiVersion": "agentsc.io/v1alpha1", "kind": "Charter", "metadata": {"name": "orders"}, "spec": {"service": {"name": "orders"}}}
             })),
         )
         .await;

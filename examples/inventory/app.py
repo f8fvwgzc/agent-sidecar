@@ -1,4 +1,4 @@
-"""inventory: a FastAPI service with zero attache SDK. Its stock-analyst agent lives in the sidecar."""
+"""inventory: a FastAPI service with zero agentsc SDK. Its stock-analyst agent lives in the sidecar."""
 
 from fastapi import FastAPI, HTTPException, Request
 
@@ -35,4 +35,4 @@ def admin_reset(request: Request):
     # The app listens on 127.0.0.1 inside the pod, so this is reachable only through the sidecar,
     # and the inventory charter denies it to the orders ops-assistant.
     ADMIN["resets"] += 1
-    return {"reset": True, "resets": ADMIN["resets"], "caller": request.headers.get("x-attache-caller", "direct")}
+    return {"reset": True, "resets": ADMIN["resets"], "caller": request.headers.get("x-agentsc-caller", "direct")}

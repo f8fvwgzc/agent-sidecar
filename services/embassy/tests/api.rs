@@ -78,7 +78,7 @@ async fn bearer_tokens_sessions_and_the_login_rate_limit() {
     assert_eq!(r.status, 200, "{}", r.text);
     assert_eq!(r.body["name"], "carol");
     let cookie = r.headers["set-cookie"].to_str().unwrap().to_string();
-    assert!(cookie.starts_with("attache_session="), "{cookie}");
+    assert!(cookie.starts_with("agentsc_session="), "{cookie}");
     assert!(
         cookie.contains("; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200"),
         "{cookie}"
@@ -183,7 +183,7 @@ async fn csrf_and_content_type_on_every_mutation() {
             .header("Content-Type", ct.to_string())
             .body(json!({"token": env.token("alice")}).to_string());
         if csrf {
-            b = b.header("X-Attache-CSRF", "1");
+            b = b.header("X-Agentsc-CSRF", "1");
         }
         b
     };
@@ -193,7 +193,7 @@ async fn csrf_and_content_type_on_every_mutation() {
     assert_eq!((r.status, r.error()), (400, "invalid"));
     let r = Env::send(login(true, "application/json; charset=utf-8")).await;
     assert_eq!(r.status, 200);
-    let r = Env::send(login(false, "application/json").header("X-Attache-CSRF", "yes")).await;
+    let r = Env::send(login(false, "application/json").header("X-Agentsc-CSRF", "yes")).await;
     assert_eq!(r.status, 403, "only the value 1");
     // PUT and DELETE with a valid token but no CSRF header
     for (m, path) in [
@@ -353,9 +353,9 @@ async fn roles_are_enforced_on_the_charter_diff() {
         (
             "non-local caller",
             Box::new(|c| {
-                c["authz"]["callers"].as_array_mut().unwrap().push(json!({"identity": "spiffe://attache/ns/shop/svc/billing", "agents": ["triage"]}))
+                c["authz"]["callers"].as_array_mut().unwrap().push(json!({"identity": "spiffe://agentsc/ns/shop/svc/billing", "agents": ["triage"]}))
             }),
-            "authz.callers rule for spiffe://attache/ns/shop/svc/billing requires admin",
+            "authz.callers rule for spiffe://agentsc/ns/shop/svc/billing requires admin",
         ),
         (
             "learning auto",
@@ -566,7 +566,7 @@ async fn versions_and_if_match() {
         &env,
         "alice",
         "orders",
-        &json!({"apiVersion": "attache.io/v1alpha1"}),
+        &json!({"apiVersion": "agentsc.io/v1alpha1"}),
         "2",
     )
     .await;
@@ -1002,7 +1002,7 @@ async fn links_within_and_across_services() {
     let (iv2, inv) = env.charter("inventory").await;
     assert_eq!(
         inv["authz"]["callers"][2],
-        json!({"identity": format!("spiffe://attache/ns/{NS}/svc/support"), "agents": ["stock"], "caller_agents": ["helper"]})
+        json!({"identity": format!("spiffe://agentsc/ns/{NS}/svc/support"), "agents": ["stock"], "caller_agents": ["helper"]})
     );
     // again with the right versions: the target already admits it, only the source changes
     let ok = link(
@@ -1344,7 +1344,7 @@ async fn memory_exists_only_for_agents_that_learn() {
 
 async fn propose(env: &Env, note: &str, dedup: &str) {
     let actor = embassy::controlplane::sidecar_actor(
-        &attache_common::identity::SpiffeId {
+        &agentsc_common::identity::SpiffeId {
             namespace: NS.into(),
             service: "support".into(),
         },
@@ -1354,7 +1354,7 @@ async fn propose(env: &Env, note: &str, dedup: &str) {
         &env.hub,
         &embassy::store::ServiceKey::new(NS, "support"),
         &actor,
-        attache_proto::LearningProposal {
+        agentsc_proto::LearningProposal {
             dedup_key: dedup.into(),
             agent: "helper".into(),
             note: note.into(),
@@ -1492,7 +1492,7 @@ async fn recent_events_filter_and_order() {
     let ts = "2026-10-21T10:00:00.000Z";
     env.ingest(rec("tool_call", json!({"ts": ts, "span_id": "1111111111111111", "callee": "ask_stock", "direction": "internal"})));
     env.ingest(rec("agent_call", json!({"ts": ts, "span_id": "2222222222222222", "parent_span_id": "1111111111111111", "callee": "inventory/stock", "direction": "outbound"})));
-    env.ingest(rec("agent_invocation", json!({"ts": "2026-10-21T10:00:01.000Z", "service": "inventory", "agent": "stock", "caller": "spiffe://attache/ns/shop/svc/orders", "caller_agent": "ops", "trace_id": "ffffffffffffffffffffffffffffffff", "request_id": "r2"})));
+    env.ingest(rec("agent_invocation", json!({"ts": "2026-10-21T10:00:01.000Z", "service": "inventory", "agent": "stock", "caller": "spiffe://agentsc/ns/shop/svc/orders", "caller_agent": "ops", "trace_id": "ffffffffffffffffffffffffffffffff", "request_id": "r2"})));
     let all = env.get("/events/recent", "alice").await.body;
     let kinds: Vec<&str> = all
         .as_array()
@@ -1592,7 +1592,7 @@ async fn the_graph_follows_the_charters_and_the_mapping_table() {
         json!({"span_id": "5555555555555555", "callee": "eta", "direction": "internal"}),
     ));
     env.ingest(rec("http_call", json!({"span_id": "6666666666666666", "parent_span_id": "5555555555555555", "callee": "GET https://api.partner.example/eta", "direction": "outbound", "decision": "deny"})));
-    env.ingest(rec("service_call", json!({"agent": "boss", "caller": "spiffe://attache/ns/shop/svc/billing", "caller_agent": "boss", "callee": "orders POST /refund", "direction": "inbound", "latency_ms": 7})));
+    env.ingest(rec("service_call", json!({"agent": "boss", "caller": "spiffe://agentsc/ns/shop/svc/billing", "caller_agent": "boss", "callee": "orders POST /refund", "direction": "inbound", "latency_ms": 7})));
     let g: Graph = serde_json::from_value(env.get("/graph", "alice").await.body).unwrap();
     assert!(g.version.parse::<u64>().unwrap() > g0.version.parse::<u64>().unwrap());
     let Node::Agent(ops) = node(&g, "agent:shop/orders/ops") else {
@@ -1664,7 +1664,7 @@ async fn traces_come_from_span_starts_and_audit_records() {
     env.create("orders", &orders_yaml()).await;
     let key = embassy::store::ServiceKey::new(NS, "orders");
     let start =
-        |span: &str, kind: &str, ts: &str, callee: &str, parent: &str| attache_proto::SpanStart {
+        |span: &str, kind: &str, ts: &str, callee: &str, parent: &str| agentsc_proto::SpanStart {
             request_id: "q".into(),
             trace_id: "6e2d9ff960031afca28de8fa28704004".into(),
             span_id: span.into(),

@@ -9,9 +9,9 @@
 // `live` (default true) subscribes to SSE `span_start` and `audit` events.
 //
 // The view dispatches, on `container` (bubbling):
-//   CustomEvent("attache:open-traffic", {detail: {request_id, trace_id, span_id, kind, agent}})
+//   CustomEvent("agentsc:open-traffic", {detail: {request_id, trace_id, span_id, kind, agent}})
 //     when a segment is clicked (the console opens the inspector Traffic tab for request_id);
-//   CustomEvent("attache:select-node", {detail: {node_id}}) when a lane label is clicked.
+//   CustomEvent("agentsc:select-node", {detail: {node_id}}) when a lane label is clicked.
 //
 // Keyboard while the view is visible: Space play/pause, R restart; arrows on the playhead.
 
@@ -33,7 +33,7 @@ import { agentName, clamp, el, fmtCost, fmtInt, fmtSeconds, statusLabel } from "
 // A live run's axis starts at about 25 s (plus a margin so the 25 s tick shows) and grows in 10 s
 // steps once the run gets longer.
 const LIVE_MIN_WINDOW_MS = 26_000;
-const FOLLOW_KEY = "attache.timeline.follow.v1";
+const FOLLOW_KEY = "agentsc.timeline.follow.v1";
 const MAX_RUNS = 100;
 const LIST_LIMIT = 50;
 
@@ -92,8 +92,8 @@ class TimelineView {
       onSeekBy: (delta) => this.seek(this.pb.P + delta, "key"),
       onLive: () => this.goLive(),
       onZoom: () => this.invalidate(),
-      onOpenTraffic: (span) => this.emit("attache:open-traffic", { request_id: span.request_id, trace_id: this.selectedId, span_id: span.span_id, kind: span.kind, agent: span.agent }),
-      onSelectNode: (nodeId) => this.emit("attache:select-node", { node_id: nodeId }),
+      onOpenTraffic: (span) => this.emit("agentsc:open-traffic", { request_id: span.request_id, trace_id: this.selectedId, span_id: span.span_id, kind: span.kind, agent: span.agent }),
+      onSelectNode: (nodeId) => this.emit("agentsc:select-node", { node_id: nodeId }),
     });
     this.root = el("div", { class: "tl-root" }, this.list.el, el("div", { class: "tl-main" }, this.card.el));
     container.append(this.root);

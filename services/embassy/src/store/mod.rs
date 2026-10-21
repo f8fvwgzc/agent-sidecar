@@ -612,8 +612,8 @@ mod tests {
     /// at most 400 characters), `faq` does not learn.
     fn support_charter(enabled: bool, max_notes: u64) -> serde_json::Value {
         json!({
-            "apiVersion": "attache.io/v1alpha1", "kind": "Charter",
-            "service": {"name": "support", "namespace": "attache-demo", "app_port": 8090},
+            "apiVersion": "agentsc.io/v1alpha1", "kind": "Charter",
+            "service": {"name": "support", "namespace": "agentsc-demo", "app_port": 8090},
             "agents": [
                 {"name": "support-agent", "model": "claude-opus-5-5",
                  "learning": {"enabled": enabled, "mode": "review", "max_notes": max_notes, "max_note_chars": 400}},
@@ -817,8 +817,8 @@ mod tests {
     async fn the_trait_is_object_safe_and_usable() {
         let (tx, _) = broadcast::channel(4);
         let store: Arc<dyn Store> = Arc::new(Empty::new(tx.clone(), vec![]));
-        let key = ServiceKey::new("attache-demo", "orders");
-        assert_eq!(key.to_string(), "attache-demo/orders");
+        let key = ServiceKey::new("agentsc-demo", "orders");
+        assert_eq!(key.to_string(), "agentsc-demo/orders");
         assert_eq!(store.get_charter(&key).await, Err(StoreError::NotFound));
         assert_eq!(
             store
@@ -876,7 +876,7 @@ mod tests {
     fn proposal(id: &str, status: ProposalStatus) -> Proposal {
         Proposal {
             id: id.into(),
-            namespace: "attache-demo".into(),
+            namespace: "agentsc-demo".into(),
             service: "support".into(),
             agent: "support-agent".into(),
             note: format!("note of {id}"),
@@ -1109,8 +1109,8 @@ mod tests {
         spec_map.remove("apiVersion");
         spec_map.remove("kind");
         let cr = json!({
-            "apiVersion": "attache.io/v1alpha1", "kind": "Charter",
-            "metadata": {"name": "support", "namespace": "attache-demo"},
+            "apiVersion": "agentsc.io/v1alpha1", "kind": "Charter",
+            "metadata": {"name": "support", "namespace": "agentsc-demo"},
             "spec": spec
         });
         assert_eq!(
@@ -1121,7 +1121,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn approve_and_reject_never_both_win() {
-        let key = ServiceKey::new("attache-demo", "support");
+        let key = ServiceKey::new("agentsc-demo", "support");
         for round in 0..50 {
             let (tx, _) = broadcast::channel(16);
             let store: Arc<dyn Store> = Arc::new(Empty::new(
@@ -1183,7 +1183,7 @@ mod tests {
         // an unknown proposal, or one of another service
         let (tx, _) = broadcast::channel(4);
         let store = Empty::new(tx, vec![proposal("p1", ProposalStatus::Pending)]);
-        let other = ServiceKey::new("attache-demo", "orders");
+        let other = ServiceKey::new("agentsc-demo", "orders");
         assert_eq!(
             store.approve_proposal(&key, "p2", "0", &alice()).await,
             Err(StoreError::NotFound)
@@ -1200,7 +1200,7 @@ mod tests {
     /// approve stored. Never a note for an agent whose learning is off.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn approve_never_outlives_learning_turned_off() {
-        let key = ServiceKey::new("attache-demo", "support");
+        let key = ServiceKey::new("agentsc-demo", "support");
         let (mut refused, mut dropped) = (0, 0);
         for round in 0..50 {
             let (tx, _) = broadcast::channel(16);
@@ -1248,7 +1248,7 @@ mod tests {
     fn proposal_filters() {
         let p = Proposal {
             id: "1".into(),
-            namespace: "attache-demo".into(),
+            namespace: "agentsc-demo".into(),
             service: "orders".into(),
             agent: "ops-assistant".into(),
             note: "n".into(),
@@ -1263,7 +1263,7 @@ mod tests {
         assert!(
             ProposalFilter {
                 status: Some(ProposalStatus::Pending),
-                namespace: Some("attache-demo".into()),
+                namespace: Some("agentsc-demo".into()),
                 service: Some("orders".into()),
             }
             .matches(&p)

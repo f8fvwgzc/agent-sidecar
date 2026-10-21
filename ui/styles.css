@@ -1,4 +1,4 @@
-/* attache console. Dark only (the canvas is a dark dotted grid). No inline styles anywhere:
+/* agentsc console. Dark only (the canvas is a dark dotted grid). No inline styles anywhere:
    the control plane's CSP is style-src 'self'. */
 
 :root {

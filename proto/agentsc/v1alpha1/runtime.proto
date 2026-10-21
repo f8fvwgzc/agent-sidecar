@@ -1,0 +1,99 @@
+syntax = "proto3";
+package agentsc.v1alpha1;
+
+import "agentsc/v1alpha1/common.proto";
+
+// Served by the agent runtime on unix:/run/agentsc/runtime.sock.
+service Runtime {
+  rpc Execute(ExecuteRequest) returns (ExecuteResponse);
+  rpc Health(Empty) returns (HealthResponse);
+}
+
+message ExecuteRequest {
+  string request_id = 1;
+  string trace_id = 2;
+  string span_id = 3;          // the sidecar's span for this invocation; the runtime's records use it as parent
+  string agent_spec_json = 4;  // the agent's charter entry after allowed_tools filtering
+  string input = 5;
+  string context_json = 6;
+  string caller = 7;           // local | spiffe://...
+  string caller_agent = 8;
+  uint32 depth = 9;
+}
+
+message ExecuteResponse {
+  string status = 1;           // ok | denied | error
+  string output = 2;
+  Usage usage = 3;
+  repeated Step steps = 4;
+  string rule = 5;
+  string reason = 6;
+}
+
+message HealthResponse {
+  bool ok = 1;
+  string model_provider = 2;   // anthropic | mock
+  string version = 3;
+}
+
+// Served by agentscd on unix:/run/agentsc/sidecar.sock for the runtime.
+service SidecarTools {
+  rpc InvokeService(ToolServiceRequest) returns (ServiceResponse);
+  rpc InvokeAgent(ToolAgentRequest) returns (InvokeAgentResponse);
+  rpc InvokeHttp(ToolHttpRequest) returns (ServiceResponse);
+  rpc ReportEvent(AuditEvent) returns (Empty);
+  rpc ProposeLesson(LessonRequest) returns (LessonResponse);
+}
+
+message ToolContext {
+  string request_id = 1;
+  string trace_id = 2;
+  string span_id = 3;          // runtime span making the call
+  string agent = 4;            // calling agent
+  string tool = 5;             // tool name as declared in the charter
+  uint32 depth = 6;
+}
+
+message ToolServiceRequest {
+  ToolContext ctx = 1;
+  string service = 2;
+  string method = 3;
+  string path = 4;
+  map<string, string> headers = 5;
+  bytes body = 6;
+}
+
+message ToolAgentRequest {
+  ToolContext ctx = 1;
+  string target_service = 2;   // "" = local
+  string target_agent = 3;
+  string input = 4;
+}
+
+message ToolHttpRequest {
+  ToolContext ctx = 1;
+  string method = 2;
+  string url = 3;
+  map<string, string> headers = 4;
+  bytes body = 5;
+}
+
+// A CONTRACT.md §6 record as JSON; the sidecar stamps service/namespace and redacts.
+message AuditEvent {
+  string json = 1;
+}
+
+// A lesson the runtime drew from a finished run, for the agent's memory. The sidecar checks,
+// scrubs and audits it (kind `learning`); it never becomes memory without the sidecar.
+message LessonRequest {
+  ToolContext ctx = 1;         // ctx.agent is the agent that learned
+  string note = 2;
+  string rationale = 3;
+  string run_request_id = 4;   // the request_id of the run the lesson is about
+}
+
+message LessonResponse {
+  string decision = 1;         // allow | deny
+  string rule = 2;             // learning.proposed | learning.applied | learning.denied | learning.rate_limited | ...
+  string reason = 3;
+}

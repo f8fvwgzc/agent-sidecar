@@ -1,7 +1,7 @@
 //! `CertificateAuthority.IssueCertificate` (design §7, component `ca`).
 //!
 //! A sidecar sends a CSR and one credential; it gets a fresh workload leaf for
-//! `spiffe://attache/ns/<ns>/svc/<svc>` only if, in this order:
+//! `spiffe://agentsc/ns/<ns>/svc/<svc>` only if, in this order:
 //!
 //! 1. `namespace` and `service` are DNS-1123 labels and not reserved (the control-plane
 //!    namespace, the service `embassy`) — else `INVALID_ARGUMENT`;
@@ -11,11 +11,11 @@
 //!    `PERMISSION_DENIED` (`UNAVAILABLE` when the Kubernetes API cannot be asked):
 //!    - a **join token** (`issuance.join_tokens`): its SHA-256 matches an unexpired entry whose
 //!      `namespace` is the request's and whose `services` lists the request's service;
-//!    - a **Kubernetes token** (`issuance.kubernetes`): a TokenReview with audience `attache`
+//!    - a **Kubernetes token** (`issuance.kubernetes`): a TokenReview with audience `agentsc`
 //!      authenticates it (and says so in `status.audiences`) as a service account bound to a
 //!      pod (`authentication.kubernetes.io/pod-name` / `pod-uid` extras); the pod exists, has
 //!      that uid and is not terminating; pod, token and request namespaces are equal; the
-//!      service is the `ATTACHE_SERVICE` env of the pod's `attached` container (init or
+//!      service is the `AGENTSC_SERVICE` env of the pod's `agentscd` container (init or
 //!      regular; container env is immutable) and equals the request's; the pod's
 //!      `serviceAccountName` is the token's and is the service's name or listed in the stored
 //!      charter's `service.service_accounts`.
@@ -25,7 +25,7 @@
 //! refusal is a control-plane audit record (`cert_issue` / `cert_denied`) naming the identity
 //! (`namespace`, `service`), the pod or join token, and the public key's SHA-256
 //! (`sha256_after`). The actor of an issuance follows the `sidecar:<spiffe id>/<pod>` convention
-//! of design §7 (`sidecar:spiffe://attache/ns/<ns>/svc/<svc>/<pod>`, or `.../join:<token name>`
+//! of design §7 (`sidecar:spiffe://agentsc/ns/<ns>/svc/<svc>/<pod>`, or `.../join:<token name>`
 //! for a join token); a refusal never names the identity that was asked for but only what the
 //! credential showed: `sidecar:pod:<ns>/<pod>`, `sidecar:join:<token name>` or `sidecar:unknown`.
 //!
@@ -36,11 +36,11 @@
 //! `ca_components` then starts no gRPC listener of its own.
 use std::sync::Arc;
 
-use arc_swap::ArcSwap;
-use attache_proto::certificate_authority_server::{
+use agentsc_proto::certificate_authority_server::{
     CertificateAuthority, CertificateAuthorityServer,
 };
-use attache_proto::{CertificateRequest, CertificateResponse};
+use agentsc_proto::{CertificateRequest, CertificateResponse};
+use arc_swap::ArcSwap;
 use chrono::{DateTime, SecondsFormat, Utc};
 use k8s_openapi::api::core::v1::{Container, Pod};
 use serde_json::Value;
@@ -58,12 +58,12 @@ use crate::store::{Actor, ActorKind, ServiceKey, Store, StoreError};
 /// gRPC max decode of `IssueCertificate` (design §3).
 pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
 /// The TokenReview audience (and the projected token's audience, design §13).
-pub const AUDIENCE: &str = "attache";
+pub const AUDIENCE: &str = "agentsc";
 pub const POD_NAME_EXTRA: &str = "authentication.kubernetes.io/pod-name";
 pub const POD_UID_EXTRA: &str = "authentication.kubernetes.io/pod-uid";
 /// The container the service is read from, and the env var.
-pub const SIDECAR_CONTAINER: &str = "attached";
-pub const SERVICE_ENV: &str = "ATTACHE_SERVICE";
+pub const SIDECAR_CONTAINER: &str = "agentscd";
+pub const SERVICE_ENV: &str = "AGENTSC_SERVICE";
 
 /// Where the Kubernetes calls go.
 enum KubeSource {
@@ -182,7 +182,7 @@ fn charter_service_accounts(charter_json: &Value) -> Vec<String> {
         .collect()
 }
 
-/// The value of `ATTACHE_SERVICE` on the pod's `attached` container (init containers first;
+/// The value of `AGENTSC_SERVICE` on the pod's `agentscd` container (init containers first;
 /// the last entry of a repeated name wins, as in Kubernetes). Only a literal `value` counts.
 pub fn pod_service(pod: &Pod) -> Option<String> {
     let spec = pod.spec.as_ref()?;
@@ -380,7 +380,7 @@ impl Issuer {
             return Err(deny(
                 Code::PermissionDenied,
                 "the Kubernetes token is not bound to a pod (mount a projected service-account \
-                 token with audience attache)",
+                 token with audience agentsc)",
             ));
         };
         let who = Some(Caller::Pod {
@@ -485,7 +485,7 @@ impl Issuer {
                     Caller::Pod { name, .. } => name.clone(),
                     Caller::Join { name } => format!("join:{name}"),
                 };
-                format!("sidecar:spiffe://attache/ns/{namespace}/svc/{service}/{slot}")
+                format!("sidecar:spiffe://agentsc/ns/{namespace}/svc/{service}/{slot}")
             }
             (Some(Caller::Pod { namespace, name }), false) => {
                 format!("sidecar:pod:{namespace}/{name}")
@@ -530,7 +530,7 @@ impl Issuer {
             self.audit(&req, None, None, Err(&d)).await;
             return Err(Status::new(d.code, d.message));
         }
-        let key = match attache_pki::verify_csr_p256(&req.csr_pem) {
+        let key = match agentsc_pki::verify_csr_p256(&req.csr_pem) {
             Ok(k) => k,
             Err(e) => {
                 let d = deny(Code::InvalidArgument, e.to_string());
@@ -709,7 +709,7 @@ mod tests {
     }
 
     fn rig(join: Vec<JoinTokenEntry>) -> Rig {
-        let ca = attache_pki::ca_init().unwrap();
+        let ca = agentsc_pki::ca_init().unwrap();
         let ca = Arc::new(CaMaterial::from_pems(&ca.cert_pem, &ca.key_pem).unwrap());
         let cluster = Arc::new(FakeCluster::new());
         let store = Arc::new(KubeStore::with_writer(
@@ -723,7 +723,7 @@ mod tests {
             Arc::new(ArcSwap::from_pointee(config(join))),
             Some(store.clone()),
             cp_audit,
-            "attache-system".into(),
+            "agentsc-system".into(),
             Some(cluster.clone()),
         );
         Rig {
@@ -754,7 +754,7 @@ mod tests {
 
     async fn put_charter(store: &KubeStore, ns: &str, svc: &str, service_accounts: &[&str]) {
         let json = serde_json::json!({
-            "apiVersion": "attache.io/v1alpha1", "kind": "Charter",
+            "apiVersion": "agentsc.io/v1alpha1", "kind": "Charter",
             "service": {"name": svc, "namespace": ns, "app_port": 8080, "service_accounts": service_accounts},
             "agents": []
         });
@@ -784,13 +784,13 @@ mod tests {
             .put_pod(pod("shop", "orders-0", "orders", "orders"));
         r.cluster.put_token(
             "tok",
-            review("shop", "orders", "orders-0", POD_UID, &["attache"]),
+            review("shop", "orders", "orders-0", POD_UID, &["agentsc"]),
         );
         // the CSR asks for another identity: ignored
         let key = rcgen::KeyPair::generate().unwrap();
         let mut params = rcgen::CertificateParams::new(vec!["evil.example".to_string()]).unwrap();
         params.subject_alt_names.push(rcgen::SanType::URI(
-            "spiffe://attache/ns/kube-system/svc/admin"
+            "spiffe://agentsc/ns/kube-system/svc/admin"
                 .try_into()
                 .unwrap(),
         ));
@@ -798,14 +798,14 @@ mod tests {
         req.csr_pem = params.serialize_request(&key).unwrap().pem().unwrap();
 
         let resp = r.issuer.issue(req).await.unwrap();
-        let der = attache_pki::certs_from_pem(&resp.cert_pem)
+        let der = agentsc_pki::certs_from_pem(&resp.cert_pem)
             .unwrap()
             .remove(0);
         assert_eq!(
-            attache_pki::uri_sans_of(&der).unwrap(),
-            ["spiffe://attache/ns/shop/svc/orders"]
+            agentsc_pki::uri_sans_of(&der).unwrap(),
+            ["spiffe://agentsc/ns/shop/svc/orders"]
         );
-        let dns = attache_pki::dns_names_of(&der).unwrap();
+        let dns = agentsc_pki::dns_names_of(&der).unwrap();
         assert_eq!(
             dns,
             [
@@ -817,7 +817,7 @@ mod tests {
         );
         assert_eq!(resp.ca_pem, r.ca.roots_pem());
         // lifetime: issuance.workload_cert_ttl (2 h here)
-        let not_after = attache_pki::not_after_of(&der).unwrap();
+        let not_after = agentsc_pki::not_after_of(&der).unwrap();
         let left = not_after
             .duration_since(std::time::SystemTime::now())
             .unwrap();
@@ -831,10 +831,10 @@ mod tests {
                 .timestamp(),
             DateTime::<Utc>::from(not_after).timestamp()
         );
-        // the token was reviewed for audience attache
+        // the token was reviewed for audience agentsc
         assert_eq!(
             r.cluster.review_requests(),
-            [("tok".to_string(), vec!["attache".to_string()])]
+            [("tok".to_string(), vec!["agentsc".to_string()])]
         );
 
         let rec = r.audit.recv().await.unwrap();
@@ -843,14 +843,14 @@ mod tests {
         // design §7: sidecar:<spiffe id>/<pod>
         assert_eq!(
             rec.actor,
-            "sidecar:spiffe://attache/ns/shop/svc/orders/orders-0"
+            "sidecar:spiffe://agentsc/ns/shop/svc/orders/orders-0"
         );
         assert_eq!(rec.actor_kind, ActorKind::Sidecar);
         assert_eq!(
             (rec.namespace.as_deref(), rec.service.as_deref()),
             (Some("shop"), Some("orders"))
         );
-        let spki = attache_pki::verify_csr_p256(&k8s_request_csr_of(&key))
+        let spki = agentsc_pki::verify_csr_p256(&k8s_request_csr_of(&key))
             .unwrap()
             .sha256_hex();
         assert_eq!(rec.sha256_after.as_deref(), Some(spki.as_str()));
@@ -884,7 +884,7 @@ mod tests {
             reason: &'static str,
         }
         let good_pod = || pod("shop", "orders-0", "orders", "orders");
-        let good = || review("shop", "orders", "orders-0", POD_UID, &["attache"]);
+        let good = || review("shop", "orders", "orders-0", POD_UID, &["agentsc"]);
         let mut terminating = good_pod();
         terminating.metadata.deletion_timestamp = Some(Time(k8s_openapi::jiff::Timestamp::now()));
         let mut from_field = good_pod();
@@ -962,7 +962,7 @@ mod tests {
             },
             Row {
                 name: "uid mismatch",
-                review: review("shop", "orders", "orders-0", "another-uid", &["attache"]),
+                review: review("shop", "orders", "orders-0", "another-uid", &["agentsc"]),
                 pod: Some(good_pod()),
                 request_service: "orders",
                 code: Code::PermissionDenied,
@@ -986,7 +986,7 @@ mod tests {
             },
             Row {
                 name: "token namespace",
-                review: review("other", "orders", "orders-0", POD_UID, &["attache"]),
+                review: review("other", "orders", "orders-0", POD_UID, &["agentsc"]),
                 pod: Some(good_pod()),
                 request_service: "orders",
                 code: Code::PermissionDenied,
@@ -994,7 +994,7 @@ mod tests {
             },
             Row {
                 name: "SA mismatch",
-                review: review("shop", "inventory", "orders-0", POD_UID, &["attache"]),
+                review: review("shop", "inventory", "orders-0", POD_UID, &["agentsc"]),
                 pod: Some(pod("shop", "orders-0", "inventory", "orders")),
                 request_service: "orders",
                 code: Code::PermissionDenied,
@@ -1002,7 +1002,7 @@ mod tests {
             },
             Row {
                 name: "token SA is not the pod's",
-                review: review("shop", "default", "orders-0", POD_UID, &["attache"]),
+                review: review("shop", "default", "orders-0", POD_UID, &["agentsc"]),
                 pod: Some(good_pod()),
                 request_service: "orders",
                 code: Code::PermissionDenied,
@@ -1017,7 +1017,7 @@ mod tests {
                 reason: "runs the sidecar of service \"orders\"",
             },
             Row {
-                name: "no attached container",
+                name: "no agentscd container",
                 review: good(),
                 pod: Some({
                     let mut p = good_pod();
@@ -1026,7 +1026,7 @@ mod tests {
                 }),
                 request_service: "orders",
                 code: Code::PermissionDenied,
-                reason: "has no \"attached\" container",
+                reason: "has no \"agentscd\" container",
             },
             Row {
                 name: "service from valueFrom",
@@ -1034,7 +1034,7 @@ mod tests {
                 pod: Some(from_field),
                 request_service: "orders",
                 code: Code::PermissionDenied,
-                reason: "has no \"attached\" container",
+                reason: "has no \"agentscd\" container",
             },
         ];
         for row in rows {
@@ -1091,7 +1091,7 @@ mod tests {
             .put_pod(pod("shop", "orders-0", "orders-runner", "orders"));
         r.cluster.put_token(
             "tok",
-            review("shop", "orders-runner", "orders-0", POD_UID, &["attache"]),
+            review("shop", "orders-runner", "orders-0", POD_UID, &["agentsc"]),
         );
         // no charter: only the service's own name is allowed
         let err = r
@@ -1155,18 +1155,18 @@ mod tests {
             .issue(join("demo", "orders", "att_join_orders"))
             .await
             .unwrap();
-        let der = attache_pki::certs_from_pem(&resp.cert_pem)
+        let der = agentsc_pki::certs_from_pem(&resp.cert_pem)
             .unwrap()
             .remove(0);
         assert_eq!(
-            attache_pki::uri_sans_of(&der).unwrap(),
-            ["spiffe://attache/ns/demo/svc/orders"]
+            agentsc_pki::uri_sans_of(&der).unwrap(),
+            ["spiffe://agentsc/ns/demo/svc/orders"]
         );
         let rec = r.audit.recv().await.unwrap();
         assert_eq!(rec.action, CpAction::CertIssue);
         assert_eq!(
             rec.actor,
-            "sidecar:spiffe://attache/ns/demo/svc/orders/join:compose-orders"
+            "sidecar:spiffe://agentsc/ns/demo/svc/orders/join:compose-orders"
         );
         assert!(
             rec.reason
@@ -1232,7 +1232,7 @@ mod tests {
                 "orders_v2",
                 "service \"orders_v2\" is not a DNS-1123 label",
             ),
-            ("attache-system", "orders", "is the control plane's"),
+            ("agentsc-system", "orders", "is the control plane's"),
             ("demo", "embassy", "reserved for the control plane"),
             ("", "", "is not a DNS-1123 label"),
         ] {
@@ -1292,7 +1292,7 @@ mod tests {
         let mut bad = der.clone();
         let last = bad.len() - 1;
         bad[last] ^= 0x01;
-        let tampered = attache_pki::pem_block("CERTIFICATE REQUEST", &bad);
+        let tampered = agentsc_pki::pem_block("CERTIFICATE REQUEST", &bad);
         for (csr, reason) in [
             (csr384, "P-256"),
             (csr_ed, "only ECDSA P-256"),
@@ -1328,7 +1328,7 @@ mod tests {
 
     #[tokio::test]
     async fn requests_over_64_kib_are_refused_by_the_server() {
-        use attache_proto::certificate_authority_client::CertificateAuthorityClient;
+        use agentsc_proto::certificate_authority_client::CertificateAuthorityClient;
         let r = rig(vec![join_entry("t", "att_t", "demo", &["orders"], 3600)]);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1364,10 +1364,10 @@ mod tests {
     }
 
     #[test]
-    fn the_service_comes_from_the_attached_container_only() {
+    fn the_service_comes_from_the_agentscd_container_only() {
         let mut p = pod("shop", "orders-0", "orders", "orders");
         assert_eq!(pod_service(&p).as_deref(), Some("orders"));
-        // a regular container named attached (v0.1 explicit sidecar)
+        // a regular container named agentscd (v0.1 explicit sidecar)
         let sidecar = p
             .spec
             .as_mut()
@@ -1403,38 +1403,38 @@ mod tests {
     /// one TokenReview and one pod GET. Run by hand with a token bound to a pod:
     ///
     /// ```text
-    /// ATTACHE_K8S_SMOKE_TOKEN=$(kubectl create token <sa> -n <ns> --audience attache \
+    /// AGENTSC_K8S_SMOKE_TOKEN=$(kubectl create token <sa> -n <ns> --audience agentsc \
     ///     --bound-object-kind Pod --bound-object-name <pod> --duration 10m) \
-    /// ATTACHE_K8S_SMOKE_NAMESPACE=<ns> ATTACHE_K8S_SMOKE_SERVICE=<svc> \
-    /// ATTACHE_K8S_SMOKE_EXPECT='issued' (or a part of the expected refusal) \
+    /// AGENTSC_K8S_SMOKE_NAMESPACE=<ns> AGENTSC_K8S_SMOKE_SERVICE=<svc> \
+    /// AGENTSC_K8S_SMOKE_EXPECT='issued' (or a part of the expected refusal) \
     ///     cargo test -p embassy -- --ignored kubernetes_smoke --nocapture
     /// ```
     #[tokio::test]
     #[ignore = "needs a cluster and a pod-bound token (see the doc comment)"]
     async fn kubernetes_smoke() {
         let var = |k: &str| std::env::var(k).unwrap_or_default();
-        let token = match var("ATTACHE_K8S_SMOKE_TOKEN_FILE") {
+        let token = match var("AGENTSC_K8S_SMOKE_TOKEN_FILE") {
             f if !f.is_empty() => std::fs::read_to_string(f).unwrap().trim().to_string(),
-            _ => var("ATTACHE_K8S_SMOKE_TOKEN"),
+            _ => var("AGENTSC_K8S_SMOKE_TOKEN"),
         };
         let (token, ns, svc, expect) = (
             token,
-            var("ATTACHE_K8S_SMOKE_NAMESPACE"),
-            var("ATTACHE_K8S_SMOKE_SERVICE"),
-            var("ATTACHE_K8S_SMOKE_EXPECT"),
+            var("AGENTSC_K8S_SMOKE_NAMESPACE"),
+            var("AGENTSC_K8S_SMOKE_SERVICE"),
+            var("AGENTSC_K8S_SMOKE_EXPECT"),
         );
         if token.is_empty() || ns.is_empty() || svc.is_empty() {
-            eprintln!("ATTACHE_K8S_SMOKE_* not set; nothing to do");
+            eprintln!("AGENTSC_K8S_SMOKE_* not set; nothing to do");
             return;
         }
-        let ca = attache_pki::ca_init().unwrap();
+        let ca = agentsc_pki::ca_init().unwrap();
         let ca = Arc::new(CaMaterial::from_pems(&ca.cert_pem, &ca.key_pem).unwrap());
         let issuer = Issuer::new(
             ca,
             Arc::new(ArcSwap::from_pointee(ControlPlaneConfig::default())),
             None,
             Arc::new(CpAudit::with_writer(None, Box::new(std::io::sink()))),
-            "attache-system".into(),
+            "agentsc-system".into(),
             None,
         );
         let outcome = issuer.issue(k8s_request(&ns, &svc, &token)).await;
@@ -1442,12 +1442,12 @@ mod tests {
         match outcome {
             Ok(resp) => {
                 assert_eq!(expect, "issued");
-                let der = attache_pki::certs_from_pem(&resp.cert_pem)
+                let der = agentsc_pki::certs_from_pem(&resp.cert_pem)
                     .unwrap()
                     .remove(0);
                 assert_eq!(
-                    attache_pki::uri_sans_of(&der).unwrap(),
-                    [format!("spiffe://attache/ns/{ns}/svc/{svc}")]
+                    agentsc_pki::uri_sans_of(&der).unwrap(),
+                    [format!("spiffe://agentsc/ns/{ns}/svc/{svc}")]
                 );
             }
             Err(status) => assert!(
@@ -1460,7 +1460,7 @@ mod tests {
         let missing = client
             .get_webhook_config(
                 crate::k8s::client::WebhookKind::Mutating,
-                "attache-smoke-does-not-exist",
+                "agentsc-smoke-does-not-exist",
             )
             .await
             .unwrap();

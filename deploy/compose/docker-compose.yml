@@ -1,10 +1,10 @@
 # agent-sidecar on one machine (docs/design/agent-platform.md §14): embassy with every component, the
-# two demo services each with its attached sidecar, and an OpenTelemetry collector feeding Jaeger.
+# two demo services each with its agentscd sidecar, and an OpenTelemetry collector feeding Jaeger.
 #
 #   make compose-up     # generates deploy/compose/.env (tokens), builds the images, starts everything
 #   make compose-down
 #
-#   console   http://localhost:8080    sign in with ATTACHE_ADMIN_TOKEN from deploy/compose/.env
+#   console   http://localhost:8080    sign in with AGENTSC_ADMIN_TOKEN from deploy/compose/.env
 #   orders    http://localhost:8081    POST /ask {"question": "..."}
 #   jaeger    http://localhost:16686
 #
@@ -12,19 +12,19 @@
 # API token and one join token per service, each with its SHA-256 and expiry. Only the hashes reach
 # embassy (in its ControlPlaneConfig below); each sidecar gets its own join token as a secret file.
 #
-# The namespace is attache-demo and is not a setting: the sidecars' --namespace is authoritative,
+# The namespace is agentsc-demo and is not a setting: the sidecars' --namespace is authoritative,
 # and the start-up charters mounted from examples/charters name it (service.namespace, and
 # inventory's authz rule for orders' identity), so any other value breaks adoption and authz.
-name: attache
+name: agentsc
 
 services:
   embassy:
-    image: attache/embassy:dev
+    image: agentsc/embassy:dev
     build:
       context: ../..
       dockerfile: docker/Dockerfile
       target: embassy
-    # Before serving, embassy publishes the CA certificate (never the key) to the attache-ca volume
+    # Before serving, embassy publishes the CA certificate (never the key) to the agentsc-ca volume
     # that every sidecar mounts read-only. The CA itself (ca.crt, ca.key: the --ca-dir layout) is in
     # the embassy-data volume, which only embassy mounts; the first start creates it with
     # `embassy ca-init`, so `serve` always finds one. A changed ca.crt (several roots during a
@@ -34,9 +34,9 @@ services:
       - -ec
       - |
         umask 077
-        [ -f /var/lib/attache/ca/ca.key ] || embassy ca-init --out /var/lib/attache/ca
-        install -m 0644 /var/lib/attache/ca/ca.crt /attache-ca/.ca.crt.tmp
-        mv -f /attache-ca/.ca.crt.tmp /attache-ca/ca.crt
+        [ -f /var/lib/agentsc/ca/ca.key ] || embassy ca-init --out /var/lib/agentsc/ca
+        install -m 0644 /var/lib/agentsc/ca/ca.crt /agentsc-ca/.ca.crt.tmp
+        mv -f /agentsc-ca/.ca.crt.tmp /agentsc-ca/ca.crt
         exec embassy "$$@"
       - embassy
     # All components (ca, webhook, controlplane, api, ui) in one process, file store, sidecar
@@ -45,14 +45,14 @@ services:
       - serve
       - --http-addr=0.0.0.0:8080
       - --grpc-addr=0.0.0.0:15012
-      - --ca-dir=/var/lib/attache/ca
-      - --store=file:/var/lib/attache/store
-      - --config=/etc/attache/config.yaml
+      - --ca-dir=/var/lib/agentsc/ca
+      - --store=file:/var/lib/agentsc/store
+      - --config=/etc/agentsc/config.yaml
       - --auto-adopt
       - --dns-name=embassy
     configs:
       - source: control-plane
-        target: /etc/attache/config.yaml
+        target: /etc/agentsc/config.yaml
     environment:
       RUST_LOG: ${RUST_LOG:-info}
     ports:
@@ -60,10 +60,10 @@ services:
     expose:
       - "15012"
     volumes:
-      - embassy-data:/var/lib/attache
-      - attache-ca:/attache-ca
+      - embassy-data:/var/lib/agentsc
+      - agentsc-ca:/agentsc-ca
     healthcheck:
-      test: ["CMD", "attache-http-ready", "8080", "/api/v1/readyz"]
+      test: ["CMD", "agentsc-http-ready", "8080", "/api/v1/readyz"]
       interval: 5s
       timeout: 6s
       retries: 24
@@ -73,20 +73,20 @@ services:
   # orders: the sidecar owns the network namespace; the app joins it and calls the sidecar on
   # 127.0.0.1:3500. The app port 8080 is published on localhost:8081 (the console has 8080).
   orders-sidecar:
-    image: attache/attached:dev
+    image: agentsc/agentscd:dev
     build:
       context: ../..
       dockerfile: docker/Dockerfile
-      target: attached
+      target: agentscd
     command:
       - --control-plane=embassy:15012
-      - --ca-file=/attache-ca/ca.crt
+      - --ca-file=/agentsc-ca/ca.crt
       - --join-token-file=/run/secrets/orders-join-token
       - --service=orders
-      - --namespace=attache-demo
+      - --namespace=agentsc-demo
       - --app-port=8080
       - --pod-name=orders-sidecar
-      - --charter=/etc/attache/charter/charter.yaml
+      - --charter=/etc/agentsc/charter/charter.yaml
       - --peer-address-template={service}-sidecar:{port}
     environment: &sidecar-env
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
@@ -100,16 +100,16 @@ services:
       - "8080"
       - "50002"
     volumes:
-      - attache-ca:/attache-ca:ro
-      - ../../examples/charters/orders.charter.yaml:/etc/attache/charter/charter.yaml:ro
-      - orders-state:/run/attache/state
+      - agentsc-ca:/agentsc-ca:ro
+      - ../../examples/charters/orders.charter.yaml:/etc/agentsc/charter/charter.yaml:ro
+      - orders-state:/run/agentsc/state
     depends_on: &sidecar-depends
       embassy:
         condition: service_healthy
       otel-collector:
         condition: service_started
     healthcheck: &sidecar-health
-      test: ["CMD", "attache-ready"]
+      test: ["CMD", "agentsc-ready"]
       interval: 5s
       timeout: 3s
       retries: 24
@@ -117,11 +117,11 @@ services:
     restart: unless-stopped
 
   orders:
-    image: attache/orders:dev
+    image: agentsc/orders:dev
     build: ../../examples/orders
     network_mode: service:orders-sidecar
     environment:
-      ATTACHE_URL: http://127.0.0.1:3500
+      AGENTSC_URL: http://127.0.0.1:3500
     depends_on:
       orders-sidecar:
         condition: service_started
@@ -131,17 +131,17 @@ services:
   # inventory: the app listens on 127.0.0.1:8000 inside the shared network namespace, so only its
   # sidecar reaches it; peers come in through the mesh port 50002.
   inventory-sidecar:
-    image: attache/attached:dev
+    image: agentsc/agentscd:dev
     pull_policy: never
     command:
       - --control-plane=embassy:15012
-      - --ca-file=/attache-ca/ca.crt
+      - --ca-file=/agentsc-ca/ca.crt
       - --join-token-file=/run/secrets/inventory-join-token
       - --service=inventory
-      - --namespace=attache-demo
+      - --namespace=agentsc-demo
       - --app-port=8000
       - --pod-name=inventory-sidecar
-      - --charter=/etc/attache/charter/charter.yaml
+      - --charter=/etc/agentsc/charter/charter.yaml
       - --peer-address-template={service}-sidecar:{port}
     environment: *sidecar-env
     secrets:
@@ -150,15 +150,15 @@ services:
       - "8000"
       - "50002"
     volumes:
-      - attache-ca:/attache-ca:ro
-      - ../../examples/charters/inventory.charter.yaml:/etc/attache/charter/charter.yaml:ro
-      - inventory-state:/run/attache/state
+      - agentsc-ca:/agentsc-ca:ro
+      - ../../examples/charters/inventory.charter.yaml:/etc/agentsc/charter/charter.yaml:ro
+      - inventory-state:/run/agentsc/state
     depends_on: *sidecar-depends
     healthcheck: *sidecar-health
     restart: unless-stopped
 
   inventory:
-    image: attache/inventory:dev
+    image: agentsc/inventory:dev
     build: ../../examples/inventory
     network_mode: service:inventory-sidecar
     depends_on:
@@ -191,13 +191,13 @@ services:
 configs:
   control-plane:
     content: |
-      apiVersion: attache.io/v1alpha1
+      apiVersion: agentsc.io/v1alpha1
       kind: ControlPlaneConfig
       auth:
         tokens:
           - name: compose-admin
             role: admin
-            sha256: "${ATTACHE_ADMIN_TOKEN_SHA256:?run 'make compose-up' to generate deploy/compose/.env}"
+            sha256: "${AGENTSC_ADMIN_TOKEN_SHA256:?run 'make compose-up' to generate deploy/compose/.env}"
             namespaces: ["*"]
             payloads: true
         anonymous: none
@@ -206,15 +206,15 @@ configs:
         workload_cert_ttl: 24h
         join_tokens:
           - name: compose-orders
-            sha256: "${ATTACHE_JOIN_TOKEN_ORDERS_SHA256:?run 'make compose-up' to generate deploy/compose/.env}"
-            namespace: attache-demo
+            sha256: "${AGENTSC_JOIN_TOKEN_ORDERS_SHA256:?run 'make compose-up' to generate deploy/compose/.env}"
+            namespace: agentsc-demo
             services: [orders]
-            expires_at: "${ATTACHE_JOIN_TOKEN_ORDERS_EXPIRES_AT:?run 'make compose-up' to generate deploy/compose/.env}"
+            expires_at: "${AGENTSC_JOIN_TOKEN_ORDERS_EXPIRES_AT:?run 'make compose-up' to generate deploy/compose/.env}"
           - name: compose-inventory
-            sha256: "${ATTACHE_JOIN_TOKEN_INVENTORY_SHA256:?run 'make compose-up' to generate deploy/compose/.env}"
-            namespace: attache-demo
+            sha256: "${AGENTSC_JOIN_TOKEN_INVENTORY_SHA256:?run 'make compose-up' to generate deploy/compose/.env}"
+            namespace: agentsc-demo
             services: [inventory]
-            expires_at: "${ATTACHE_JOIN_TOKEN_INVENTORY_EXPIRES_AT:?run 'make compose-up' to generate deploy/compose/.env}"
+            expires_at: "${AGENTSC_JOIN_TOKEN_INVENTORY_EXPIRES_AT:?run 'make compose-up' to generate deploy/compose/.env}"
       events:
         retain_bytes: 67108864
   otel-collector:
@@ -222,12 +222,12 @@ configs:
 
 secrets:
   orders-join-token:
-    environment: ATTACHE_JOIN_TOKEN_ORDERS
+    environment: AGENTSC_JOIN_TOKEN_ORDERS
   inventory-join-token:
-    environment: ATTACHE_JOIN_TOKEN_INVENTORY
+    environment: AGENTSC_JOIN_TOKEN_INVENTORY
 
 volumes:
   embassy-data:
-  attache-ca:
+  agentsc-ca:
   orders-state:
   inventory-state:

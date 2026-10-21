@@ -7,8 +7,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use attache_proto::control_plane_client::ControlPlaneClient;
-use attache_proto::{ControlMessage, Hello, SidecarMessage, sidecar_message};
+use agentsc_proto::control_plane_client::ControlPlaneClient;
+use agentsc_proto::{ControlMessage, Hello, SidecarMessage, sidecar_message};
 use clap::Parser;
 use embassy::ca::CaMaterial;
 use embassy::config::{Anonymous, ControlPlaneConfig, PolicyConfig, Role, TokenEntry};
@@ -112,7 +112,7 @@ impl Env {
     pub async fn start_with(opts: Opts) -> Env {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let dir = tempfile::tempdir().unwrap();
-        let ca = attache_pki::ca_init().unwrap();
+        let ca = agentsc_pki::ca_init().unwrap();
         let ca_dir = dir.path().join("ca");
         std::fs::create_dir_all(&ca_dir).unwrap();
         std::fs::write(ca_dir.join("ca.crt"), &ca.cert_pem).unwrap();
@@ -239,7 +239,7 @@ impl Env {
         }
         if m != reqwest::Method::GET {
             b = b
-                .header("X-Attache-CSRF", "1")
+                .header("X-Agentsc-CSRF", "1")
                 .header("Content-Type", "application/json");
         }
         b
@@ -319,7 +319,7 @@ impl Env {
             .unwrap()
             .pem()
             .unwrap();
-        let public = attache_pki::verify_csr_p256(&csr).unwrap();
+        let public = agentsc_pki::verify_csr_p256(&csr).unwrap();
         let leaf = self
             .ca
             .sign_workload(&public, ns, svc, Duration::from_secs(3600))
@@ -528,7 +528,7 @@ pub fn rec(kind: &str, over: Value) -> Value {
 /// the local `triage`) and `triage`.
 pub fn orders_yaml() -> String {
     format!(
-        r#"apiVersion: attache.io/v1alpha1
+        r#"apiVersion: agentsc.io/v1alpha1
 kind: Charter
 service:
   name: orders
@@ -575,7 +575,7 @@ authz:
 /// The inventory charter: `stock`, callable by orders' `ops`.
 pub fn inventory_yaml() -> String {
     format!(
-        r#"apiVersion: attache.io/v1alpha1
+        r#"apiVersion: agentsc.io/v1alpha1
 kind: Charter
 service:
   name: inventory
@@ -596,7 +596,7 @@ authz:
   callers:
     - identity: local
       agents: [stock]
-    - identity: spiffe://attache/ns/{NS}/svc/orders
+    - identity: spiffe://agentsc/ns/{NS}/svc/orders
       agents: [stock]
       caller_agents: [ops]
 "#
@@ -607,7 +607,7 @@ authz:
 /// characters); `faq` does not learn.
 pub fn support_yaml(learning: bool) -> String {
     format!(
-        r#"apiVersion: attache.io/v1alpha1
+        r#"apiVersion: agentsc.io/v1alpha1
 kind: Charter
 service:
   name: support

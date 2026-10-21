@@ -3,14 +3,14 @@
 //! Secrets (CONTRACT.md §5, §7).
 use std::path::PathBuf;
 
+use agentsc_pki::{PemBundle, TlsMaterial};
 use anyhow::Context;
-use attache_pki::{PemBundle, TlsMaterial};
 use base64::Engine;
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 
 #[derive(Parser)]
-#[command(name = "embassy", version, about = "attache control plane")]
+#[command(name = "embassy", version, about = "agentsc control plane")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -40,19 +40,19 @@ enum Cmd {
         service: String,
         #[arg(long)]
         out: PathBuf,
-        #[arg(long, default_value_t = attache_pki::LEAF_TTL_DAYS)]
+        #[arg(long, default_value_t = agentsc_pki::LEAF_TTL_DAYS)]
         ttl_days: i64,
     },
     /// In-cluster: ensure the CA Secret exists and (re)issue one Secret per service.
     Bootstrap {
-        #[arg(long, env = "ATTACHE_NAMESPACE")]
+        #[arg(long, env = "AGENTSC_NAMESPACE")]
         namespace: String,
         /// Comma-separated service names.
-        #[arg(long, env = "ATTACHE_SERVICES", value_delimiter = ',')]
+        #[arg(long, env = "AGENTSC_SERVICES", value_delimiter = ',')]
         services: Vec<String>,
-        #[arg(long, default_value = "attache-ca")]
+        #[arg(long, default_value = "agentsc-ca")]
         ca_secret: String,
-        #[arg(long, default_value = "attache-cert-")]
+        #[arg(long, default_value = "agentsc-cert-")]
         cert_secret_prefix: String,
         #[arg(long, default_value = "https://kubernetes.default.svc")]
         api_server: String,
@@ -89,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
             print!("{}", created.render()?);
         }
         Cmd::CaInit { out } => {
-            let ca = attache_pki::ca_init()?;
+            let ca = agentsc_pki::ca_init()?;
             std::fs::create_dir_all(&out)?;
             std::fs::write(out.join("ca.crt"), &ca.cert_pem)?;
             std::fs::write(out.join("ca.key"), &ca.key_pem)?;
@@ -103,10 +103,10 @@ async fn main() -> anyhow::Result<()> {
             ttl_days,
         } => {
             let ca = read_bundle(&ca)?;
-            let leaf = attache_pki::issue_leaf(&ca, &namespace, &service, ttl_days)?;
+            let leaf = agentsc_pki::issue_leaf(&ca, &namespace, &service, ttl_days)?;
             TlsMaterial::write(&leaf, &ca.cert_pem, &out)?;
             println!(
-                "issued spiffe://attache/ns/{namespace}/svc/{service} into {}",
+                "issued spiffe://agentsc/ns/{namespace}/svc/{service} into {}",
                 out.display()
             );
         }
@@ -239,7 +239,7 @@ async fn bootstrap(
     }
     let kube = Kube::in_cluster(api_server, namespace)?;
     let labels =
-        json!({ "app.kubernetes.io/managed-by": "embassy", "attache.io/component": "pki" });
+        json!({ "app.kubernetes.io/managed-by": "embassy", "agentsc.io/component": "pki" });
     let ca = match kube.get_secret(ca_secret).await? {
         Some(existing) => match (
             secret_field(&existing, "ca.crt"),
@@ -252,7 +252,7 @@ async fn bootstrap(
             _ => anyhow::bail!("secret {ca_secret} exists but lacks ca.crt/ca.key"),
         },
         None => {
-            let ca = attache_pki::ca_init()?;
+            let ca = agentsc_pki::ca_init()?;
             kube.upsert_secret(
                 ca_secret,
                 &[("ca.crt", &ca.cert_pem), ("ca.key", &ca.key_pem)],
@@ -264,10 +264,10 @@ async fn bootstrap(
         }
     };
     for service in services {
-        let leaf = attache_pki::issue_leaf(&ca, namespace, service, attache_pki::LEAF_TTL_DAYS)?;
+        let leaf = agentsc_pki::issue_leaf(&ca, namespace, service, agentsc_pki::LEAF_TTL_DAYS)?;
         let name = format!("{prefix}{service}");
         let mut l = labels.clone();
-        l["attache.io/service"] = json!(service);
+        l["agentsc.io/service"] = json!(service);
         kube.upsert_secret(
             &name,
             &[
@@ -278,7 +278,7 @@ async fn bootstrap(
             l,
         )
         .await?;
-        tracing::info!(secret = %name, identity = %attache_common::identity::SpiffeId { namespace: namespace.into(), service: service.clone() }.uri(), "issued");
+        tracing::info!(secret = %name, identity = %agentsc_common::identity::SpiffeId { namespace: namespace.into(), service: service.clone() }.uri(), "issued");
     }
     println!(
         "bootstrap complete: CA {ca_secret}, {} leaf secret(s)",

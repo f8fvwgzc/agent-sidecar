@@ -1,6 +1,6 @@
 openapi: 3.1.0
 info:
-  title: attache control plane API (embassy)
+  title: agentsc control plane API (embassy)
   version: 0.2.0
   license:
     name: MIT
@@ -41,7 +41,7 @@ info:
       base64url-encoded without padding, prefixed with `att_` (`embassy token create`). The
       ControlPlaneConfig stores only the lowercase hex SHA-256 of the whole token text
       (`att_` included); the server compares hashes in constant time.
-    - The session cookie `attache_session`, set by `POST /login`. Its value is an
+    - The session cookie `agentsc_session`, set by `POST /login`. Its value is an
       HMAC-SHA256-signed `{token_name, exp}` (lifetime 12 h) under the configured
       `auth.session_key_file` key. Attributes: `HttpOnly; SameSite=Strict; Path=/`, plus
       `Secure` when served over TLS. A session dies when its token is removed from the
@@ -54,7 +54,7 @@ info:
     ## CSRF and content type
 
     Every mutating request (`POST`, `PUT`, `DELETE`; `/login`, `/logout` and
-    `/charter/validate` included) must carry `X-Attache-CSRF: 1` (else 403 `forbidden`) and
+    `/charter/validate` included) must carry `X-Agentsc-CSRF: 1` (else 403 `forbidden`) and
     `Content-Type: application/json` (else 400 `invalid`). A request without a body (a
     `DELETE`, `/logout`) still sends the header.
 
@@ -1309,7 +1309,7 @@ components:
     session:
       type: apiKey
       in: cookie
-      name: attache_session
+      name: agentsc_session
       description: Session cookie from `POST /login` (HMAC-SHA256 signed `{token_name, exp}`, 12 h).
 
   parameters:
@@ -1351,7 +1351,7 @@ components:
         type: string
         format: uuid
     Csrf:
-      name: X-Attache-CSRF
+      name: X-Agentsc-CSRF
       in: header
       required: true
       description: Must be exactly `1` on every mutating request (403 `forbidden` otherwise).
@@ -1395,7 +1395,7 @@ components:
         pattern: '^"[0-9]+"$'
     SetSessionCookie:
       description: |
-        `attache_session=<signed>; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200` (plus
+        `agentsc_session=<signed>; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200` (plus
         `Secure` over TLS); cleared with `Max-Age=0` on logout.
       schema:
         type: string
@@ -1441,7 +1441,7 @@ components:
             $ref: "#/components/schemas/Error"
           example:
             error: not_found
-            details: ["no charter for attache-demo/billing"]
+            details: ["no charter for agentsc-demo/billing"]
     Conflict:
       description: "`version_conflict` (stale If-Match; `current_version` is set), `in_use`, or `not_pending` (a decision on a proposal that was already decided)."
       content:
@@ -2156,7 +2156,7 @@ components:
       properties:
         identity:
           type: string
-          description: "`local` or `spiffe://attache/ns/<ns>/svc/<svc>`."
+          description: "`local` or `spiffe://agentsc/ns/<ns>/svc/<svc>`."
         caller_agents:
           oneOf:
             - type: array
@@ -2495,7 +2495,7 @@ components:
         records of kinds it does not know and shows the kind as-is. `service`/`namespace` are the
         identity of the Connect stream the record arrived on.
 
-        **Lenient view** (design §5, `attache_common::audit::AuditRecordView`): records come
+        **Lenient view** (design §5, `agentsc_common::audit::AuditRecordView`): records come
         from sidecars one minor version older or newer than the control plane, so `kind`,
         `direction` and `decision` are any string (the values listed are the ones v0.2 writes),
         `tokens` keeps counters it does not know, and top-level fields this document does not
@@ -2619,7 +2619,7 @@ components:
       type: object
       additionalProperties: true
       description: |
-        Token usage (`attache_common::audit::TokensView`). `input` and `output` are 0 when a
+        Token usage (`agentsc_common::audit::TokensView`). `input` and `output` are 0 when a
         received record leaves them out, and always served. Counters a later sidecar adds are
         kept and served again as written.
       required: [input, output]

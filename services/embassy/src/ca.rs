@@ -14,8 +14,8 @@ use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
+use agentsc_pki::{CaKeyPair, IssuedCert, IssuedKeyPair, VerifiedPublicKey};
 use anyhow::Context;
-use attache_pki::{CaKeyPair, IssuedCert, IssuedKeyPair, VerifiedPublicKey};
 
 /// The CA trust bundle and the signing key pair.
 pub struct CaMaterial {
@@ -54,10 +54,10 @@ impl CaMaterial {
 
     /// From the text of `ca.crt` and `ca.key`.
     pub fn from_pems(crt: &str, key: &str) -> anyhow::Result<Self> {
-        let roots = attache_pki::certs_from_pem(crt).context("ca.crt")?;
+        let roots = agentsc_pki::certs_from_pem(crt).context("ca.crt")?;
         let signer = CaKeyPair::from_pems(crt, key).context("ca.key and ca.crt")?;
         Ok(Self {
-            roots_pem: attache_pki::certs_to_pem(&roots),
+            roots_pem: agentsc_pki::certs_to_pem(&roots),
             signer,
         })
     }
@@ -72,7 +72,7 @@ impl CaMaterial {
         &self.signer
     }
 
-    /// A workload leaf for `spiffe://attache/ns/<namespace>/svc/<service>` (design §7): only
+    /// A workload leaf for `spiffe://agentsc/ns/<namespace>/svc/<service>` (design §7): only
     /// the verified CSR key is used; DNS SANs `<svc>`, `<svc>.<ns>`, `<svc>.<ns>.svc`,
     /// `<svc>.<ns>.svc.cluster.local`; EKU serverAuth + clientAuth; valid for `ttl` (capped at
     /// the CA's expiry). The caller has already checked the names (DNS labels, not reserved) and
@@ -84,7 +84,7 @@ impl CaMaterial {
         service: &str,
         ttl: Duration,
     ) -> anyhow::Result<IssuedCert> {
-        attache_pki::issue_workload_leaf(&self.signer, public_key, namespace, service, ttl)
+        agentsc_pki::issue_workload_leaf(&self.signer, public_key, namespace, service, ttl)
             .with_context(|| format!("sign a certificate for {namespace}/{service}"))
     }
 
@@ -97,7 +97,7 @@ impl CaMaterial {
         uri_san: &str,
         ttl: Duration,
     ) -> anyhow::Result<IssuedKeyPair> {
-        attache_pki::issue_server_leaf(&self.signer, dns_names, uri_san, ttl)
+        agentsc_pki::issue_server_leaf(&self.signer, dns_names, uri_san, ttl)
             .with_context(|| format!("sign a serving certificate for {uri_san}"))
     }
 }
@@ -121,7 +121,7 @@ mod tests {
 
     fn roots(pem: &str) -> Arc<RootCertStore> {
         let mut store = RootCertStore::empty();
-        for c in attache_pki::certs_from_pem(pem).unwrap() {
+        for c in agentsc_pki::certs_from_pem(pem).unwrap() {
             store.add(c).unwrap();
         }
         Arc::new(store)
@@ -138,7 +138,7 @@ mod tests {
             .unwrap()
             .pem()
             .unwrap();
-        attache_pki::verify_csr_p256(&csr).unwrap()
+        agentsc_pki::verify_csr_p256(&csr).unwrap()
     }
 
     fn write_ca(dir: &Path, crt: &str, key: &str) {
@@ -155,7 +155,7 @@ mod tests {
     #[test]
     fn load_dir_reads_ca_init_output() {
         let dir = tempfile::tempdir().unwrap();
-        let ca = attache_pki::ca_init().unwrap();
+        let ca = agentsc_pki::ca_init().unwrap();
         write_ca(dir.path(), &ca.cert_pem, &ca.key_pem);
         let m = CaMaterial::load_dir(dir.path()).unwrap();
         assert_eq!(der(m.roots_pem()), der(&ca.cert_pem));
@@ -173,7 +173,7 @@ mod tests {
         assert!(e.contains("ca.crt"), "{e}");
 
         // a key that is not the CA's
-        let other = attache_pki::ca_init().unwrap();
+        let other = agentsc_pki::ca_init().unwrap();
         write_ca(dir.path(), &ca.cert_pem, &other.key_pem);
         let e = format!("{:#}", CaMaterial::load_dir(dir.path()).unwrap_err());
         assert!(e.contains("not") || e.contains("none"), "{e}");
@@ -182,8 +182,8 @@ mod tests {
 
     #[test]
     fn several_roots_are_trusted_and_the_key_matching_one_signs() {
-        let old = attache_pki::ca_init().unwrap();
-        let new = attache_pki::ca_init().unwrap();
+        let old = agentsc_pki::ca_init().unwrap();
+        let new = agentsc_pki::ca_init().unwrap();
         // the new key, a bundle with the old root first and a stray private key block
         let crt = format!(
             "{}\n# rotation\n{}{}",
@@ -218,7 +218,7 @@ mod tests {
 
     #[test]
     fn workload_and_server_leaves_have_their_usages() {
-        let ca = attache_pki::ca_init().unwrap();
+        let ca = agentsc_pki::ca_init().unwrap();
         let m = CaMaterial::from_pems(&ca.cert_pem, &ca.key_pem).unwrap();
         let roots = roots(m.roots_pem());
 
@@ -226,10 +226,10 @@ mod tests {
         let leaf = m
             .sign_workload(&csr(), "shop", "orders", 24 * HOUR)
             .unwrap();
-        let id = attache_pki::sole_spiffe_id_of(&leaf.cert_der)
+        let id = agentsc_pki::sole_spiffe_id_of(&leaf.cert_der)
             .unwrap()
             .unwrap();
-        assert_eq!(id.uri(), "spiffe://attache/ns/shop/svc/orders");
+        assert_eq!(id.uri(), "spiffe://agentsc/ns/shop/svc/orders");
         let server_verifier =
             WebPkiServerVerifier::builder_with_provider(roots.clone(), provider())
                 .build()

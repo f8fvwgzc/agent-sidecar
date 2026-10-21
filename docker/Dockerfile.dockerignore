@@ -17,9 +17,9 @@
 !runtime/uv.lock
 !runtime/README.md
 !runtime/src
-!docker/attache-ready
-!docker/attache-http-ready
-# BINARIES=prebuilt: dist/linux-<arch>/{attached,attache,embassy}
+!docker/agentsc-ready
+!docker/agentsc-http-ready
+# BINARIES=prebuilt: dist/linux-<arch>/{agentscd,agentsc,embassy}
 !dist/linux-*
 
 **/target

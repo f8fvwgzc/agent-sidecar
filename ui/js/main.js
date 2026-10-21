@@ -1,4 +1,4 @@
-// The attache console: boots the API client, the sign-in screen, the canvas, the inspector and
+// The agentsc console: boots the API client, the sign-in screen, the canvas, the inspector and
 // the live stream, and wires the toolbar. Design: docs/design/agent-platform.md §11.
 
 import { ApiError, createApi, isUnreachable } from './api.js';

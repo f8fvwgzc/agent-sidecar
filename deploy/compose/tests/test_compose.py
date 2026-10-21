@@ -27,7 +27,7 @@ COMPOSE_FILE = COMPOSE_DIR / "docker-compose.yml"
 GEN_ENV = COMPOSE_DIR / "gen-env.sh"
 SERVICES = ("orders", "inventory")
 
-# `embassy serve` (design §8.1) and `attached` (design §6.1 plus CONTRACT.md §2) flags.
+# `embassy serve` (design §8.1) and `agentscd` (design §6.1 plus CONTRACT.md §2) flags.
 SERVE_FLAGS = {
     "components",
     "http-addr",
@@ -146,13 +146,13 @@ def fake_embassy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, 
 
 def check_env(env: dict[str, str]) -> None:
     token = re.compile(r"att_[A-Za-z0-9_-]{43}")
-    assert "ATTACHE_NAMESPACE" not in env, "the namespace is fixed, not a setting"
-    names = ["ATTACHE_ADMIN_TOKEN"] + [f"ATTACHE_JOIN_TOKEN_{s.upper()}" for s in SERVICES]
+    assert "AGENTSC_NAMESPACE" not in env, "the namespace is fixed, not a setting"
+    names = ["AGENTSC_ADMIN_TOKEN"] + [f"AGENTSC_JOIN_TOKEN_{s.upper()}" for s in SERVICES]
     for name in names:
         assert token.fullmatch(env[name]), name
         assert env[f"{name}_SHA256"] == hashlib.sha256(env[name].encode()).hexdigest()
     for s in SERVICES:
-        assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", env[f"ATTACHE_JOIN_TOKEN_{s.upper()}_EXPIRES_AT"])
+        assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", env[f"AGENTSC_JOIN_TOKEN_{s.upper()}_EXPIRES_AT"])
     assert len({env[n] for n in names}) == len(names), "every token is different"
 
 
@@ -162,20 +162,20 @@ def check_env(env: dict[str, str]) -> None:
 def test_gen_env_writes_tokens_once_with_mode_0600(tmp_path: Path, fake_embassy: tuple[str, Path]) -> None:
     embassy, log = fake_embassy
     env_file = tmp_path / ".env"
-    # ATTACHE_NAMESPACE in the environment changes nothing: the example charters fix attache-demo
-    r = run_gen_env(env_file, embassy, ATTACHE_NAMESPACE="shop")
+    # AGENTSC_NAMESPACE in the environment changes nothing: the example charters fix agentsc-demo
+    r = run_gen_env(env_file, embassy, AGENTSC_NAMESPACE="shop")
     assert r.returncode == 0, r.stderr
     assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
     env = read_env(env_file)
     check_env(env)
-    assert env["ATTACHE_ADMIN_TOKEN"] in r.stdout, "the admin token is printed once"
+    assert env["AGENTSC_ADMIN_TOKEN"] in r.stdout, "the admin token is printed once"
     for s in SERVICES:
-        assert env[f"ATTACHE_JOIN_TOKEN_{s.upper()}"] not in r.stdout
+        assert env[f"AGENTSC_JOIN_TOKEN_{s.upper()}"] not in r.stdout
     calls = log.read_text().splitlines()
     assert calls == [
         "token create --name compose-admin --role admin --payloads",
-        "token create --name compose-orders --join --namespace attache-demo --services orders --expires-in 8760h",
-        "token create --name compose-inventory --join --namespace attache-demo --services inventory --expires-in 8760h",
+        "token create --name compose-orders --join --namespace agentsc-demo --services orders --expires-in 8760h",
+        "token create --name compose-inventory --join --namespace agentsc-demo --services inventory --expires-in 8760h",
     ]
 
     before = env_file.read_bytes()
@@ -213,19 +213,19 @@ def test_gen_env_with_the_real_embassy(tmp_path: Path) -> None:
 def sample_env() -> dict[str, str]:
     """A .env shaped like gen-env.sh's, with random tokens that are never used."""
     env = {}
-    for name in ["ATTACHE_ADMIN_TOKEN"] + [f"ATTACHE_JOIN_TOKEN_{s.upper()}" for s in SERVICES]:
+    for name in ["AGENTSC_ADMIN_TOKEN"] + [f"AGENTSC_JOIN_TOKEN_{s.upper()}" for s in SERVICES]:
         token = "att_" + secrets.token_urlsafe(32)
         env[name] = token
         env[f"{name}_SHA256"] = hashlib.sha256(token.encode()).hexdigest()
     for s in SERVICES:
-        env[f"ATTACHE_JOIN_TOKEN_{s.upper()}_EXPIRES_AT"] = "2027-10-21T10:00:00Z"
+        env[f"AGENTSC_JOIN_TOKEN_{s.upper()}_EXPIRES_AT"] = "2027-10-21T10:00:00Z"
     return env
 
 
 def compose_config(env_file: Path) -> subprocess.CompletedProcess[str]:
     # --env-file replaces deploy/compose/.env, which may exist after `make compose-up`.
     args = ["docker", "compose", "-f", str(COMPOSE_FILE), "--env-file", str(env_file)]
-    clean = {k: v for k, v in os.environ.items() if not k.startswith("ATTACHE_")}
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("AGENTSC_")}
     clean.pop("ANTHROPIC_API_KEY", None)
     return subprocess.run(
         [*args, "config", "--format", "json"],
@@ -270,7 +270,7 @@ def test_stack_has_the_designed_services(stack: dict) -> None:
         "otel-collector",
         "jaeger",
     }
-    assert stack["name"] == "attache"
+    assert stack["name"] == "agentsc"
 
 
 @needs_compose
@@ -290,22 +290,22 @@ def test_embassy_runs_every_component_with_the_file_store(stack: dict) -> None:
     assert "components" not in flags, "default: all components"
     assert "dev" not in flags
     assert flags["auto-adopt"] == [""]
-    assert flags["store"] == ["file:/var/lib/attache/store"]
-    assert flags["ca-dir"] == ["/var/lib/attache/ca"]
+    assert flags["store"] == ["file:/var/lib/agentsc/store"]
+    assert flags["ca-dir"] == ["/var/lib/agentsc/ca"]
     assert flags["http-addr"] == ["0.0.0.0:8080"]
     assert flags["grpc-addr"] == ["0.0.0.0:15012"]
-    assert flags["config"] == ["/etc/attache/config.yaml"]
+    assert flags["config"] == ["/etc/agentsc/config.yaml"]
     assert set(flags) <= SERVE_FLAGS, set(flags) - SERVE_FLAGS
     assert svc["build"]["dockerfile"] == "docker/Dockerfile"
     assert svc["build"]["target"] == "embassy"
     assert Path(svc["build"]["context"]).resolve() == ROOT
     assert [(p["host_ip"], p["published"], p["target"]) for p in svc["ports"]] == [("127.0.0.1", "8080", 8080)]
-    assert svc["configs"] == [{"source": "control-plane", "target": "/etc/attache/config.yaml"}]
+    assert svc["configs"] == [{"source": "control-plane", "target": "/etc/agentsc/config.yaml"}]
     assert "depends_on" not in svc
-    assert svc["healthcheck"]["test"] == ["CMD", "attache-http-ready", "8080", "/api/v1/readyz"]
+    assert svc["healthcheck"]["test"] == ["CMD", "agentsc-http-ready", "8080", "/api/v1/readyz"]
     assert {v["source"]: v["target"] for v in svc["volumes"]} == {
-        "embassy-data": "/var/lib/attache",
-        "attache-ca": "/attache-ca",
+        "embassy-data": "/var/lib/agentsc",
+        "agentsc-ca": "/agentsc-ca",
     }
 
     binary = os.environ.get("EMBASSY_BIN")
@@ -335,7 +335,7 @@ FAKE_EMBASSY_CA = textwrap.dedent(
 def run_entrypoint(entrypoint: list[str], command: list[str], data: Path, public: Path, bin_dir: Path) -> None:
     # `docker compose config` writes $ as $$; the shell in the container sees one $.
     _shell, flag, script, name = entrypoint
-    script = script.replace("$$", "$").replace("/var/lib/attache", str(data)).replace("/attache-ca", str(public))
+    script = script.replace("$$", "$").replace("/var/lib/agentsc", str(data)).replace("/agentsc-ca", str(public))
     env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
     subprocess.run(["sh", flag, script, name, *command], env=env, check=True)
 
@@ -348,8 +348,8 @@ def test_embassy_publishes_only_the_ca_certificate_then_serves(
     entrypoint = svc["entrypoint"]
     assert entrypoint[:2] == ["/bin/sh", "-ec"] and entrypoint[3] == "embassy"
     # the CA is created in the --ca-dir that serve reads
-    assert "embassy ca-init --out /var/lib/attache/ca" in entrypoint[2]
-    assert split_flags(svc["command"][1:])["ca-dir"] == ["/var/lib/attache/ca"]
+    assert "embassy ca-init --out /var/lib/agentsc/ca" in entrypoint[2]
+    assert split_flags(svc["command"][1:])["ca-dir"] == ["/var/lib/agentsc/ca"]
 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -379,25 +379,25 @@ def test_embassy_publishes_only_the_ca_certificate_then_serves(
         for v in other.get("volumes", []):
             if v.get("source") == "embassy-data":
                 assert name == "embassy", f"{name} must not see the CA key"
-            if v.get("source") == "attache-ca" and name != "embassy":
-                assert v["read_only"] is True, f"{name} mounts attache-ca writable"
+            if v.get("source") == "agentsc-ca" and name != "embassy":
+                assert v["read_only"] is True, f"{name} mounts agentsc-ca writable"
 
 
 @needs_compose
 def test_control_plane_config_holds_only_hashes(stack: dict, sample_env: dict[str, str]) -> None:
     content = stack["configs"]["control-plane"]["content"]
     for name, value in sample_env.items():
-        if re.fullmatch(r"ATTACHE_(ADMIN|JOIN)_TOKEN(_[A-Z]+)?", name):
+        if re.fullmatch(r"AGENTSC_(ADMIN|JOIN)_TOKEN(_[A-Z]+)?", name):
             assert value not in content, f"{name} leaked into the config"
     cfg = yaml.safe_load(content)
-    assert cfg["apiVersion"] == "attache.io/v1alpha1"
+    assert cfg["apiVersion"] == "agentsc.io/v1alpha1"
     assert cfg["kind"] == "ControlPlaneConfig"
     assert cfg["auth"]["anonymous"] == "none"
     [admin] = cfg["auth"]["tokens"]
     assert admin == {
         "name": "compose-admin",
         "role": "admin",
-        "sha256": sample_env["ATTACHE_ADMIN_TOKEN_SHA256"],
+        "sha256": sample_env["AGENTSC_ADMIN_TOKEN_SHA256"],
         "namespaces": ["*"],
         "payloads": True,
     }
@@ -407,7 +407,7 @@ def test_control_plane_config_holds_only_hashes(stack: dict, sample_env: dict[st
     for s in SERVICES:
         assert joins[s] == {
             "name": f"compose-{s}",
-            "sha256": sample_env[f"ATTACHE_JOIN_TOKEN_{s.upper()}_SHA256"],
+            "sha256": sample_env[f"AGENTSC_JOIN_TOKEN_{s.upper()}_SHA256"],
             "namespace": yaml.safe_load((ROOT / f"examples/charters/{s}.charter.yaml").read_text())["service"][
                 "namespace"
             ],
@@ -425,27 +425,27 @@ def test_sidecar_owns_the_network_namespace_and_joins_the_control_plane(stack: d
     flags = split_flags(sidecar["command"])
     assert set(flags) <= SIDECAR_FLAGS, set(flags) - SIDECAR_FLAGS
     assert flags["control-plane"] == ["embassy:15012"]
-    assert flags["ca-file"] == ["/attache-ca/ca.crt"]
+    assert flags["ca-file"] == ["/agentsc-ca/ca.crt"]
     assert flags["join-token-file"] == [f"/run/secrets/{service}-join-token"]
     assert flags["peer-address-template"] == ["{service}-sidecar:{port}"]
     assert flags["service"] == [service]
     assert flags["namespace"] == [charter["service"]["namespace"]]
     assert flags["app-port"] == [str(charter["service"]["app_port"])]
-    assert flags["charter"] == ["/etc/attache/charter/charter.yaml"]
-    assert sidecar["image"] == "attache/attached:dev"
+    assert flags["charter"] == ["/etc/agentsc/charter/charter.yaml"]
+    assert sidecar["image"] == "agentsc/agentscd:dev"
     assert sidecar["environment"]["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://otel-collector:4318"
     assert sidecar["depends_on"]["embassy"]["condition"] == "service_healthy"
     assert sidecar["secrets"] == [{"source": f"{service}-join-token", "target": f"/run/secrets/{service}-join-token"}]
     secret = stack["secrets"][f"{service}-join-token"]
-    assert secret["environment"] == f"ATTACHE_JOIN_TOKEN_{service.upper()}"
+    assert secret["environment"] == f"AGENTSC_JOIN_TOKEN_{service.upper()}"
     mounts = {v["target"]: v for v in sidecar["volumes"]}
-    assert mounts["/attache-ca"]["source"] == "attache-ca" and mounts["/attache-ca"]["read_only"] is True
-    charter_mount = mounts["/etc/attache/charter/charter.yaml"]
+    assert mounts["/agentsc-ca"]["source"] == "agentsc-ca" and mounts["/agentsc-ca"]["read_only"] is True
+    charter_mount = mounts["/etc/agentsc/charter/charter.yaml"]
     assert Path(charter_mount["source"]) == ROOT / f"examples/charters/{service}.charter.yaml"
     assert charter_mount["read_only"] is True
-    assert mounts["/run/attache/state"]["source"] == f"{service}-state"
+    assert mounts["/run/agentsc/state"]["source"] == f"{service}-state"
     assert "50002" in sidecar["expose"]
-    assert sidecar["healthcheck"]["test"] == ["CMD", "attache-ready"]
+    assert sidecar["healthcheck"]["test"] == ["CMD", "agentsc-ready"]
 
     assert app["network_mode"] == f"service:{service}-sidecar"
     assert app["depends_on"][f"{service}-sidecar"]["restart"] is True
@@ -488,14 +488,14 @@ def test_collector_config_receives_otlp_http_and_exports_to_jaeger() -> None:
 
 
 def test_namespace_is_fixed_to_the_example_charters() -> None:
-    # The sidecars' --namespace is authoritative and the mounted start-up charters name attache-demo
+    # The sidecars' --namespace is authoritative and the mounted start-up charters name agentsc-demo
     # (service.namespace, inventory's authz identity for orders): it cannot be a setting.
     for s in SERVICES:
         charter = yaml.safe_load((ROOT / f"examples/charters/{s}.charter.yaml").read_text())
-        assert charter["service"]["namespace"] == "attache-demo"
-    assert "ATTACHE_NAMESPACE" not in COMPOSE_FILE.read_text()
-    assert "ATTACHE_NAMESPACE" not in GEN_ENV.read_text()
-    assert "NAMESPACE=attache-demo\n" in GEN_ENV.read_text()
+        assert charter["service"]["namespace"] == "agentsc-demo"
+    assert "AGENTSC_NAMESPACE" not in COMPOSE_FILE.read_text()
+    assert "AGENTSC_NAMESPACE" not in GEN_ENV.read_text()
+    assert "NAMESPACE=agentsc-demo\n" in GEN_ENV.read_text()
 
 
 def test_env_file_is_git_ignored() -> None:

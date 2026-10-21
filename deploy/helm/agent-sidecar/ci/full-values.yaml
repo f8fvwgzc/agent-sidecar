@@ -1,10 +1,10 @@
 # Every optional feature on (make helm-lint, deploy/helm/tests). The hashes are of no real token.
 images:
   embassy:
-    repository: registry.example/attache/embassy
+    repository: registry.example/agentsc/embassy
     digest: sha256:0000000000000000000000000000000000000000000000000000000000000001
-  attached:
-    repository: registry.example/attache/attached
+  agentscd:
+    repository: registry.example/agentsc/agentscd
     tag: 0.2.0-rc.1
     pullPolicy: Always
 imagePullSecrets:
@@ -19,7 +19,7 @@ auth:
     - name: ci
       role: viewer
       sha256: "2222222222222222222222222222222222222222222222222222222222222222"
-      namespaces: ["shop", "attache-demo"]
+      namespaces: ["shop", "agentsc-demo"]
   sessionKey:
     existingSecret: my-session-key
 issuance:
@@ -37,7 +37,7 @@ policy:
 events:
   retainBytes: 134217728
 ca:
-  existingSecret: attache-demo/attache-ca
+  existingSecret: agentsc-demo/agentsc-ca
 otlp:
   endpoint: http://otel-collector.observability:4318
   endpointAllow: ["http://otel-collector.*:4318", "https://otlp.example"]
@@ -46,10 +46,10 @@ injection:
 embassyCa:
   replicas: 3
   antiAffinity: hard
-  dnsNames: [attache.example.com]
+  dnsNames: [agentsc.example.com]
 embassy:
   httpTLS: true
-  dnsNames: [attache.example.com]
+  dnsNames: [agentsc.example.com]
 networkPolicy:
   enabled: true
   httpFrom:

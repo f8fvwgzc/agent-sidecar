@@ -1,9 +1,9 @@
 # charter.yaml for the `orders` service (CONTRACT.md §3).
-apiVersion: attache.io/v1alpha1
+apiVersion: agentsc.io/v1alpha1
 kind: Charter
 service:
   name: orders
-  namespace: attache-demo
+  namespace: agentsc-demo
   app_port: 8080
 agents:
   - name: ops-assistant

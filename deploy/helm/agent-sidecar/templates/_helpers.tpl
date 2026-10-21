@@ -1,12 +1,12 @@
 {{/*
 Fixed object names: RBAC resourceNames and embassy's flags refer to them (design §13).
 */}}
-{{- define "agent-sidecar.caSecretName" -}}attache-ca{{- end -}}
+{{- define "agent-sidecar.caSecretName" -}}agentsc-ca{{- end -}}
 {{- define "agent-sidecar.tlsSecretName" -}}embassy-tls{{- end -}}
-{{- define "agent-sidecar.sessionKeySecretName" -}}attache-session-key{{- end -}}
+{{- define "agent-sidecar.sessionKeySecretName" -}}agentsc-session-key{{- end -}}
 {{- define "agent-sidecar.configSecretName" -}}embassy-config{{- end -}}
-{{- define "agent-sidecar.injectorName" -}}attache-sidecar-injector{{- end -}}
-{{- define "agent-sidecar.validatorName" -}}attache-charter-validator{{- end -}}
+{{- define "agent-sidecar.injectorName" -}}agentsc-sidecar-injector{{- end -}}
+{{- define "agent-sidecar.validatorName" -}}agentsc-charter-validator{{- end -}}
 
 {{- define "agent-sidecar.labels" -}}
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
@@ -14,7 +14,7 @@ app.kubernetes.io/name: {{ .Chart.Name }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
-app.kubernetes.io/part-of: attache
+app.kubernetes.io/part-of: agentsc
 {{- end -}}
 
 {{/* Selector labels of one component: pass (dict "root" $ "component" "embassy-ca"). */}}
@@ -39,7 +39,7 @@ app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 {{- end -}}
 
-{{/* --ca-secret: the existing CA Secret, or attache-ca in the release namespace. */}}
+{{/* --ca-secret: the existing CA Secret, or agentsc-ca in the release namespace. */}}
 {{- define "agent-sidecar.caSecretRef" -}}
 {{- if .Values.ca.existingSecret -}}
 {{- if ne (len (splitList "/" .Values.ca.existingSecret)) 2 -}}
@@ -56,10 +56,10 @@ app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 
 {{/*
-ATTACHE_INJECT_TEMPLATE for embassy-ca: Kubernetes Container fields the injector applies to the
-attached container it generates. Only imagePullPolicy, resources, securityContext and env; env
+AGENTSC_INJECT_TEMPLATE for embassy-ca: Kubernetes Container fields the injector applies to the
+agentscd container it generates. Only imagePullPolicy, resources, securityContext and env; env
 holds only sidecar variables of design §6.1 and §9 (OTEL_EXPORTER_OTLP_ENDPOINT,
-ATTACHE_OTLP_ENDPOINT_ALLOW). The control-plane and CA addresses are not here: the injector derives
+AGENTSC_OTLP_ENDPOINT_ALLOW). The control-plane and CA addresses are not here: the injector derives
 them from --cp-namespace and the fixed Service names (embassy.<ns>.svc:15012,
 embassy-ca.<ns>.svc:15012).
 */}}
@@ -69,10 +69,10 @@ embassy-ca.<ns>.svc:15012).
 {{- $env = append $env (dict "name" "OTEL_EXPORTER_OTLP_ENDPOINT" "value" .) -}}
 {{- end -}}
 {{- with .Values.otlp.endpointAllow -}}
-{{- $env = append $env (dict "name" "ATTACHE_OTLP_ENDPOINT_ALLOW" "value" (join "," .)) -}}
+{{- $env = append $env (dict "name" "AGENTSC_OTLP_ENDPOINT_ALLOW" "value" (join "," .)) -}}
 {{- end -}}
 {{- $t := dict
-  "imagePullPolicy" .Values.images.attached.pullPolicy
+  "imagePullPolicy" .Values.images.agentscd.pullPolicy
   "resources" .Values.injection.resources
   "securityContext" .Values.injection.securityContext
 -}}
@@ -102,12 +102,12 @@ other field).
 {{- $joinTokens = append $joinTokens (dict "name" .name "sha256" .sha256 "namespace" .namespace "services" .services "expires_at" .expires_at) -}}
 {{- end -}}
 {{- $cfg := dict
-  "apiVersion" "attache.io/v1alpha1"
+  "apiVersion" "agentsc.io/v1alpha1"
   "kind" "ControlPlaneConfig"
   "auth" (dict
     "tokens" $tokens
     "anonymous" "none"
-    "session_key_file" "/etc/attache/session/key")
+    "session_key_file" "/etc/agentsc/session/key")
   "issuance" (dict
     "kubernetes" .Values.issuance.kubernetes
     "workload_cert_ttl" .Values.issuance.workloadCertTTL

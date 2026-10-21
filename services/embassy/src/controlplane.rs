@@ -23,9 +23,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use attache_common::identity::SpiffeId;
-use attache_proto::control_plane_server::{ControlPlane, ControlPlaneServer};
-use attache_proto::{
+use agentsc_common::identity::SpiffeId;
+use agentsc_proto::control_plane_server::{ControlPlane, ControlPlaneServer};
+use agentsc_proto::{
     AuditBatch, CharterUpdate, ConfigAck, ControlMessage, Heartbeat, Hello, LearningProposal,
     MemoryUpdate, NoteList, SidecarMessage, SpanStart, control_message, sidecar_message,
 };
@@ -156,7 +156,7 @@ impl ControlPlane for ConnectService {
             .and_then(|c| peer_identity(&c))
             .ok_or_else(|| {
                 Status::permission_denied(
-                    "Connect needs a workload certificate from the attache CA",
+                    "Connect needs a workload certificate from the agentsc CA",
                 )
             })?;
         let mut inbound = req.into_inner();
@@ -269,8 +269,8 @@ fn send(outbox: &Outbox, msg: ControlMessage) {
 
 /// The plain charter text a sidecar gets (a custom-resource document is converted).
 fn plain_yaml(stored: &crate::store::StoredCharter) -> Option<String> {
-    if attache_charter::resource::is_resource(&stored.charter_json) {
-        attache_charter::Charter::from_yaml(&stored.yaml)
+    if agentsc_charter::resource::is_resource(&stored.charter_json) {
+        agentsc_charter::Charter::from_yaml(&stored.yaml)
             .ok()?
             .to_yaml()
             .ok()
@@ -304,7 +304,7 @@ pub fn memory_message(doc: &MemoryDoc) -> ControlMessage {
                         .and_then(crate::traces::parse_ts)
                         .is_none_or(|t| t > now)
                 })
-                .map(|n| attache_proto::Note {
+                .map(|n| agentsc_proto::Note {
                     id: n.id.clone(),
                     text: n.text.clone(),
                     source: match n.source {
@@ -668,7 +668,7 @@ pub async fn ingest_proposal(hub: &Hub, key: &ServiceKey, actor: &Actor, p: Lear
         tracing::debug!(service = %key, agent = p.agent, "dropping a proposal: empty or too long");
         return;
     }
-    let mut auto = p.auto && learning.mode == attache_charter::LearningMode::Auto;
+    let mut auto = p.auto && learning.mode == agentsc_charter::LearningMode::Auto;
     let ts = now_ts();
     if auto {
         // room for the note: at max_notes the oldest auto note goes; without one it waits
@@ -824,7 +824,7 @@ mod tests {
         let a = sidecar_actor(&id, "orders-0");
         assert_eq!(
             a.name,
-            "sidecar:spiffe://attache/ns/shop/svc/orders/orders-0"
+            "sidecar:spiffe://agentsc/ns/shop/svc/orders/orders-0"
         );
         assert_eq!(a.kind, ActorKind::Sidecar);
         assert!(a.role.is_none());

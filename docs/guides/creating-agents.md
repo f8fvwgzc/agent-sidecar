@@ -2,7 +2,7 @@
 
 This guide shows how to write a charter, declare agents and tools, run an agent on your own machine, and call it from your app. It also covers orchestrators, budgets, guardrails, authz, tests with the mock model, and the switch to Claude.
 
-Commands and files use the code names: `attached` is the sidecar, `attache` is the CLI, `embassy` is the CA, and charters use `apiVersion: attache.io/v1alpha1`. [Architecture](../architecture.md#names-agent-sidecar-and-attache) explains the naming. [CONTRACT.md](../../CONTRACT.md) is the full reference for every field and rule.
+Commands and files use the code names: `agentscd` is the sidecar, `agentsc` is the CLI, `embassy` is the CA, and charters use `apiVersion: agentsc.io/v1alpha1`. [Architecture](../architecture.md#names-agent-sidecar-and-agentsc) explains the naming. [CONTRACT.md](../../CONTRACT.md) is the full reference for every field and rule.
 
 Contents:
 
@@ -29,8 +29,8 @@ An agent is an entry in your service's charter file. You do not write agent code
 Three processes take part:
 
 - **Your app.** It sends one HTTP or gRPC request to the sidecar on `localhost`. It needs no SDK.
-- **The sidecar (`attached`).** It checks policy, runs the agent, and writes one audit line for every step.
-- **The runtime (`attache-runtime`).** A Python process. The sidecar starts it as a child process in the same container. The runtime runs the agent loop: it calls the model, and it sends every tool call back to the sidecar.
+- **The sidecar (`agentscd`).** It checks policy, runs the agent, and writes one audit line for every step.
+- **The runtime (`agentsc-runtime`).** A Python process. The sidecar starts it as a child process in the same container. The runtime runs the agent loop: it calls the model, and it sends every tool call back to the sidecar.
 
 The model never calls your app directly. Every tool call goes to the sidecar first, and the sidecar checks it against the charter.
 
@@ -65,11 +65,11 @@ Each service has one charter. It holds the service identity, the agents, their t
 
 The sidecar reads the charter once, at startup. It validates the file and refuses to start when the file is invalid. Every charter object refuses unknown keys, so a typo is an error, not a silent no-op. Only the JSON Schema inside a tool's `parameters` is free-form.
 
-These are all the top-level keys. They come from `crates/attache-charter/src/lib.rs`.
+These are all the top-level keys. They come from `crates/agentsc-charter/src/lib.rs`.
 
 | Key | Required | Default | What it holds |
 | --- | --- | --- | --- |
-| `apiVersion` | yes | none | Must be `attache.io/v1alpha1`. |
+| `apiVersion` | yes | none | Must be `agentsc.io/v1alpha1`. |
 | `kind` | yes | none | Must be `Charter`. |
 | `service` | yes | none | `name`, `namespace` and `app_port` of this service. |
 | `mesh` | no | `port: 50002`, `peers: {}` | How to reach other services' sidecars. |
@@ -82,7 +82,7 @@ Here is a charter that shows every top-level key. Most values are the defaults.
 
 ```yaml
 # yaml-language-server: $schema=https://raw.githubusercontent.com/f8fvwgzc/agent-sidecar/main/schemas/charter.schema.json
-apiVersion: attache.io/v1alpha1   # required, exactly this value
+apiVersion: agentsc.io/v1alpha1   # required, exactly this value
 kind: Charter                     # required, exactly this value
 service:                          # required
   name: billing                   # DNS-1123 label; part of the SPIFFE id
@@ -130,7 +130,7 @@ audit:                            # optional
 
 A DNS-1123 label has 1 to 63 characters. It uses only lowercase letters, digits and `-`. It does not start or end with `-`.
 
-`name` and `namespace` form the identity of the service: `spiffe://attache/ns/<namespace>/svc/<name>`. The certificate must hold the same identity. If `tls.crt` holds another identity, the sidecar refuses to start.
+`name` and `namespace` form the identity of the service: `spiffe://agentsc/ns/<namespace>/svc/<name>`. The certificate must hold the same identity. If `tls.crt` holds another identity, the sidecar refuses to start.
 
 ### `mesh`
 
@@ -165,7 +165,7 @@ You need `cargo`, `protoc`, `uv`, `python3` and `curl`. [Getting started](../get
 
 ```bash
 git clone https://github.com/f8fvwgzc/agent-sidecar.git && cd agent-sidecar
-cargo build -p attached -p attache-cli -p embassy
+cargo build -p agentscd -p agentsc-cli -p embassy
 (cd runtime && uv sync)
 mkdir -p .local/billing
 ```
@@ -189,7 +189,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         prefix = "/invoices/"
         invoice = INVOICES.get(self.path[len(prefix):]) if self.path.startswith(prefix) else None
-        print("GET", self.path, "agent:", self.headers.get("x-attache-agent"))
+        print("GET", self.path, "agent:", self.headers.get("x-agentsc-agent"))
         body = json.dumps(invoice or {"error": "not found"}).encode()
         self.send_response(200 if invoice else 404)
         self.send_header("content-type", "application/json")
@@ -214,7 +214,7 @@ If port 8080 is busy on your machine, change the port in the app and `app_port` 
 Save this as `.local/billing/billing.charter.yaml`:
 
 ```yaml
-apiVersion: attache.io/v1alpha1
+apiVersion: agentsc.io/v1alpha1
 kind: Charter
 service:
   name: billing
@@ -262,16 +262,16 @@ What each part does:
 ### Step 4: validate
 
 ```bash
-./target/debug/attache charter validate .local/billing/billing.charter.yaml
+./target/debug/agentsc charter validate .local/billing/billing.charter.yaml
 ```
 
 ```text
-valid: .local/billing/billing.charter.yaml (1 agent(s), identity spiffe://attache/ns/shop/svc/billing)
+valid: .local/billing/billing.charter.yaml (1 agent(s), identity spiffe://agentsc/ns/shop/svc/billing)
 ```
 
 The command exits with 0 when the file is valid. It exits with 1 and prints the errors when it is not. See [Common validation errors](#common-validation-errors).
 
-If you did not build the CLI, `cargo run -q -p attache-cli -- charter validate <file>` does the same.
+If you did not build the CLI, `cargo run -q -p agentsc-cli -- charter validate <file>` does the same.
 
 ### Step 5: create a certificate
 
@@ -292,24 +292,24 @@ Without a certificate, the sidecar still starts. It logs `no TLS material in <di
 Open a second terminal. From the repository root, run:
 
 ```bash
-./target/debug/attached \
+./target/debug/agentscd \
   --charter .local/billing/billing.charter.yaml \
   --tls-dir .local/billing/tls \
   --socket-dir "$PWD/.local/billing/run" \
   --mesh-addr 127.0.0.1:50002 \
-  --runtime-cmd "uv run --quiet --project $PWD/runtime attache-runtime" \
-  > .local/billing/audit.jsonl 2> .local/billing/attached.log
+  --runtime-cmd "uv run --quiet --project $PWD/runtime agentsc-runtime" \
+  > .local/billing/audit.jsonl 2> .local/billing/agentscd.log
 ```
 
 | Flag | Value here | Default | Why |
 | --- | --- | --- | --- |
-| `--charter` | your charter | `/etc/attache/charter/charter.yaml` | The file to load. |
-| `--tls-dir` | `.local/billing/tls` | `/etc/attache/tls` | Holds `ca.crt`, `tls.crt` and `tls.key`. |
-| `--socket-dir` | `.local/billing/run` | `/run/attache` | The Unix sockets between sidecar and runtime. The default is usually not writable on a laptop. |
+| `--charter` | your charter | `/etc/agentsc/charter/charter.yaml` | The file to load. |
+| `--tls-dir` | `.local/billing/tls` | `/etc/agentsc/tls` | Holds `ca.crt`, `tls.crt` and `tls.key`. |
+| `--socket-dir` | `.local/billing/run` | `/run/agentsc` | The Unix sockets between sidecar and runtime. The default is usually not writable on a laptop. |
 | `--mesh-addr` | `127.0.0.1:50002` | `0.0.0.0:50002` | Keeps the mTLS port on loopback. |
-| `--runtime-cmd` | `uv run ... attache-runtime` | `attache-runtime` | How to start the runtime. The sidecar appends `--listen` and `--sidecar`. |
+| `--runtime-cmd` | `uv run ... agentsc-runtime` | `agentsc-runtime` | How to start the runtime. The sidecar appends `--listen` and `--sidecar`. |
 
-The app API keeps its defaults: HTTP on `127.0.0.1:3500` and gRPC on `127.0.0.1:50001`. Every flag also has an environment variable, for example `ATTACHE_CHARTER`. [CONTRACT.md](../../CONTRACT.md) §2 lists them all.
+The app API keeps its defaults: HTTP on `127.0.0.1:3500` and gRPC on `127.0.0.1:50001`. Every flag also has an environment variable, for example `AGENTSC_CHARTER`. [CONTRACT.md](../../CONTRACT.md) §2 lists them all.
 
 The sidecar writes audit lines (JSONL) to stdout. It writes its own log, and the runtime's output, to stderr. That is why the command sends them to two files.
 
@@ -362,7 +362,7 @@ The mock model always answers `Based on <tool>: <result>`. [Testing with the moc
 ### Step 8: read the audit log
 
 ```bash
-./target/debug/attache logs --file .local/billing/audit.jsonl
+./target/debug/agentsc logs --file .local/billing/audit.jsonl
 ```
 
 This one call wrote five records, in this order: `model_call`, `tool_call`, `service_call`, `model_call`, `agent_invocation`. A record is written when its step ends, so the record of the whole invocation comes last. Add `--raw` to see the JSON lines. [Operations](../operations.md) explains the fields and the filters.
@@ -400,13 +400,13 @@ It prints `404`. The body has `"status": "error"` and `"rule": "agent.unknown"`.
 
 The same charter runs in a pod. There, the pieces come from Kubernetes objects:
 
-- **The charter** goes into a ConfigMap, for example `billing-charter` with the key `charter.yaml`. It is mounted at `/etc/attache/charter/`.
+- **The charter** goes into a ConfigMap, for example `billing-charter` with the key `charter.yaml`. It is mounted at `/etc/agentsc/charter/`.
   ```bash
   kubectl -n shop create configmap billing-charter \
     --from-file=charter.yaml=.local/billing/billing.charter.yaml
   ```
-- **The sidecar container** is written into your Deployment by hand. There is no injection webhook yet. Copy the `attached` container, its volumes and its probes from [deploy/inventory/deployment.yaml](../../deploy/inventory/deployment.yaml).
-- **The certificate** is the Secret `attache-cert-<service>`. The `embassy bootstrap` Job creates it. The Job's `--namespace` flag sets both the namespace of the Secrets and the namespace in the SPIFFE id. The Job keeps one CA per namespace, in the Secret `attache-ca`. The demo Job in [deploy/embassy/job.yaml](../../deploy/embassy/job.yaml) runs `bootstrap --namespace attache-demo --services orders,inventory`, so adding `billing` there gives a certificate for `attache-demo`, not `shop`. For `billing` in `shop`, run a copy of the Job in `shop`, with `--namespace shop --services billing`, and its ServiceAccount, Role and RoleBinding from [deploy/embassy/rbac.yaml](../../deploy/embassy/rbac.yaml). The certificates do not rotate.
+- **The sidecar container** is written into your Deployment by hand. There is no injection webhook yet. Copy the `agentscd` container, its volumes and its probes from [deploy/inventory/deployment.yaml](../../deploy/inventory/deployment.yaml).
+- **The certificate** is the Secret `agentsc-cert-<service>`. The `embassy bootstrap` Job creates it. The Job's `--namespace` flag sets both the namespace of the Secrets and the namespace in the SPIFFE id. The Job keeps one CA per namespace, in the Secret `agentsc-ca`. The demo Job in [deploy/embassy/job.yaml](../../deploy/embassy/job.yaml) runs `bootstrap --namespace agentsc-demo --services orders,inventory`, so adding `billing` there gives a certificate for `agentsc-demo`, not `shop`. For `billing` in `shop`, run a copy of the Job in `shop`, with `--namespace shop --services billing`, and its ServiceAccount, Role and RoleBinding from [deploy/embassy/rbac.yaml](../../deploy/embassy/rbac.yaml). The certificates do not rotate.
 - **A charter change** needs a pod restart: update the ConfigMap, then run `kubectl -n shop rollout restart deployment/billing`.
 
 [Getting started](../getting-started.md) runs the full demo on minikube. [Microservices](microservices.md) shows how to add the sidecar to many services.
@@ -462,7 +462,7 @@ Common rules:
 This charter has one example of each type. The sections below refer to it.
 
 ```yaml
-apiVersion: attache.io/v1alpha1
+apiVersion: agentsc.io/v1alpha1
 kind: Charter
 service:
   name: billing
@@ -583,9 +583,9 @@ Your app receives these headers from the sidecar:
 
 | Header | Value |
 | --- | --- |
-| `x-attache-caller` | `local` for your own agents, or the caller's SPIFFE id for a call from another service |
-| `x-attache-agent` | The name of the calling agent |
-| `x-attache-request-id` | The request id of the whole invocation |
+| `x-agentsc-caller` | `local` for your own agents, or the caller's SPIFFE id for a call from another service |
+| `x-agentsc-agent` | The name of the calling agent |
+| `x-agentsc-request-id` | The request id of the whole invocation |
 | `traceparent` | A W3C trace header, a child span of the invocation |
 
 The sidecar sets these values itself. It drops any value for them that comes from the runtime or from a peer.
@@ -598,7 +598,7 @@ An `http` tool calls a URL outside your services, for example a public API.
 - The sidecar makes the request, not the runtime. It is audited as `http_call`.
 - The sidecar checks that the agent may use the tool, that the method is the declared method, and that the origin (scheme, host and port) is the declared origin. It does not check the path.
 - `authz.services` and `guardrails.allowed_services` do not apply to `http` tools.
-- The sidecar adds `traceparent` and `x-attache-request-id` to the outgoing request.
+- The sidecar adds `traceparent` and `x-agentsc-request-id` to the outgoing request.
 
 A tool has no field for request headers or credentials. If an API needs a key, put a small endpoint in your app that adds the key, and call it with a `service` tool.
 
@@ -615,7 +615,7 @@ An `agent` tool runs another agent. Only an agent with `type: orchestrator` may 
 
 ### How arguments become a request
 
-The runtime turns the model's tool arguments into a request. The code is `runtime/src/attache_runtime/tools.py`.
+The runtime turns the model's tool arguments into a request. The code is `runtime/src/agentsc_runtime/tools.py`.
 
 1. Each `{name}` in `path` or `url` is replaced by the argument with that name. Names may use letters, digits and `_`.
 2. The value is percent-encoded. `/` becomes `%2F` and a space becomes `%20`. A value cannot add path segments. For a `service` tool, the sidecar refuses a path with `%2F` (`guardrail.path`).
@@ -681,7 +681,7 @@ The tools charter uses this to keep `invoice-helper` internal. The first caller 
 The remote service needs its own charter that allows the call. Here is the `payments` charter:
 
 ```yaml
-apiVersion: attache.io/v1alpha1
+apiVersion: agentsc.io/v1alpha1
 kind: Charter
 service:
   name: payments
@@ -708,7 +708,7 @@ authz:
   callers:
     - identity: local
       agents: ["*"]
-    - identity: spiffe://attache/ns/shop/svc/billing     # the billing pod ...
+    - identity: spiffe://agentsc/ns/shop/svc/billing     # the billing pod ...
       agents: [payment-checker]                          # ... may run this agent ...
       caller_agents: [billing-assistant]                 # ... only when billing-assistant asks
   services:
@@ -718,12 +718,12 @@ authz:
       service: payments
       allow: ["GET /payments/*"]
     - name: billing-reads-payments
-      identity: spiffe://attache/ns/shop/svc/billing
+      identity: spiffe://agentsc/ns/shop/svc/billing
       agent: billing-assistant
       service: payments
       allow: ["GET /payments/*"]
     - name: no-admin
-      identity: spiffe://attache/ns/shop/svc/billing
+      identity: spiffe://agentsc/ns/shop/svc/billing
       service: payments
       deny: ["* /admin", "* /admin/*"]
 ```
@@ -735,7 +735,7 @@ When `billing-assistant` uses `ask_payment_checker`, these checks run:
 | billing sidecar | `billing-assistant` may use the tool, and the call matches the declaration (`guardrail.allowed_tools`, `guardrail.tool_spec`). |
 | billing sidecar | `payments` is in the agent's allowed services (`guardrail.allowed_services`). By default it is, because a tool names it. |
 | billing sidecar | It opens mTLS to the payments sidecar with the billing certificate. It sends the claim "calling agent = `billing-assistant`". |
-| payments sidecar | `authz.callers`: the certificate identity `spiffe://attache/ns/shop/svc/billing` may run `payment-checker`, and `billing-assistant` is in `caller_agents`. |
+| payments sidecar | `authz.callers`: the certificate identity `spiffe://agentsc/ns/shop/svc/billing` may run `payment-checker`, and `billing-assistant` is in `caller_agents`. |
 | payments sidecar | Depth, the budgets of `payment-checker`, and the input guardrails of the payments charter. Then the agent runs. |
 | payments sidecar | Each tool call of `payment-checker` is checked by the payments charter, with `identity: local`. |
 | payments sidecar | Output guardrails and `pii_redact` of the payments charter. Then the output goes back to billing. |
@@ -785,7 +785,7 @@ Guardrails are charter-wide checks. `max_input_bytes`, `pii_redact`, `input_deny
 | `allowed_services` | every service its tools name | Map from agent name to service names. Checked for `service` tools and remote `agent` tools. | `guardrail.allowed_services` |
 
 ```yaml
-apiVersion: attache.io/v1alpha1
+apiVersion: agentsc.io/v1alpha1
 kind: Charter
 service:
   name: billing
@@ -877,7 +877,7 @@ Tool results are not checked by `input_deny` or `output_deny`. Those rules see o
 
 | Field | Required | Meaning |
 | --- | --- | --- |
-| `identity` | yes | `local`, or a SPIFFE id such as `spiffe://attache/ns/shop/svc/billing`. |
+| `identity` | yes | `local`, or a SPIFFE id such as `spiffe://agentsc/ns/shop/svc/billing`. |
 | `agents` | yes, not empty | Agent names of this charter, or `"*"` for all. |
 | `caller_agents` | no | Calling agents this rule admits. Empty means any caller, including a direct call from the app. |
 
@@ -930,7 +930,7 @@ To cover a path and everything below it, write two patterns: `"* /admin"` and `"
 
 - Set `identity: local` on rules meant for your own agents. A rule without `identity` also applies to inbound calls from other services. If the rule sets `agent`, it applies when the peer's calling agent has that name.
 - Validation does not check `authz.services[].agent` or `authz.services[].service` against your agents and services. A typo means the rule never applies, so the call falls to `authz.default`.
-- Your app can read `x-attache-caller` and `x-attache-agent`. Trust them only if nothing but the sidecar can reach your app port. The inventory demo binds its app to `127.0.0.1` for this reason. No NetworkPolicy is shipped.
+- Your app can read `x-agentsc-caller` and `x-agentsc-agent`. Trust them only if nothing but the sidecar can reach your app port. The inventory demo binds its app to `127.0.0.1` for this reason. No NetworkPolicy is shipped.
 
 ## Calling an agent from your app
 
@@ -967,7 +967,7 @@ The response body:
 | `steps` | One entry per step: `kind`, `name`, `decision`, `latency_ms`, and `rule` and `summary` when set. |
 | `rule`, `reason` | Only when `status` is not `ok`. Which rule acted, and why. |
 
-Response headers: `traceparent` and `x-attache-request-id`.
+Response headers: `traceparent` and `x-agentsc-request-id`.
 
 Status codes:
 
@@ -991,21 +991,21 @@ Other endpoints on the same port:
 
 ### gRPC
 
-The same API is a gRPC service on `127.0.0.1:50001`, plaintext. The definition is in [proto/attache/v1alpha1/app.proto](../../proto/attache/v1alpha1/app.proto), with the shared messages in `common.proto`.
+The same API is a gRPC service on `127.0.0.1:50001`, plaintext. The definition is in [proto/agentsc/v1alpha1/app.proto](../../proto/agentsc/v1alpha1/app.proto), with the shared messages in `common.proto`.
 
 | Method | Request | Response |
 | --- | --- | --- |
-| `attache.v1alpha1.AppApi/InvokeAgent` | `InvokeAgentRequest` | `InvokeAgentResponse` |
-| `attache.v1alpha1.AppApi/ListAgents` | `Empty` | `ListAgentsResponse` |
+| `agentsc.v1alpha1.AppApi/InvokeAgent` | `InvokeAgentRequest` | `InvokeAgentResponse` |
+| `agentsc.v1alpha1.AppApi/ListAgents` | `Empty` | `ListAgentsResponse` |
 
 Set `agent`, `input` and, if you want, `context_json` (a JSON text, not an object) and `traceparent`. A `traceparent` in the gRPC metadata wins over the field. The sidecar sets `request_id`, `caller_agent` and `depth` itself and ignores what the app sends.
 
 The server has no reflection, so a tool like `grpcurl` needs the proto files:
 
 ```bash
-grpcurl -plaintext -import-path proto -proto attache/v1alpha1/app.proto \
+grpcurl -plaintext -import-path proto -proto agentsc/v1alpha1/app.proto \
   -d '{"agent": "invoice-helper", "input": "What is the status of invoice INV-1001?"}' \
-  127.0.0.1:50001 attache.v1alpha1.AppApi/InvokeAgent
+  127.0.0.1:50001 agentsc.v1alpha1.AppApi/InvokeAgent
 ```
 
 When `status` is `ok`, the response is the `InvokeAgentResponse` message with the same fields as the HTTP JSON. Otherwise the call fails with a gRPC status, and you get no envelope:
@@ -1017,11 +1017,11 @@ When `status` is `ok`, the response is the `InvokeAgentResponse` message with th
 | unknown agent | `NOT_FOUND` |
 | other errors | `UNAVAILABLE` |
 
-The status message is `<rule>: <reason>`. The trailing metadata has `x-attache-rule` and `x-attache-request-id`.
+The status message is `<rule>: <reason>`. The trailing metadata has `x-agentsc-rule` and `x-agentsc-request-id`.
 
 ## Testing with the mock model
 
-The mock model is deterministic and works offline. Use it in local runs and in your own CI. This repository does not ship a CI config. Its code is in [runtime/src/attache_runtime/models.py](../../runtime/src/attache_runtime/models.py).
+The mock model is deterministic and works offline. Use it in local runs and in your own CI. This repository does not ship a CI config. Its code is in [runtime/src/agentsc_runtime/models.py](../../runtime/src/agentsc_runtime/models.py).
 
 When is the mock used?
 
@@ -1076,13 +1076,13 @@ Test denials the same way. Check for a step with `"decision": "deny"` and the `r
 ## Switching to Claude
 
 1. Set `model` to a Claude model id, for example `claude-opus-5-5`. Validation accepts any non-empty id. A wrong id fails at call time with rule `model.error` (HTTP 502).
-2. Set `ANTHROPIC_API_KEY` in the sidecar's environment before it starts. The runtime is a child process and gets the same environment. On minikube, `make secret-anthropic` puts the key into the Secret `attache-anthropic` and restarts the demo pods.
+2. Set `ANTHROPIC_API_KEY` in the sidecar's environment before it starts. The runtime is a child process and gets the same environment. On minikube, `make secret-anthropic` puts the key into the Secret `agentsc-anthropic` and restarts the demo pods.
 3. Check `GET /readyz`. It shows `"model_provider": "anthropic"`.
 4. Raise `max_tokens_per_call` if you see `budget.max_tokens_per_call` errors. Thinking counts against this limit. The demo `ops-assistant` uses 2048.
 
 The runtime streams every request to the model API. It sends `output_config.effort: low` to every model except ids that start with `claude-haiku-4-5`, `claude-sonnet-4-5`, `claude-opus-4-1`, `claude-opus-4-0`, `claude-sonnet-4-0` or `claude-3`.
 
-The cost budget uses the price table in [runtime/src/attache_runtime/pricing.py](../../runtime/src/attache_runtime/pricing.py). The prices are USD per 1 million tokens, as written in that file:
+The cost budget uses the price table in [runtime/src/agentsc_runtime/pricing.py](../../runtime/src/agentsc_runtime/pricing.py). The prices are USD per 1 million tokens, as written in that file:
 
 | Model id | Input | Output |
 | --- | --- | --- |
@@ -1105,7 +1105,7 @@ An unknown id gets the highest price, so the budget never counts too little. Thi
 
 ## Editor autocompletion
 
-The JSON Schema of the charter is [schemas/charter.schema.json](../../schemas/charter.schema.json). The Rust types generate it (`attache charter schema`), and a test keeps the file in sync.
+The JSON Schema of the charter is [schemas/charter.schema.json](../../schemas/charter.schema.json). The Rust types generate it (`agentsc charter schema`), and a test keeps the file in sync.
 
 Editors that use `yaml-language-server` (for example the YAML extension for VS Code) read a `$schema` comment at the top of the file. Point it to the schema in the repository:
 
@@ -1115,11 +1115,11 @@ Editors that use `yaml-language-server` (for example the YAML extension for VS C
 
 A relative path also works, for example `$schema=../schemas/charter.schema.json`. The path is relative to the charter file.
 
-The editor then completes field names and marks unknown fields and wrong types. The schema does not hold every rule. For example, it does not check DNS labels, the orchestrator rule or regexes. Always run `attache charter validate` before you deploy.
+The editor then completes field names and marks unknown fields and wrong types. The schema does not hold every rule. For example, it does not check DNS labels, the orchestrator rule or regexes. Always run `agentsc charter validate` before you deploy.
 
 ## Common validation errors
 
-`attache charter validate` prints errors in two forms.
+`agentsc charter validate` prints errors in two forms.
 
 A parse error stops at the first problem and shows the line and column:
 
@@ -1144,7 +1144,7 @@ Fix parse errors first, then run the command again.
 | ``unknown field `x`, expected one of ...`` | A key is misspelled or does not exist. | Use a key from the list. |
 | ``missing field `model` `` | A required field is missing. | Add it. |
 | `found a tab character that violates indentation` or `found character that cannot start any token` | YAML does not allow tabs for indentation. | Use spaces. |
-| `apiVersion must be attache.io/v1alpha1` / `kind must be Charter` | Wrong header. | Copy the header from an example. |
+| `apiVersion must be agentsc.io/v1alpha1` / `kind must be Charter` | Wrong header. | Copy the header from an example. |
 | `... is not a DNS-1123 label` | Uppercase letters, `_` or other characters in a service, namespace or agent name. | Use lowercase letters, digits and `-`. |
 | `duplicate agent name` / `duplicate tool name` | Two agents, or two tools of one agent, share a name. | Rename one. |
 | `tool name must match ^[a-zA-Z0-9_-]{1,64}$` | Spaces, dots or other characters in a tool name. | Use letters, digits, `_` and `-`. |
@@ -1161,7 +1161,7 @@ Fix parse errors first, then run the command again.
 | `guardrails.allowed_tools.x: tool "y" is not declared` | The allow list names a tool the agent does not have. | Fix the name. |
 | `no tool of this agent targets service "x"` | `allowed_services` names a service no tool of the agent uses. | Remove it, or add a tool for it. |
 | `guardrails regex rule #0 (name): regex parse error` | A regex does not compile. | Fix the regex. Remember `\\` in double quotes. |
-| ``identity must be `local` or a spiffe:// URI`` | A wrong identity in `authz.callers` or `authz.services`. | Use `local` or `spiffe://attache/ns/<ns>/svc/<svc>`. |
+| ``identity must be `local` or a spiffe:// URI`` | A wrong identity in `authz.callers` or `authz.services`. | Use `local` or `spiffe://agentsc/ns/<ns>/svc/<svc>`. |
 | `agents must not be empty` / `unknown agent "x"` | A caller rule has no agents, or names an agent that is not in this charter. | List agents of this charter, or `"*"`. |
 | `name must be unique and non-empty` | Two `authz.services` rules share a name. | Rename one. |
 | `needs allow or deny patterns` | A service rule has no patterns. | Add `allow` or `deny`. |
@@ -1179,6 +1179,6 @@ These are true for the current code. [Operations](../operations.md#known-limitat
 - **The runtime calls the model API directly.** Model calls are audited through the sidecar, but they are not proxied. The runtime runs as a child process in the same container as the sidecar.
 - **`pii_redact` does not protect prompts.** It cleans the final output and the audit records, not what the model provider receives.
 - **Cross-namespace calls are not supported out of the box.** Peer addresses and TLS names use the charter's own namespace, and the bootstrap Job creates one CA per namespace.
-- **Sidecar injection is manual.** You write the `attached` container into each Deployment.
+- **Sidecar injection is manual.** You write the `agentscd` container into each Deployment.
 - **Certificates are per service.** The bootstrap Job issues them, and they do not rotate.
-- **No NetworkPolicy is shipped.** The `x-attache-*` headers your app receives are only as trustworthy as your app port is private.
+- **No NetworkPolicy is shipped.** The `x-agentsc-*` headers your app receives are only as trustworthy as your app port is private.

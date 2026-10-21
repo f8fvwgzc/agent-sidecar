@@ -1,4 +1,4 @@
-//! `embassy` — the attache control plane (docs/design/agent-platform.md §2, §7–§10).
+//! `embassy` — the agentsc control plane (docs/design/agent-platform.md §2, §7–§10).
 //!
 //! One binary, `embassy serve --components <list>`, runs any of the components `ca`
 //! (IssueCertificate), `webhook` (admission), `controlplane` (Connect), `api` (REST/SSE) and

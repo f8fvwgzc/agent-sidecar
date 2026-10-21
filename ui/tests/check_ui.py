@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static checks for the attache console (design §11 "Security" and §15 rule 10).
+"""Static checks for the agentsc console (design §11 "Security" and §15 rule 10).
 
 Standard library only. Run from the repository root:
 

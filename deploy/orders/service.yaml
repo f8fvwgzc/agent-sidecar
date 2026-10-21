@@ -4,7 +4,7 @@ metadata:
   name: orders
   labels:
     app: orders
-    attache.io/service: orders
+    agentsc.io/service: orders
 spec:
   selector:
     app: orders

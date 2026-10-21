@@ -1,13 +1,13 @@
 {{- /*
-charters.attache.io, from files/crds/charters.attache.io.yaml: a symbolic link to
-deploy/crds/charters.attache.io.yaml (the generated CRD), so the chart cannot drift from it. Helm
+charters.agentsc.io, from files/crds/charters.agentsc.io.yaml: a symbolic link to
+deploy/crds/charters.agentsc.io.yaml (the generated CRD), so the chart cannot drift from it. Helm
 follows the link (and says so on stderr); `helm package` stores the file's content. Kept on
 uninstall.
 */ -}}
 {{- if .Values.crds.install }}
-{{- $crd := .Files.Get "files/crds/charters.attache.io.yaml" | fromYaml }}
+{{- $crd := .Files.Get "files/crds/charters.agentsc.io.yaml" | fromYaml }}
 {{- if or (not $crd) (hasKey $crd "Error") }}
-{{- fail "files/crds/charters.attache.io.yaml is missing or invalid: it must link to deploy/crds/charters.attache.io.yaml (a checkout without symbolic links cannot render the chart; use a packaged chart)" }}
+{{- fail "files/crds/charters.agentsc.io.yaml is missing or invalid: it must link to deploy/crds/charters.agentsc.io.yaml (a checkout without symbolic links cannot render the chart; use a packaged chart)" }}
 {{- end }}
 {{- $annotations := merge (dict "helm.sh/resource-policy" "keep") ($crd.metadata.annotations | default dict) }}
 {{- $labels := merge (include "agent-sidecar.labels" . | fromYaml) ($crd.metadata.labels | default dict) }}

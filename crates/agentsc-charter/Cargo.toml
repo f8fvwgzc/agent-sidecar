@@ -1,0 +1,18 @@
+[package]
+name = "agentsc-charter"
+description = "charter.yaml types, validation and JSON Schema (CONTRACT.md §3)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+schemars.workspace = true
+regex.workspace = true
+thiserror.workspace = true
+url.workspace = true

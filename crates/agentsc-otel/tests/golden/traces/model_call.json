@@ -1,0 +1,115 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "orders"
+            }
+          },
+          {
+            "key": "service.namespace",
+            "value": {
+              "stringValue": "shop"
+            }
+          },
+          {
+            "key": "service.version",
+            "value": {
+              "stringValue": "0.2.0"
+            }
+          },
+          {
+            "key": "agentsc.identity",
+            "value": {
+              "stringValue": "spiffe://agentsc/ns/shop/svc/orders"
+            }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "agentsc-otel",
+            "version": "<version>"
+          },
+          "spans": [
+            {
+              "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "spanId": "1111111111111111",
+              "parentSpanId": "00f067aa0ba902b7",
+              "name": "model_call claude-opus-5-5",
+              "kind": 3,
+              "startTimeUnixNano": "1792576800050000000",
+              "endTimeUnixNano": "1792576800950000000",
+              "attributes": [
+                {
+                  "key": "agentsc.kind",
+                  "value": {
+                    "stringValue": "model_call"
+                  }
+                },
+                {
+                  "key": "agentsc.decision",
+                  "value": {
+                    "stringValue": "allow"
+                  }
+                },
+                {
+                  "key": "agentsc.caller",
+                  "value": {
+                    "stringValue": "local"
+                  }
+                },
+                {
+                  "key": "agentsc.agent",
+                  "value": {
+                    "stringValue": "ops-assistant"
+                  }
+                },
+                {
+                  "key": "agentsc.request_id",
+                  "value": {
+                    "stringValue": "0c4a3f8e-6b1d-4f7e-9c11-2a5d3e4f5a6b"
+                  }
+                },
+                {
+                  "key": "gen_ai.system",
+                  "value": {
+                    "stringValue": "anthropic"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "claude-opus-5-5"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "812"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "96"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

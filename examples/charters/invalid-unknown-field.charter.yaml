@@ -1,10 +1,10 @@
 # Deliberately invalid: `pii_redaction` is not a guardrails field (the field is `pii_redact`).
-# `attache charter validate` must reject this file and name the field (CONTRACT.md §3).
-apiVersion: attache.io/v1alpha1
+# `agentsc charter validate` must reject this file and name the field (CONTRACT.md §3).
+apiVersion: agentsc.io/v1alpha1
 kind: Charter
 service:
   name: inventory
-  namespace: attache-demo
+  namespace: agentsc-demo
   app_port: 8000
 agents:
   - name: stock-analyst

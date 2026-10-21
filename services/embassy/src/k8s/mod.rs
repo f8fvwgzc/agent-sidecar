@@ -103,9 +103,9 @@ pub async fn open_kube_store(args: &ServeArgs) -> anyhow::Result<Arc<KubeStore>>
     match CharterApi::list(&client).await {
         Ok(_) => {}
         Err(ApiError::NotFound) => bail!(
-            "--store kubernetes: the CustomResourceDefinition charters.attache.io is not \
+            "--store kubernetes: the CustomResourceDefinition charters.agentsc.io is not \
              installed (helm install the agent-sidecar chart with crds.install=true, or kubectl \
-             apply -f deploy/crds/charters.attache.io.yaml)"
+             apply -f deploy/crds/charters.agentsc.io.yaml)"
         ),
         Err(e) => bail!("--store kubernetes: listing Charters failed: {e}"),
     }
@@ -119,8 +119,8 @@ pub async fn open_kube_store(args: &ServeArgs) -> anyhow::Result<Arc<KubeStore>>
 }
 
 /// The CA material in Secret `<namespace>/<name>` (`--ca-secret`, keys `ca.crt` and `ca.key`,
-/// the layout of `embassy ca-init` and of the v0.1 `attache-ca` Secret). When the Secret does not
-/// exist a new CA is created in it (the chart's default `attache-ca`); with `ca.existingSecret`
+/// the layout of `embassy ca-init` and of the v0.1 `agentsc-ca` Secret). When the Secret does not
+/// exist a new CA is created in it (the chart's default `agentsc-ca`); with `ca.existingSecret`
 /// the Secret exists and is only read.
 pub async fn load_ca_secret(namespace: &str, name: &str) -> anyhow::Result<CaMaterial> {
     let api = KubeClient::try_default()
@@ -157,7 +157,7 @@ pub async fn load_or_create_ca(
                 return CaMaterial::from_pems(crt, key).with_context(|| what.clone());
             }
             Ok(None) => {
-                let ca = attache_pki::ca_init().map_err(|e| anyhow!("{what}: {e}"))?;
+                let ca = agentsc_pki::ca_init().map_err(|e| anyhow!("{what}: {e}"))?;
                 let secret = Secret {
                     metadata: ObjectMeta {
                         name: Some(name.to_string()),
@@ -209,10 +209,10 @@ mod tests {
     async fn the_ca_secret_is_read_or_created_once() {
         let cluster = FakeCluster::new();
         // first start: created, with both keys
-        let first = load_or_create_ca(&cluster, "attache-system", "attache-ca")
+        let first = load_or_create_ca(&cluster, "agentsc-system", "agentsc-ca")
             .await
             .unwrap();
-        let stored = cluster.secret("attache-system", "attache-ca").unwrap();
+        let stored = cluster.secret("agentsc-system", "agentsc-ca").unwrap();
         assert_eq!(stored.type_.as_deref(), Some("Opaque"));
         assert_eq!(
             secret_text(&stored, "ca.crt").unwrap().trim(),
@@ -224,7 +224,7 @@ mod tests {
                 .contains("PRIVATE KEY")
         );
         // later starts: the same CA
-        let again = load_or_create_ca(&cluster, "attache-system", "attache-ca")
+        let again = load_or_create_ca(&cluster, "agentsc-system", "agentsc-ca")
             .await
             .unwrap();
         assert_eq!(again.roots_pem(), first.roots_pem());
@@ -233,30 +233,30 @@ mod tests {
     #[tokio::test]
     async fn an_existing_v01_ca_is_reused_and_bad_ones_are_named() {
         let cluster = FakeCluster::new();
-        let ca = attache_pki::ca_init().unwrap();
+        let ca = agentsc_pki::ca_init().unwrap();
         cluster.put_secret(
-            "attache-demo",
-            "attache-ca",
+            "agentsc-demo",
+            "agentsc-ca",
             &[("ca.crt", &ca.cert_pem), ("ca.key", &ca.key_pem)],
         );
-        let m = load_or_create_ca(&cluster, "attache-demo", "attache-ca")
+        let m = load_or_create_ca(&cluster, "agentsc-demo", "agentsc-ca")
             .await
             .unwrap();
         assert_eq!(
-            attache_pki::certs_from_pem(m.roots_pem()).unwrap(),
-            attache_pki::certs_from_pem(&ca.cert_pem).unwrap()
+            agentsc_pki::certs_from_pem(m.roots_pem()).unwrap(),
+            agentsc_pki::certs_from_pem(&ca.cert_pem).unwrap()
         );
 
-        cluster.put_secret("attache-demo", "broken", &[("ca.crt", &ca.cert_pem)]);
+        cluster.put_secret("agentsc-demo", "broken", &[("ca.crt", &ca.cert_pem)]);
         let e = format!(
             "{:#}",
-            load_or_create_ca(&cluster, "attache-demo", "broken")
+            load_or_create_ca(&cluster, "agentsc-demo", "broken")
                 .await
                 .err()
                 .unwrap()
         );
         assert!(
-            e.contains("attache-demo/broken") && e.contains("ca.key"),
+            e.contains("agentsc-demo/broken") && e.contains("ca.key"),
             "{e}"
         );
 
@@ -264,7 +264,7 @@ mod tests {
         cluster.refuse_secret_creates();
         let e = format!(
             "{:#}",
-            load_or_create_ca(&cluster, "elsewhere", "attache-ca")
+            load_or_create_ca(&cluster, "elsewhere", "agentsc-ca")
                 .await
                 .err()
                 .unwrap()
@@ -275,19 +275,19 @@ mod tests {
     #[tokio::test]
     async fn a_lost_creation_race_uses_the_winners_ca() {
         let cluster = FakeCluster::new();
-        let winner = attache_pki::ca_init().unwrap();
+        let winner = agentsc_pki::ca_init().unwrap();
         // the Secret appears between our read and our create
         cluster.create_secret_on_next_create(
-            "attache-system",
-            "attache-ca",
+            "agentsc-system",
+            "agentsc-ca",
             &[("ca.crt", &winner.cert_pem), ("ca.key", &winner.key_pem)],
         );
-        let m = load_or_create_ca(&cluster, "attache-system", "attache-ca")
+        let m = load_or_create_ca(&cluster, "agentsc-system", "agentsc-ca")
             .await
             .unwrap();
         assert_eq!(
-            attache_pki::certs_from_pem(m.roots_pem()).unwrap(),
-            attache_pki::certs_from_pem(&winner.cert_pem).unwrap()
+            agentsc_pki::certs_from_pem(m.roots_pem()).unwrap(),
+            agentsc_pki::certs_from_pem(&winner.cert_pem).unwrap()
         );
     }
 

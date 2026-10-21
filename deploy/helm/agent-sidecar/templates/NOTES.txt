@@ -5,10 +5,10 @@ agent-sidecar {{ .Chart.AppVersion }} is installed in namespace {{ .Release.Name
      kubectl -n {{ .Release.Namespace }} rollout status deployment/embassy-ca deployment/embassy
 
 2. Enable injection for a namespace and give each service a Charter:
-     kubectl label namespace <ns> attache.io/injection=enabled
-     attache charter to-cr <service>.charter.yaml | kubectl apply -f -
-   Pods get the attached sidecar when they carry the label attache.io/inject: "true" and the
-   annotations attache.io/service: <service> and attache.io/app-port: "<port>". The pod's service
+     kubectl label namespace <ns> agentsc.io/injection=enabled
+     agentsc charter to-cr <service>.charter.yaml | kubectl apply -f -
+   Pods get the agentscd sidecar when they carry the label agentsc.io/inject: "true" and the
+   annotations agentsc.io/service: <service> and agentsc.io/app-port: "<port>". The pod's service
    account must be named like the service or be listed in the charter's service.service_accounts.
 
 3. Open the console:
@@ -19,8 +19,8 @@ agent-sidecar {{ .Chart.AppVersion }} is installed in namespace {{ .Release.Name
      embassy token create --name <you> --role admin --payloads
 {{- end }}
 
-Writing Charter resources is equivalent to the attache admin role for that service; grant the
-attache-charter-edit ClusterRole accordingly.
+Writing Charter resources is equivalent to the agentsc admin role for that service; grant the
+agentsc-charter-edit ClusterRole accordingly.
 {{- if .Values.crds.install }}
-The charters.attache.io CRD is kept when the release is uninstalled.
+The charters.agentsc.io CRD is kept when the release is uninstalled.
 {{- end }}

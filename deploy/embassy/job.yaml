@@ -3,22 +3,22 @@ kind: Job
 metadata:
   name: embassy-bootstrap
   labels:
-    attache.io/component: embassy
+    agentsc.io/component: embassy
 spec:
   backoffLimit: 4
   ttlSecondsAfterFinished: 3600
   template:
     metadata:
       labels:
-        attache.io/component: embassy
+        agentsc.io/component: embassy
     spec:
       serviceAccountName: embassy
       restartPolicy: OnFailure
       containers:
         - name: embassy
-          image: attache/embassy:dev
+          image: agentsc/embassy:dev
           imagePullPolicy: IfNotPresent
-          args: ["bootstrap", "--namespace", "attache-demo", "--services", "orders,inventory"]
+          args: ["bootstrap", "--namespace", "agentsc-demo", "--services", "orders,inventory"]
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

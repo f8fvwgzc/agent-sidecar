@@ -1,0 +1,12 @@
+syntax = "proto3";
+package agentsc.v1alpha1;
+
+import "agentsc/v1alpha1/common.proto";
+
+// Served by agentscd on 0.0.0.0:50002 over mTLS for other pods' sidecars.
+// Caller identity = URI SAN of the client certificate. Metadata: traceparent,
+// x-agentsc-request-id, x-agentsc-agent.
+service Mesh {
+  rpc InvokeAgent(InvokeAgentRequest) returns (InvokeAgentResponse);
+  rpc InvokeService(ServiceRequest) returns (ServiceResponse);
+}

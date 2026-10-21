@@ -66,7 +66,7 @@ export function nodeBox(node, opts = {}) {
 
 /**
  * The canvas point of a port. A port the node does not declare (an undeclared edge naming a
- * tool the node no longer has) attaches to the node's border instead.
+ * tool the node no longer has) agentscs to the node's border instead.
  */
 export function portPoint(box, pos, side, name) {
   const list = side === 'in' ? box.inPorts : box.outPorts;

@@ -1,6 +1,6 @@
-from attache_runtime.models import MockModel, model_for
-from attache_runtime.prompts import load_skill_tool, reflection_system
-from attache_runtime.spec import Skill
+from agentsc_runtime.models import MockModel, model_for
+from agentsc_runtime.prompts import load_skill_tool, reflection_system
+from agentsc_runtime.spec import Skill
 
 
 def tool(name: str, desc: str, props=None, required=None):

@@ -3,9 +3,9 @@ import threading
 
 import pytest
 
-from attache_runtime import pricing
-from attache_runtime.agent import run_agent
-from attache_runtime.models import MockModel, ModelError, ModelResponse
+from agentsc_runtime import pricing
+from agentsc_runtime.agent import run_agent
+from agentsc_runtime.models import MockModel, ModelError, ModelResponse
 
 
 def run(coro):

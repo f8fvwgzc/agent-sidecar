@@ -279,9 +279,9 @@ mod tests {
     use crate::cp_audit::CpAudit;
     use crate::k8s::client::WebhookKind;
     use crate::k8s::fake::FakeCluster;
+    use agentsc_proto::CertificateRequest;
+    use agentsc_proto::certificate_authority_client::CertificateAuthorityClient;
     use arc_swap::ArcSwap;
-    use attache_proto::CertificateRequest;
-    use attache_proto::certificate_authority_client::CertificateAuthorityClient;
     use clap::Parser;
     use sha2::{Digest, Sha256};
 
@@ -300,7 +300,7 @@ mod tests {
         let args = Cli::try_parse_from(std::iter::once("serve").chain(args.iter().copied()))
             .unwrap()
             .serve;
-        let ca = attache_pki::ca_init().unwrap();
+        let ca = agentsc_pki::ca_init().unwrap();
         let ca = Arc::new(CaMaterial::from_pems(&ca.cert_pem, &ca.key_pem).unwrap());
         let serving = ServingCertSource::in_memory(ca.clone(), vec!["localhost".into()]).unwrap();
         let mut config = ControlPlaneConfig::default();
@@ -382,12 +382,12 @@ mod tests {
             .await
             .unwrap()
             .into_inner();
-        let der = attache_pki::certs_from_pem(&resp.cert_pem)
+        let der = agentsc_pki::certs_from_pem(&resp.cert_pem)
             .unwrap()
             .remove(0);
         assert_eq!(
-            attache_pki::uri_sans_of(&der).unwrap(),
-            ["spiffe://attache/ns/demo/svc/orders"]
+            agentsc_pki::uri_sans_of(&der).unwrap(),
+            ["spiffe://agentsc/ns/demo/svc/orders"]
         );
         assert_eq!(resp.ca_pem, r.ca.roots_pem());
         finish(&r.ctx, tasks).await;
@@ -413,7 +413,7 @@ mod tests {
             "--tls-dir",
             "/tls",
             "--injector-image",
-            "attache/attached:dev",
+            "agentsc/agentscd:dev",
         ]);
         let listener = local().await;
         let addr = listener.local_addr().unwrap();
@@ -436,7 +436,7 @@ mod tests {
         let review = serde_json::json!({
             "apiVersion": "admission.k8s.io/v1", "kind": "AdmissionReview",
             "request": {"uid": "u1", "namespace": "shop", "operation": "CREATE", "userInfo": {},
-                        "object": {"metadata": {"labels": {"attache.io/inject": "true"}}, "spec": {"containers": []}}}
+                        "object": {"metadata": {"labels": {"agentsc.io/inject": "true"}}, "spec": {"containers": []}}}
         });
         let resp: serde_json::Value = client
             .post(format!("https://localhost:{}/mutate", addr.port()))
@@ -453,7 +453,7 @@ mod tests {
             resp["response"]["status"]["message"]
                 .as_str()
                 .unwrap()
-                .contains("attache.io/service")
+                .contains("agentsc.io/service")
         );
         finish(&r.ctx, tasks).await;
     }
@@ -466,15 +466,15 @@ mod tests {
             "--ca-dir",
             "/ca",
             "--tls-secret",
-            "attache-system/embassy-tls",
+            "agentsc-system/embassy-tls",
             "--dns-name",
             "localhost",
         ]);
         let cluster = Arc::new(FakeCluster::new());
         cluster.put_webhook_config(
             WebhookKind::Mutating,
-            "attache-sidecar-injector",
-            serde_json::json!({"webhooks": [{"name": "sidecar-injector.attache.io", "clientConfig": {}}]}),
+            "agentsc-sidecar-injector",
+            serde_json::json!({"webhooks": [{"name": "sidecar-injector.agentsc.io", "clientConfig": {}}]}),
         );
         let tasks = spawn_with(
             r.ctx.clone(),
@@ -493,9 +493,9 @@ mod tests {
         );
         let mut done = false;
         for _ in 0..300 {
-            let secret = cluster.secret("attache-system", "embassy-tls");
+            let secret = cluster.secret("agentsc-system", "embassy-tls");
             let bundle = cluster
-                .webhook_config(WebhookKind::Mutating, "attache-sidecar-injector")
+                .webhook_config(WebhookKind::Mutating, "agentsc-sidecar-injector")
                 .and_then(|c| {
                     c["webhooks"][0]["clientConfig"]["caBundle"]
                         .as_str()

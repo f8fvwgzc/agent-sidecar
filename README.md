@@ -12,21 +12,21 @@
 
 agent-sidecar brings AgentSecOps to LLM agents: identity, policy, budgets, guardrails and audit, owned by the platform instead of by each app. Agents run on Claude, or on a built-in mock model for offline tests.
 
-**Naming.** The code still uses its working name, attache: the sidecar is `attached`, the CLI is `attache`, the CA is `embassy`, the runtime is `attache-runtime`, charters use `apiVersion: attache.io/v1alpha1`, and identities look like `spiffe://attache/ns/<ns>/svc/<svc>`.
+**Naming.** `agentsc` is the short name of agent-sidecar, used in all code: the sidecar is `agentscd`, the CLI is `agentsc`, the CA is `embassy`, the runtime is `agentsc-runtime`, charters use `apiVersion: agentsc.io/v1alpha1`, and identities look like `spiffe://agentsc/ns/<ns>/svc/<svc>`.
 
 ## What you get
 
 - **Any language, no SDK.** Your app calls its sidecar on localhost: HTTP on `127.0.0.1:3500` or gRPC on `127.0.0.1:50001`.
 - **One YAML charter per service.** Every tool call an agent makes is checked against it, including calls to other services. Model calls are bounded by its budgets.
-- **mTLS identity per service.** Each service gets `spiffe://attache/ns/<ns>/svc/<svc>`. The called sidecar decides which peers and which of their agents may call.
+- **mTLS identity per service.** Each service gets `spiffe://agentsc/ns/<ns>/svc/<svc>`. The called sidecar decides which peers and which of their agents may call.
 - **Budgets and guardrails.** Tokens per model call, invocations per minute, cost per day, steps per run, input size, regex deny rules on input and output, and PII redaction of the agent's output.
-- **One JSONL audit line per action.** The sidecar writes them to stdout (or to a file with `audit.sink: file`). Read them with `kubectl logs` or `attache logs`.
+- **One JSONL audit line per action.** The sidecar writes them to stdout (or to a file with `audit.sink: file`). Read them with `kubectl logs` or `agentsc logs`.
 
 ```mermaid
 flowchart LR
   subgraph podA["pod: orders"]
-    A["app (any language)"] -->|"HTTP or gRPC on localhost"| S["sidecar (attached)"]
-    S ---|"gRPC on a unix socket"| R["runtime (attache-runtime)"]
+    A["app (any language)"] -->|"HTTP or gRPC on localhost"| S["sidecar (agentscd)"]
+    S ---|"gRPC on a unix socket"| R["runtime (agentsc-runtime)"]
   end
   R -->|"model API"| C["Claude"]
   subgraph podB["pod: inventory"]
@@ -67,7 +67,7 @@ A tool call that is denied inside the run does not fail the request. It appears 
 ## A charter
 
 ```yaml
-apiVersion: attache.io/v1alpha1
+apiVersion: agentsc.io/v1alpha1
 kind: Charter
 service: { name: inventory, namespace: shop, app_port: 8000 }
 agents:
@@ -91,7 +91,7 @@ authz:
 audit: { sink: stdout }
 ```
 
-Check a charter with `cargo run -p attache-cli -- charter validate <file>`.
+Check a charter with `cargo run -p agentsc-cli -- charter validate <file>`.
 
 ## Docs
 
@@ -109,7 +109,7 @@ Check a charter with `cargo run -p attache-cli -- charter validate <file>`.
 
 This is a `v1alpha1` MVP. It is **not production-ready**. The most important limits:
 
-- Sidecar injection is manual. There is no mutating webhook; you write the `attached` container into each Deployment.
+- Sidecar injection is manual. There is no mutating webhook; you write the `agentscd` container into each Deployment.
 - Certificates are per service, issued by a bootstrap Job, with no rotation. The Job keeps its CA Secret in its own namespace, so each namespace gets its own CA. Cross-namespace mesh calls do not work out of the box.
 - Budgets live in memory in each sidecar replica. They are not shared across replicas, and they reset when the sidecar restarts.
 - The runtime runs as a child process in the same container as the sidecar.

@@ -1,9 +1,9 @@
 // Per-viewer conveniences kept in localStorage: node positions (design §11 key
-// `attache.positions.v1`) and the namespace/service filter. Storage can be missing or throw
+// `agentsc.positions.v1`) and the namespace/service filter. Storage can be missing or throw
 // (private windows, blocked site data); the console works the same without it.
 
-export const POSITIONS_KEY = 'attache.positions.v1';
-const FILTERS_KEY = 'attache.filters.v1';
+export const POSITIONS_KEY = 'agentsc.positions.v1';
+const FILTERS_KEY = 'agentsc.filters.v1';
 
 function storage() {
   try {

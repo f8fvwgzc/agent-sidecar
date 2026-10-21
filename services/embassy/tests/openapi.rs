@@ -90,10 +90,10 @@ fn openapi_document_is_consistent() {
     }
     assert_eq!(
         doc["components"]["securitySchemes"]["session"]["name"],
-        "attache_session"
+        "agentsc_session"
     );
     assert_eq!(
         doc["components"]["parameters"]["Csrf"]["name"],
-        "X-Attache-CSRF"
+        "X-Agentsc-CSRF"
     );
 }

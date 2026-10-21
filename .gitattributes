@@ -1,7 +1,7 @@
 * text=auto eol=lf
 
 # Generated code: keep it out of diffs and out of the language statistics.
-runtime/src/attache_runtime/pb/** linguist-generated=true
+runtime/src/agentsc_runtime/pb/** linguist-generated=true
 schemas/charter.schema.json linguist-generated=true
 Cargo.lock linguist-generated=true
 runtime/uv.lock linguist-generated=true

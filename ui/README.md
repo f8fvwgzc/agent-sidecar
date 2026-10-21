@@ -1,4 +1,4 @@
-# attache console (`ui/`)
+# agentsc console (`ui/`)
 
 The node-graph console of design §11 (`docs/design/agent-platform.md`). Static files, no build step.
 The console only shows what a real control plane returns: it talks to the REST/SSE API under

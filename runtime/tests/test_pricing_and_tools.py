@@ -2,9 +2,9 @@ import asyncio
 
 import pytest
 
-from attache_runtime import pricing
-from attache_runtime.spec import ToolSpec
-from attache_runtime.tools import ToolDenied, fill_path, run_tool, with_query
+from agentsc_runtime import pricing
+from agentsc_runtime.spec import ToolSpec
+from agentsc_runtime.tools import ToolDenied, fill_path, run_tool, with_query
 
 
 def test_pricing():

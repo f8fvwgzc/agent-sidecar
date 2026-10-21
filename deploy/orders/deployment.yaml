@@ -4,7 +4,7 @@ metadata:
   name: orders
   labels:
     app: orders
-    attache.io/service: orders
+    agentsc.io/service: orders
 spec:
   replicas: 1
   selector:
@@ -14,60 +14,60 @@ spec:
     metadata:
       labels:
         app: orders
-        attache.io/service: orders
+        agentsc.io/service: orders
       annotations:
-        attache.io/inject: "false"   # injection is explicit in the MVP: the sidecar is written out below
+        agentsc.io/inject: "false"   # injection is explicit in the MVP: the sidecar is written out below
     spec:
       containers:
         - name: app
-          image: attache/orders:dev
+          image: agentsc/orders:dev
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: 8080
           env:
-            - name: ATTACHE_URL
+            - name: AGENTSC_URL
               value: http://127.0.0.1:3500
           readinessProbe:
             httpGet: { path: /healthz, port: 8080 }
           resources:
             requests: { cpu: 10m, memory: 32Mi }
-        - name: attached
-          image: attache/attached:dev
+        - name: agentscd
+          image: agentsc/agentscd:dev
           imagePullPolicy: IfNotPresent
           ports:
             - name: mesh
               containerPort: 50002
           env:
-            - name: ATTACHE_CHARTER
-              value: /etc/attache/charter/charter.yaml
-            - name: ATTACHE_TLS_DIR
-              value: /etc/attache/tls
+            - name: AGENTSC_CHARTER
+              value: /etc/agentsc/charter/charter.yaml
+            - name: AGENTSC_TLS_DIR
+              value: /etc/agentsc/tls
             - name: RUST_LOG
               value: info
             - name: ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: attache-anthropic
+                  name: agentsc-anthropic
                   key: ANTHROPIC_API_KEY
                   optional: true
           volumeMounts:
             - name: charter
-              mountPath: /etc/attache/charter
+              mountPath: /etc/agentsc/charter
               readOnly: true
             - name: tls
-              mountPath: /etc/attache/tls
+              mountPath: /etc/agentsc/tls
               readOnly: true
             - name: run
-              mountPath: /run/attache
+              mountPath: /run/agentsc
           readinessProbe:
             exec:
-              command: ["attache-ready"]
+              command: ["agentsc-ready"]
             initialDelaySeconds: 3
             periodSeconds: 5
           livenessProbe:
             exec:
-              command: ["attache-ready"]
+              command: ["agentsc-ready"]
             initialDelaySeconds: 20
             periodSeconds: 20
             failureThreshold: 6
@@ -83,6 +83,6 @@ spec:
             name: orders-charter
         - name: tls
           secret:
-            secretName: attache-cert-orders
+            secretName: agentsc-cert-orders
         - name: run
           emptyDir: {}

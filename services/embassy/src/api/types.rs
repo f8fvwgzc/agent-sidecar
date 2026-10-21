@@ -832,7 +832,7 @@ impl Decision {
 }
 
 /// A sidecar audit record (CONTRACT.md §6) as the API serves it: the shared lenient view of
-/// design §5, `attache_common::audit::AuditRecordView`, which the CLI and the OpenTelemetry
+/// design §5, `agentsc_common::audit::AuditRecordView`, which the CLI and the OpenTelemetry
 /// exporter read too.
 ///
 /// - `kind`, `direction` and `decision` are any string.
@@ -843,10 +843,10 @@ impl Decision {
 /// - Top-level fields this build does not know are kept in `extra` and serialized again
 ///   unchanged, so a record from a newer sidecar is served as it arrived — except to a caller
 ///   that does not see payloads ([`AuditRecordExt::without_payloads`]).
-pub use attache_common::audit::AuditRecordView as AuditRecord;
-/// Token usage of a record (`attache_common::audit::TokensView`): `input` and `output` (0 when
+pub use agentsc_common::audit::AuditRecordView as AuditRecord;
+/// Token usage of a record (`agentsc_common::audit::TokensView`): `input` and `output` (0 when
 /// absent), and any counter a newer sidecar adds, kept and served again as written.
-pub use attache_common::audit::TokensView as Tokens;
+pub use agentsc_common::audit::TokensView as Tokens;
 
 /// What the API does with an [`AuditRecord`] (a trait: the record type is the shared one).
 pub trait AuditRecordExt: Sized {
@@ -1305,7 +1305,7 @@ mod tests {
     fn record() -> Value {
         json!({
             "ts": "2026-10-21T10:00:00.000Z", "kind": "config", "request_id": "r", "trace_id": "t",
-            "span_id": "s", "parent_span_id": null, "service": "orders", "namespace": "attache-demo",
+            "span_id": "s", "parent_span_id": null, "service": "orders", "namespace": "agentsc-demo",
             "agent": null, "caller": "control-plane", "caller_agent": null, "callee": "charter",
             "direction": "internal", "input": {"version": "3"}, "output": null, "input_sha256": null,
             "output_sha256": null, "tokens": null, "cost_usd": null, "latency_ms": 0,
@@ -1390,7 +1390,7 @@ mod tests {
         assert_eq!(hidden["tokens"]["cache_read"], json!(7));
     }
 
-    /// The shape `attache_common::audit::AuditRecordView` (A1) has: what the CLI and the
+    /// The shape `agentsc_common::audit::AuditRecordView` (A1) has: what the CLI and the
     /// OpenTelemetry exporter accept, embassy accepts and serves the same way. This must keep
     /// passing when `AuditRecord` becomes that type.
     #[test]

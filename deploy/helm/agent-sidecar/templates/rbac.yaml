@@ -2,21 +2,21 @@
 RBAC as design §13, plus `delete` on charters: §10 DELETE /services/{ns}/{svc} (admin) has the
 kubernetes store delete the service's Charter (§8.4 "delete service"; its ControllerRevisions go
 with it through their owner reference), which §13's verb list leaves out. ClusterRole
-attache-embassy is bound to both control-plane service accounts. The Secret Role is bound to embassy-ca only, so embassy-ca is the only workload that can
+agentsc-embassy is bound to both control-plane service accounts. The Secret Role is bound to embassy-ca only, so embassy-ca is the only workload that can
 read the CA key; embassy reads embassy-tls, the config and the session key as mounted volumes.
 No ConfigMap permissions anywhere.
 */ -}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: attache-embassy
+  name: agentsc-embassy
   labels:
     {{- include "agent-sidecar.labels" . | nindent 4 }}
 rules:
-  - apiGroups: ["attache.io"]
+  - apiGroups: ["agentsc.io"]
     resources: ["charters"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["attache.io"]
+  - apiGroups: ["agentsc.io"]
     resources: ["charters/status"]
     verbs: ["get", "update", "patch"]
   - apiGroups: ["apps"]
@@ -36,13 +36,13 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: attache-embassy
+  name: agentsc-embassy
   labels:
     {{- include "agent-sidecar.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: attache-embassy
+  name: agentsc-embassy
 subjects:
   - kind: ServiceAccount
     name: embassy-ca
@@ -51,7 +51,7 @@ subjects:
     name: embassy
     namespace: {{ .Release.Namespace }}
 ---
-# Secrets in the control-plane namespace: the CA (attache-ca), the serving certificate that
+# Secrets in the control-plane namespace: the CA (agentsc-ca), the serving certificate that
 # embassy-ca creates and renews (embassy-tls) and the session key. Kubernetes cannot restrict
 # `create` by resourceNames (the name is not known when a create is authorized), so `create` is a
 # separate rule without names: embassy-ca can create any Secret in this namespace, but read and
@@ -59,7 +59,7 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: attache-embassy-secrets
+  name: agentsc-embassy-secrets
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "agent-sidecar.labels" . | nindent 4 }}
@@ -78,14 +78,14 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: attache-embassy-secrets
+  name: agentsc-embassy-secrets
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "agent-sidecar.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: attache-embassy-secrets
+  name: agentsc-embassy-secrets
 subjects:
   - kind: ServiceAccount
     name: embassy-ca
@@ -100,7 +100,7 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: attache-embassy-existing-ca
+  name: agentsc-embassy-existing-ca
   namespace: {{ index $ref 0 }}
   labels:
     {{- include "agent-sidecar.labels" $ | nindent 4 }}
@@ -113,26 +113,26 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: attache-embassy-existing-ca
+  name: agentsc-embassy-existing-ca
   namespace: {{ index $ref 0 }}
   labels:
     {{- include "agent-sidecar.labels" $ | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: attache-embassy-existing-ca
+  name: agentsc-embassy-existing-ca
 subjects:
   - kind: ServiceAccount
     name: embassy-ca
     namespace: {{ $.Release.Namespace }}
 {{- end }}
 ---
-# For users. Writing a Charter is equivalent to the attache admin role for that service: the
+# For users. Writing a Charter is equivalent to the agentsc admin role for that service: the
 # validating webhook checks it, but no role-on-diff check applies to kubectl.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: attache-charter-view
+  name: agentsc-charter-view
   labels:
     {{- include "agent-sidecar.labels" . | nindent 4 }}
     {{- if .Values.rbac.aggregate }}
@@ -141,14 +141,14 @@ metadata:
     rbac.authorization.k8s.io/aggregate-to-admin: "true"
     {{- end }}
 rules:
-  - apiGroups: ["attache.io"]
+  - apiGroups: ["agentsc.io"]
     resources: ["charters", "charters/status"]
     verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: attache-charter-edit
+  name: agentsc-charter-edit
   labels:
     {{- include "agent-sidecar.labels" . | nindent 4 }}
     {{- if .Values.rbac.aggregate }}
@@ -157,9 +157,9 @@ metadata:
     {{- end }}
     {{- end }}
 rules:
-  - apiGroups: ["attache.io"]
+  - apiGroups: ["agentsc.io"]
     resources: ["charters"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"]
-  - apiGroups: ["attache.io"]
+  - apiGroups: ["agentsc.io"]
     resources: ["charters/status"]
     verbs: ["get", "list", "watch"]

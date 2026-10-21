@@ -26,7 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # attache-proto's build script runs protoc (via tonic-prost-build).
+      # agentsc-proto's build script runs protoc (via tonic-prost-build).
       - name: Install protoc
         run: |
           sudo apt-get update
@@ -92,7 +92,7 @@ jobs:
         working-directory: .
         run: |
           make proto
-          pb=runtime/src/attache_runtime/pb
+          pb=runtime/src/agentsc_runtime/pb
           if [ -n "$(git status --porcelain -- "$pb")" ]; then
             git status --short -- "$pb"
             git diff -- "$pb"

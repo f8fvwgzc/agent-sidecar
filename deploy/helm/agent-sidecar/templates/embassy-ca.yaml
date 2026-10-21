@@ -72,13 +72,13 @@ spec:
             - --ca-secret={{ include "agent-sidecar.caSecretRef" . }}
             - --tls-secret={{ $ns }}/{{ include "agent-sidecar.tlsSecretName" . }}
             - --store=kubernetes
-            - --config=/etc/attache/config/config.yaml
+            - --config=/etc/agentsc/config/config.yaml
             {{- range $dnsNames }}
             - --dns-name={{ . }}
             {{- end }}
             - --webhook-config-name={{ include "agent-sidecar.injectorName" . }}
             - --validating-webhook-name={{ include "agent-sidecar.validatorName" . }}
-            - --injector-image={{ include "agent-sidecar.image" (dict "image" .Values.images.attached "root" $) }}
+            - --injector-image={{ include "agent-sidecar.image" (dict "image" .Values.images.agentscd "root" $) }}
             - --cp-namespace={{ $ns }}
           env:
             - name: RUST_LOG
@@ -91,11 +91,11 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            # The Helm-value part of the injected attached container (design §13: "resources and
+            # The Helm-value part of the injected agentscd container (design §13: "resources and
             # securityContext ... from Helm values"), as one JSON object of Kubernetes Container
             # fields. This is the chart's only input to the injector beyond the design's flags; the
             # contract is in the chart README ("What embassy-ca reads from the chart").
-            - name: ATTACHE_INJECT_TEMPLATE
+            - name: AGENTSC_INJECT_TEMPLATE
               value: {{ include "agent-sidecar.injectTemplate" . | quote }}
           ports:
             - name: grpc
@@ -123,7 +123,7 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           volumeMounts:
             - name: config
-              mountPath: /etc/attache/config
+              mountPath: /etc/agentsc/config
               readOnly: true
             - name: tmp
               mountPath: /tmp

@@ -25,9 +25,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime};
 
+use agentsc_common::identity::SpiffeId;
 use anyhow::{Context, anyhow, bail};
 use arc_swap::ArcSwap;
-use attache_common::identity::SpiffeId;
 use rustls::client::danger::HandshakeSignatureValid;
 use rustls::crypto::CryptoProvider;
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
@@ -44,7 +44,7 @@ use tokio::sync::watch;
 use crate::ca::CaMaterial;
 
 /// The URI SAN of the control-plane serving certificate; sidecars check it (design §6.3).
-pub const CONTROL_PLANE_SPIFFE_ID: &str = "spiffe://attache/control-plane";
+pub const CONTROL_PLANE_SPIFFE_ID: &str = "spiffe://agentsc/control-plane";
 /// Lifetime of an in-memory serving certificate (design §7).
 pub const SERVING_CERT_TTL: Duration = Duration::from_secs(30 * 24 * 3600);
 /// How often [`ServingCertSource::from_dir`] looks at the files.
@@ -133,18 +133,18 @@ fn load(
     key_pem: &str,
     ca_pem: &str,
 ) -> anyhow::Result<Loaded> {
-    let chain = attache_pki::certs_from_pem(cert_pem).context("the serving certificate")?;
+    let chain = agentsc_pki::certs_from_pem(cert_pem).context("the serving certificate")?;
     let leaf = chain
         .first()
         .ok_or_else(|| anyhow!("the serving certificate is empty"))?;
-    let not_after = attache_pki::not_after_of(leaf).context("the serving certificate")?;
+    let not_after = agentsc_pki::not_after_of(leaf).context("the serving certificate")?;
     let key = PrivateKeyDer::from_pem_slice(key_pem.as_bytes())
         .map_err(|e| anyhow!("the serving key: {e}"))?;
     let certified = CertifiedKey::from_der(chain.clone(), key, provider)
         .context("the serving key does not fit the serving certificate")?;
 
-    let roots_der = attache_pki::certs_from_pem(ca_pem).context("the CA bundle")?;
-    let ca_pem = attache_pki::certs_to_pem(&roots_der);
+    let roots_der = agentsc_pki::certs_from_pem(ca_pem).context("the CA bundle")?;
+    let ca_pem = agentsc_pki::certs_to_pem(&roots_der);
     let mut roots = RootCertStore::empty();
     for (i, root) in roots_der.into_iter().enumerate() {
         roots
@@ -157,7 +157,7 @@ fn load(
             .context("the client-certificate verifier")?;
     Ok(Loaded {
         pem: Arc::new(ServingCert {
-            cert_pem: attache_pki::certs_to_pem(&chain),
+            cert_pem: agentsc_pki::certs_to_pem(&chain),
             key_pem: key_pem.to_string(),
             ca_pem,
             not_after,
@@ -339,13 +339,13 @@ impl ServingCertSource {
     }
 }
 
-/// The workload identity (`spiffe://attache/ns/<ns>/svc/<svc>`) of a TLS peer, from the
+/// The workload identity (`spiffe://agentsc/ns/<ns>/svc/<svc>`) of a TLS peer, from the
 /// certificates the handshake verified (leaf first): `None` without a certificate, or when the
 /// leaf does not carry exactly one URI SAN of that form. Only meaningful for certificates a
 /// [`ServingCertSource`] configuration verified.
 pub fn peer_identity(certs: &[CertificateDer<'_>]) -> Option<SpiffeId> {
     let leaf = certs.first()?;
-    attache_pki::sole_spiffe_id_of(leaf).ok().flatten()
+    agentsc_pki::sole_spiffe_id_of(leaf).ok().flatten()
 }
 
 /// Serves the current certificate on every handshake.
@@ -549,13 +549,13 @@ mod tests {
     const HOUR: Duration = Duration::from_secs(3600);
 
     fn ca() -> Arc<CaMaterial> {
-        let ca = attache_pki::ca_init().unwrap();
+        let ca = agentsc_pki::ca_init().unwrap();
         Arc::new(CaMaterial::from_pems(&ca.cert_pem, &ca.key_pem).unwrap())
     }
 
     fn dns() -> Vec<String> {
         vec![
-            "embassy.attache-system.svc".to_string(),
+            "embassy.agentsc-system.svc".to_string(),
             "localhost".to_string(),
         ]
     }
@@ -572,14 +572,14 @@ mod tests {
             .unwrap()
             .pem()
             .unwrap();
-        let public = attache_pki::verify_csr_p256(&csr).unwrap();
+        let public = agentsc_pki::verify_csr_p256(&csr).unwrap();
         let leaf = ca.sign_workload(&public, ns, svc, HOUR).unwrap();
         (leaf.cert_pem, key.serialize_pem())
     }
 
     fn client(roots_pem: &str, identity: Option<(&str, &str)>) -> Arc<ClientConfig> {
         let mut roots = RootCertStore::empty();
-        for c in attache_pki::certs_from_pem(roots_pem).unwrap() {
+        for c in agentsc_pki::certs_from_pem(roots_pem).unwrap() {
             roots.add(c).unwrap();
         }
         let b = ClientConfig::builder_with_provider(ServingCertSource::provider())
@@ -589,7 +589,7 @@ mod tests {
         Arc::new(match identity {
             Some((cert, key)) => b
                 .with_client_auth_cert(
-                    attache_pki::certs_from_pem(cert).unwrap(),
+                    agentsc_pki::certs_from_pem(cert).unwrap(),
                     PrivateKeyDer::from_pem_slice(key.as_bytes()).unwrap(),
                 )
                 .unwrap(),
@@ -669,10 +669,10 @@ mod tests {
         assert_eq!(cur.ca_pem, ca.roots_pem());
         let leaf = der(&cur.cert_pem);
         assert_eq!(
-            attache_pki::uri_sans_of(&leaf).unwrap(),
+            agentsc_pki::uri_sans_of(&leaf).unwrap(),
             [CONTROL_PLANE_SPIFFE_ID]
         );
-        assert_eq!(attache_pki::dns_names_of(&leaf).unwrap(), dns());
+        assert_eq!(agentsc_pki::dns_names_of(&leaf).unwrap(), dns());
         assert_eq!(peer_identity(std::slice::from_ref(&leaf)), None);
         let days = cur
             .not_after
@@ -725,7 +725,7 @@ mod tests {
         let required = source.rustls_server_config(ClientAuth::Required);
         let (_, s) = handshake(workload_client(), required.clone()).unwrap();
         let id = s.peer_certificates().and_then(peer_identity).unwrap();
-        assert_eq!(id.uri(), "spiffe://attache/ns/shop/svc/orders");
+        assert_eq!(id.uri(), "spiffe://agentsc/ns/shop/svc/orders");
         let e = handshake(anonymous(), required.clone()).unwrap_err();
         assert!(e.starts_with("server:"), "{e}");
         let e = handshake(foreign(), required).unwrap_err();
@@ -940,7 +940,7 @@ mod tests {
         let ca = ca();
         let (cert, _) = workload(&ca, "shop", "orders");
         let id = peer_identity(&[der(&cert)]).unwrap();
-        assert_eq!(id.uri(), "spiffe://attache/ns/shop/svc/orders");
+        assert_eq!(id.uri(), "spiffe://agentsc/ns/shop/svc/orders");
         assert_eq!(peer_identity(&[]), None);
         assert_eq!(peer_identity(&[der(ca.roots_pem())]), None);
         assert_eq!(peer_identity(&[CertificateDer::from(vec![1, 2, 3])]), None);

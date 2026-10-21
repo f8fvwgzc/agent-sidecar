@@ -2,7 +2,7 @@
 //!
 //! - **Bearer tokens**: `Authorization: Bearer att_...`; the token's SHA-256 is compared in
 //!   constant time with every [`crate::config::TokenEntry::sha256`] (see [`crate::token`]).
-//! - **Sessions**: `POST /login` sets the `attache_session` cookie, an HMAC-SHA256-signed
+//! - **Sessions**: `POST /login` sets the `agentsc_session` cookie, an HMAC-SHA256-signed
 //!   `{token_name, exp}` ([`session`]); the token is looked up again on every request, so a
 //!   session dies when its token leaves the config.
 //! - **Login rate limit**: 5 failures per minute per client IP ([`LoginLimiter`]).

@@ -61,26 +61,26 @@ fn usable(
         text(secret, "tls.key")?,
         text(secret, "ca.crt")?,
     );
-    let their_ca = attache_pki::certs_from_pem(&ca).ok()?;
-    let our_ca = attache_pki::certs_from_pem(ca_pem).ok()?;
+    let their_ca = agentsc_pki::certs_from_pem(&ca).ok()?;
+    let our_ca = agentsc_pki::certs_from_pem(ca_pem).ok()?;
     if their_ca != our_ca {
         return None;
     }
-    let chain = attache_pki::certs_from_pem(&cert).ok()?;
+    let chain = agentsc_pki::certs_from_pem(&cert).ok()?;
     let leaf = chain.first()?;
-    if !attache_pki::uri_sans_of(leaf)
+    if !agentsc_pki::uri_sans_of(leaf)
         .ok()?
         .iter()
         .any(|u| u == CONTROL_PLANE_SPIFFE_ID)
     {
         return None;
     }
-    let theirs: BTreeSet<String> = attache_pki::dns_names_of(leaf).ok()?.into_iter().collect();
+    let theirs: BTreeSet<String> = agentsc_pki::dns_names_of(leaf).ok()?.into_iter().collect();
     let ours: BTreeSet<String> = dns_names.iter().cloned().collect();
     if theirs != ours {
         return None;
     }
-    let not_after = attache_pki::not_after_of(leaf).ok()?;
+    let not_after = agentsc_pki::not_after_of(leaf).ok()?;
     if not_after.duration_since(SystemTime::now()).ok()? <= min_remaining {
         return None;
     }
@@ -220,14 +220,14 @@ mod tests {
     const DAY: Duration = Duration::from_secs(24 * 3600);
 
     fn ca() -> Arc<CaMaterial> {
-        let ca = attache_pki::ca_init().unwrap();
+        let ca = agentsc_pki::ca_init().unwrap();
         Arc::new(CaMaterial::from_pems(&ca.cert_pem, &ca.key_pem).unwrap())
     }
 
     fn dns() -> Vec<String> {
         vec![
-            "embassy.attache-system.svc".into(),
-            "embassy-ca.attache-system.svc".into(),
+            "embassy.agentsc-system.svc".into(),
+            "embassy-ca.agentsc-system.svc".into(),
         ]
     }
 
@@ -237,12 +237,12 @@ mod tests {
     }
 
     fn secret_ref() -> ObjectRef {
-        "attache-system/embassy-tls".parse().unwrap()
+        "agentsc-system/embassy-tls".parse().unwrap()
     }
 
     fn stored_cert(cluster: &FakeCluster) -> String {
         text(
-            &cluster.secret("attache-system", "embassy-tls").unwrap(),
+            &cluster.secret("agentsc-system", "embassy-tls").unwrap(),
             "tls.crt",
         )
         .unwrap()
@@ -262,7 +262,7 @@ mod tests {
                 .unwrap(),
             SyncOutcome::Written
         );
-        let s = cluster.secret("attache-system", "embassy-tls").unwrap();
+        let s = cluster.secret("agentsc-system", "embassy-tls").unwrap();
         assert_eq!(s.type_.as_deref(), Some("kubernetes.io/tls"));
         assert_eq!(text(&s, "tls.key").unwrap(), a.current().key_pem);
         assert_eq!(text(&s, "ca.crt").unwrap(), a.current().ca_pem);
@@ -310,7 +310,7 @@ mod tests {
         // less than min_remaining left in the Secret: not adopted, replaced
         let near = source(&ca, &dns(), 11 * DAY).current();
         cluster.put_secret(
-            "attache-system",
+            "agentsc-system",
             "embassy-tls",
             &[
                 ("tls.crt", &near.cert_pem),
@@ -347,7 +347,7 @@ mod tests {
         );
 
         // garbage in the Secret: replaced
-        cluster.put_secret("attache-system", "embassy-tls", &[("tls.crt", "nope")]);
+        cluster.put_secret("agentsc-system", "embassy-tls", &[("tls.crt", "nope")]);
         assert_eq!(
             sync_once(&cluster, &secret_ref(), &wider, &more, 10 * DAY)
                 .await
@@ -365,7 +365,7 @@ mod tests {
         let cluster = FakeCluster::new();
         let ca = ca();
         let a = source(&ca, &dns(), 30 * DAY);
-        cluster.create_secret_on_next_create("attache-system", "embassy-tls", &[("tls.crt", "x")]);
+        cluster.create_secret_on_next_create("agentsc-system", "embassy-tls", &[("tls.crt", "x")]);
         assert_eq!(
             sync_once(&cluster, &secret_ref(), &a, &dns(), 10 * DAY)
                 .await
@@ -388,7 +388,7 @@ mod tests {
             shutdown.clone(),
         ));
         for _ in 0..200 {
-            if cluster.secret("attache-system", "embassy-tls").is_some() {
+            if cluster.secret("agentsc-system", "embassy-tls").is_some() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;

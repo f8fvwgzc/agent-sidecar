@@ -1,8 +1,8 @@
 //! Every charter write (design §8.3, §8.4): charter validator → policy → role on the diff →
 //! version-skew check → (restart-only fields while instances are connected) → store, and the
 //! control-plane audit record of the attempt.
-use attache_charter::Charter;
-use attache_charter::diff::{self, FirstCharter};
+use agentsc_charter::Charter;
+use agentsc_charter::diff::{self, FirstCharter};
 use serde_json::Value;
 
 use super::error::Fail;
@@ -36,9 +36,9 @@ pub struct Candidate {
     pub json: Value,
 }
 
-fn lines(e: attache_charter::CharterError) -> Vec<String> {
+fn lines(e: agentsc_charter::CharterError) -> Vec<String> {
     match e {
-        attache_charter::CharterError::Invalid(v) => v,
+        agentsc_charter::CharterError::Invalid(v) => v,
         other => vec![other.to_string()],
     }
 }
@@ -76,7 +76,7 @@ pub fn policy_problems(policy: Option<&PolicyConfig>, c: &Charter) -> Vec<String
         return Vec::new();
     };
     let mut out = Vec::new();
-    if p.require_authz_default_deny && c.authz.default != attache_charter::Decision::Deny {
+    if p.require_authz_default_deny && c.authz.default != agentsc_charter::Decision::Deny {
         out.push("policy.require_authz_default_deny: authz.default must be deny".to_string());
     }
     if let Some(allow) = &p.http_origin_allowlist {
@@ -84,9 +84,9 @@ pub fn policy_problems(policy: Option<&PolicyConfig>, c: &Charter) -> Vec<String
             for t in a
                 .tools
                 .iter()
-                .filter(|t| t.tool_type == attache_charter::ToolType::Http)
+                .filter(|t| t.tool_type == agentsc_charter::ToolType::Http)
             {
-                let origin = t.url.as_deref().and_then(attache_charter::http_origin);
+                let origin = t.url.as_deref().and_then(agentsc_charter::http_origin);
                 match origin {
                     Some(o) if allow.contains(&o) => {}
                     Some(o) => out.push(format!(
@@ -103,7 +103,7 @@ pub fn policy_problems(policy: Option<&PolicyConfig>, c: &Charter) -> Vec<String
     }
     if p.forbid_learning_auto {
         for a in &c.agents {
-            if a.learning_or_default().mode == attache_charter::LearningMode::Auto {
+            if a.learning_or_default().mode == agentsc_charter::LearningMode::Auto {
                 out.push(format!(
                     "policy.forbid_learning_auto: agents.{}.learning.mode is auto",
                     a.name
@@ -369,7 +369,7 @@ mod tests {
 
     fn charter(extra: &str) -> Charter {
         Charter::from_yaml(&format!(
-            "apiVersion: attache.io/v1alpha1\nkind: Charter\nservice: {{name: orders, namespace: shop, app_port: 8080}}\n{extra}"
+            "apiVersion: agentsc.io/v1alpha1\nkind: Charter\nservice: {{name: orders, namespace: shop, app_port: 8080}}\n{extra}"
         ))
         .unwrap()
     }

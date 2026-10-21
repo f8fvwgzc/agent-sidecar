@@ -7,12 +7,12 @@ from types import SimpleNamespace
 import grpc
 import pytest
 
-from attache_runtime import models
-from attache_runtime.agent import _now, run_agent
-from attache_runtime.models import MockModel, ModelError, ModelResponse, supports_effort
-from attache_runtime.pb.attache.v1alpha1 import common_pb2
-from attache_runtime.sidecar import AGENT_TIMEOUT, SERVICE_TIMEOUT, GrpcSidecar
-from attache_runtime.tools import HOP_MARGIN, CallContext, ToolDenied, ToolFailed, timeout_for
+from agentsc_runtime import models
+from agentsc_runtime.agent import _now, run_agent
+from agentsc_runtime.models import MockModel, ModelError, ModelResponse, supports_effort
+from agentsc_runtime.pb.agentsc.v1alpha1 import common_pb2
+from agentsc_runtime.sidecar import AGENT_TIMEOUT, SERVICE_TIMEOUT, GrpcSidecar
+from agentsc_runtime.tools import HOP_MARGIN, CallContext, ToolDenied, ToolFailed, timeout_for
 
 
 class FakeStream:
@@ -109,7 +109,7 @@ def test_timestamp_format():
 
 
 def rpc_error(code, rule=None, details="x"):
-    md = grpc.aio.Metadata(("x-attache-rule", rule)) if rule else grpc.aio.Metadata()
+    md = grpc.aio.Metadata(("x-agentsc-rule", rule)) if rule else grpc.aio.Metadata()
     return grpc.aio.AioRpcError(code, grpc.aio.Metadata(), md, details=details)
 
 

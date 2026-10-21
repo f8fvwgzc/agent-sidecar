@@ -140,7 +140,7 @@ impl std::str::FromStr for StoreSpec {
         }
         match s.strip_prefix("file:") {
             Some(dir) if !dir.is_empty() => Ok(Self::File(PathBuf::from(dir))),
-            Some(_) => Err("file: needs a directory, e.g. file:/var/lib/attache".into()),
+            Some(_) => Err("file: needs a directory, e.g. file:/var/lib/agentsc".into()),
             None => Err(format!(
                 "{s:?} is not a store (expected file:<dir> or kubernetes)"
             )),
@@ -199,16 +199,16 @@ pub struct ServeArgs {
     #[arg(long)]
     pub auto_adopt: bool,
     /// The MutatingWebhookConfiguration whose caBundle is kept current.
-    #[arg(long, default_value = "attache-sidecar-injector")]
+    #[arg(long, default_value = "agentsc-sidecar-injector")]
     pub webhook_config_name: String,
     /// The ValidatingWebhookConfiguration whose caBundle is kept current.
-    #[arg(long, default_value = "attache-charter-validator")]
+    #[arg(long, default_value = "agentsc-charter-validator")]
     pub validating_webhook_name: String,
-    /// Image injected as the attached sidecar.
+    /// Image injected as the agentscd sidecar.
     #[arg(long)]
     pub injector_image: Option<String>,
     /// The control plane's own namespace (never issued certificates, never injected).
-    #[arg(long, default_value = "attache-system")]
+    #[arg(long, default_value = "agentsc-system")]
     pub cp_namespace: String,
     /// Serve UI files from this directory instead of the embedded copy (development).
     #[arg(long)]
@@ -473,7 +473,7 @@ fn file_store_validator(
 ) -> Arc<crate::store::file::ExternalValidator> {
     Arc::new(move |key: &crate::store::ServiceKey, yaml: &str| {
         let json = crate::store::file::default_validator(key, yaml)?;
-        let charter = attache_charter::Charter::from_yaml(yaml).map_err(|e| vec![e.to_string()])?;
+        let charter = agentsc_charter::Charter::from_yaml(yaml).map_err(|e| vec![e.to_string()])?;
         let policy = crate::api::write::policy_problems(config.load().policy.as_ref(), &charter);
         if policy.is_empty() {
             Ok(json)
@@ -766,9 +766,9 @@ mod tests {
         assert_eq!(a.http_addr, "127.0.0.1:8080".parse().unwrap());
         assert_eq!(a.grpc_addr, "0.0.0.0:15012".parse().unwrap());
         assert_eq!(a.webhook_addr, "0.0.0.0:9443".parse().unwrap());
-        assert_eq!(a.webhook_config_name, "attache-sidecar-injector");
-        assert_eq!(a.validating_webhook_name, "attache-charter-validator");
-        assert_eq!(a.cp_namespace, "attache-system");
+        assert_eq!(a.webhook_config_name, "agentsc-sidecar-injector");
+        assert_eq!(a.validating_webhook_name, "agentsc-charter-validator");
+        assert_eq!(a.cp_namespace, "agentsc-system");
         assert!(a.store.is_none() && a.config.is_none() && a.dns_names.is_empty());
         assert!(!a.http_tls && !a.auto_adopt && !a.dev);
         // all components need CA material and a store
@@ -792,17 +792,17 @@ mod tests {
             "--webhook-addr",
             "127.0.0.1:9444",
             "--ca-secret",
-            "attache-system/attache-ca",
+            "agentsc-system/agentsc-ca",
             "--tls-secret",
-            "attache-system/embassy-tls",
+            "agentsc-system/embassy-tls",
             "--tls-dir",
-            "/etc/attache/tls",
+            "/etc/agentsc/tls",
             "--store",
-            "file:/var/lib/attache",
+            "file:/var/lib/agentsc",
             "--config",
-            "/etc/attache/config.yaml",
+            "/etc/agentsc/config.yaml",
             "--dns-name",
-            "embassy.attache-system.svc",
+            "embassy.agentsc-system.svc",
             "--dns-name",
             "localhost",
             "--http-tls",
@@ -812,9 +812,9 @@ mod tests {
             "--validating-webhook-name",
             "val",
             "--injector-image",
-            "ghcr.io/x/attached:0.2.0",
+            "ghcr.io/x/agentscd:0.2.0",
             "--cp-namespace",
-            "attache-cp",
+            "agentsc-cp",
             "--ui-dir",
             "ui",
             "--dev",
@@ -826,18 +826,18 @@ mod tests {
         );
         assert_eq!(a.components.to_string(), "controlplane,api,ui");
         assert_eq!(a.http_addr, "[::1]:8081".parse().unwrap());
-        assert_eq!(a.ca_secret.as_ref().unwrap().name, "attache-ca");
+        assert_eq!(a.ca_secret.as_ref().unwrap().name, "agentsc-ca");
         assert_eq!(
             a.tls_secret.as_ref().unwrap().to_string(),
-            "attache-system/embassy-tls"
+            "agentsc-system/embassy-tls"
         );
-        assert_eq!(a.store, Some(StoreSpec::File("/var/lib/attache".into())));
-        assert_eq!(a.dns_names, ["embassy.attache-system.svc", "localhost"]);
+        assert_eq!(a.store, Some(StoreSpec::File("/var/lib/agentsc".into())));
+        assert_eq!(a.dns_names, ["embassy.agentsc-system.svc", "localhost"]);
         assert_eq!(
             a.injector_image.as_deref(),
-            Some("ghcr.io/x/attached:0.2.0")
+            Some("ghcr.io/x/agentscd:0.2.0")
         );
-        assert_eq!(a.cp_namespace, "attache-cp");
+        assert_eq!(a.cp_namespace, "agentsc-cp");
         assert!(a.http_tls && a.auto_adopt && a.dev);
         // CA material and --tls-secret without the ca component
         let e = a.validate().unwrap_err().join("\n");
@@ -859,10 +859,10 @@ mod tests {
             &["--components", "ca,,api"],
             &["--store", "s3://bucket"],
             &["--store", "file:"],
-            &["--ca-secret", "attache-ca"],
+            &["--ca-secret", "agentsc-ca"],
             &["--dns-name", "Bad_Name"],
             &["--http-addr", "localhost"],
-            &["--ca-dir", "/ca", "--ca-secret", "ns/attache-ca"],
+            &["--ca-dir", "/ca", "--ca-secret", "ns/agentsc-ca"],
         ] {
             assert!(parse(args).is_err(), "{args:?} should be refused");
         }
@@ -895,13 +895,13 @@ mod tests {
             "--components",
             "ca,webhook",
             "--ca-secret",
-            "attache-system/attache-ca",
+            "agentsc-system/agentsc-ca",
             "--tls-secret",
-            "attache-system/embassy-tls",
+            "agentsc-system/embassy-tls",
             "--store",
             "kubernetes",
             "--injector-image",
-            "attache/attached:0.2.0",
+            "agentsc/agentscd:0.2.0",
         ])
         .unwrap()
         .validate()
@@ -911,7 +911,7 @@ mod tests {
             "--components",
             "controlplane,api,ui",
             "--tls-dir",
-            "/etc/attache/tls",
+            "/etc/agentsc/tls",
             "--store",
             "kubernetes",
             "--http-addr",
@@ -1009,8 +1009,8 @@ mod tests {
             "{e}"
         );
 
-        let e = errors(&["--components", "ui", "--cp-namespace", "Attache"]);
-        assert!(e.contains("--cp-namespace \"Attache\""), "{e}");
+        let e = errors(&["--components", "ui", "--cp-namespace", "Agentsc"]);
+        assert!(e.contains("--cp-namespace \"Agentsc\""), "{e}");
 
         let e = errors(&["--components", "ui", "--webhook-config-name", "a_b"]);
         assert!(e.contains("--webhook-config-name \"a_b\""), "{e}");
@@ -1024,7 +1024,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
-        std::fs::write(&cfg, "apiVersion: attache.io/v1alpha1\nkind: Charter\n").unwrap();
+        std::fs::write(&cfg, "apiVersion: agentsc.io/v1alpha1\nkind: Charter\n").unwrap();
         let store = format!("file:{}", dir.path().display());
         let a = parse(&[
             "--components",
@@ -1105,15 +1105,15 @@ mod tests {
     async fn the_config_is_reloaded_when_it_changes() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
-        let base = "apiVersion: attache.io/v1alpha1\nkind: ControlPlaneConfig\n";
+        let base = "apiVersion: agentsc.io/v1alpha1\nkind: ControlPlaneConfig\n";
         std::fs::write(&path, base).unwrap();
         let config = Arc::new(ArcSwap::from_pointee(
-            ControlPlaneConfig::load(&path, "attache-system").unwrap(),
+            ControlPlaneConfig::load(&path, "agentsc-system").unwrap(),
         ));
         let stop = CancellationToken::new();
         let task = tokio::spawn(reload_config(
             path.clone(),
-            "attache-system".into(),
+            "agentsc-system".into(),
             config.clone(),
             None,
             Duration::from_millis(20),

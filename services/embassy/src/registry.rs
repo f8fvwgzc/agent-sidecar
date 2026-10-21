@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-use attache_proto::ControlMessage;
+use agentsc_proto::ControlMessage;
 use tokio::sync::mpsc;
 use tonic::Status;
 

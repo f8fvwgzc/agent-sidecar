@@ -1,10 +1,10 @@
 # agent-sidecar chart values (docs/design/agent-platform.md §13).
 #
-# Install into the control-plane namespace (attache-system by convention; the release namespace is
+# Install into the control-plane namespace (agentsc-system by convention; the release namespace is
 # passed to embassy as --cp-namespace and is never injected or issued workload certificates):
-#   helm install agent-sidecar deploy/helm/agent-sidecar -n attache-system --create-namespace
+#   helm install agent-sidecar deploy/helm/agent-sidecar -n agentsc-system --create-namespace
 #
-# Object names are fixed (embassy-ca, embassy, attache-ca, embassy-tls, attache-session-key and the
+# Object names are fixed (embassy-ca, embassy, agentsc-ca, embassy-tls, agentsc-session-key and the
 # two webhook configurations) because the RBAC rules and embassy's flags name them: install the
 # chart once per cluster.
 
@@ -15,10 +15,10 @@ images:
     tag: ""          # default: the chart's appVersion
     digest: ""       # sha256:<64 hex>; wins over tag
     pullPolicy: IfNotPresent
-  # The image the injector adds to labelled pods as the `attached` native sidecar
-  # (embassy-ca --injector-image; a pod may override it with annotation attache.io/sidecar-image).
-  attached:
-    repository: ghcr.io/f8fvwgzc/agent-sidecar/attached
+  # The image the injector adds to labelled pods as the `agentscd` native sidecar
+  # (embassy-ca --injector-image; a pod may override it with annotation agentsc.io/sidecar-image).
+  agentscd:
+    repository: ghcr.io/f8fvwgzc/agent-sidecar/agentscd
     tag: ""
     digest: ""
     pullPolicy: IfNotPresent
@@ -29,7 +29,7 @@ imagePullSecrets: []
 clusterDomain: cluster.local
 
 crds:
-  # Render the charters.attache.io CRD (files/crds links to the generated deploy/crds/ file). It
+  # Render the charters.agentsc.io CRD (files/crds links to the generated deploy/crds/ file). It
   # carries helm.sh/resource-policy: keep, so uninstalling the chart never deletes Charters.
   install: true
 
@@ -47,13 +47,13 @@ auth:
   tokens: []
   sessionKey:
     # A Secret in the release namespace with key `key` (32+ random bytes): the HMAC key for
-    # session cookies. Empty: the chart creates Secret attache-session-key with a random key and
+    # session cookies. Empty: the chart creates Secret agentsc-session-key with a random key and
     # keeps it across upgrades (it reads the live Secret with `lookup`; tools that cannot, such as
     # Argo CD, should set this instead).
     existingSecret: ""
 
 issuance:
-  # Accept Kubernetes projected service-account tokens (TokenReview, audience attache).
+  # Accept Kubernetes projected service-account tokens (TokenReview, audience agentsc).
   kubernetes: true
   workloadCertTTL: 24h          # 1h..720h
   # Join tokens for sidecars outside the cluster, SHA-256 only (embassy token create --join ...):
@@ -75,24 +75,24 @@ events:
 
 ca:
   # Reuse an existing CA Secret (keys ca.crt, ca.key) as "<namespace>/<name>", e.g. the v0.1
-  # attache-demo/attache-ca. embassy-ca then gets read access to that one Secret and never creates
+  # agentsc-demo/agentsc-ca. embassy-ca then gets read access to that one Secret and never creates
   # a CA. ca.crt may hold several roots; the first one matching ca.key signs. Empty: embassy-ca
-  # creates Secret attache-ca in the release namespace on first start.
+  # creates Secret agentsc-ca in the release namespace on first start.
   existingSecret: ""
 
-# Telemetry of injected sidecars: set as environment variables of the injected attached container
-# (through embassy-ca's ATTACHE_INJECT_TEMPLATE, see README.md).
+# Telemetry of injected sidecars: set as environment variables of the injected agentscd container
+# (through embassy-ca's AGENTSC_INJECT_TEMPLATE, see README.md).
 otlp:
   # OTLP/HTTP endpoint (OTEL_EXPORTER_OTLP_ENDPOINT), e.g.
   # http://otel-collector.observability:4318. Empty: no environment endpoint.
   endpoint: ""
   # Globs of charter telemetry.otlp_endpoint values sidecars may use when no environment endpoint
-  # is set (ATTACHE_OTLP_ENDPOINT_ALLOW, attached --otlp-endpoint-allow). Empty: charter endpoints
+  # is set (AGENTSC_OTLP_ENDPOINT_ALLOW, agentscd --otlp-endpoint-allow). Empty: charter endpoints
   # are refused.
   endpointAllow: []
 
-# Defaults for the injected `attached` native sidecar. resources, securityContext (and
-# images.attached.pullPolicy) reach the injector as embassy-ca's ATTACHE_INJECT_TEMPLATE (README.md).
+# Defaults for the injected `agentscd` native sidecar. resources, securityContext (and
+# images.agentscd.pullPolicy) reach the injector as embassy-ca's AGENTSC_INJECT_TEMPLATE (README.md).
 injection:
   # failurePolicy of the mutating webhook. Fail: pods in labelled namespaces are not created while
   # embassy-ca is unavailable (never unprotected). Ignore: they start without a sidecar.
@@ -168,8 +168,8 @@ networkPolicy:
   httpFrom: []
 
 rbac:
-  # Aggregate attache-charter-view into the built-in view, edit and admin ClusterRoles, and
-  # attache-charter-edit into the roles listed below. Writing a Charter is equivalent to the attache
+  # Aggregate agentsc-charter-view into the built-in view, edit and admin ClusterRoles, and
+  # agentsc-charter-edit into the roles listed below. Writing a Charter is equivalent to the agentsc
   # admin role for that service (the webhook validates it, but no role-on-diff check applies).
   aggregate: true
   charterEditAggregatesTo: ["admin"]

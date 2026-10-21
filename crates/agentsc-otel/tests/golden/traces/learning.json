@@ -1,0 +1,91 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "orders"
+            }
+          },
+          {
+            "key": "service.namespace",
+            "value": {
+              "stringValue": "shop"
+            }
+          },
+          {
+            "key": "service.version",
+            "value": {
+              "stringValue": "0.2.0"
+            }
+          },
+          {
+            "key": "agentsc.identity",
+            "value": {
+              "stringValue": "spiffe://agentsc/ns/shop/svc/orders"
+            }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "agentsc-otel",
+            "version": "<version>"
+          },
+          "spans": [
+            {
+              "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "spanId": "812db6295a3a2566",
+              "parentSpanId": "9999999999999999",
+              "name": "learning ops-assistant",
+              "kind": 1,
+              "startTimeUnixNano": "1792576805000000000",
+              "endTimeUnixNano": "1792576805000000000",
+              "attributes": [
+                {
+                  "key": "agentsc.kind",
+                  "value": {
+                    "stringValue": "learning"
+                  }
+                },
+                {
+                  "key": "agentsc.decision",
+                  "value": {
+                    "stringValue": "allow"
+                  }
+                },
+                {
+                  "key": "agentsc.rule",
+                  "value": {
+                    "stringValue": "learning.proposed"
+                  }
+                },
+                {
+                  "key": "agentsc.caller",
+                  "value": {
+                    "stringValue": "local"
+                  }
+                },
+                {
+                  "key": "agentsc.agent",
+                  "value": {
+                    "stringValue": "ops-assistant"
+                  }
+                },
+                {
+                  "key": "agentsc.request_id",
+                  "value": {
+                    "stringValue": "0c4a3f8e-6b1d-4f7e-9c11-2a5d3e4f5a6b"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

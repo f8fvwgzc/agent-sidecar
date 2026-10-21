@@ -34,7 +34,7 @@ export function parseTime(v) {
 export function agentNodeFromRecord(rec) {
   if (!rec || !rec.agent) return null;
   if (rec.direction === "inbound" && rec.kind !== "agent_invocation" && typeof rec.caller === "string") {
-    const m = /^spiffe:\/\/attache\/ns\/([^/]+)\/svc\/([^/]+)$/.exec(rec.caller);
+    const m = /^spiffe:\/\/agentsc\/ns\/([^/]+)\/svc\/([^/]+)$/.exec(rec.caller);
     if (m) return `agent:${m[1]}/${m[2]}/${rec.agent}`;
   }
   return `agent:${rec.namespace}/${rec.service}/${rec.agent}`;

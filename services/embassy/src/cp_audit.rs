@@ -313,7 +313,7 @@ mod tests {
         let mut sidecar = CpAudit::entry(
             CpAction::ConnectDenied,
             &Actor {
-                name: "sidecar:spiffe://attache/ns/shop/svc/orders/orders-0".into(),
+                name: "sidecar:spiffe://agentsc/ns/shop/svc/orders/orders-0".into(),
                 kind: ActorKind::Sidecar,
                 role: None,
             },

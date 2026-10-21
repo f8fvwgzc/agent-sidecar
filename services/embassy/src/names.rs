@@ -14,7 +14,7 @@ pub fn is_dns_label(s: &str) -> bool {
         && b.iter().all(|c| alnum(c) || *c == b'-')
 }
 
-/// A DNS-1123 subdomain (a host name such as `embassy.attache-system.svc`): dot-separated
+/// A DNS-1123 subdomain (a host name such as `embassy.agentsc-system.svc`): dot-separated
 /// labels, at most 253 characters.
 pub fn is_dns_subdomain(s: &str) -> bool {
     s.len() <= 253 && s.split('.').all(is_dns_label)
@@ -27,7 +27,7 @@ pub fn is_sha256_hex(s: &str) -> bool {
             .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
 }
 
-/// A Kubernetes object reference `<namespace>/<name>` (e.g. `--ca-secret attache-system/attache-ca`).
+/// A Kubernetes object reference `<namespace>/<name>` (e.g. `--ca-secret agentsc-system/agentsc-ca`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectRef {
     pub namespace: String,
@@ -66,7 +66,7 @@ mod tests {
 
     #[test]
     fn dns_labels() {
-        for ok in ["a", "orders", "attache-demo", "a1", &"x".repeat(63)] {
+        for ok in ["a", "orders", "agentsc-demo", "a1", &"x".repeat(63)] {
             assert!(is_dns_label(ok), "{ok}");
         }
         for bad in ["", "-a", "a-", "A", "a_b", "a.b", "*", &"x".repeat(64)] {
@@ -76,7 +76,7 @@ mod tests {
 
     #[test]
     fn dns_subdomains() {
-        assert!(is_dns_subdomain("embassy.attache-system.svc"));
+        assert!(is_dns_subdomain("embassy.agentsc-system.svc"));
         assert!(is_dns_subdomain("localhost"));
         assert!(!is_dns_subdomain("embassy..svc"));
         assert!(!is_dns_subdomain(".svc"));
@@ -94,12 +94,12 @@ mod tests {
 
     #[test]
     fn object_refs() {
-        let r: ObjectRef = "attache-system/embassy-tls".parse().unwrap();
-        assert_eq!(r.namespace, "attache-system");
+        let r: ObjectRef = "agentsc-system/embassy-tls".parse().unwrap();
+        assert_eq!(r.namespace, "agentsc-system");
         assert_eq!(r.name, "embassy-tls");
-        assert_eq!(r.to_string(), "attache-system/embassy-tls");
+        assert_eq!(r.to_string(), "agentsc-system/embassy-tls");
         assert!("embassy-tls".parse::<ObjectRef>().is_err());
-        assert!("Attache/x".parse::<ObjectRef>().is_err());
+        assert!("Agentsc/x".parse::<ObjectRef>().is_err());
         assert!("ns/".parse::<ObjectRef>().is_err());
         assert!("ns/a/b".parse::<ObjectRef>().is_err());
     }

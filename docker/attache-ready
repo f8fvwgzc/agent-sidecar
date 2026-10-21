@@ -1,7 +1,0 @@
-#!/bin/sh
-# Readiness probe for the attached container: the app API is bound to 127.0.0.1, so probe from inside.
-exec python3 -c 'import sys,urllib.request
-try:
-    sys.exit(0 if urllib.request.urlopen("http://127.0.0.1:3500/readyz", timeout=2).status == 200 else 1)
-except Exception as e:
-    print(e, file=sys.stderr); sys.exit(1)'

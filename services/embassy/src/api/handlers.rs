@@ -5,7 +5,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::time::Instant;
 
-use attache_charter::Charter;
+use agentsc_charter::Charter;
 use axum::Json;
 use axum::extract::connect_info::ConnectInfo;
 use axum::extract::{FromRequestParts, Path, State};
@@ -328,7 +328,7 @@ pub async fn validate_charter(
     let weakened = before
         .as_ref()
         .and_then(|s| Charter::from_yaml(&s.yaml).ok())
-        .map(|old| attache_charter::diff::weakened(&old, &cand.charter))
+        .map(|old| agentsc_charter::diff::weakened(&old, &cand.charter))
         .unwrap_or_default();
     Ok(Json(ValidateResult {
         charter: cand.json,

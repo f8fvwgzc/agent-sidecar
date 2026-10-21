@@ -97,7 +97,7 @@ fn add_managed(obj: &mut Value, manager: &str, time: &str, subresource: Option<&
             !(e.get("manager").and_then(Value::as_str) == Some(manager)
                 && e.get("subresource").and_then(Value::as_str) == subresource)
         });
-        let mut entry = json!({"manager": manager, "operation": "Update", "apiVersion": "attache.io/v1alpha1", "time": time});
+        let mut entry = json!({"manager": manager, "operation": "Update", "apiVersion": "agentsc.io/v1alpha1", "time": time});
         if let Some(s) = subresource {
             entry["subresource"] = Value::String(s.into());
         }
@@ -175,7 +175,7 @@ impl FakeCluster {
             None => {
                 st.uids += 1;
                 json!({
-                    "apiVersion": "attache.io/v1alpha1", "kind": "Charter",
+                    "apiVersion": "agentsc.io/v1alpha1", "kind": "Charter",
                     "metadata": {"name": name, "namespace": ns,
                                  "uid": format!("00000000-0000-4000-8000-{:012}", st.uids),
                                  "generation": 0, "creationTimestamp": time},

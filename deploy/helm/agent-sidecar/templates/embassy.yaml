@@ -57,9 +57,9 @@ spec:
             - --components=controlplane,api,ui
             - --http-addr=0.0.0.0:8080
             - --grpc-addr=0.0.0.0:15012
-            - --tls-dir=/etc/attache/tls
+            - --tls-dir=/etc/agentsc/tls
             - --store=kubernetes
-            - --config=/etc/attache/config/config.yaml
+            - --config=/etc/agentsc/config/config.yaml
             {{- range $dnsNames }}
             - --dns-name={{ . }}
             {{- end }}
@@ -113,13 +113,13 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           volumeMounts:
             - name: config
-              mountPath: /etc/attache/config
+              mountPath: /etc/agentsc/config
               readOnly: true
             - name: session-key
-              mountPath: /etc/attache/session
+              mountPath: /etc/agentsc/session
               readOnly: true
             - name: tls
-              mountPath: /etc/attache/tls
+              mountPath: /etc/agentsc/tls
               readOnly: true
             - name: tmp
               mountPath: /tmp

@@ -1,0 +1,60 @@
+syntax = "proto3";
+package agentsc.v1alpha1;
+
+message Empty {}
+
+message Usage {
+  uint32 input_tokens = 1;
+  uint32 output_tokens = 2;
+  double cost_usd = 3;
+}
+
+// One step of an invocation, echoed to the caller (the audit log has the full record).
+message Step {
+  string kind = 1;        // model_call | tool_call | agent_call | service_call | http_call | guardrail | budget
+  string name = 2;        // model id, tool name, "svc/agent", "svc METHOD /path", url
+  string decision = 3;    // allow | deny
+  string rule = 4;        // rule name when denied or when a guardrail rewrote
+  uint32 latency_ms = 5;
+  string summary = 6;
+}
+
+// Shared by AppApi.InvokeAgent, Mesh.InvokeAgent and SidecarTools.InvokeAgent (local target).
+message InvokeAgentRequest {
+  string agent = 1;
+  string input = 2;
+  string context_json = 3;   // "" or a JSON object
+  string request_id = 4;     // "" on a top-level call; the sidecar generates one
+  string traceparent = 5;    // "" on a top-level call; the sidecar generates one
+  string caller_agent = 6;   // set by a sidecar when another agent is the caller
+  uint32 depth = 7;          // agent-call nesting depth
+}
+
+message InvokeAgentResponse {
+  string status = 1;         // ok | denied | error
+  string request_id = 2;
+  string trace_id = 3;
+  string agent = 4;
+  string output = 5;
+  Usage usage = 6;
+  repeated Step steps = 7;
+  string rule = 8;           // when status != ok
+  string reason = 9;         // when status != ok
+}
+
+// An HTTP exchange carried over gRPC (mesh and runtime tool calls).
+message ServiceRequest {
+  string method = 1;
+  string path = 2;
+  map<string, string> headers = 3;
+  bytes body = 4;
+  string request_id = 5;
+  string traceparent = 6;
+  string agent = 7;          // calling agent
+}
+
+message ServiceResponse {
+  uint32 status = 1;
+  map<string, string> headers = 2;
+  bytes body = 3;
+}

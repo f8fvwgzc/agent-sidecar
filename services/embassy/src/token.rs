@@ -73,7 +73,7 @@ pub struct CreateArgs {
     #[arg(long, default_value = "8760h", requires = "join")]
     pub expires_in: HumanDuration,
     /// The control-plane namespace (join tokens may not name it).
-    #[arg(long, default_value = "attache-system")]
+    #[arg(long, default_value = "agentsc-system")]
     pub cp_namespace: String,
 }
 
@@ -198,7 +198,7 @@ mod tests {
             "--role",
             "admin",
             "--namespaces",
-            "shop,attache-demo",
+            "shop,agentsc-demo",
             "--payloads",
         ])
         .unwrap();
@@ -214,7 +214,7 @@ mod tests {
                 name: "alice".into(),
                 role: Role::Admin,
                 sha256: sha256_hex(&c.token),
-                namespaces: vec!["shop".into(), "attache-demo".into()],
+                namespaces: vec!["shop".into(), "agentsc-demo".into()],
                 payloads: true,
             }]
         );
@@ -278,7 +278,7 @@ mod tests {
                     "j",
                     "--join",
                     "--namespace",
-                    "attache-system",
+                    "agentsc-system",
                     "--services",
                     "orders",
                 ],

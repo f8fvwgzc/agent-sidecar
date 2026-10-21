@@ -14,10 +14,10 @@ import anthropic
 import httpx2
 import pytest
 
-from attache_runtime import agent, harness, models, pricing
-from attache_runtime.agent import run_agent
-from attache_runtime.models import AnthropicModel, ModelError, ModelResponse
-from attache_runtime.tools import HOP_MARGIN
+from agentsc_runtime import agent, harness, models, pricing
+from agentsc_runtime.agent import run_agent
+from agentsc_runtime.models import AnthropicModel, ModelError, ModelResponse
+from agentsc_runtime.tools import HOP_MARGIN
 
 REQ = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
 

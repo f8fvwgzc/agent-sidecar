@@ -44,10 +44,10 @@
     "images": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["embassy", "attached"],
+      "required": ["embassy", "agentscd"],
       "properties": {
         "embassy": { "$ref": "#/definitions/image" },
-        "attached": { "$ref": "#/definitions/image" }
+        "agentscd": { "$ref": "#/definitions/image" }
       }
     },
     "imagePullSecrets": { "type": "array" },

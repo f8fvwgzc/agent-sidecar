@@ -23,7 +23,7 @@ body:
     id: audit
     attributes:
       label: Audit records or logs
-      description: The audit lines for the request (attache logs --trace <id>) and any sidecar errors. Remove secrets.
+      description: The audit lines for the request (agentsc logs --trace <id>) and any sidecar errors. Remove secrets.
       render: text
   - type: input
     id: commit

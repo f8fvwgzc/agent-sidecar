@@ -2,20 +2,20 @@
 # `make demo-helm`: the v0.2 demo on minikube through the Helm chart (docs/design/agent-platform.md
 # §13). The images are already in minikube's docker (make build). This script installs the chart,
 # waits for embassy-ca to arm the webhooks, enables injection for the demo namespace, makes sure the
-# Secret attache-anthropic exists (ANTHROPIC_API_KEY, empty for the mock model), applies the example
+# Secret agentsc-anthropic exists (ANTHROPIC_API_KEY, empty for the mock model), applies the example
 # charters as Charter resources, deploys the two apps without a sidecar in their spec and runs the
 # demo calls (scripts/demo.sh). Every kubectl and helm call names the context explicitly.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 KUBE_CONTEXT=${KUBE_CONTEXT:-minikube}
-CP_NS=${CP_NS:-attache-system}
+CP_NS=${CP_NS:-agentsc-system}
 RELEASE=${RELEASE:-agent-sidecar}
-ATTACHE=${ATTACHE:-./target/debug/attache}
+AGENTSC=${AGENTSC:-./target/debug/agentsc}
 EMBASSY=${EMBASSY:-./target/debug/embassy}
 TAG=${TAG:-dev}
 # The example charters name this namespace (service.namespace, and inventory's authz identities).
-NS=attache-demo
+NS=agentsc-demo
 TOKEN_FILE=.local/helm-admin-token
 
 kc() { kubectl --context "$KUBE_CONTEXT" "$@"; }
@@ -36,13 +36,13 @@ SHA256=$(sed -n -E 's/^[- ] *sha256: *([0-9a-f]{64})$/\1/p' "$TOKEN_FILE")
 echo "▶ helm upgrade --install $RELEASE (namespace $CP_NS)"
 helm upgrade --install "$RELEASE" deploy/helm/agent-sidecar \
   --kube-context "$KUBE_CONTEXT" --namespace "$CP_NS" --create-namespace \
-  --set images.embassy.repository=attache/embassy --set "images.embassy.tag=$TAG" \
-  --set images.attached.repository=attache/attached --set "images.attached.tag=$TAG" \
+  --set images.embassy.repository=agentsc/embassy --set "images.embassy.tag=$TAG" \
+  --set images.agentscd.repository=agentsc/agentscd --set "images.agentscd.tag=$TAG" \
   --set-json "auth.tokens=[{\"name\":\"demo-admin\",\"role\":\"admin\",\"sha256\":\"$SHA256\",\"namespaces\":[\"*\"],\"payloads\":true}]" \
   --wait --timeout 5m
 
 echo "▶ waiting for embassy-ca to set the webhooks' caBundle"
-for kind in mutatingwebhookconfiguration/attache-sidecar-injector validatingwebhookconfiguration/attache-charter-validator; do
+for kind in mutatingwebhookconfiguration/agentsc-sidecar-injector validatingwebhookconfiguration/agentsc-charter-validator; do
   ca=
   for _ in $(seq 1 60); do
     ca=$(kc get "$kind" -o jsonpath='{.webhooks[0].clientConfig.caBundle}' 2>/dev/null || true)
@@ -54,28 +54,28 @@ done
 
 echo "▶ namespace $NS with injection enabled"
 kc create namespace "$NS" --dry-run=client -o yaml | kc apply -f -
-kc label namespace "$NS" attache.io/injection=enabled --overwrite
+kc label namespace "$NS" agentsc.io/injection=enabled --overwrite
 
-# The apps' annotation attache.io/anthropic-secret names this Secret. It always exists so pods never
+# The apps' annotation agentsc.io/anthropic-secret names this Secret. It always exists so pods never
 # wait for it: with an empty key the runtime uses the mock model. A key set here, or later with
 # `make secret-anthropic`, is never overwritten by a run without one.
 if [[ -n ${ANTHROPIC_API_KEY:-} ]]; then
-  echo "▶ Secret attache-anthropic from ANTHROPIC_API_KEY (real model)"
+  echo "▶ Secret agentsc-anthropic from ANTHROPIC_API_KEY (real model)"
   # The key goes through stdin, not the command line.
   printf %s "$ANTHROPIC_API_KEY" |
-    kc -n "$NS" create secret generic attache-anthropic --from-file=ANTHROPIC_API_KEY=/dev/stdin \
+    kc -n "$NS" create secret generic agentsc-anthropic --from-file=ANTHROPIC_API_KEY=/dev/stdin \
       --dry-run=client -o yaml | kc apply -f -
-elif ! kc -n "$NS" get secret attache-anthropic >/dev/null 2>&1; then
-  echo "▶ Secret attache-anthropic, empty (mock model; make secret-anthropic switches to the real one)"
-  kc -n "$NS" create secret generic attache-anthropic --from-literal=ANTHROPIC_API_KEY=
+elif ! kc -n "$NS" get secret agentsc-anthropic >/dev/null 2>&1; then
+  echo "▶ Secret agentsc-anthropic, empty (mock model; make secret-anthropic switches to the real one)"
+  kc -n "$NS" create secret generic agentsc-anthropic --from-literal=ANTHROPIC_API_KEY=
 fi
 
 echo "▶ Charter resources from examples/charters (validated by the admission webhook)"
 for svc in orders inventory; do
-  "$ATTACHE" charter to-cr "examples/charters/$svc.charter.yaml" | kc apply -f -
+  "$AGENTSC" charter to-cr "examples/charters/$svc.charter.yaml" | kc apply -f -
 done
 
-echo "▶ the demo apps (the webhook injects attached)"
+echo "▶ the demo apps (the webhook injects agentscd)"
 kc apply -f deploy/helm/demo/apps.yaml
 kc -n "$NS" rollout restart deployment/orders deployment/inventory
 kc -n "$NS" rollout status deployment/orders --timeout=300s
@@ -87,12 +87,12 @@ for svc in orders inventory; do
   IFS='|' read -r -a inits <<<"$pods"
   [[ ${#inits[@]} -gt 0 ]] || { echo "✗ no $svc pod" >&2; exit 1; }
   for init in "${inits[@]}"; do
-    [[ " $init " == *" attached "* ]] || { echo "✗ a $svc pod was not injected (init containers: ${init:-none})" >&2; exit 1; }
+    [[ " $init " == *" agentscd "* ]] || { echo "✗ a $svc pod was not injected (init containers: ${init:-none})" >&2; exit 1; }
   done
 done
-echo "✓ both pods run the injected attached sidecar"
+echo "✓ both pods run the injected agentscd sidecar"
 
-ATTACHE=$ATTACHE NS=$NS KUBE_CONTEXT=$KUBE_CONTEXT ./scripts/demo.sh
+AGENTSC=$AGENTSC NS=$NS KUBE_CONTEXT=$KUBE_CONTEXT ./scripts/demo.sh
 
 echo
 echo "console: kubectl --context $KUBE_CONTEXT -n $CP_NS port-forward svc/embassy 8080:8080"

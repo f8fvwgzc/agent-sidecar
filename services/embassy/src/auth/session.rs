@@ -1,4 +1,4 @@
-//! The `attache_session` cookie (design §8.3): `<payload>.<mac>`, both base64url without
+//! The `agentsc_session` cookie (design §8.3): `<payload>.<mac>`, both base64url without
 //! padding; the payload is the JSON `{"token_name": ..., "exp": <unix seconds>}` and the MAC is
 //! HMAC-SHA256 over the encoded payload with the session key.
 use std::time::Duration;
@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
 /// The cookie name.
-pub const COOKIE: &str = "attache_session";
+pub const COOKIE: &str = "agentsc_session";
 /// A session's lifetime.
 pub const LIFETIME: Duration = Duration::from_secs(12 * 3600);
 /// Longer values are refused before any work.
@@ -58,7 +58,7 @@ pub fn verify(key: &[u8], value: &str, now: i64) -> Option<Claims> {
     (claims.exp > now).then_some(claims)
 }
 
-/// The `attache_session` value in a `Cookie` header.
+/// The `agentsc_session` value in a `Cookie` header.
 pub fn from_cookie_header(header: &str) -> Option<&str> {
     header
         .split(';')
@@ -99,11 +99,11 @@ mod tests {
     #[test]
     fn reads_the_cookie_header() {
         assert_eq!(
-            from_cookie_header("a=1; attache_session=xyz.abc; b=2"),
+            from_cookie_header("a=1; agentsc_session=xyz.abc; b=2"),
             Some("xyz.abc")
         );
-        assert_eq!(from_cookie_header("attache_session="), None);
-        assert_eq!(from_cookie_header("attache_sessionx=1"), None);
+        assert_eq!(from_cookie_header("agentsc_session="), None);
+        assert_eq!(from_cookie_header("agentsc_sessionx=1"), None);
         assert_eq!(from_cookie_header("other=1"), None);
     }
 }

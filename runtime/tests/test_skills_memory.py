@@ -10,12 +10,12 @@ from typing import Any
 
 import pytest
 
-from attache_runtime.agent import run_agent
-from attache_runtime.models import MockModel, ModelResponse
-from attache_runtime.pb.attache.v1alpha1 import common_pb2
-from attache_runtime.prompts import NOTES_HEADER, load_skill_tool, notes_block, system_prompt
-from attache_runtime.sidecar import GrpcSidecar
-from attache_runtime.spec import AgentSpec, MemoryNote, Skill
+from agentsc_runtime.agent import run_agent
+from agentsc_runtime.models import MockModel, ModelResponse
+from agentsc_runtime.pb.agentsc.v1alpha1 import common_pb2
+from agentsc_runtime.prompts import NOTES_HEADER, load_skill_tool, notes_block, system_prompt
+from agentsc_runtime.sidecar import GrpcSidecar
+from agentsc_runtime.spec import AgentSpec, MemoryNote, Skill
 
 EXAMPLE = Path(__file__).resolve().parents[2] / "schemas" / "runtime-agent-spec.example.json"
 EXPECTED_NOTES = (

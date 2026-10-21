@@ -24,7 +24,7 @@ use serde_json::Value;
 /// store tells its own writes from kubectl's by it.
 pub const FIELD_MANAGER: &str = "embassy";
 /// `Charter` custom resources: group, version, kind, plural.
-pub const CHARTER_GROUP: &str = "attache.io";
+pub const CHARTER_GROUP: &str = "agentsc.io";
 pub const CHARTER_VERSION: &str = "v1alpha1";
 pub const CHARTER_KIND: &str = "Charter";
 pub const CHARTER_PLURAL: &str = "charters";
@@ -157,7 +157,7 @@ pub trait CharterApi: Send + Sync {
     async fn delete_revision(&self, namespace: &str, name: &str) -> Result<(), ApiError>;
 }
 
-/// The `ApiResource` of `charters.attache.io/v1alpha1`.
+/// The `ApiResource` of `charters.agentsc.io/v1alpha1`.
 pub fn charter_resource() -> ApiResource {
     ApiResource::from_gvk_with_plural(
         &GroupVersionKind::gvk(CHARTER_GROUP, CHARTER_VERSION, CHARTER_KIND),
@@ -473,9 +473,9 @@ mod tests {
     }
 
     #[test]
-    fn the_charter_resource_is_attache_io() {
+    fn the_charter_resource_is_agentsc_io() {
         let ar = charter_resource();
-        assert_eq!(ar.api_version, "attache.io/v1alpha1");
+        assert_eq!(ar.api_version, "agentsc.io/v1alpha1");
         assert_eq!(ar.kind, "Charter");
         assert_eq!(ar.plural, "charters");
     }

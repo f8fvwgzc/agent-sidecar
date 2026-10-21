@@ -1,0 +1,82 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "orders"
+            }
+          },
+          {
+            "key": "service.namespace",
+            "value": {
+              "stringValue": "shop"
+            }
+          },
+          {
+            "key": "service.version",
+            "value": {
+              "stringValue": "0.2.0"
+            }
+          },
+          {
+            "key": "agentsc.identity",
+            "value": {
+              "stringValue": "spiffe://agentsc/ns/shop/svc/orders"
+            }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "agentsc-otel",
+            "version": "<version>"
+          },
+          "spans": [
+            {
+              "traceId": "8b41eee12dbad8346dcf6436c9049315",
+              "spanId": "cfc835739581a375",
+              "name": "config",
+              "kind": 1,
+              "startTimeUnixNano": "1792576680000000000",
+              "endTimeUnixNano": "1792576680000000000",
+              "attributes": [
+                {
+                  "key": "agentsc.kind",
+                  "value": {
+                    "stringValue": "config"
+                  }
+                },
+                {
+                  "key": "agentsc.decision",
+                  "value": {
+                    "stringValue": "allow"
+                  }
+                },
+                {
+                  "key": "agentsc.rule",
+                  "value": {
+                    "stringValue": "cert.renew_failed"
+                  }
+                },
+                {
+                  "key": "agentsc.caller",
+                  "value": {
+                    "stringValue": "file"
+                  }
+                }
+              ],
+              "status": {
+                "message": "cert.renew_failed",
+                "code": 2
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

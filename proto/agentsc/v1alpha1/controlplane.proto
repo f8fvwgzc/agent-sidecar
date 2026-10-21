@@ -1,0 +1,133 @@
+syntax = "proto3";
+package agentsc.v1alpha1;
+
+// Served by embassy (component `controlplane`) on :15012, mTLS with a workload certificate.
+// A sidecar keeps one stream open; see docs/design/agent-platform.md §7.
+service ControlPlane {
+  rpc Connect(stream SidecarMessage) returns (stream ControlMessage);
+}
+
+// Served by embassy (component `ca`) on :15012; client certificates optional.
+service CertificateAuthority {
+  rpc IssueCertificate(CertificateRequest) returns (CertificateResponse);
+}
+
+message SidecarMessage {
+  oneof msg {
+    Hello hello = 1;
+    Heartbeat heartbeat = 2;
+    AuditBatch audit = 3;
+    ConfigAck ack = 4;
+    LearningProposal proposal = 5;
+    SpanStart span_start = 6;
+  }
+}
+
+message Hello {
+  string service = 1;
+  string namespace = 2;
+  string pod = 3;
+  string sidecar_version = 4;
+  string charter_epoch = 5;
+  string charter_version = 6;
+  string charter_yaml = 7;          // local start-up charter, for pending adoption only
+  uint32 app_port = 8;
+  uint32 mesh_port = 9;
+  uint32 charter_schema_level = 10; // 2 for v0.2
+  string memory_version = 11;
+}
+
+message Heartbeat {
+  uint64 seq = 1;
+  bool runtime_ready = 2;
+  string charter_version = 3;
+  uint64 audit_dropped = 4;
+  int64 cert_expires_in_s = 5;
+}
+
+// CONTRACT.md §6 records as JSON, after redaction and truncation.
+message AuditBatch {
+  repeated string records_json = 1;
+}
+
+message ConfigAck {
+  string epoch = 1;
+  string version = 2;
+  bool applied = 3;
+  string error = 4;
+  string kind = 5;                  // charter | memory
+}
+
+// Sent when an invocation or a tool call starts, so the console can draw running work (design §6.4, §11.1).
+// Not an audit record: never written to the audit log or exported to OTel.
+message SpanStart {
+  string request_id = 1;
+  string trace_id = 2;
+  string span_id = 3;
+  string parent_span_id = 4;
+  string kind = 5;           // agent_invocation | agent_call | service_call | http_call
+  string agent = 6;
+  string caller = 7;
+  string caller_agent = 8;
+  string callee = 9;
+  string direction = 10;
+  string ts = 11;            // start time, RFC 3339 with milliseconds
+}
+
+message LearningProposal {
+  string dedup_key = 1;
+  string agent = 2;
+  string note = 3;
+  string rationale = 4;
+  string request_id = 5;
+  string trace_id = 6;
+  bool auto = 7;
+}
+
+message ControlMessage {
+  oneof msg {
+    CharterUpdate charter = 1;
+    MemoryUpdate memory = 2;
+  }
+}
+
+message CharterUpdate {
+  string epoch = 1;
+  string version = 2;
+  string charter_yaml = 3;          // plain Charter document (not CR form)
+}
+
+message Note {
+  string id = 1;
+  string text = 2;
+  string source = 3;
+  string request_id = 4;
+  string trace_id = 5;
+  string approved_by = 6;
+  string ts = 7;
+  string expires_at = 8;
+}
+
+// Full replacement of the memory of the whole service.
+message MemoryUpdate {
+  string version = 1;
+  map<string, NoteList> agents = 2;
+}
+
+message NoteList {
+  repeated Note notes = 1;
+}
+
+message CertificateRequest {
+  string csr_pem = 1;
+  string kubernetes_token = 2;
+  string join_token = 3;
+  string namespace = 4;
+  string service = 5;
+}
+
+message CertificateResponse {
+  string cert_pem = 1;
+  string ca_pem = 2;
+  string expires_at = 3;
+}

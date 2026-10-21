@@ -4,7 +4,7 @@ metadata:
   name: inventory
   labels:
     app: inventory
-    attache.io/service: inventory
+    agentsc.io/service: inventory
 spec:
   replicas: 1
   selector:
@@ -14,13 +14,13 @@ spec:
     metadata:
       labels:
         app: inventory
-        attache.io/service: inventory
+        agentsc.io/service: inventory
       annotations:
-        attache.io/inject: "false"
+        agentsc.io/inject: "false"
     spec:
       containers:
         - name: app
-          image: attache/inventory:dev
+          image: agentsc/inventory:dev
           imagePullPolicy: IfNotPresent
           # No container port: the app listens on 127.0.0.1 only and is reached through the sidecar.
           readinessProbe:
@@ -29,42 +29,42 @@ spec:
             periodSeconds: 5
           resources:
             requests: { cpu: 10m, memory: 64Mi }
-        - name: attached
-          image: attache/attached:dev
+        - name: agentscd
+          image: agentsc/agentscd:dev
           imagePullPolicy: IfNotPresent
           ports:
             - name: mesh
               containerPort: 50002
           env:
-            - name: ATTACHE_CHARTER
-              value: /etc/attache/charter/charter.yaml
-            - name: ATTACHE_TLS_DIR
-              value: /etc/attache/tls
+            - name: AGENTSC_CHARTER
+              value: /etc/agentsc/charter/charter.yaml
+            - name: AGENTSC_TLS_DIR
+              value: /etc/agentsc/tls
             - name: RUST_LOG
               value: info
             - name: ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: attache-anthropic
+                  name: agentsc-anthropic
                   key: ANTHROPIC_API_KEY
                   optional: true
           volumeMounts:
             - name: charter
-              mountPath: /etc/attache/charter
+              mountPath: /etc/agentsc/charter
               readOnly: true
             - name: tls
-              mountPath: /etc/attache/tls
+              mountPath: /etc/agentsc/tls
               readOnly: true
             - name: run
-              mountPath: /run/attache
+              mountPath: /run/agentsc
           readinessProbe:
             exec:
-              command: ["attache-ready"]
+              command: ["agentsc-ready"]
             initialDelaySeconds: 3
             periodSeconds: 5
           livenessProbe:
             exec:
-              command: ["attache-ready"]
+              command: ["agentsc-ready"]
             initialDelaySeconds: 20
             periodSeconds: 20
             failureThreshold: 6
@@ -80,6 +80,6 @@ spec:
             name: inventory-charter
         - name: tls
           secret:
-            secretName: attache-cert-inventory
+            secretName: agentsc-cert-inventory
         - name: run
           emptyDir: {}

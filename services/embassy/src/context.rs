@@ -70,7 +70,7 @@ mod tests {
         .unwrap()
         .serve;
         args.validate().unwrap();
-        let ca = attache_pki::ca_init().unwrap();
+        let ca = agentsc_pki::ca_init().unwrap();
         let ca = Arc::new(CaMaterial::from_pems(&ca.cert_pem, &ca.key_pem).unwrap());
         let serving = ServingCertSource::in_memory(ca.clone(), args.dns_names.clone()).unwrap();
         let ctx = Arc::new(ServeContext {

@@ -1,0 +1,17 @@
+[package]
+name = "agentsc-proto"
+description = "Generated gRPC clients, servers and messages for agentsc (CONTRACT.md §4)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[dependencies]
+tonic.workspace = true
+tonic-prost.workspace = true
+prost.workspace = true
+
+[build-dependencies]
+tonic-prost-build.workspace = true

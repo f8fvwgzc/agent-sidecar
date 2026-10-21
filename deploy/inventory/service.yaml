@@ -4,7 +4,7 @@ metadata:
   name: inventory
   labels:
     app: inventory
-    attache.io/service: inventory
+    agentsc.io/service: inventory
 spec:
   selector:
     app: inventory

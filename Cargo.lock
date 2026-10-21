@@ -3,6 +3,135 @@
 version = 4
 
 [[package]]
+name = "agentsc-charter"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "schemars",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "thiserror",
+ "url",
+]
+
+[[package]]
+name = "agentsc-cli"
+version = "0.1.0"
+dependencies = [
+ "agentsc-charter",
+ "agentsc-common",
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+]
+
+[[package]]
+name = "agentsc-common"
+version = "0.1.0"
+dependencies = [
+ "agentsc-charter",
+ "chrono",
+ "hex",
+ "rand 0.9.5",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "agentsc-otel"
+version = "0.1.0"
+dependencies = [
+ "agentsc-charter",
+ "agentsc-common",
+ "axum",
+ "chrono",
+ "hex",
+ "http",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "agentsc-pki"
+version = "0.1.0"
+dependencies = [
+ "agentsc-common",
+ "base64 0.22.1",
+ "rcgen",
+ "ring",
+ "rustls-pki-types",
+ "thiserror",
+ "time",
+ "x509-parser",
+]
+
+[[package]]
+name = "agentsc-proto"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+]
+
+[[package]]
+name = "agentscd"
+version = "0.1.0"
+dependencies = [
+ "agentsc-charter",
+ "agentsc-common",
+ "agentsc-otel",
+ "agentsc-pki",
+ "agentsc-proto",
+ "anyhow",
+ "arc-swap",
+ "axum",
+ "chrono",
+ "clap",
+ "futures",
+ "http",
+ "hyper-util",
+ "prost",
+ "rand 0.9.5",
+ "rcgen",
+ "reqwest",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "sha2",
+ "shell-words",
+ "tempfile",
+ "time",
+ "tokio",
+ "tokio-rustls",
+ "tokio-stream",
+ "tonic",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+ "x509-parser",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -210,135 +339,6 @@ name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
-
-[[package]]
-name = "attache-charter"
-version = "0.1.0"
-dependencies = [
- "regex",
- "schemars",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "thiserror",
- "url",
-]
-
-[[package]]
-name = "attache-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "attache-charter",
- "attache-common",
- "clap",
- "serde",
- "serde_json",
- "serde_yaml_ng",
-]
-
-[[package]]
-name = "attache-common"
-version = "0.1.0"
-dependencies = [
- "attache-charter",
- "chrono",
- "hex",
- "rand 0.9.5",
- "regex",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
- "tokio",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "attache-otel"
-version = "0.1.0"
-dependencies = [
- "attache-charter",
- "attache-common",
- "axum",
- "chrono",
- "hex",
- "http",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "attache-pki"
-version = "0.1.0"
-dependencies = [
- "attache-common",
- "base64 0.22.1",
- "rcgen",
- "ring",
- "rustls-pki-types",
- "thiserror",
- "time",
- "x509-parser",
-]
-
-[[package]]
-name = "attache-proto"
-version = "0.1.0"
-dependencies = [
- "prost",
- "tonic",
- "tonic-prost",
- "tonic-prost-build",
-]
-
-[[package]]
-name = "attached"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arc-swap",
- "attache-charter",
- "attache-common",
- "attache-otel",
- "attache-pki",
- "attache-proto",
- "axum",
- "chrono",
- "clap",
- "futures",
- "http",
- "hyper-util",
- "prost",
- "rand 0.9.5",
- "rcgen",
- "reqwest",
- "rustls",
- "rustls-pki-types",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "sha2",
- "shell-words",
- "tempfile",
- "time",
- "tokio",
- "tokio-rustls",
- "tokio-stream",
- "tonic",
- "tower",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
- "x509-parser",
-]
 
 [[package]]
 name = "autocfg"
@@ -796,13 +796,13 @@ checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
 name = "embassy"
 version = "0.1.0"
 dependencies = [
+ "agentsc-charter",
+ "agentsc-common",
+ "agentsc-pki",
+ "agentsc-proto",
  "anyhow",
  "arc-swap",
  "async-trait",
- "attache-charter",
- "attache-common",
- "attache-pki",
- "attache-proto",
  "axum",
  "base64 0.22.1",
  "chrono",

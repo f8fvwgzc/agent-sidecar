@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::names::{RESERVED_SERVICE, is_dns_label, is_sha256_hex};
 
-pub const API_VERSION: &str = "attache.io/v1alpha1";
+pub const API_VERSION: &str = "agentsc.io/v1alpha1";
 pub const KIND: &str = "ControlPlaneConfig";
 /// `issuance.workload_cert_ttl` default and bounds (design §7).
 pub const DEFAULT_WORKLOAD_CERT_TTL: Duration = Duration::from_secs(24 * 3600);
@@ -505,7 +505,7 @@ mod tests {
     fn design_example() -> String {
         // design §8.2, with real hashes
         format!(
-            r#"apiVersion: attache.io/v1alpha1
+            r#"apiVersion: agentsc.io/v1alpha1
 kind: ControlPlaneConfig
 auth:
   tokens:
@@ -515,7 +515,7 @@ auth:
       namespaces: ["*"]
       payloads: true
   anonymous: none
-  session_key_file: /etc/attache/session/key
+  session_key_file: /etc/agentsc/session/key
 issuance:
   kubernetes: true
   workload_cert_ttl: 24h
@@ -536,7 +536,7 @@ events:
     #[test]
     fn parses_and_validates_the_design_example() {
         let c = ControlPlaneConfig::from_yaml(&design_example()).unwrap();
-        c.validate("attache-system").unwrap();
+        c.validate("agentsc-system").unwrap();
         assert_eq!(c.auth.tokens[0].role, Role::Admin);
         assert!(c.auth.tokens[0].payloads);
         assert!(c.auth.tokens[0].allows_namespace("anything"));
@@ -571,10 +571,10 @@ events:
     #[test]
     fn minimal_config_gets_defaults() {
         let c = ControlPlaneConfig::from_yaml(
-            "apiVersion: attache.io/v1alpha1\nkind: ControlPlaneConfig\n",
+            "apiVersion: agentsc.io/v1alpha1\nkind: ControlPlaneConfig\n",
         )
         .unwrap();
-        c.validate("attache-system").unwrap();
+        c.validate("agentsc-system").unwrap();
         assert_eq!(c, ControlPlaneConfig::default());
         assert_eq!(c.auth.anonymous, Anonymous::None);
         assert!(c.issuance.kubernetes);
@@ -584,7 +584,7 @@ events:
     #[test]
     fn unknown_fields_are_errors_with_their_path() {
         let err = ControlPlaneConfig::from_yaml(
-            "apiVersion: attache.io/v1alpha1\nkind: ControlPlaneConfig\nauth:\n  tokenz: []\n",
+            "apiVersion: agentsc.io/v1alpha1\nkind: ControlPlaneConfig\nauth:\n  tokenz: []\n",
         )
         .unwrap_err()
         .to_string();
@@ -595,7 +595,7 @@ events:
     #[test]
     fn roles_are_an_enum() {
         let y = format!(
-            "apiVersion: attache.io/v1alpha1\nkind: ControlPlaneConfig\nauth:\n  tokens:\n    - {{name: a, role: root, sha256: \"{}\", namespaces: [x]}}\n",
+            "apiVersion: agentsc.io/v1alpha1\nkind: ControlPlaneConfig\nauth:\n  tokens:\n    - {{name: a, role: root, sha256: \"{}\", namespaces: [x]}}\n",
             hash('a')
         );
         let err = ControlPlaneConfig::from_yaml(&y).unwrap_err().to_string();
@@ -638,7 +638,7 @@ events:
         c.issuance.join_tokens = vec![JoinTokenEntry {
             name: "j".into(),
             sha256: hash('c'),
-            namespace: "attache-system".into(),
+            namespace: "agentsc-system".into(),
             services: vec!["*".into(), "embassy".into(), "Orders".into()],
             expires_at: "2027-01-01T00:00:00Z".parse().unwrap(),
         }];
@@ -651,7 +651,7 @@ events:
             ..Default::default()
         });
         c.events.retain_bytes = 10;
-        let errs = c.validate("attache-system").unwrap_err();
+        let errs = c.validate("agentsc-system").unwrap_err();
         let all = errs.join("\n");
         for want in [
             "apiVersion must be",
@@ -667,7 +667,7 @@ events:
             "auth.session_key_file is empty",
             "issuance.workload_cert_ttl 30m is outside",
             "issuance.join_tokens[0].sha256 is the hash of a token",
-            "issuance.join_tokens[0].namespace \"attache-system\" is the control-plane namespace",
+            "issuance.join_tokens[0].namespace \"agentsc-system\" is the control-plane namespace",
             "issuance.join_tokens[0].services[0] \"*\": wildcards are not allowed",
             "issuance.join_tokens[0].services[1] \"embassy\" is reserved",
             "issuance.join_tokens[0].services[2] \"Orders\"",
@@ -704,7 +704,7 @@ events:
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
         std::fs::write(&path, design_example()).unwrap();
-        ControlPlaneConfig::load(&path, "attache-system").unwrap();
+        ControlPlaneConfig::load(&path, "agentsc-system").unwrap();
         // the join token's namespace is `demo`: as the control-plane namespace it is refused
         let err = ControlPlaneConfig::load(&path, "demo").unwrap_err();
         assert!(matches!(err, ConfigError::Invalid(_)), "{err}");

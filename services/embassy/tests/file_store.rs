@@ -451,7 +451,7 @@ async fn external_edits_are_validated_stored_and_audited() {
     // an invalid edit is ignored, audited once
     put_file(
         &file,
-        "apiVersion: attache.io/v1alpha1\nkind: Charter\nservice: {name: orders}\n",
+        "apiVersion: agentsc.io/v1alpha1\nkind: Charter\nservice: {name: orders}\n",
     )
     .unwrap();
     let ev = next(&mut rx, |e| matches!(e, StoreEvent::CpAudit(_))).await;

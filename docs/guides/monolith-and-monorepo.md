@@ -2,7 +2,7 @@
 
 This guide shows how to run many agents next to one service (a monolith). It also shows how to keep many charters in one repository (a monorepo) or across many repositories (a polyrepo).
 
-Commands and files use the code names: `attached` is the sidecar, `attache` is the CLI, and `embassy` is the CA. [Architecture](../architecture.md#names-agent-sidecar-and-attache) explains the naming.
+Commands and files use the code names: `agentscd` is the sidecar, `agentsc` is the CLI, and `embassy` is the CA. [Architecture](../architecture.md#names-agent-sidecar-and-agentsc) explains the naming.
 
 ## Part 1: One service (monolith)
 
@@ -11,10 +11,10 @@ You do not need many services to use agent-sidecar. One app with one sidecar can
 ```mermaid
 flowchart LR
   user["Customer"] --> app["shop app, port 8080"]
-  app -->|"POST /v1/agents/shop-assistant/invoke"| sc["attached sidecar, 127.0.0.1:3500"]
-  sc -->|"gRPC over unix sockets"| rt["attache-runtime, child process"]
+  app -->|"POST /v1/agents/shop-assistant/invoke"| sc["agentscd sidecar, 127.0.0.1:3500"]
+  sc -->|"gRPC over unix sockets"| rt["agentsc-runtime, child process"]
   sc -->|"self calls: GET /products, GET /orders/..."| app
-  sc -.->|"audit JSONL"| logs["stdout of the attached container"]
+  sc -.->|"audit JSONL"| logs["stdout of the agentscd container"]
 ```
 
 The app calls the sidecar on localhost. The sidecar runs the agents through the runtime. When an agent needs data, it calls a tool. The sidecar checks the tool call against the charter. Then it calls your own app on `127.0.0.1:<app_port>`. Every step is one audit line.
@@ -43,7 +43,7 @@ Save this as `services/shop/charter.yaml`:
 
 ```yaml
 # yaml-language-server: $schema=../../schemas/charter.schema.json
-apiVersion: attache.io/v1alpha1
+apiVersion: agentsc.io/v1alpha1
 kind: Charter
 service:
   name: shop
@@ -177,14 +177,14 @@ audit:
   sink: stdout
 ```
 
-Validate it with the CLI. In an agent-sidecar checkout the CLI is `./target/debug/attache` after `cargo build -p attache-cli`:
+Validate it with the CLI. In an agent-sidecar checkout the CLI is `./target/debug/agentsc` after `cargo build -p agentsc-cli`:
 
 ```bash
-attache charter validate services/shop/charter.yaml
+agentsc charter validate services/shop/charter.yaml
 ```
 
 ```text
-valid: services/shop/charter.yaml (3 agent(s), identity spiffe://attache/ns/shop/svc/shop)
+valid: services/shop/charter.yaml (3 agent(s), identity spiffe://agentsc/ns/shop/svc/shop)
 ```
 
 The [creating agents guide](creating-agents.md) explains every field. The sections below explain the parts that matter for a monolith.
@@ -216,9 +216,9 @@ Your app receives these headers on a self call:
 
 | Header | Value |
 | --- | --- |
-| `x-attache-caller` | `local` |
-| `x-attache-agent` | The calling agent, for example `catalog-agent` |
-| `x-attache-request-id` | The request id, the same in every audit line of this request |
+| `x-agentsc-caller` | `local` |
+| `x-agentsc-agent` | The calling agent, for example `catalog-agent` |
+| `x-agentsc-request-id` | The request id, the same in every audit line of this request |
 | `traceparent` | A child span of the request's trace |
 
 The sidecar drops these headers if the runtime or a peer tries to set them. But the sidecar does not sit in front of your users' traffic. If your app port is reachable by other clients, they can send these headers too. Use them for logging, not for security decisions on that port.
@@ -275,7 +275,7 @@ sequenceDiagram
 
 ### Run it on Kubernetes
 
-Use the same pattern as `deploy/inventory/`: one Deployment with two containers, `app` and `attached`. Sidecar injection is manual. There is no mutating webhook yet, so you write the `attached` container into the Deployment yourself.
+Use the same pattern as `deploy/inventory/`: one Deployment with two containers, `app` and `agentscd`. Sidecar injection is manual. There is no mutating webhook yet, so you write the `agentscd` container into the Deployment yourself.
 
 You need four things in namespace `shop`:
 
@@ -286,22 +286,22 @@ You need four things in namespace `shop`:
 | Job | `embassy-bootstrap` | copy `deploy/embassy/job.yaml` |
 | Deployment and Service | `shop` | below |
 
-In the Job, change the arguments. On a real cluster, also set `image` to your own build of `docker/Dockerfile --target embassy` (the file uses `attache/embassy:dev`, which `make build` builds inside minikube only):
+In the Job, change the arguments. On a real cluster, also set `image` to your own build of `docker/Dockerfile --target embassy` (the file uses `agentsc/embassy:dev`, which `make build` builds inside minikube only):
 
 ```yaml
           args: ["bootstrap", "--namespace", "shop", "--services", "shop"]
 ```
 
-The Job creates Secret `attache-ca` (the CA) and Secret `attache-cert-shop` (the certificate for `spiffe://attache/ns/shop/svc/shop`).
+The Job creates Secret `agentsc-ca` (the CA) and Secret `agentsc-cert-shop` (the certificate for `spiffe://agentsc/ns/shop/svc/shop`).
 
-The Deployment, `deploy/shop/deployment.yaml`, has the same `attached` container, volumes and probes as the billing Deployment in [Microservices, step 5](microservices.md#step-5-add-the-sidecar-to-the-deployment). Both copy [`deploy/inventory/deployment.yaml`](../../deploy/inventory/deployment.yaml). Copy that block and change these values:
+The Deployment, `deploy/shop/deployment.yaml`, has the same `agentscd` container, volumes and probes as the billing Deployment in [Microservices, step 5](microservices.md#step-5-add-the-sidecar-to-the-deployment). Both copy [`deploy/inventory/deployment.yaml`](../../deploy/inventory/deployment.yaml). Copy that block and change these values:
 
 | Field | Value for shop |
 | --- | --- |
-| `metadata.name`, labels `app` and `attache.io/service` (on the Deployment and the pod template) | `shop` |
+| `metadata.name`, labels `app` and `agentsc.io/service` (on the Deployment and the pod template) | `shop` |
 | `charter` volume, `configMap.name` | `shop-charter` |
-| `tls` volume, `secret.secretName` | `attache-cert-shop` |
-| `attached` image | your build of `docker/Dockerfile --target attached`, for example `registry.example.com/attache/attached:1.0.0` |
+| `tls` volume, `secret.secretName` | `agentsc-cert-shop` |
+| `agentscd` image | your build of `docker/Dockerfile --target agentscd`, for example `registry.example.com/agentsc/agentscd:1.0.0` |
 
 Two parts differ from billing, because your users call the shop app directly and no other service calls into `shop`:
 
@@ -315,11 +315,11 @@ Two parts differ from billing, because your users call the shop app directly and
       - name: http
         containerPort: 8080
     env:
-      - name: ATTACHE_URL       # your app's own setting; the orders example reads this name
+      - name: AGENTSC_URL       # your app's own setting; the orders example reads this name
         value: http://127.0.0.1:3500
   ```
 
-- The `attached` container needs no `mesh` port, so you can leave out its `ports` block.
+- The `agentscd` container needs no `mesh` port, so you can leave out its `ports` block.
 
 The Service, `deploy/shop/service.yaml`. It exposes only the app port for your users. No other service calls into `shop`, so it does not expose the mesh port `50002`:
 
@@ -330,7 +330,7 @@ metadata:
   name: shop
   labels:
     app: shop
-    attache.io/service: shop
+    agentsc.io/service: shop
 spec:
   selector:
     app: shop
@@ -358,7 +358,7 @@ Deploy it in the same order as `make deploy`:
 
 ```bash
 kubectl apply -f deploy/namespace.yaml
-attache charter validate services/shop/charter.yaml
+agentsc charter validate services/shop/charter.yaml
 kubectl -n shop create configmap shop-charter \
   --from-file=charter.yaml=services/shop/charter.yaml \
   --dry-run=client -o yaml | kubectl apply -f -
@@ -376,8 +376,8 @@ The certificate is per service: every replica of `shop` shares the one Secret. C
 Read the audit log:
 
 ```bash
-kubectl -n shop logs deploy/shop -c attached
-attache logs shop -n shop --denied
+kubectl -n shop logs deploy/shop -c agentscd
+agentsc logs shop -n shop --denied
 ```
 
 The sidecar loads the charter once, at startup. After you change the ConfigMap, restart the pods:
@@ -395,10 +395,10 @@ The repo has no Docker Compose file. The tested way to run outside Kubernetes is
 1. Build the sidecar, the CLI, embassy and the runtime. Point `CHARTER` at your charter file:
 
    ```bash
-   cargo build -p attached -p attache-cli -p embassy
+   cargo build -p agentscd -p agentsc-cli -p embassy
    (cd runtime && uv sync)
    CHARTER=/path/to/your-repo/services/shop/charter.yaml
-   ./target/debug/attache charter validate "$CHARTER"
+   ./target/debug/agentsc charter validate "$CHARTER"
    ```
 
 2. Create a CA once, then a certificate for `shop`. `ca-init` writes a new CA each time, so the first line skips it when one exists. `make dev-certs` runs the same two commands, but only for the demo services `orders` and `inventory`, and it runs `ca-init` every time.
@@ -416,19 +416,19 @@ The repo has no Docker Compose file. The tested way to run outside Kubernetes is
 
    ```bash
    mkdir -p .local/run/shop .local/logs
-   ./target/debug/attached \
+   ./target/debug/agentscd \
      --charter "$CHARTER" \
      --tls-dir .local/tls/shop \
      --mesh-addr 127.0.0.1:50002 \
      --socket-dir .local/run/shop \
-     --runtime-cmd "uv run --quiet --project $PWD/runtime attache-runtime" \
-     > .local/logs/shop-audit.jsonl 2> .local/logs/shop-attached.log
+     --runtime-cmd "uv run --quiet --project $PWD/runtime agentsc-runtime" \
+     > .local/logs/shop-audit.jsonl 2> .local/logs/shop-agentscd.log
    ```
 
    | Flag | Why |
    | --- | --- |
    | `--mesh-addr 127.0.0.1:50002` | The default is `0.0.0.0:50002`. On a laptop, keep the mesh on loopback. |
-   | `--socket-dir` | The default `/run/attache` is often not writable on a laptop. |
+   | `--socket-dir` | The default `/run/agentsc` is often not writable on a laptop. |
    | `--runtime-cmd` | Runs the runtime from the `uv` project. The sidecar appends `--listen` and `--sidecar`. |
 
    The app API keeps its defaults: HTTP on `127.0.0.1:3500` and gRPC on `127.0.0.1:50001`. Set `ANTHROPIC_API_KEY` in this shell to use Claude. Without it, every agent runs on the mock model.
@@ -451,15 +451,15 @@ The repo has no Docker Compose file. The tested way to run outside Kubernetes is
 6. Read the audit trail:
 
    ```bash
-   ./target/debug/attache logs --file .local/logs/shop-audit.jsonl
-   ./target/debug/attache logs --file .local/logs/shop-audit.jsonl --denied
+   ./target/debug/agentsc logs --file .local/logs/shop-audit.jsonl
+   ./target/debug/agentsc logs --file .local/logs/shop-audit.jsonl --denied
    ```
 
 The [operations guide](../operations.md) explains the audit fields and the CLI filters.
 
 ### Limits that matter for a monolith
 
-- **One runtime for all agents.** The runtime is a child process inside the `attached` container. All agents of the pod share it and that container's CPU and memory. Size the container for all of them.
+- **One runtime for all agents.** The runtime is a child process inside the `agentscd` container. All agents of the pod share it and that container's CPU and memory. Size the container for all of them.
 - **Guardrails are per charter.** `max_input_bytes`, `pii_redact`, `input_deny` and `output_deny` apply to every agent in the charter. Only `allowed_tools`, `allowed_services` and `budgets` are per agent.
 - **What `pii_redact` covers.** It redacts each agent's final output, including a specialist's answer to the orchestrator, and every audit record. It does not redact prompts sent to the model provider. Tool results, such as an order with a customer email, go to the model unchanged.
 - **Budgets are in memory, per replica.** With `replicas: 3`, each replica counts its own `max_calls_per_minute` and `max_cost_usd_per_day`. A restart resets them.
@@ -480,8 +480,8 @@ To move `catalog-agent` into its own service `catalog`:
 
 1. Move the endpoints and the agent into the new service, with its own charter (`service.name: catalog`). In that charter, the agent's tools and its `authz.services` rule use `service: catalog`.
 2. In the shop charter, turn the local tool into a remote one. Add `service: catalog` to `ask_catalog`. Remove `catalog-agent` from `agents` and from the `authz.callers` rule. Otherwise validation fails with `unknown agent "catalog-agent"`.
-3. In the catalog charter, add an `authz.callers` rule for `spiffe://attache/ns/shop/svc/shop` with `agents: [catalog-agent]` and `caller_agents: [shop-assistant]`.
-4. Add `catalog` to the embassy `--services` list. On the catalog Deployment, give the `attached` container a port `50002` named `mesh`, as in `deploy/inventory/`. Expose that port on the catalog Service.
+3. In the catalog charter, add an `authz.callers` rule for `spiffe://agentsc/ns/shop/svc/shop` with `agents: [catalog-agent]` and `caller_agents: [shop-assistant]`.
+4. Add `catalog` to the embassy `--services` list. On the catalog Deployment, give the `agentscd` container a port `50002` named `mesh`, as in `deploy/inventory/`. Expose that port on the catalog Service.
 5. Keep both services in the same namespace. Each namespace gets its own CA, so cross-namespace mesh calls do not work out of the box.
 
 The [microservices guide](microservices.md) covers this setup in full.
@@ -529,7 +529,7 @@ This is a layout for your own repository. In the agent-sidecar repository itself
 Guidelines:
 
 - **The directory name is the service name.** `services/shop/` holds the charter with `service.name: shop`. The check below enforces it.
-- **One sidecar image.** Build `attached` once from `docker/Dockerfile` (`--target attached`). Push it to your registry with a fixed tag. Every Deployment uses the same image and tag.
+- **One sidecar image.** Build `agentscd` once from `docker/Dockerfile` (`--target agentscd`). Push it to your registry with a fixed tag. Every Deployment uses the same image and tag.
 - **One kustomize tree.** `deploy/<svc>/` holds each Deployment and Service. `deploy/embassy/` holds one bootstrap Job per namespace. Its `--services` list names every service in that namespace.
 - **ConfigMaps come from the committed charters.** Do not keep a second copy of a charter in `deploy/`. Create the ConfigMaps from `services/*/charter.yaml` in your deploy step, as `make charters` does here:
 
@@ -557,42 +557,42 @@ This is a recommendation. agent-sidecar does not ship this script, and the repo 
 # Validate every charter in the repo and check that each one names its own directory.
 set -euo pipefail
 NS=${NS:-shop}
-ATTACHE=${ATTACHE:-attache}
+AGENTSC=${AGENTSC:-agentsc}
 status=0
 for f in services/*/charter.yaml; do
   svc=$(basename "$(dirname "$f")")
-  if ! out=$("$ATTACHE" charter validate "$f" 2>&1); then
+  if ! out=$("$AGENTSC" charter validate "$f" 2>&1); then
     echo "$out"; status=1; continue
   fi
   echo "$out"
   case "$out" in
-    *"identity spiffe://attache/ns/$NS/svc/$svc)") ;;
+    *"identity spiffe://agentsc/ns/$NS/svc/$svc)") ;;
     *) echo "  error: $f must declare service.name: $svc and service.namespace: $NS"; status=1 ;;
   esac
 done
 exit $status
 ```
 
-`attache charter validate` exits 1 and prints one error per line when a charter is invalid. When it is valid, it prints the identity, for example `valid: services/shop/charter.yaml (3 agent(s), identity spiffe://attache/ns/shop/svc/shop)`. The loop uses that identity to check the directory name and the namespace. The script checks every file before it fails, so one CI run shows all errors.
+`agentsc charter validate` exits 1 and prints one error per line when a charter is invalid. When it is valid, it prints the identity, for example `valid: services/shop/charter.yaml (3 agent(s), identity spiffe://agentsc/ns/shop/svc/shop)`. The loop uses that identity to check the directory name and the namespace. The script checks every file before it fails, so one CI run shows all errors.
 
 Example output with one wrong namespace:
 
 ```text
-valid: services/catalog/charter.yaml (1 agent(s), identity spiffe://attache/ns/shop/svc/catalog)
-valid: services/payments/charter.yaml (2 agent(s), identity spiffe://attache/ns/other/svc/payments)
+valid: services/catalog/charter.yaml (1 agent(s), identity spiffe://agentsc/ns/shop/svc/catalog)
+valid: services/payments/charter.yaml (2 agent(s), identity spiffe://agentsc/ns/other/svc/payments)
   error: services/payments/charter.yaml must declare service.name: payments and service.namespace: shop
-valid: services/shop/charter.yaml (3 agent(s), identity spiffe://attache/ns/shop/svc/shop)
+valid: services/shop/charter.yaml (3 agent(s), identity spiffe://agentsc/ns/shop/svc/shop)
 ```
 
-Two ways to get the `attache` CLI in CI:
+Two ways to get the `agentsc` CLI in CI:
 
 ```bash
 # 1. Build it from an agent-sidecar checkout
-cargo build -p attache-cli            # binary: target/debug/attache
+cargo build -p agentsc-cli            # binary: target/debug/agentsc
 
-# 2. Use the copy inside the sidecar image (it is at /usr/local/bin/attache)
-docker run --rm -v "$PWD:/work" -w /work --entrypoint attache \
-  registry.example.com/attache/attached:1.0.0 charter validate services/shop/charter.yaml
+# 2. Use the copy inside the sidecar image (it is at /usr/local/bin/agentsc)
+docker run --rm -v "$PWD:/work" -w /work --entrypoint agentsc \
+  registry.example.com/agentsc/agentscd:1.0.0 charter validate services/shop/charter.yaml
 ```
 
 Option 2 uses the same version as the sidecar you deploy. The image runs as user `10001`, so the mounted files must be readable by that user.
@@ -606,7 +606,7 @@ You can add more checks to the same loop. For example, check that `deploy/$svc/d
 Copy the schema from the agent-sidecar version you run. Or generate it with the same CLI version:
 
 ```bash
-attache charter schema > schemas/charter.schema.json
+agentsc charter schema > schemas/charter.schema.json
 ```
 
 Then connect it to your editor. These are editor features, not part of agent-sidecar:
@@ -629,16 +629,16 @@ Then connect it to your editor. These are editor features, not part of agent-sid
 
 - **JetBrains IDEs.** Add a mapping under Settings, Languages & Frameworks, Schemas and DTDs, JSON Schema Mappings.
 
-The schema checks structure only. Rules such as "only an orchestrator may declare `agent` tools" or "`allowed_tools` must name declared tools" are checked by `attache charter validate`. Keep the CI step.
+The schema checks structure only. Rules such as "only an orchestrator may declare `agent` tools" or "`allowed_tools` must name declared tools" are checked by `agentsc charter validate`. Keep the CI step.
 
 ### Keep identity names consistent
 
-One service has one identity: `spiffe://attache/ns/<service.namespace>/svc/<service.name>`. The same names appear in several places.
+One service has one identity: `spiffe://agentsc/ns/<service.namespace>/svc/<service.name>`. The same names appear in several places.
 
 ```mermaid
 flowchart LR
-  charter["charter.yaml: service.name and service.namespace"] --> spiffeid["spiffe://attache/ns/shop/svc/shop"]
-  job["embassy bootstrap --namespace shop --services shop"] --> secret["Secret attache-cert-shop"]
+  charter["charter.yaml: service.name and service.namespace"] --> spiffeid["spiffe://agentsc/ns/shop/svc/shop"]
+  job["embassy bootstrap --namespace shop --services shop"] --> secret["Secret agentsc-cert-shop"]
   secret -->|"tls.crt URI SAN"| spiffeid
 ```
 
@@ -647,7 +647,7 @@ What the sidecar checks at startup:
 | Situation | Result |
 | --- | --- |
 | The charter is invalid | The sidecar exits with the validation errors. |
-| `tls.crt` has no `spiffe://attache/` URI SAN | The sidecar exits. |
+| `tls.crt` has no `spiffe://agentsc/` URI SAN | The sidecar exits. |
 | The certificate's identity is not the charter's identity | The sidecar exits: `tls.crt identity ... does not match charter identity ...`. On Kubernetes the pod restarts in a loop. |
 | No certificate files in `--tls-dir` | The sidecar starts with the mesh off. `/readyz` stays at 503. |
 
@@ -657,10 +657,10 @@ What the sidecar does not check: the real namespace of the pod, the name of the 
 | --- | --- | --- |
 | `service.name` | charter | Embassy `--services` entry, so the certificate matches. |
 | `service.name` | Kubernetes Service name | Peers find a service at `<service>.<namespace>.svc.cluster.local:50002`, unless `mesh.peers` in their charter overrides the address. |
-| `service.name` | label `attache.io/service` | `attache logs <svc>` selects pods by this label. |
+| `service.name` | label `agentsc.io/service` | `agentsc logs <svc>` selects pods by this label. |
 | `service.name` | other charters | The `service` field of their tools, and the identity in their `authz` rules. |
 | `service.namespace` | charter | Embassy `--namespace`, the namespace the pod runs in, and the identity in other charters. |
-| `attache-cert-<svc>` | Deployment `tls` volume | The Secret name embassy writes (prefix `attache-cert-`). |
+| `agentsc-cert-<svc>` | Deployment `tls` volume | The Secret name embassy writes (prefix `agentsc-cert-`). |
 | `<svc>-charter` | Deployment `charter` volume | The ConfigMap name your deploy step creates. This is a convention from `deploy/`. |
 
 Renaming a service is a change in several files. Search the whole repo for the old name, including the SPIFFE ids in other charters.
@@ -673,9 +673,9 @@ The agent-sidecar repository is a small monorepo with two demo services:
 | --- | --- |
 | App code per service | `examples/orders/` (Go), `examples/inventory/` (FastAPI) |
 | One committed charter per service | `examples/charters/orders.charter.yaml`, `examples/charters/inventory.charter.yaml` |
-| One shared sidecar image | `attache/attached:dev` from `docker/Dockerfile`, used by both Deployments |
+| One shared sidecar image | `agentsc/agentscd:dev` from `docker/Dockerfile`, used by both Deployments |
 | One kustomize tree | `deploy/kustomization.yaml`, `deploy/orders/`, `deploy/inventory/`, `deploy/embassy/` |
-| One bootstrap Job for the namespace | `embassy bootstrap --namespace attache-demo --services orders,inventory` |
+| One bootstrap Job for the namespace | `embassy bootstrap --namespace agentsc-demo --services orders,inventory` |
 | ConfigMaps from the committed charters | `make charters`, which runs `make validate` first |
 | Local run with plain processes | `scripts/local-demo.sh` |
 
@@ -687,9 +687,9 @@ In a polyrepo, each service has its own repository. The rule is the same: **the 
 
 | Shared part | How to share it |
 | --- | --- |
-| Sidecar image | Build `attached` from agent-sidecar's `docker/Dockerfile`. Push it to your registry with a fixed tag. Each service repo uses that tag. |
-| CLI | Use the copy inside the same image: `docker run --rm --entrypoint attache <image> charter validate ...`. |
-| JSON Schema | Generate it from the same image: `docker run --rm --entrypoint attache <image> charter schema > charter.schema.json`. Or copy it from the agent-sidecar commit you built the image from. |
+| Sidecar image | Build `agentscd` from agent-sidecar's `docker/Dockerfile`. Push it to your registry with a fixed tag. Each service repo uses that tag. |
+| CLI | Use the copy inside the same image: `docker run --rm --entrypoint agentsc <image> charter validate ...`. |
+| JSON Schema | Generate it from the same image: `docker run --rm --entrypoint agentsc <image> charter schema > charter.schema.json`. Or copy it from the agent-sidecar commit you built the image from. |
 | Embassy Job, RBAC, namespace | Keep them in one platform repository. There is one Job per namespace, and its `--services` list names every service in it. |
 
 When you upgrade the sidecar, upgrade the image tag and the schema together.

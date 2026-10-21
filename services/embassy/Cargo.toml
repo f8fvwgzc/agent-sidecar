@@ -1,6 +1,6 @@
 [package]
 name = "embassy"
-description = "attache control plane: CA, certificate issuance, Connect, REST/SSE API and UI (CONTRACT.md §5, §7; docs/design/agent-platform.md §7-§10)."
+description = "agentsc control plane: CA, certificate issuance, Connect, REST/SSE API and UI (CONTRACT.md §5, §7; docs/design/agent-platform.md §7-§10)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,10 +9,10 @@ homepage.workspace = true
 publish.workspace = true
 
 [dependencies]
-attache-pki.workspace = true
-attache-common.workspace = true
-attache-charter.workspace = true
-attache-proto.workspace = true
+agentsc-pki.workspace = true
+agentsc-common.workspace = true
+agentsc-charter.workspace = true
+agentsc-proto.workspace = true
 tonic.workspace = true
 prost.workspace = true
 axum.workspace = true

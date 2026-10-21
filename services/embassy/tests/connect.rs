@@ -4,7 +4,7 @@ mod common;
 
 use std::time::Duration;
 
-use attache_proto::{
+use agentsc_proto::{
     AuditBatch, ConfigAck, ControlMessage, Heartbeat, LearningProposal, SpanStart, control_message,
     sidecar_message,
 };
@@ -23,7 +23,7 @@ fn charter_of(m: &ControlMessage) -> Option<(String, String, String)> {
     }
 }
 
-fn memory_of(m: &ControlMessage) -> Option<attache_proto::MemoryUpdate> {
+fn memory_of(m: &ControlMessage) -> Option<agentsc_proto::MemoryUpdate> {
     match &m.msg {
         Some(control_message::Msg::Memory(u)) => Some(u.clone()),
         _ => None,
@@ -69,7 +69,7 @@ async fn the_certificate_decides_the_identity() {
     eventually("connect_denied in the audit", || async {
         audit_actions(&env).iter().any(|l| {
             l["action"] == "connect_denied"
-                && l["actor"] == "sidecar:spiffe://attache/ns/shop/svc/orders/orders-0"
+                && l["actor"] == "sidecar:spiffe://agentsc/ns/shop/svc/orders/orders-0"
                 && l["actor_kind"] == "sidecar"
                 && l["result"] == "denied"
         })
@@ -97,7 +97,7 @@ async fn the_certificate_decides_the_identity() {
         assert!(r.is_err(), "a stream without a client certificate");
     }
     // a certificate from another CA
-    let other = attache_pki::ca_init().unwrap();
+    let other = agentsc_pki::ca_init().unwrap();
     let other = embassy::ca::CaMaterial::from_pems(&other.cert_pem, &other.key_pem).unwrap();
     let key = rcgen::KeyPair::generate().unwrap();
     let csr = rcgen::CertificateParams::default()
@@ -107,7 +107,7 @@ async fn the_certificate_decides_the_identity() {
         .unwrap();
     let leaf = other
         .sign_workload(
-            &attache_pki::verify_csr_p256(&csr).unwrap(),
+            &agentsc_pki::verify_csr_p256(&csr).unwrap(),
             NS,
             "orders",
             Duration::from_secs(600),
@@ -177,7 +177,7 @@ async fn a_start_up_charter_waits_for_adoption() {
         audit_actions(&env)
             .iter()
             .any(|l| l["action"] == "adopt_pending"
-                && l["actor"] == "sidecar:spiffe://attache/ns/shop/svc/orders/orders-0")
+                && l["actor"] == "sidecar:spiffe://agentsc/ns/shop/svc/orders/orders-0")
     );
     // adopting: editor, the matching hash
     let path = format!("/services/{NS}/orders/adopt");
@@ -261,7 +261,7 @@ async fn auto_adopt_stores_the_start_up_charter() {
     .unwrap();
     assert_eq!(
         hist[0].actor,
-        "sidecar:spiffe://attache/ns/shop/svc/orders/orders-0"
+        "sidecar:spiffe://agentsc/ns/shop/svc/orders/orders-0"
     );
     assert!(
         audit_actions(&env)
@@ -474,7 +474,7 @@ async fn audit_records_follow_the_drop_rules() {
         // an agent the stored charter does not have, not inbound
         rec("model_call", json!({"agent": "ghost", "callee": "mock", "direction": "outbound", "request_id": "ghost"})).to_string(),
         // inbound records carry the calling peer's agent: kept
-        rec("service_call", json!({"agent": "payer", "direction": "inbound", "caller": "spiffe://attache/ns/shop/svc/billing", "callee": "orders POST /refund", "request_id": "kept-2"})).to_string(),
+        rec("service_call", json!({"agent": "payer", "direction": "inbound", "caller": "spiffe://agentsc/ns/shop/svc/billing", "callee": "orders POST /refund", "request_id": "kept-2"})).to_string(),
         // no agent: kept
         rec("config", json!({"agent": null, "caller": "control-plane", "callee": "charter", "direction": "internal", "request_id": "kept-3", "kind": "config"})).to_string(),
         // not an audit record

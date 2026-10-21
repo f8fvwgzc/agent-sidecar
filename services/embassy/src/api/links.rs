@@ -262,7 +262,7 @@ pub async fn link(
     };
     if src != dst {
         // the callee side first: its authz.callers admits the caller's service and agent
-        let identity = attache_charter::spiffe_id(&ns, &from_svc);
+        let identity = agentsc_charter::spiffe_id(&ns, &from_svc);
         let target = stored_or_404(&hub, &dst).await;
         let needed = match target {
             Ok(c) => {

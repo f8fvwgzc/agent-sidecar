@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from attache_runtime.spec import AgentSpec
+from agentsc_runtime.spec import AgentSpec
 
 BASE: dict[str, Any] = {"name": "support", "model": "mock", "system": "You help customers."}
 NOTES = [{"id": "n1", "text": "Ask for the order id first."}, {"id": "n2", "text": "Refunds take 5 days."}]

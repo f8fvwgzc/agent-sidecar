@@ -742,7 +742,7 @@ mod tests {
             )),
             1
         );
-        // a guardrail record attaches to the invocation span
+        // a guardrail record agentscs to the invocation span
         store.add_record(rec(json!({"kind": "guardrail", "span_id": "inv", "rule": "guardrail.pii_redact", "ts": "2026-10-21T10:00:10.000Z", "direction": "internal"})));
         let vis = Visibility {
             allows: &all,

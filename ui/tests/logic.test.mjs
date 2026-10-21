@@ -542,7 +542,7 @@ test('the API client sends CSRF, JSON and quoted If-Match on writes, nothing ext
     { now: () => 0, subscribe: () => null },
   );
   const r = await api.putAgent('ns', 'svc', 'a b', { agent: {} }, '7');
-  assert.deepEqual(calls[0].headers, { 'Content-Type': 'application/json', 'X-Attache-CSRF': '1', 'If-Match': '"7"' });
+  assert.deepEqual(calls[0].headers, { 'Content-Type': 'application/json', 'X-Agentsc-CSRF': '1', 'If-Match': '"7"' });
   assert.equal(calls[0].path, '/services/ns/svc/agents/a%20b');
   assert.equal(r.version, '7');
   await api.recent({ namespace: 'ns', agent: undefined, limit: 5 });
@@ -552,7 +552,7 @@ test('the API client sends CSRF, JSON and quoted If-Match on writes, nothing ext
   assert.equal(calls[2].headers['If-None-Match'], '*');
   assert.equal(calls[2].headers['If-Match'], undefined);
   await api.logout();
-  assert.equal(calls[3].headers['X-Attache-CSRF'], '1', 'bodiless writes still carry the headers');
+  assert.equal(calls[3].headers['X-Agentsc-CSRF'], '1', 'bodiless writes still carry the headers');
 });
 
 test('API errors carry code, details and current_version; 401 signs out', async () => {

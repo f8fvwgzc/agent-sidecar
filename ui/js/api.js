@@ -1,5 +1,5 @@
 // The control-plane API client (docs/api/openapi.yaml). Every mutating call sends
-// `Content-Type: application/json` and `X-Attache-CSRF: 1`; versions travel as quoted
+// `Content-Type: application/json` and `X-Agentsc-CSRF: 1`; versions travel as quoted
 // `If-Match` values. The session is the HttpOnly cookie from POST /login: the console never
 // stores a token.
 //
@@ -153,7 +153,7 @@ export class Api {
     const headers = {};
     if (method !== 'GET') {
       headers['Content-Type'] = 'application/json';
-      headers['X-Attache-CSRF'] = '1';
+      headers['X-Agentsc-CSRF'] = '1';
     }
     if (ifMatch !== undefined && ifMatch !== null) headers['If-Match'] = `"${ifMatch}"`;
     if (ifNoneMatch) headers['If-None-Match'] = '*';

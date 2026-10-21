@@ -21,7 +21,7 @@ use crate::store::{
 };
 
 /// The most characters of notes one service keeps (design §3).
-pub const MAX_MEMORY_CHARS: usize = attache_charter::MAX_MEMORY_CHARS;
+pub const MAX_MEMORY_CHARS: usize = agentsc_charter::MAX_MEMORY_CHARS;
 
 pub async fn get_memory(
     State(hub): State<Arc<Hub>>,

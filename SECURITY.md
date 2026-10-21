@@ -22,6 +22,6 @@ You should get a first answer within 7 days. A fix and an advisory follow once t
 
 ## Scope
 
-In scope: the sidecar (`attached`), the runtime (`attache-runtime`), the CA (`embassy`), the CLI (`attache`), the charter validation and the Kubernetes manifests in `deploy/`.
+In scope: the sidecar (`agentscd`), the runtime (`agentsc-runtime`), the CA (`embassy`), the CLI (`agentsc`), the charter validation and the Kubernetes manifests in `deploy/`.
 
 Already known limitations listed in [docs/operations.md](docs/operations.md#known-limitations) and in [CONTRACT.md section 11](CONTRACT.md#11-known-gaps-mvp) are not new vulnerabilities. A report that shows a consequence the docs do not mention is welcome.

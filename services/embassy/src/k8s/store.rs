@@ -80,15 +80,15 @@ use crate::store::{
 
 /// The charter version embassy's last spec write stored (written only by embassy; the webhook
 /// refuses changes by anyone else).
-pub const VERSION_ANNOTATION: &str = "attache.io/version";
+pub const VERSION_ANNOTATION: &str = "agentsc.io/version";
 /// SHA-256 of the canonical JSON of the spec that [`VERSION_ANNOTATION`] names.
-pub const SPEC_SHA256_ANNOTATION: &str = "attache.io/spec-sha256";
+pub const SPEC_SHA256_ANNOTATION: &str = "agentsc.io/spec-sha256";
 /// The annotations only embassy writes.
 pub const PROTECTED_ANNOTATIONS: [&str; 2] = [VERSION_ANNOTATION, SPEC_SHA256_ANNOTATION];
 /// ControllerRevision labels: the service, the epoch (Charter uid) and the version.
-pub const REVISION_CHARTER_LABEL: &str = "attache.io/charter";
-pub const REVISION_EPOCH_LABEL: &str = "attache.io/epoch";
-pub const REVISION_VERSION_LABEL: &str = "attache.io/version";
+pub const REVISION_CHARTER_LABEL: &str = "agentsc.io/charter";
+pub const REVISION_EPOCH_LABEL: &str = "agentsc.io/epoch";
+pub const REVISION_VERSION_LABEL: &str = "agentsc.io/version";
 /// Revisions kept per service (design §8.4).
 pub const HISTORY_LIMIT: usize = 20;
 /// The watcher lists everything again this often (design §8.4).
@@ -374,7 +374,7 @@ pub fn spec_from_write(key: &ServiceKey, charter_json: &Value) -> Result<Value, 
     let map = charter_json
         .as_object()
         .ok_or_else(|| invalid("the charter is not a mapping".into()))?;
-    if attache_charter::resource::is_resource(charter_json) {
+    if agentsc_charter::resource::is_resource(charter_json) {
         for (field, want) in [("name", &key.service), ("namespace", &key.namespace)] {
             if let Some(got) = str_at(charter_json, &["metadata", field])
                 && got != want
@@ -1236,9 +1236,9 @@ impl Inner {
         record.sha256_before = before.as_ref().map(|y| sha256_hex(y.as_bytes()));
 
         let doc = resource_doc(obj);
-        if let Err(e) = attache_charter::Charter::from_value(&doc) {
+        if let Err(e) = agentsc_charter::Charter::from_value(&doc) {
             let errors = match e {
-                attache_charter::CharterError::Invalid(list) => list.join("; "),
+                agentsc_charter::CharterError::Invalid(list) => list.join("; "),
                 other => other.to_string(),
             };
             self.mark_invalid(key, generation, &errors).await?;

@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use attache_charter::{Charter, LOCAL_IDENTITY, ToolType as CharterToolType};
+use agentsc_charter::{Charter, LOCAL_IDENTITY, ToolType as CharterToolType};
 use chrono::{DateTime, Utc};
 use tokio::sync::Notify;
 
@@ -638,7 +638,7 @@ fn admitted_locally(c: &Charter, agent: &str) -> bool {
 pub fn tool_target(
     namespace: &str,
     service: &str,
-    t: &attache_charter::ToolSpec,
+    t: &agentsc_charter::ToolSpec,
 ) -> Option<String> {
     match t.tool_type {
         CharterToolType::Agent => Some(ids::agent(
@@ -650,7 +650,7 @@ pub fn tool_target(
         CharterToolType::Http => t
             .url
             .as_deref()
-            .and_then(attache_charter::http_origin)
+            .and_then(agentsc_charter::http_origin)
             .map(|o| ids::external(&o)),
     }
 }
@@ -938,7 +938,7 @@ pub async fn build(
             stats: state.app_stats(&inner, &app_id, now_min),
         }));
         let Some(c) = &d.charter else { continue };
-        let allowed_tools = |a: &attache_charter::AgentSpec| c.allowed_tools(a);
+        let allowed_tools = |a: &agentsc_charter::AgentSpec| c.allowed_tools(a);
         for a in &c.agents {
             let id = ids::agent(ns, svc, &a.name);
             let stats = state.agent_stats(&inner, &id, now_min);
@@ -967,8 +967,8 @@ pub async fn build(
                 parent: ids::service(ns, svc),
                 label: a.name.clone(),
                 agent_type: match a.agent_type {
-                    attache_charter::AgentType::Agent => AgentType::Agent,
-                    attache_charter::AgentType::Orchestrator => AgentType::Orchestrator,
+                    agentsc_charter::AgentType::Agent => AgentType::Agent,
+                    agentsc_charter::AgentType::Orchestrator => AgentType::Orchestrator,
                 },
                 model: a.model.clone(),
                 skills: a.skills.clone(),
@@ -981,8 +981,8 @@ pub async fn build(
                 learning: LearningSummary {
                     enabled: learning.enabled,
                     mode: match learning.mode {
-                        attache_charter::LearningMode::Review => LearningMode::Review,
-                        attache_charter::LearningMode::Auto => LearningMode::Auto,
+                        agentsc_charter::LearningMode::Review => LearningMode::Review,
+                        agentsc_charter::LearningMode::Auto => LearningMode::Auto,
                     },
                     notes: if learning.enabled {
                         u32::try_from(d.notes.get(&a.name).copied().unwrap_or(0))
@@ -1124,7 +1124,7 @@ mod tests {
             rec(json!({"kind": "agent_invocation", "caller_agent": "boss", "callee": "ops"}));
         assert_eq!(map_record(&local_orch, None), None);
         let peer = rec(
-            json!({"kind": "agent_invocation", "caller": "spiffe://attache/ns/shop/svc/x", "caller_agent": "a"}),
+            json!({"kind": "agent_invocation", "caller": "spiffe://agentsc/ns/shop/svc/x", "caller_agent": "a"}),
         );
         assert_eq!(map_record(&peer, None), None);
         let call = rec(json!({"kind": "agent_call", "callee": "inventory/stock-analyst"}));

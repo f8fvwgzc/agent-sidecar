@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # End-to-end demo on minikube (CONTRACT.md §6 lists the records each step produces).
 set -euo pipefail
-NS=${NS:-attache-demo}
-ATTACHE=${ATTACHE:-./target/debug/attache}
+NS=${NS:-agentsc-demo}
+AGENTSC=${AGENTSC:-./target/debug/agentsc}
 KUBE_CONTEXT=${KUBE_CONTEXT:-minikube}
 PORT=${PORT:-38081}
 kc() { kubectl --context "$KUBE_CONTEXT" "$@"; }
@@ -47,9 +47,9 @@ echo "✓ the call was denied with rule authz.services.deny-admin and the agent 
 echo
 echo "▶ 3. audit trail of call 1 across both pods (same trace_id $TRACE1)"
 sleep 1
-$ATTACHE logs orders,inventory -n "$NS" --context "$KUBE_CONTEXT" --trace "$TRACE1"
+$AGENTSC logs orders,inventory -n "$NS" --context "$KUBE_CONTEXT" --trace "$TRACE1"
 echo
 echo "▶ 4. the denial of call 2 in both pods (trace $TRACE2)"
-$ATTACHE logs orders,inventory -n "$NS" --context "$KUBE_CONTEXT" --trace "$TRACE2" --denied
+$AGENTSC logs orders,inventory -n "$NS" --context "$KUBE_CONTEXT" --trace "$TRACE2" --denied
 echo
-echo "✓ demo complete. Raw JSONL: kubectl --context $KUBE_CONTEXT -n $NS logs -l attache.io/service=inventory -c attached"
+echo "✓ demo complete. Raw JSONL: kubectl --context $KUBE_CONTEXT -n $NS logs -l agentsc.io/service=inventory -c agentscd"

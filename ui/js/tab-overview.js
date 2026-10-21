@@ -5,7 +5,7 @@ import { h, clear, kv, pill } from './dom.js';
 import { fmtInt, fmtMs, relTime, parseNodeId } from './util.js';
 
 const DESCRIPTION = {
-  service: 'A service with its app and agents. Each pod runs the attached sidecar.',
+  service: 'A service with its app and agents. Each pod runs the agentscd sidecar.',
   app: 'The application container of the service. It invokes agents; service tools call its HTTP API.',
   model_provider: 'The model provider the sidecars call for agents of this model family.',
   external: 'An external origin that http tools call through the sidecar.',

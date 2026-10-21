@@ -5,20 +5,20 @@ control plane, the CLI and the Kubernetes manifests is defined here. When code
 and this file disagree, this file wins and the code is wrong. Keep it updated
 in the same change.
 
-## 0. Names (placeholders, one find/replace away)
+## 0. Names
 
 | Thing                       | Name            | Where                                   |
 | --------------------------- | --------------- | --------------------------------------- |
-| Product                     | **attache**     | repo, docs                              |
-| Sidecar daemon binary       | `attached`      | `services/attached`                     |
-| CLI                         | `attache`       | `services/attache-cli`                  |
+| Product                     | **agent-sidecar** (short: **agentsc**) | repo, docs                |
+| Sidecar daemon binary       | `agentscd`      | `services/agentscd`                     |
+| CLI                         | `agentsc`       | `services/agentsc-cli`                  |
 | Control plane / CA          | `embassy`       | `services/embassy`                      |
 | Agent + policy spec file    | `charter.yaml`  | `examples/charters/*.charter.yaml`      |
-| Kubernetes API group        | `attache.io/v1alpha1` | `apiVersion` in charters, labels  |
-| Agent runtime (Python)      | `attache-runtime` | `runtime/`                            |
+| Kubernetes API group        | `agentsc.io/v1alpha1` | `apiVersion` in charters, labels  |
+| Agent runtime (Python)      | `agentsc-runtime` | `runtime/`                            |
 | Discipline                  | AgentSecOps     | README                                  |
 
-## 1. What attache is
+## 1. What agentsc is
 
 **The agent is a sidecar of the service, not a service of its own.**
 
@@ -29,15 +29,15 @@ in the same change.
  │   POST localhost:3500/v1/agents/ops-assistant  │        │   GET /stock      POST /admin/reset    │
  │             │                                  │        │        ▲                 ▲ (denied)    │
  │  ───────────┼──────────────────────────────    │        │  ──────┼─────────────────┼──────────── │
- │  attached (sidecar)  ◀── charter.yaml (CM)     │  mTLS  │  attached (sidecar) ◀── charter.yaml   │
+ │  agentscd (sidecar)  ◀── charter.yaml (CM)     │  mTLS  │  agentscd (sidecar) ◀── charter.yaml   │
  │   HTTP 3500 · gRPC 50001 · mesh 50002 ─────────┼────────┼─▶ mesh 50002  authz(SAN + agent)       │
  │   guardrails · budgets · authz · audit JSONL   │        │   guardrails · budgets · authz · audit │
  │        │ unix socket                           │        │        │ unix socket                   │
- │   attache-runtime (python) ── Claude / mock    │        │   attache-runtime (python)             │
+ │   agentsc-runtime (python) ── Claude / mock    │        │   agentsc-runtime (python)             │
  │     ops-assistant (orchestrator)               │        │     stock-analyst (agent)              │
  └────────────────────────────────────────────────┘        └────────────────────────────────────────┘
-                 ▲ certs: Secret attache-cert-orders           ▲ certs: Secret attache-cert-inventory
-                 └──────────────── embassy (CA, Job) ──────────┘  spiffe://attache/ns/<ns>/svc/<svc>
+                 ▲ certs: Secret agentsc-cert-orders           ▲ certs: Secret agentsc-cert-inventory
+                 └──────────────── embassy (CA, Job) ──────────┘  spiffe://agentsc/ns/<ns>/svc/<svc>
 ```
 
 Principles every component honours:
@@ -50,7 +50,7 @@ Principles every component honours:
    live in `charter.yaml`. The sidecar validates it on load and refuses unknown
    fields. A UI will generate it later; the schema is the API.
 4. **Identity is the certificate.** Every pod has an mTLS identity
-   `spiffe://attache/ns/<namespace>/svc/<service>`. The callee sidecar decides
+   `spiffe://agentsc/ns/<namespace>/svc/<service>`. The callee sidecar decides
    using the caller's certificate SAN plus the calling agent name, never a
    header alone.
 5. **Default deny** for authz once a charter exists. Explicit `allow` rules
@@ -60,11 +60,11 @@ Principles every component honours:
 
 | Component            | Listens on                               | Who calls it                      | Protocol        |
 | -------------------- | ---------------------------------------- | --------------------------------- | --------------- |
-| `attached` app HTTP  | `127.0.0.1:3500`                         | the app container                 | HTTP/1.1 JSON   |
-| `attached` app gRPC  | `127.0.0.1:50001`                        | the app container                 | gRPC plaintext  |
-| `attached` mesh      | `0.0.0.0:50002` (pod IP, via Service)    | other pods' sidecars              | gRPC **mTLS**   |
-| `attached` tools     | `unix:/run/attache/sidecar.sock`         | the local agent runtime           | gRPC            |
-| `attache-runtime`    | `unix:/run/attache/runtime.sock`         | the local sidecar                 | gRPC            |
+| `agentscd` app HTTP  | `127.0.0.1:3500`                         | the app container                 | HTTP/1.1 JSON   |
+| `agentscd` app gRPC  | `127.0.0.1:50001`                        | the app container                 | gRPC plaintext  |
+| `agentscd` mesh      | `0.0.0.0:50002` (pod IP, via Service)    | other pods' sidecars              | gRPC **mTLS**   |
+| `agentscd` tools     | `unix:/run/agentsc/sidecar.sock`         | the local agent runtime           | gRPC            |
+| `agentsc-runtime`    | `unix:/run/agentsc/runtime.sock`         | the local sidecar                 | gRPC            |
 | `embassy`            | none (Job) — see §7                      | —                                 | Kubernetes API  |
 
 Peer discovery: the mesh address of service `S` in namespace `N` is
@@ -72,35 +72,35 @@ Peer discovery: the mesh address of service `S` in namespace `N` is
 it. Every demo Service therefore exposes port `50002` (`mesh`) next to the
 app port.
 
-Flags / environment of `attached` (flag wins over env):
+Flags / environment of `agentscd` (flag wins over env):
 
 | Flag              | Env                      | Default                           |
 | ----------------- | ------------------------ | --------------------------------- |
-| `--charter`       | `ATTACHE_CHARTER`        | `/etc/attache/charter/charter.yaml` |
-| `--tls-dir`       | `ATTACHE_TLS_DIR`        | `/etc/attache/tls` (`ca.crt`, `tls.crt`, `tls.key`) |
-| `--http-addr`     | `ATTACHE_HTTP_ADDR`      | `127.0.0.1:3500`                  |
-| `--grpc-addr`     | `ATTACHE_GRPC_ADDR`      | `127.0.0.1:50001`                 |
-| `--mesh-addr`     | `ATTACHE_MESH_ADDR`      | `0.0.0.0:50002`                   |
-| `--socket-dir`    | `ATTACHE_SOCKET_DIR`     | `/run/attache`                    |
-| `--runtime-cmd`   | `ATTACHE_RUNTIME_CMD`    | `attache-runtime` (shell words; `--listen` and `--sidecar` are appended) |
-| `--no-runtime`    | `ATTACHE_NO_RUNTIME`     | off. `1/true/yes/on` = do not spawn the runtime; something else serves `runtime.sock`, and readiness still follows its `Health` |
+| `--charter`       | `AGENTSC_CHARTER`        | `/etc/agentsc/charter/charter.yaml` |
+| `--tls-dir`       | `AGENTSC_TLS_DIR`        | `/etc/agentsc/tls` (`ca.crt`, `tls.crt`, `tls.key`) |
+| `--http-addr`     | `AGENTSC_HTTP_ADDR`      | `127.0.0.1:3500`                  |
+| `--grpc-addr`     | `AGENTSC_GRPC_ADDR`      | `127.0.0.1:50001`                 |
+| `--mesh-addr`     | `AGENTSC_MESH_ADDR`      | `0.0.0.0:50002`                   |
+| `--socket-dir`    | `AGENTSC_SOCKET_DIR`     | `/run/agentsc`                    |
+| `--runtime-cmd`   | `AGENTSC_RUNTIME_CMD`    | `agentsc-runtime` (shell words; `--listen` and `--sidecar` are appended) |
+| `--no-runtime`    | `AGENTSC_NO_RUNTIME`     | off. `1/true/yes/on` = do not spawn the runtime; something else serves `runtime.sock`, and readiness still follows its `Health` |
 | —                 | `ANTHROPIC_API_KEY`      | unset → the runtime uses the `mock` model for every agent |
 
 ## 3. `charter.yaml`
 
 Top-level keys are exactly these; unknown keys anywhere are a validation
-error (`attache charter validate` exits 1 and names the path). JSON Schema:
+error (`agentsc charter validate` exits 1 and names the path). JSON Schema:
 `schemas/charter.schema.json`, generated from the Rust types by
-`attache charter schema`; a test keeps the file in sync. Fields marked
+`agentsc charter schema`; a test keeps the file in sync. Fields marked
 *v0.2* are optional additions (§3.3); a charter without them is a v0.1
 charter, unchanged.
 
 ```yaml
-apiVersion: attache.io/v1alpha1
+apiVersion: agentsc.io/v1alpha1
 kind: Charter
 service:
   name: orders                 # DNS-1123 label
-  namespace: attache-demo      # DNS-1123 label
+  namespace: agentsc-demo      # DNS-1123 label
   app_port: 8080               # where the app container listens on localhost
   service_accounts: [orders]   # v0.2: Kubernetes service accounts allowed to obtain this identity (default: [<service.name>])
 mesh:                          # optional
@@ -158,19 +158,19 @@ authz:
   callers:                     # who may invoke which of MY agents
     - identity: local                                        # the app container (localhost)
       agents: ["*"]
-    - identity: spiffe://attache/ns/attache-demo/svc/orders  # a peer pod
+    - identity: spiffe://agentsc/ns/agentsc-demo/svc/orders  # a peer pod
       agents: [stock-analyst]
       caller_agents: [ops-assistant]   # optional: only when the caller's sidecar says this agent is calling
   services:                    # path-level rules for service invocation
     - name: inbound-orders-to-stock
-      identity: spiffe://attache/ns/attache-demo/svc/orders  # caller pod; omit = any (incl. local)
+      identity: spiffe://agentsc/ns/agentsc-demo/svc/orders  # caller pod; omit = any (incl. local)
       agent: ops-assistant                                   # calling agent; omit = any
       service: inventory                                     # target service (self when evaluated inbound)
       allow: ["GET /stock", "GET /stock/*"]
       deny:  ["* /admin", "* /admin/*"]
 audit:
   sink: stdout                 # stdout | file
-  file: /var/log/attache/audit.jsonl   # only with sink: file; the image makes /var/log/attache writable
+  file: /var/log/agentsc/audit.jsonl   # only with sink: file; the image makes /var/log/agentsc writable
   redact: []                   # dotted paths inside `input`/`output` to replace with "[redacted]"
 ```
 
@@ -218,9 +218,9 @@ canonical path (§5.1; for `http`, the URL's path) must have the template's
 literal segments, and one segment of one or more characters for each
 `{param}` — else `guardrail.tool_spec`. The query is not checked.
 
-### 3.2 Validation rules (all enforced by `attache-charter`)
+### 3.2 Validation rules (all enforced by `agentsc-charter`)
 
-- `apiVersion` must be `attache.io/v1alpha1`, `kind` must be `Charter`.
+- `apiVersion` must be `agentsc.io/v1alpha1`, `kind` must be `Charter`.
 - Names (`service.name`, `service.namespace`, agent names) are DNS-1123 labels.
 - Agent names unique; tool names unique per agent.
 - `agent` tools only on orchestrators; a local `agent` tool (no `service`, or this service) must name an agent in this charter; an agent may not call itself.
@@ -233,7 +233,7 @@ literal segments, and one segment of one or more characters for each
 - Regexes must compile.
 - `budgets.*` positive; `audit.sink: file` requires `audit.file`.
 
-v0.2 rules (each has a passing and a failing test in `crates/attache-charter/tests/v02_rules.rs`;
+v0.2 rules (each has a passing and a failing test in `crates/agentsc-charter/tests/v02_rules.rs`;
 the JSON Schema mirrors what it can express: patterns, ranges, lengths, `maxItems`, `uniqueItems`,
 `learning.mode: auto` ⇒ `enabled: true`, a tool `name` that matches `^[a-zA-Z0-9_-]{1,64}$` and is
 `not` `load_skill`, and a `model` / `fallback_model` that matches `^[^\s\x00-\x1f\x7f-\x9f]+$`
@@ -287,22 +287,22 @@ with `maxLength` 128; the validator is the authority, e.g. it counts the 128 in 
 - `service.service_accounts`: the pods allowed to obtain this service's certificate run as the
   service account `<service.name>` or one of these.
 
-Defaults are filled by `attache-charter` (`AgentSpec::harness_or_default`,
+Defaults are filled by `agentsc-charter` (`AgentSpec::harness_or_default`,
 `learning_or_default`, `Charter::telemetry_or_default`); empty v0.2 lists and absent v0.2
 blocks are left out when a charter is serialized, so a v0.1 charter serializes exactly as before.
 
 ### 3.4 Custom resource form
 
 A charter is also accepted as a Kubernetes custom resource; `Charter::from_yaml`,
-`Charter::from_value` (and so `attache charter validate`) read both forms. A document with a
+`Charter::from_value` (and so `agentsc charter validate`) read both forms. A document with a
 top-level `spec` or `metadata` is the resource form:
 
 ```yaml
-apiVersion: attache.io/v1alpha1
+apiVersion: agentsc.io/v1alpha1
 kind: Charter
 metadata:
   name: orders                 # must equal spec.service.name
-  namespace: attache-demo      # spec.service.namespace defaults to it; if both are given they must be equal
+  namespace: agentsc-demo      # spec.service.namespace defaults to it; if both are given they must be equal
 spec:                          # the plain charter without apiVersion and kind
   service: { name: orders, app_port: 8080 }
   agents: [...]
@@ -318,9 +318,9 @@ server's own request limit). A text over 256 KiB is parsed only when it may be t
 form, that is when `spec` or `metadata` followed by `:` appears in it; any other is refused as
 an oversized plain charter before it is parsed.
 
-- `attache charter to-cr <file>` prints the resource form of a charter (`metadata` from `service`,
+- `agentsc charter to-cr <file>` prints the resource form of a charter (`metadata` from `service`,
   `spec.service` without `namespace`); `Charter::to_resource` does the same in code.
-- `attache charter schema --crd` prints the CustomResourceDefinition `charters.attache.io`
+- `agentsc charter schema --crd` prints the CustomResourceDefinition `charters.agentsc.io`
   (namespaced, `v1alpha1` served and stored, `status` subresource, printer columns Service,
   Version, Valid, Synced, Age). Its `spec` schema is the charter's JSON Schema made structural
   (references inlined, `Option` fields `nullable`, free-form values such as a tool's `parameters`
@@ -331,7 +331,7 @@ an oversized plain charter before it is parsed.
   know and the validating webhook, which rejects unknown fields, sees the resource exactly as
   written. The root `metadata` is the one exception: Kubernetes allows nothing there but rules
   for `name` and `generateName`. The output is committed as
-  `deploy/crds/charters.attache.io.yaml`; a test keeps it in sync. The schema checks structure
+  `deploy/crds/charters.agentsc.io.yaml`; a test keeps it in sync. The schema checks structure
   and ranges only: the charter validator (the validating webhook) is the authority.
 
 ### 3.5 Schema level and restart-only fields
@@ -342,20 +342,20 @@ an oversized plain charter before it is parsed.
   understands (sent as `Hello.charter_schema_level`).
 - **Restart-only fields**: a hot reload may not change `service.name`, `service.namespace`,
   `service.app_port`, `mesh.port`, `audit.sink`, `audit.file` or `telemetry.otlp_endpoint`
-  (`attache_charter::diff::restart_required` lists the ones that differ). A sidecar refuses such
+  (`agentsc_charter::diff::restart_required` lists the ones that differ). A sidecar refuses such
   an update with `config.invalid`; the control plane refuses such a write with 400
   `config.restart_required` while instances are connected.
-- `attache_charter::diff::weakened` lists the changes that reduce protection (§6, `config`
-  records) and `attache_charter::diff::required_role` the role a change needs (viewer < editor <
+- `agentsc_charter::diff::weakened` lists the changes that reduce protection (§6, `config`
+  records) and `agentsc_charter::diff::required_role` the role a change needs (viewer < editor <
   admin, with one `"<field> requires admin"` reason per field that needs admin). A service with
-  no stored charter has nothing to diff: `attache_charter::diff::first_charter_role` says that
+  no stored charter has nothing to diff: `agentsc_charter::diff::first_charter_role` says that
   adopting a pending charter needs editor and a first `PUT` needs admin.
 
 ## 4. Wire protocol
 
-Protobuf package `attache.v1alpha1` under `proto/attache/v1alpha1/`
+Protobuf package `agentsc.v1alpha1` under `proto/agentsc/v1alpha1/`
 (`common.proto`, `app.proto`, `mesh.proto`, `runtime.proto`). Generated Rust in
-`crates/attache-proto`; generated Python in `runtime/src/attache_runtime/pb/`
+`crates/agentsc-proto`; generated Python in `runtime/src/agentsc_runtime/pb/`
 (committed; regenerate with `make proto`).
 
 ### 4.1 App → sidecar (HTTP, `127.0.0.1:3500`)
@@ -400,7 +400,7 @@ A tool call that is denied inside the run does **not** fail the invocation; it
 is returned to the model as an error tool result, appears in `steps[]` with
 `decision: deny`, and is audited.
 
-Response headers always include `traceparent` and `x-attache-request-id`.
+Response headers always include `traceparent` and `x-agentsc-request-id`.
 
 Also: `GET /v1/agents` → `{"agents":[{"name","type","model","tools":[...]}]}`,
 `GET /v1/charter` → the loaded charter as JSON, `GET /healthz` → `200 ok`
@@ -419,10 +419,10 @@ and `AppApi.ListAgents`. Denials map to `PERMISSION_DENIED` /
 
 ### 4.2 Sidecar ↔ sidecar (mesh, gRPC over mTLS, port 50002)
 
-Metadata on every call: `traceparent`, `x-attache-request-id`,
-`x-attache-agent` (calling agent). Caller identity is **only** taken from the
-client certificate's URI SAN. `x-attache-agent` is a claim made by the
-caller's sidecar (it is set by `attached`, never by the app or the model); the
+Metadata on every call: `traceparent`, `x-agentsc-request-id`,
+`x-agentsc-agent` (calling agent). Caller identity is **only** taken from the
+client certificate's URI SAN. `x-agentsc-agent` is a claim made by the
+caller's sidecar (it is set by `agentscd`, never by the app or the model); the
 callee cannot see the caller's charter, so it trusts the pair (SAN, agent)
 exactly as far as its own `authz` rules say.
 
@@ -431,10 +431,10 @@ exactly as far as its own `authz` rules say.
   invocation.
 - `Mesh.InvokeService(ServiceRequest) → ServiceResponse` — the callee runs
   `authz.services` with `service = self`, `identity = SAN`, `agent =
-  x-attache-agent`, then forwards `method path headers body` to
+  x-agentsc-agent`, then forwards `method path headers body` to
   `127.0.0.1:<service.app_port>` and returns status/headers/body. Denials
   return `PERMISSION_DENIED` with the rule name in the message and the
-  metadata `x-attache-rule`.
+  metadata `x-agentsc-rule`.
 
 ### 4.3 Sidecar ↔ runtime (gRPC over Unix sockets)
 
@@ -497,10 +497,10 @@ declared path or URL template (§3.1) — else `guardrail.tool_spec`.
   audited. Rules: `learning.proposed`, `learning.applied`, `learning.denied`,
   `learning.rate_limited`.
 
-The sidecar adds `traceparent` (a child span) and `x-attache-request-id` to
+The sidecar adds `traceparent` (a child span) and `x-agentsc-request-id` to
 every request it sends — local app, mesh, http tool — and, toward an app,
-`x-attache-caller` and `x-attache-agent`. Values for `traceparent`,
-`tracestate`, `host`, `content-length` and any `x-attache-*` header supplied by
+`x-agentsc-caller` and `x-agentsc-agent`. Values for `traceparent`,
+`tracestate`, `host`, `content-length` and any `x-agentsc-*` header supplied by
 the runtime or a peer are dropped, never forwarded.
 
 The sidecar never follows a redirect. A 3xx from the local app (tool or mesh
@@ -519,7 +519,7 @@ API sets no deadline, so 300 s); `Execute` → the runtime's tool RPCs (at most
 requests (at most 600 s; §9); a tool RPC → the peer over the mesh, or the local
 app and http tools (at most 30 s).
 
-Outcomes, for all three tool RPCs (message = reason, metadata `x-attache-rule`):
+Outcomes, for all three tool RPCs (message = reason, metadata `x-agentsc-rule`):
 
 | outcome | gRPC status | runtime sees | audit `decision` |
 | ------- | ----------- | ------------ | ---------------- |
@@ -537,16 +537,16 @@ with `PROTOCOL_ERROR`.
 
 ## 5. Identity, mTLS, authz
 
-- Trust domain `attache`. SPIFFE ID `spiffe://attache/ns/<namespace>/svc/<service>`.
-- `embassy` holds one CA per cluster: Secret `attache-ca` (`ca.crt`, `ca.key`)
-  in the demo namespace. Leaf certs: Secret `attache-cert-<service>` with
+- Trust domain `agentsc`. SPIFFE ID `spiffe://agentsc/ns/<namespace>/svc/<service>`.
+- `embassy` holds one CA per cluster: Secret `agentsc-ca` (`ca.crt`, `ca.key`)
+  in the demo namespace. Leaf certs: Secret `agentsc-cert-<service>` with
   `ca.crt`, `tls.crt`, `tls.key`. Leaf SANs: URI = the SPIFFE ID; DNS =
   `<service>`, `<service>.<ns>`, `<service>.<ns>.svc`,
   `<service>.<ns>.svc.cluster.local`. CA TTL 10 years, leaf TTL 365 days
   (MVP: no rotation; re-running the Job keeps the CA and re-issues leaves).
 - Mesh server: rustls, requires a client certificate chained to `ca.crt`.
   Caller identity = the first URI SAN of the client leaf; a certificate
-  without a `spiffe://attache/` URI SAN is rejected (`authz.identity.invalid`).
+  without a `spiffe://agentsc/` URI SAN is rejected (`authz.identity.invalid`).
 - Mesh client: verifies the server against `ca.crt` with server name
   `<service>.<ns>.svc.cluster.local` and presents its own leaf.
 - MVP simplification (documented, not hidden): the certificate is **per
@@ -559,7 +559,7 @@ with `PROTOCOL_ERROR`.
 1. `authz.callers`: find rules whose `identity` equals the caller (`local` or
    the SAN); the agent is allowed if any such rule lists it or `"*"` **and**
    the rule's `caller_agents` is empty or contains the calling agent (the
-   caller sidecar's `x-attache-agent` claim; for local agent calls, the local
+   caller sidecar's `x-agentsc-agent` claim; for local agent calls, the local
    calling agent). Otherwise `deny` with rule `authz.callers.default` (no rule
    for that identity) or `authz.callers.<service>` (a rule exists but excludes
    the agent or the calling agent). This runs before the agent name is looked
@@ -625,8 +625,8 @@ that peer.
 
 ## 6. Audit record
 
-One JSON object per line, written by `attached` only (sink `stdout`, readable
-with `kubectl logs -c attached`, or `file`). Field order is fixed as below so
+One JSON object per line, written by `agentscd` only (sink `stdout`, readable
+with `kubectl logs -c agentscd`, or `file`). Field order is fixed as below so
 `grep` and humans see the same thing.
 
 ```json
@@ -637,9 +637,9 @@ with `kubectl logs -c attached`, or `file`). Field order is fixed as below so
   "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",   // W3C, propagated via traceparent
   "span_id": "00f067aa0ba902b7",           // this hop
   "parent_span_id": "b7ad6b7169203331",    // or null
-  "service": "orders", "namespace": "attache-demo",
+  "service": "orders", "namespace": "agentsc-demo",
   "agent": "ops-assistant",                // the agent this record belongs to (null for pure authz failures before resolution)
-  "caller": "local | spiffe://attache/ns/attache-demo/svc/orders",
+  "caller": "local | spiffe://agentsc/ns/agentsc-demo/svc/orders",
   "caller_agent": "ops-assistant",         // when another agent made the call, else null
   "callee": "ops-assistant | anthropic:claude-opus-5-5 | mock | inventory/stock-analyst | inventory GET /stock | https://…",
   "direction": "inbound | outbound | internal",
@@ -723,20 +723,20 @@ with `decision: deny` and the same `request_id` and `trace_id`.
 | `learning` | the agent | `local` | `learning` | internal | `{request_id_of_run}` | `{note, rationale}` (after scrubbing) | `learning.proposed`, `learning.applied` (auto), `learning.denied`, `learning.rate_limited` |
 
 `weakened` lists the changes that reduce protection, as paths
-(`attache_charter::diff::weakened`): a removed `audit.redact` path
+(`agentsc_charter::diff::weakened`): a removed `audit.redact` path
 (`audit.redact[<path>]`), `guardrails.pii_redact` true → false,
 `telemetry.export_payloads` false → true, `authz.default` deny → allow, and a
 removed `input_deny` / `output_deny` rule (`guardrails.input_deny[<name>]`; a
 rule whose regex changed counts as removed).
 
 **Unknown kinds.** A consumer that sees a `kind` it does not know keeps the
-record and shows the kind as written: `attache logs` and embassy never reject a
-record for its kind (`attache logs --kind <any>` filters on it as a string,
+record and shows the kind as written: `agentsc logs` and embassy never reject a
+record for its kind (`agentsc logs --kind <any>` filters on it as a string,
 `--raw` prints the line as it was read).
 
 **Reading records of other versions.** Consumers that read records another
 sidecar version may have written (the CLI, embassy, the OpenTelemetry
-exporter) use the lenient `attache_common::audit::AuditRecordView`: `kind`,
+exporter) use the lenient `agentsc_common::audit::AuditRecordView`: `kind`,
 `direction` and `decision` are strings; `tokens` (`TokensView`) accepts
 counts it does not know and keeps them; unknown top-level fields are kept in
 `extra` (`#[serde(flatten)]`) and serialized again unchanged, after the known
@@ -768,51 +768,51 @@ the values it remembered for open requests and its subscribers are unaffected.
 
 `deploy/` is a kustomize tree, applied with `kubectl apply -k deploy/`:
 
-- `namespace.yaml` — `attache-demo`.
+- `namespace.yaml` — `agentsc-demo`.
 - `embassy/` — ServiceAccount, Role (`secrets: get, create, update`),
   RoleBinding, Job `embassy-bootstrap` running
-  `embassy bootstrap --namespace attache-demo --services orders,inventory`.
+  `embassy bootstrap --namespace agentsc-demo --services orders,inventory`.
 - `orders/`, `inventory/` — Deployment with two containers (`app`,
-  `attached`) and a Service exposing the app port and `mesh` 50002. The
+  `agentscd`) and a Service exposing the app port and `mesh` 50002. The
   charter ConfigMap `<svc>-charter` (key `charter.yaml`) is created by
   `make charters` from `examples/charters/<svc>.charter.yaml`, the single
-  committed copy, and mounted at `/etc/attache/charter/`. The TLS Secret is
-  mounted at `/etc/attache/tls/` (sibling, never nested in the read-only
+  committed copy, and mounted at `/etc/agentsc/charter/`. The TLS Secret is
+  mounted at `/etc/agentsc/tls/` (sibling, never nested in the read-only
   ConfigMap mount).
-- Labels: `app: <svc>`, `attache.io/service: <svc>`. `attache logs` selects
-  on `attache.io/service`.
-- Images (built inside minikube's docker): `attache/attached:dev`
-  (sidecar binary + Python runtime in one image), `attache/embassy:dev`,
-  `attache/orders:dev`, `attache/inventory:dev`. `imagePullPolicy: IfNotPresent`.
+- Labels: `app: <svc>`, `agentsc.io/service: <svc>`. `agentsc logs` selects
+  on `agentsc.io/service`.
+- Images (built inside minikube's docker): `agentsc/agentscd:dev`
+  (sidecar binary + Python runtime in one image), `agentsc/embassy:dev`,
+  `agentsc/orders:dev`, `agentsc/inventory:dev`. `imagePullPolicy: IfNotPresent`.
 - The inventory app listens on `127.0.0.1` inside its pod and its Service
   exposes only `mesh`: every other pod reaches it through the sidecar. (The
   orders app keeps its HTTP port because it is the demo's entry point.)
-- Optional Secret `attache-anthropic` (`ANTHROPIC_API_KEY`), referenced with
+- Optional Secret `agentsc-anthropic` (`ANTHROPIC_API_KEY`), referenced with
   `optional: true`; without it every agent runs on the mock model.
-- Sidecar injection is **explicit** in the MVP: the `attached` container, the
+- Sidecar injection is **explicit** in the MVP: the `agentscd` container, the
   charter ConfigMap mount and the TLS Secret mount are written in each
   Deployment. The mutating admission webhook keyed on
-  `attache.io/inject: "true"` is not implemented yet.
+  `agentsc.io/inject: "true"` is not implemented yet.
 
 ## 8. CLI
 
 ```
-attache charter validate <file>        # plain or resource form (§3.4); exit 0 "valid", exit 1 with one error per line
-attache charter schema                 # JSON Schema to stdout (== schemas/charter.schema.json)
-attache charter schema --crd           # the CustomResourceDefinition charters.attache.io, YAML (== deploy/crds/charters.attache.io.yaml)
-attache charter to-cr <file>           # the charter as a `Charter` custom resource, YAML; exit 1 if the charter is invalid
-attache logs <svc>[,<svc>…] [-n NS] [--context C] [--agent A] [--trace T] [--request R] [--kind <any kind>] [--denied] [-f] [--raw] [--file F|-] [--tail N]
-attache version
+agentsc charter validate <file>        # plain or resource form (§3.4); exit 0 "valid", exit 1 with one error per line
+agentsc charter schema                 # JSON Schema to stdout (== schemas/charter.schema.json)
+agentsc charter schema --crd           # the CustomResourceDefinition charters.agentsc.io, YAML (== deploy/crds/charters.agentsc.io.yaml)
+agentsc charter to-cr <file>           # the charter as a `Charter` custom resource, YAML; exit 1 if the charter is invalid
+agentsc logs <svc>[,<svc>…] [-n NS] [--context C] [--agent A] [--trace T] [--request R] [--kind <any kind>] [--denied] [-f] [--raw] [--file F|-] [--tail N]
+agentsc version
 ```
 
-`attache charter to-cr` validates the file (either form) and prints the
+`agentsc charter to-cr` validates the file (either form) and prints the
 resource form: `metadata: {name, namespace}` from `service`, everything else
 under `spec` (`spec.service` without `namespace`); `to-cr` of its own output
-prints the same document. `attache charter schema --crd` prints the CRD of
+prints the same document. `agentsc charter schema --crd` prints the CRD of
 §3.4, generated from the Rust types.
 
-`attache logs` runs `kubectl logs -n NS -l 'attache.io/service in (<svcs>)' -c
-attached --tail N [-f]`, keeps only lines that parse as §6 records (sidecar
+`agentsc logs` runs `kubectl logs -n NS -l 'agentsc.io/service in (<svcs>)' -c
+agentscd --tail N [-f]`, keeps only lines that parse as §6 records (sidecar
 diagnostics share the container log on stderr and are skipped), applies the
 filters (`--trace`/`--request` match by prefix; `--agent` matches `agent` or
 `caller_agent`), sorts by `ts` unless following, and prints one line per
@@ -842,7 +842,7 @@ reads records from a file instead of kubectl.
 - `model_call` events are reported through `ReportEvent` with
   `input = {system, messages, tools}` and `output = content blocks`; tokens
   from the API `usage`; `cost_usd` from the pricing table in
-  `runtime/src/attache_runtime/pricing.py` (per 1M tokens; `mock` = 0).
+  `runtime/src/agentsc_runtime/pricing.py` (per 1M tokens; `mock` = 0).
   Every model call that ran is reported, because the provider bills it: a
   failed call carries the usage the API had reported before it failed (its
   input tokens once `message_start` arrived) and `error`; a call still running
@@ -884,7 +884,7 @@ reads records from a file instead of kubectl.
 - `cd runtime && uv run pytest` — mock model routing, agent loop with a fake
   sidecar, pricing, event shape, model calls reported after a cancel or a
   failure, deadlines.
-- `services/attache-cli/tests/cli.rs` — `charter validate` accepts the demo
+- `services/agentsc-cli/tests/cli.rs` — `charter validate` accepts the demo
   charters and rejects `examples/charters/invalid-unknown-field.charter.yaml`;
   `logs --file` filters and sorts.
 - `make local-demo` — the full demo on one machine: both apps, two sidecars
