@@ -42,10 +42,10 @@ One binary `embassy` with `embassy serve --components <list>`; components are `c
 
 - **Versions** are decimal strings of a `u64` counter, monotonic per service and never reused, plus an **epoch** string (a UUID of the store record; new epoch when a service's charter is deleted and recreated). A sidecar applies a `CharterUpdate` only if the epoch differs from its current one or the version is greater. Memory has its own version counter per service.
 - **Optimistic concurrency.** Every mutating REST call carries `If-Match: "<version>"` (charter version; for memory calls the memory version). Mismatch → 409 `{"error":"version_conflict","current_version":"<v>"}`. GETs return `ETag: "<version>"`.
-- **Names.** `namespace`, `service`, agent, tool and skill names are DNS-1123 labels (`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`). The control-plane namespace and the service name `embassy` are reserved and never issued certificates.
+- **Names.** `namespace`, `service`, agent and skill names are DNS-1123 labels; tool names keep the v0.1 rule `^[a-zA-Z0-9_-]{1,64}$` (the model API's tool-name rule); `model` and `fallback_model` are non-empty, at most 128 bytes, no whitespace or control characters (`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`). The control-plane namespace and the service name `embassy` are reserved and never issued certificates.
 - **Node ids** (graph): `svc:<ns>/<svc>`, `app:<ns>/<svc>`, `agent:<ns>/<svc>/<agent>`, `model:anthropic`, `model:mock`, `external:<scheme>://<host>[:<port>]`. **Edge ids**: `edge:<kind>:<source node id>-><target node id>` plus `#<tool name>` for tool edges. Ids are stable across reloads.
 - **Time.** Audit `ts` is the record's **end** time (RFC 3339, ms). The cancel guard re-stamps `ts` when it writes. Start time = `ts - latency_ms`.
-- **Size limits.** Serialized charter ≤ 256 KiB; ≤ 64 skills; `agents[].system` ≤ 32 KiB; a skill's `instructions` ≤ 32 KiB; memory per service ≤ 256 KiB (validation rejects charters where the sum over agents of `max_notes × max_note_chars` exceeds it). gRPC max decode: ControlPlane 4 MiB, IssueCertificate 64 KiB. An `AuditBatch` flushes at 256 records, 1 s or 1 MiB of JSON.
+- **Size limits.** Serialized charter ≤ 256 KiB; ≤ 64 skills; `agents[].system` ≤ 32 KiB; a skill's `instructions` ≤ 32 KiB; memory per service ≤ 262144 characters (validation rejects charters where the sum over agents **with learning enabled** of `max_notes × max_note_chars` exceeds it; memory exists only for agents with learning enabled: `runtime_spec` passes no memory for others, the control plane refuses memory writes for them, and when a charter update disables learning for an agent the control plane drops that agent's notes in the same change). gRPC max decode: ControlPlane 4 MiB, IssueCertificate 64 KiB. An `AuditBatch` flushes at 256 records, 1 s or 1 MiB of JSON.
 
 ## 4. Charter additions (attache.io/v1alpha1, backward compatible)
 
@@ -115,7 +115,9 @@ New `kind` values: `config`, `learning`. A consumer that sees an unknown kind mu
 
 `weakened` lists changes that reduce protection: removed `audit.redact` paths, `pii_redact` true→false, `export_payloads` false→true, `authz.default` deny→allow, removed `input_deny`/`output_deny` rules.
 
-`AuditWriter::subscribe() -> tokio::sync::broadcast::Receiver<Arc<AuditRecord>>` (capacity 4096; lagging receivers lose records; the writer never blocks). Records are delivered after redaction and truncation, exactly as written. Used by the OTel exporter and the control-plane client.
+`AuditWriter::subscribe() -> tokio::sync::broadcast::Receiver<Arc<AuditRecord>>` (capacity 4096; lagging receivers lose records; the writer never blocks). Records are delivered after redaction and truncation, exactly as written. Used by the OTel exporter and the control-plane client. Consumers that read records written by other versions (the CLI, embassy, OTel) use a lenient view: `kind`, `direction` and `decision` as strings, `tokens` without `deny_unknown_fields`, and unknown top-level fields preserved (`#[serde(flatten)] extra`) and re-served unchanged. `attache_common::audit::AuditRecordView` is that shared type.
+
+`AuditWriter` redaction settings (`audit.redact` paths and `pii_redact`) are hot-reloadable through `AuditWriter::set_redaction(paths, pii_redact)`; subscribers are unaffected.
 
 ## 6. Sidecar (`attached`)
 
@@ -226,7 +228,7 @@ Control-plane rules:
 
 - **Connect** requires a client certificate from the CA. The control plane takes `service`/`namespace` from the certificate's SPIFFE id; `Hello` values must match (else `PERMISSION_DENIED`, `cp_audit connect_denied`). Each stream gets an `instance_id` (UUID); closing a stream removes only that instance. Server keepalive ping 30 s; `max_connection_age` 30 min.
 - On Hello: if the store has a charter for the service and (epoch, version) differs from Hello's, send `CharterUpdate`; then always send the stored `MemoryUpdate`. If the store has no charter and `Hello.charter_yaml` validates, record a **pending adoption** (shown in UI and `GET /services`, audited as `adopt_pending` with actor `sidecar:<spiffe>/<pod>`); nothing is pushed. It becomes the stored charter only via `POST /services/{ns}/{svc}/adopt` (editor) or automatically with `embassy serve --auto-adopt` (file store only; off by default). A service with no charter and no adoptable charter shows `status: "no_charter"`.
-- Every received audit record: the control plane overwrites `service`/`namespace` with the stream's identity; drops records > 64 KiB or whose `agent` is non-null and not in the stored charter; caps undeclared nodes and edges at 200 per service (oldest evicted).
+- Every received audit record: the control plane overwrites `service`/`namespace` with the stream's identity; drops records > 64 KiB, and records whose `agent` is non-null and not in the stored charter **unless** `direction` is `inbound` (inbound records carry the calling peer's agent); caps undeclared nodes and edges at 200 per service (oldest evicted).
 - `LearningProposal`: accepted only if the stored charter enables learning for that agent; deduplicated by `(ns, svc, dedup_key)`; the control plane assigns the proposal id (UUIDv4). `auto: true` (and the stored mode is `auto`) → note stored at once with `source: auto`, `expires_at = now + note_ttl_days`, `MemoryUpdate` to all instances. Otherwise pending.
 - **Version skew.** Supported: control plane at minor N, sidecars N and N−1. The control plane validates each write also against the lowest `charter_schema_level` among the service's connected instances; violations → 400 with `details` naming field and instances.
 
@@ -303,6 +305,7 @@ events:
 - **Payloads**: tokens without `payloads: true` get audit records with `input`/`output` null (hashes kept), everywhere.
 - **Roles are enforced on the diff** between the stored and the new charter, never only by endpoint:
   - `viewer`: read only.
+  - Creating a service's first stored charter: by adoption (`POST /adopt`) needs `editor` (validator and policy still apply); by `PUT /charter` with no stored charter needs `admin`.
   - `editor`: may change agents' `system`, `model`, `skills`, `harness`, `budgets`, `learning` (except setting `mode: auto`), `tools` of type `service` and `agent` within the same namespace, top-level `skills`, `guardrails.allowed_tools` and `guardrails.allowed_services` entries for agents, agent names inside `authz.callers` rules whose identity is `local`, memory, and proposal decisions; may create and delete agents; may adopt pending charters.
   - `admin`: everything, including `authz` (other than the editor case), `guardrails` rules, `audit`, `telemetry`, `mesh`, `learning.mode: auto`, a new `http` tool origin, any change that adds an `authz.callers` rule for a non-local identity, rollback and service deletion.
   - A write that needs a higher role → 403 `{"error":"forbidden","details":["authz.default requires admin", ...]}`.
@@ -397,7 +400,8 @@ Rules: node `status` enums — service `connected|degraded|disconnected|no_chart
 
 | Record | Animates | Stats |
 | --- | --- | --- |
-| `agent_invocation`, caller `local` | `invoke` edge app→agent | agent node + edge |
+| `agent_invocation`, caller `local`, no `caller_agent` | `invoke` edge app→agent | agent node + edge |
+| `agent_invocation`, caller `local`, with `caller_agent` (local orchestrator) | nothing (the caller's `agent_call` animates) | agent node |
 | `agent_invocation`, caller a peer | nothing (the caller side animates) | agent node |
 | `agent_call` (caller side) | tool edge agent→agent `#<tool>` | edge |
 | `service_call` outbound or internal (caller side) | tool edge agent→app `#<tool>` | edge |
@@ -448,6 +452,7 @@ ComfyUI-style node canvas only (no other ComfyUI layout).
 
 ## 13. Kubernetes
 
+- **CRD pruning:** every object in the CRD schema carries `x-kubernetes-preserve-unknown-fields: true`, so the API server never prunes unknown fields and the validating webhook (which rejects them) sees exactly what the user wrote. The CR size limit (§3) applies to `spec`, not to `status` or `metadata`.
 - **CRD** `charters.attache.io` in chart `templates/` (gated by `crds.install`, annotated `helm.sh/resource-policy: keep`), structural schema generated by `attache charter schema --crd`, `status` subresource, printer columns (Service, Version, Valid, Synced, Age).
 - **Validating webhook** `attache-charter-validator` (CREATE/UPDATE charters, `failurePolicy: Fail`, served by `embassy-ca` at `/validate-charter`): charter validator + policy; it records `cp_audit cr_external_edit`. A CR that got in anyway gets `Valid=False` and is never pushed. RBAC on `charters.attache.io` is documented as equivalent to admin.
 - **Mutating webhook** `attache-sidecar-injector` at `/mutate`: `objectSelector` pod label `attache.io/inject: "true"`; `namespaceSelector` `attache.io/injection=enabled` and `kubernetes.io/metadata.name NotIn [kube-system, <cp-namespace>]`; `sideEffects: None`, `timeoutSeconds: 5`, `admissionReviewVersions: [v1]`, `reinvocationPolicy: Never`, `failurePolicy` from Helm value (default `Fail`). Required annotations: `attache.io/service` (DNS label) and `attache.io/app-port`; missing → admission denied with a clear message. Pods that already have a container named `attached` are left alone and annotated `attache.io/injected: skipped-existing`. The injected sidecar is a native sidecar (an initContainer with `restartPolicy: Always` and a `startupProbe` on `/readyz`) — Kubernetes ≥ 1.29. It gets: image from `--injector-image` or annotation `attache.io/sidecar-image`; args/env for managed mode (`ATTACHE_CONTROL_PLANE`, `ATTACHE_CA_ADDRESS`, `ATTACHE_SERVICE`, `ATTACHE_NAMESPACE`, `ATTACHE_APP_PORT`, `POD_NAME` and `POD_NAMESPACE` via fieldRef, `ATTACHE_CA_PEM` = the CA bundle, `ANTHROPIC_API_KEY` from the Secret named in annotation `attache.io/anthropic-secret` if present); an `emptyDir` at `/run/attache`; a projected token (audience `attache`, `expirationSeconds: 3600`) at `/var/run/secrets/attache/token`; containerPort 50002 named `mesh`; resources and securityContext (non-root, read-only root filesystem, drop ALL, seccomp RuntimeDefault) from Helm values. The webhook is idempotent.
@@ -486,8 +491,8 @@ ComfyUI-style node canvas only (no other ComfyUI layout).
 | A2 Foundation: API + embassy skeleton | `docs/api/openapi.yaml`, `ui/fixtures/**`, `services/embassy/**` (skeleton only) | OpenAPI 3.1 for §8–10 and golden fixtures (graph, services, charter, agent view, memory, proposals, events/recent, an SSE transcript); the embassy module tree with the `Store` trait, shared API types (serde structs matching the fixtures, with a test that the fixtures deserialize), `ControlPlaneConfig` types, `serve` and `token create` subcommands with all flags parsed, and compiling stubs; no proto-generated types used |
 | B1 Sidecar | `services/attached/**` | §6 (wires OTel at integration) |
 | B2 OTel | `crates/attache-otel/**` | §9 |
-| B3a Control plane core | `services/embassy/src/{serve,api,auth,session,graph,events,proposals,store/file,store/mod,controlplane,ui,cp_audit,config}.rs` (or a `serve/` module tree), embassy `Cargo.toml` (coordinate) | §8 except Kubernetes, §10 |
-| B3b Kubernetes + CA | `services/embassy/src/{k8s/**,issuance.rs,webhook.rs,servingcert.rs}` | kube store, IssueCertificate, webhooks, caBundle reconcile, serving cert |
+| B3a Control plane core | `services/embassy/src/lib.rs`, `main.rs`, `Cargo.toml`, and new modules `serve/**`, `api/**`, `auth/**`, `store/mod.rs`, `store/file.rs`, plus any new top-level modules it needs (session, graph, events, proposals, controlplane, ui, cp_audit) | §8 except Kubernetes, §10 |
+| B3b Kubernetes + CA | `services/embassy/src/{k8s/**,issuance.rs,webhook.rs,servingcert.rs}`, `crates/attache-pki/**`; may add its own dependencies to embassy `Cargo.toml` (merge conflicts there are resolved at integration) | kube store, IssueCertificate, webhooks, caBundle reconcile, serving cert |
 | B4 UI | `ui/**` except fixtures | §11 |
 | B5 Runtime | `runtime/**` except stubs and spec.py | §12 |
 | B6 Packaging | `deploy/helm/**`, `deploy/compose/**`, `docker/**`, `.github/workflows/release.yml`, `Makefile` | §13–14, release workflow |
