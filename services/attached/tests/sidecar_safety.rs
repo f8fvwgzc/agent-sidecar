@@ -380,12 +380,22 @@ async fn content_guardrail_denials_log_the_hash_not_the_payload() {
     let denied_out = v["request_id"].as_str().unwrap().to_string();
 
     // 3. a local agent call whose callee refuses the input: the calling agent's tool records
-    //    withhold it too, and so does its next prompt, which quotes the tool input.
+    //    withhold it too, and so does its next prompt, which quotes the tool input. The runtime
+    //    reports for a run the sidecar knows (design §6.5): one more ops-assistant run, whose
+    //    Execute just returned.
+    let r = http
+        .post(rig.invoke_url())
+        .json(&json!({"input": "plan the export"}))
+        .send()
+        .await
+        .unwrap();
+    let v: Value = r.json().await.unwrap();
+    let run = v["request_id"].as_str().unwrap().to_string();
     let mut tools = rig.tools().await;
     let nested = "triage this: password = sk-NESTED-456";
     let err = tools
         .invoke_agent(ToolAgentRequest {
-            ctx: ctx("order_triage", "req-nested"),
+            ctx: ctx("order_triage", &run),
             target_service: String::new(),
             target_agent: "order-triage".into(),
             input: nested.into(),
@@ -398,7 +408,7 @@ async fn content_guardrail_denials_log_the_hash_not_the_payload() {
     let model_call = AuditRecord::new(
         Kind::ModelCall,
         Direction::Outbound,
-        "req-nested",
+        &run,
         &TraceContext::new_root(),
         Some("ops-assistant"),
         "local",
@@ -447,7 +457,12 @@ async fn content_guardrail_denials_log_the_hash_not_the_payload() {
     );
     assert!(inv["output"].is_null());
 
-    let recs = rig.records(|v| v["request_id"] == "req-nested");
+    // after the run's own two records (its output was denied too)
+    let recs: Vec<Value> = rig
+        .records(|v| v["request_id"] == run.as_str())
+        .into_iter()
+        .skip(2)
+        .collect();
     let kinds: Vec<&str> = recs.iter().map(|v| v["kind"].as_str().unwrap()).collect();
     assert_eq!(
         kinds,
