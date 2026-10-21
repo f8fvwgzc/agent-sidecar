@@ -18,6 +18,14 @@
         "peers": {}
       }
     },
+    "skills": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SkillSpec"
+      },
+      "description": "Skills agents can use (`agents[].skills`), by name.",
+      "maxItems": 64
+    },
     "agents": {
       "type": "array",
       "items": {
@@ -50,6 +58,17 @@
         "sink": "stdout",
         "redact": []
       }
+    },
+    "telemetry": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TelemetrySpec"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "OpenTelemetry export and what audit leaves the pod. Absent = the defaults."
     }
   },
   "required": [
@@ -77,6 +96,14 @@
           "minimum": 0,
           "maximum": 65535,
           "description": "Port the app container listens on (localhost), target of inbound service invocations."
+        },
+        "service_accounts": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"
+          },
+          "description": "Kubernetes service accounts whose pods may obtain this identity, besides `<service.name>`\n(default: `[<service.name>]`)."
         }
       },
       "required": [
@@ -106,6 +133,42 @@
         }
       }
     },
+    "SkillSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "DNS-1123 label, unique among skills.",
+          "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"
+        },
+        "description": {
+          "type": "string",
+          "description": "What the skill is for (1 to 1024 characters); the model sees it before it loads the skill.",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "instructions": {
+          "type": "string",
+          "description": "What the agent should do (1 to 32768 bytes).",
+          "minLength": 1,
+          "maxLength": 32768
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Tools the instructions use; each must be allowed for every agent that uses the skill."
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "instructions"
+      ],
+      "description": "A named set of instructions agents can use (`agents[].skills`)."
+    },
     "AgentSpec": {
       "type": "object",
       "additionalProperties": false,
@@ -123,6 +186,8 @@
         },
         "system": {
           "type": "string",
+          "description": "System prompt, at most 32768 bytes.",
+          "maxLength": 32768,
           "default": ""
         },
         "tools": {
@@ -140,6 +205,37 @@
             "max_cost_usd_per_day": 10.0,
             "max_steps": 8
           }
+        },
+        "skills": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"
+          },
+          "description": "Names of top-level `skills` this agent uses, each at most once.",
+          "uniqueItems": true
+        },
+        "harness": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HarnessSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Retries, timeouts and the fallback model. Absent = the defaults."
+        },
+        "learning": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LearningSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Governed learning. Absent = off."
         }
       },
       "required": [
@@ -244,6 +340,131 @@
           "default": 8
         }
       }
+    },
+    "HarnessSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_retries": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "description": "Retries of a model call after a retryable failure, 0..=10.",
+          "maximum": 10,
+          "default": 2
+        },
+        "request_timeout_seconds": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1,
+          "description": "SDK timeout of each attempt, 1..=600 seconds.",
+          "maximum": 600,
+          "default": 120
+        },
+        "fallback_model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Model tried once after the last retryable failure; a valid model id other than `model`."
+        },
+        "tool_result_max_chars": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 100,
+          "description": "Tool results are cut to this many characters, 100..=200000.",
+          "maximum": 200000,
+          "default": 20000
+        }
+      },
+      "description": "`agents[].harness`: how the runtime retries and bounds model and tool calls."
+    },
+    "LearningSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "mode": {
+          "$ref": "#/$defs/LearningMode",
+          "description": "`auto` requires `enabled: true`.",
+          "default": "review"
+        },
+        "max_notes": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1,
+          "description": "Active notes kept for the agent, 1..=200.",
+          "maximum": 200,
+          "default": 20
+        },
+        "max_note_chars": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 50,
+          "description": "Longest note, 50..=4000 characters.",
+          "maximum": 4000,
+          "default": 500
+        },
+        "note_ttl_days": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1,
+          "description": "Lifetime of an `auto` note, 1..=365 days.",
+          "maximum": 365,
+          "default": 7
+        },
+        "from_peers": {
+          "type": "boolean",
+          "description": "Also reflect on invocations whose caller is a peer service.",
+          "default": false
+        },
+        "max_proposals_per_hour": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1,
+          "description": "Lessons the agent may propose per hour, 1..=100.",
+          "maximum": 100,
+          "default": 10
+        }
+      },
+      "description": "`agents[].learning`: governed learning (design §4, §6.5).",
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "auto"
+          }
+        },
+        "required": [
+          "mode"
+        ]
+      },
+      "then": {
+        "properties": {
+          "enabled": {
+            "const": true
+          }
+        },
+        "required": [
+          "enabled"
+        ]
+      }
+    },
+    "LearningMode": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "review",
+          "description": "A proposed lesson waits for an editor's decision."
+        },
+        {
+          "type": "string",
+          "const": "auto",
+          "description": "A proposed lesson becomes a note at once and expires after `note_ttl_days`."
+        }
+      ]
     },
     "Guardrails": {
       "type": "object",
@@ -446,6 +667,39 @@
         "stdout",
         "file"
       ]
+    },
+    "TelemetrySpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "otlp_endpoint": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "OTLP/HTTP endpoint, `http(s)://host[:port]` with no path, query or fragment. Honoured only\nwhen the sidecar allows it (`--otlp-endpoint-allow`); changing it needs a restart.",
+          "pattern": "^https?://[^/?#@\\s]+/?$"
+        },
+        "traces": {
+          "type": "boolean",
+          "default": true
+        },
+        "metrics": {
+          "type": "boolean",
+          "default": true
+        },
+        "export_payloads": {
+          "type": "boolean",
+          "description": "Spans carry inputs and outputs only if true.",
+          "default": false
+        },
+        "control_plane_payloads": {
+          "type": "boolean",
+          "description": "Audit records sent to the control plane keep their (redacted, truncated) input/output.",
+          "default": true
+        }
+      },
+      "description": "`telemetry` (design §4, §9)."
     }
   },
   "$id": "https://attache.io/schemas/v1alpha1/charter.schema.json"

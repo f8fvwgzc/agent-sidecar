@@ -3,12 +3,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::io::Write;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
+use tokio::sync::broadcast;
 
 pub const MAX_PAYLOAD_BYTES: usize = 8 * 1024;
+/// Records a [`AuditWriter::subscribe`] receiver may fall behind by before it loses the oldest.
+pub const SUBSCRIBE_CAPACITY: usize = 4096;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// The kinds this build writes. A reader must keep a record of a kind it does not know and show
+/// the kind as written (CONTRACT.md §6): parse `kind` as a string when reading other sidecars' logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
     AgentInvocation,
@@ -20,9 +25,38 @@ pub enum Kind {
     Authz,
     Guardrail,
     Budget,
+    /// A charter, memory or certificate change applied, refused or failed (`config.*`, `cert.*`).
+    Config,
+    /// A lesson an agent proposed (`learning.*`).
+    Learning,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+impl Kind {
+    /// The wire name (`"agent_invocation"`, …, `"config"`, `"learning"`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Kind::AgentInvocation => "agent_invocation",
+            Kind::ModelCall => "model_call",
+            Kind::ToolCall => "tool_call",
+            Kind::AgentCall => "agent_call",
+            Kind::ServiceCall => "service_call",
+            Kind::HttpCall => "http_call",
+            Kind::Authz => "authz",
+            Kind::Guardrail => "guardrail",
+            Kind::Budget => "budget",
+            Kind::Config => "config",
+            Kind::Learning => "learning",
+        }
+    }
+}
+
+impl std::fmt::Display for Kind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {
     Inbound,
@@ -316,7 +350,8 @@ fn truncate(v: &mut Value) {
     }
 }
 
-/// Writes records to stdout or a file, one line each, serialised.
+/// Writes records to stdout or a file, one line each, serialised, and publishes each written
+/// record to [`AuditWriter::subscribe`] receivers.
 pub struct AuditWriter {
     service: String,
     namespace: String,
@@ -326,6 +361,7 @@ pub struct AuditWriter {
     /// request (the same value reappears as text inside model prompts and tool results).
     secrets: Mutex<std::collections::HashMap<String, (std::time::Instant, Vec<String>)>>,
     sink: Mutex<Box<dyn Write + Send>>,
+    published: broadcast::Sender<Arc<AuditRecord>>,
 }
 
 impl AuditWriter {
@@ -362,7 +398,16 @@ impl AuditWriter {
             pii_redact: false,
             secrets: Mutex::new(std::collections::HashMap::new()),
             sink: Mutex::new(sink),
+            published: broadcast::channel(SUBSCRIBE_CAPACITY).0,
         }
+    }
+
+    /// Every record written from now on, after redaction and truncation, exactly as written to
+    /// the sink and in the same order (the OTel exporter and the control-plane client use it).
+    /// A receiver more than [`SUBSCRIBE_CAPACITY`] records behind loses the oldest
+    /// (`RecvError::Lagged`); the writer never waits for a receiver.
+    pub fn subscribe(&self) -> broadcast::Receiver<Arc<AuditRecord>> {
+        self.published.subscribe()
     }
 
     /// With `guardrails.pii_redact`, emails and phone numbers are rewritten in every payload written.
@@ -447,6 +492,11 @@ impl AuditWriter {
         let mut sink = self.sink.lock().unwrap_or_else(PoisonError::into_inner);
         let _ = writeln!(sink, "{line}");
         let _ = sink.flush();
+        // Published under the sink lock, so receivers see the sink's order. `send` never blocks
+        // (a full channel drops the oldest for lagging receivers) and fails only with none.
+        if self.published.receiver_count() > 0 {
+            let _ = self.published.send(Arc::new(record));
+        }
     }
 
     /// Records owed for work about to be awaited. Dropped before `disarm` — the server dropped the
@@ -481,8 +531,11 @@ impl OnCancel<'_> {
 
 impl Drop for OnCancel<'_> {
     fn drop(&mut self) {
+        // `ts` is a record's end time (CONTRACT.md §6): these were built before the work started.
+        let now = now_rfc3339();
         for mut rec in self.records.drain(..) {
             rec = rec.latency(self.started);
+            rec.ts = now.clone();
             rec.error = Some(CANCELLED.into());
             self.writer.write(rec);
         }
@@ -764,6 +817,166 @@ mod tests {
         ));
         let out = buf.lines()[0]["input"].as_str().unwrap().to_string();
         assert!(!out.contains("someone.lo"), "{}", &out[out.len() - 80..]);
+    }
+
+    #[test]
+    fn config_and_learning_kinds_have_their_wire_names() {
+        for (kind, name) in [(Kind::Config, "config"), (Kind::Learning, "learning")] {
+            assert_eq!(serde_json::to_value(kind).unwrap(), name);
+            assert_eq!(kind.as_str(), name);
+            assert_eq!(kind.to_string(), name);
+            let back: Kind = serde_json::from_value(Value::String(name.into())).unwrap();
+            assert_eq!(back, kind);
+        }
+        // as_str agrees with serde for every kind
+        for kind in [
+            Kind::AgentInvocation,
+            Kind::ModelCall,
+            Kind::ToolCall,
+            Kind::AgentCall,
+            Kind::ServiceCall,
+            Kind::HttpCall,
+            Kind::Authz,
+            Kind::Guardrail,
+            Kind::Budget,
+        ] {
+            assert_eq!(serde_json::to_value(kind).unwrap(), kind.as_str());
+        }
+    }
+
+    #[test]
+    fn subscribers_receive_each_record_as_written() {
+        let buf = Buf::default();
+        let w = AuditWriter::with_sink(
+            "orders",
+            "shop",
+            vec!["input.card".into()],
+            Box::new(buf.clone()),
+        )
+        .with_pii_redact(true);
+        let mut rx = w.subscribe();
+        let t = TraceContext::new_root();
+        let mut rec = AuditRecord::new(
+            Kind::Learning,
+            Direction::Internal,
+            "r1",
+            &t,
+            Some("support"),
+            "local",
+            None,
+            "learning",
+            serde_json::json!({"card": "4111-1111", "note": "mail ops@example.com"}),
+            Value::String("z".repeat(MAX_PAYLOAD_BYTES + 100)),
+        );
+        rec.rule = Some("learning.proposed".into());
+        w.write(rec);
+        let got = rx.try_recv().expect("one record published");
+        assert_eq!(got.kind, Kind::Learning);
+        assert_eq!(got.service, "orders", "stamped");
+        assert_eq!(got.input["card"], "[redacted]", "audit.redact applied");
+        assert_eq!(got.input["note"], "mail [redacted:email]", "PII redacted");
+        assert!(
+            got.output.as_str().unwrap().contains("…(truncated, "),
+            "truncated"
+        );
+        // exactly the line the sink got
+        let line = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(line.trim_end(), got.to_json_line());
+        assert!(rx.try_recv().is_err(), "nothing else");
+    }
+
+    #[test]
+    fn a_lagging_subscriber_never_blocks_the_writer() {
+        let buf = Buf::default();
+        let w = AuditWriter::with_sink("s", "n", vec![], Box::new(buf.clone()));
+        let mut slow = w.subscribe();
+        let t = TraceContext::new_root();
+        let total = SUBSCRIBE_CAPACITY + 100;
+        for i in 0..total {
+            w.write(AuditRecord::new(
+                Kind::Config,
+                Direction::Internal,
+                "",
+                &t,
+                None,
+                "file",
+                None,
+                &format!("charter-{i}"),
+                Value::Null,
+                Value::Null,
+            ));
+        }
+        assert_eq!(buf.lines().len(), total, "every record reached the sink");
+        match slow.try_recv() {
+            Err(broadcast::error::TryRecvError::Lagged(n)) => assert_eq!(n, 100),
+            other => panic!("expected Lagged, got {other:?}"),
+        }
+        // after the lag it reads on from the oldest record still held
+        assert_eq!(slow.try_recv().unwrap().callee, "charter-100");
+        // a writer with no subscribers at all is fine too
+        drop(slow);
+        w.write(AuditRecord::new(
+            Kind::Config,
+            Direction::Internal,
+            "",
+            &t,
+            None,
+            "file",
+            None,
+            "last",
+            Value::Null,
+            Value::Null,
+        ));
+        assert_eq!(buf.lines().len(), total + 1);
+    }
+
+    #[test]
+    fn subscribe_works_for_the_file_sink() {
+        let dir = std::env::temp_dir().join(format!("attache-audit-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("audit.jsonl");
+        let w = AuditWriter::file("s", "n", vec![], path.to_str().unwrap()).unwrap();
+        let mut rx = w.subscribe();
+        let t = TraceContext::new_root();
+        w.write(AuditRecord::new(
+            Kind::Config,
+            Direction::Internal,
+            "",
+            &t,
+            None,
+            "control-plane",
+            None,
+            "charter",
+            serde_json::json!({"source": "control-plane", "version": "7"}),
+            Value::Null,
+        ));
+        let got = rx.try_recv().unwrap();
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(on_disk.trim_end(), got.to_json_line());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_cancel_guard_stamps_the_end_time() {
+        let buf = Buf::default();
+        let w = AuditWriter::with_sink("s", "n", vec![], Box::new(buf.clone()));
+        let t = TraceContext::new_root();
+        let mut rec = AuditRecord::new(
+            Kind::ToolCall,
+            Direction::Internal,
+            "r",
+            &t,
+            None,
+            "local",
+            None,
+            "t",
+            Value::Null,
+            Value::Null,
+        );
+        rec.ts = "2000-01-01T00:00:00.000Z".into(); // built long before the work ended
+        drop(w.on_cancel(vec![rec], Instant::now()));
+        let line = &buf.lines()[0];
+        assert_ne!(line["ts"], "2000-01-01T00:00:00.000Z");
+        assert!(line["ts"].as_str().unwrap().ends_with('Z'));
     }
 
     #[test]

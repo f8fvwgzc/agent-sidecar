@@ -954,6 +954,16 @@ impl SidecarTools for ToolsService {
         self.state.audit.write(rec);
         Ok(Response::new(Empty {}))
     }
+
+    // Placeholder until the sidecar implements learning (design §6.5): the RPC exists in the proto.
+    async fn propose_lesson(
+        &self,
+        _request: Request<attache_proto::LessonRequest>,
+    ) -> Result<Response<attache_proto::LessonResponse>, Status> {
+        Err(Status::unimplemented(
+            "ProposeLesson is not implemented by this sidecar yet",
+        ))
+    }
 }
 
 fn envelope(

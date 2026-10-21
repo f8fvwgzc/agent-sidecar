@@ -2,10 +2,21 @@
 //!
 //! Every struct uses `deny_unknown_fields`, so a typo or a field from a newer
 //! version is a load error with the YAML path, not a silently ignored key.
+//!
+//! A charter is read in either of two forms: the plain document (`apiVersion`, `kind`,
+//! `service`, …) or the Kubernetes custom resource ([`resource::CharterResource`]: `metadata`
+//! plus `spec`). [`diff`] compares two charters (restart-only fields, weakened protection, the
+//! role a change needs) and [`crd`] builds the `charters.attache.io` CustomResourceDefinition.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+pub mod crd;
+pub mod diff;
+pub mod resource;
+
+pub use resource::{CharterResource, CharterSpec, ObjectMeta, ResourceServiceSpec};
 
 pub const API_VERSION: &str = "attache.io/v1alpha1";
 pub const KIND: &str = "Charter";
@@ -13,8 +24,33 @@ pub const LOCAL_IDENTITY: &str = "local";
 pub const DEFAULT_MESH_PORT: u16 = 50002;
 /// Largest `max_tokens` any current Claude model accepts.
 pub const MAX_TOKENS_PER_CALL_LIMIT: u32 = 128_000;
+/// The charter schema level this build understands: 1 = v0.1 fields only, 2 = v0.2
+/// (`skills`, `telemetry`, `service.service_accounts`, `agents[].skills/harness/learning`).
+pub const CHARTER_SCHEMA_LEVEL: u32 = 2;
+/// A serialized charter (the YAML text, and its JSON form) is at most this many bytes.
+pub const MAX_CHARTER_BYTES: usize = 256 * 1024;
+/// At most this many entries in the top-level `skills`.
+pub const MAX_SKILLS: usize = 64;
+/// `agents[].system` is at most this many bytes.
+pub const MAX_SYSTEM_BYTES: usize = 32 * 1024;
+/// A skill's `instructions` are 1 to this many bytes.
+pub const MAX_SKILL_INSTRUCTIONS_BYTES: usize = 32 * 1024;
+/// A skill's `description` is 1 to this many characters.
+pub const MAX_SKILL_DESCRIPTION_CHARS: usize = 1024;
+/// The memory of one service is at most this many bytes, so the learning agents'
+/// `max_notes × max_note_chars` must add up to no more.
+pub const MAX_MEMORY_BYTES: usize = 256 * 1024;
+/// A skill whose instructions are shorter than this (bytes) goes into the system prompt; a
+/// longer one is loaded on demand with the `load_skill` tool.
+pub const INLINE_SKILL_MAX_BYTES: usize = 2048;
+/// The tool the runtime offers for skills that are not inline; no charter tool may use the name.
+pub const LOAD_SKILL_TOOL: &str = "load_skill";
+/// A DNS-1123 label, as JSON Schema `pattern`.
+pub const DNS_LABEL_PATTERN: &str = "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$";
+/// `http(s)://host[:port]` with at most a `/` after it, as JSON Schema `pattern`.
+pub const OTLP_ENDPOINT_PATTERN: &str = r"^https?://[^/?#@\s]+/?$";
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Charter {
     #[serde(rename = "apiVersion")]
@@ -23,6 +59,10 @@ pub struct Charter {
     pub service: ServiceSpec,
     #[serde(default)]
     pub mesh: MeshSpec,
+    /// Skills agents can use (`agents[].skills`), by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 64))]
+    pub skills: Vec<SkillSpec>,
     #[serde(default)]
     pub agents: Vec<AgentSpec>,
     #[serde(default)]
@@ -31,9 +71,12 @@ pub struct Charter {
     pub authz: Authz,
     #[serde(default)]
     pub audit: AuditSpec,
+    /// OpenTelemetry export and what audit leaves the pod. Absent = the defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry: Option<TelemetrySpec>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceSpec {
     /// DNS-1123 label; also the `svc/<name>` segment of the pod's SPIFFE ID.
@@ -41,9 +84,198 @@ pub struct ServiceSpec {
     pub namespace: String,
     /// Port the app container listens on (localhost), target of inbound service invocations.
     pub app_port: u16,
+    /// Kubernetes service accounts whose pods may obtain this identity, besides `<service.name>`
+    /// (default: `[<service.name>]`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(inner(pattern(DNS_LABEL_PATTERN)))]
+    pub service_accounts: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+impl ServiceSpec {
+    /// The service accounts allowed to obtain this identity: `service.name` plus `service_accounts`.
+    pub fn allowed_service_accounts(&self) -> Vec<String> {
+        let mut out = vec![self.name.clone()];
+        for sa in &self.service_accounts {
+            if !out.contains(sa) {
+                out.push(sa.clone());
+            }
+        }
+        out
+    }
+}
+
+/// A named set of instructions agents can use (`agents[].skills`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SkillSpec {
+    /// DNS-1123 label, unique among skills.
+    #[schemars(pattern(DNS_LABEL_PATTERN))]
+    pub name: String,
+    /// What the skill is for (1 to 1024 characters); the model sees it before it loads the skill.
+    #[schemars(length(min = 1, max = 1024))]
+    pub description: String,
+    /// What the agent should do (1 to 32768 bytes).
+    #[schemars(length(min = 1, max = 32768))]
+    pub instructions: String,
+    /// Tools the instructions use; each must be allowed for every agent that uses the skill.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
+}
+
+/// `telemetry` (design §4, §9).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TelemetrySpec {
+    /// OTLP/HTTP endpoint, `http(s)://host[:port]` with no path, query or fragment. Honoured only
+    /// when the sidecar allows it (`--otlp-endpoint-allow`); changing it needs a restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(pattern(OTLP_ENDPOINT_PATTERN))]
+    pub otlp_endpoint: Option<String>,
+    #[serde(default = "d_true")]
+    pub traces: bool,
+    #[serde(default = "d_true")]
+    pub metrics: bool,
+    /// Spans carry inputs and outputs only if true.
+    #[serde(default)]
+    pub export_payloads: bool,
+    /// Audit records sent to the control plane keep their (redacted, truncated) input/output.
+    #[serde(default = "d_true")]
+    pub control_plane_payloads: bool,
+}
+
+fn d_true() -> bool {
+    true
+}
+
+impl Default for TelemetrySpec {
+    fn default() -> Self {
+        Self {
+            otlp_endpoint: None,
+            traces: true,
+            metrics: true,
+            export_payloads: false,
+            control_plane_payloads: true,
+        }
+    }
+}
+
+/// `agents[].harness`: how the runtime retries and bounds model and tool calls.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessSpec {
+    /// Retries of a model call after a retryable failure, 0..=10.
+    #[serde(default = "d_max_retries")]
+    #[schemars(range(max = 10))]
+    pub max_retries: u32,
+    /// SDK timeout of each attempt, 1..=600 seconds.
+    #[serde(default = "d_request_timeout_seconds")]
+    #[schemars(range(min = 1, max = 600))]
+    pub request_timeout_seconds: u32,
+    /// Model tried once after the last retryable failure; a valid model id other than `model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_model: Option<String>,
+    /// Tool results are cut to this many characters, 100..=200000.
+    #[serde(default = "d_tool_result_max_chars")]
+    #[schemars(range(min = 100, max = 200000))]
+    pub tool_result_max_chars: u32,
+}
+fn d_max_retries() -> u32 {
+    2
+}
+fn d_request_timeout_seconds() -> u32 {
+    120
+}
+fn d_tool_result_max_chars() -> u32 {
+    20_000
+}
+impl Default for HarnessSpec {
+    fn default() -> Self {
+        Self {
+            max_retries: d_max_retries(),
+            request_timeout_seconds: d_request_timeout_seconds(),
+            fallback_model: None,
+            tool_result_max_chars: d_tool_result_max_chars(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum LearningMode {
+    /// A proposed lesson waits for an editor's decision.
+    #[default]
+    Review,
+    /// A proposed lesson becomes a note at once and expires after `note_ttl_days`.
+    Auto,
+}
+
+/// `agents[].learning`: governed learning (design §4, §6.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(extend(
+    "if" = {"properties": {"mode": {"const": "auto"}}, "required": ["mode"]},
+    "then" = {"properties": {"enabled": {"const": true}}, "required": ["enabled"]}
+))]
+pub struct LearningSpec {
+    #[serde(default)]
+    pub enabled: bool,
+    /// `auto` requires `enabled: true`.
+    #[serde(default)]
+    pub mode: LearningMode,
+    /// Active notes kept for the agent, 1..=200.
+    #[serde(default = "d_max_notes")]
+    #[schemars(range(min = 1, max = 200))]
+    pub max_notes: u32,
+    /// Longest note, 50..=4000 characters.
+    #[serde(default = "d_max_note_chars")]
+    #[schemars(range(min = 50, max = 4000))]
+    pub max_note_chars: u32,
+    /// Lifetime of an `auto` note, 1..=365 days.
+    #[serde(default = "d_note_ttl_days")]
+    #[schemars(range(min = 1, max = 365))]
+    pub note_ttl_days: u32,
+    /// Also reflect on invocations whose caller is a peer service.
+    #[serde(default)]
+    pub from_peers: bool,
+    /// Lessons the agent may propose per hour, 1..=100.
+    #[serde(default = "d_max_proposals_per_hour")]
+    #[schemars(range(min = 1, max = 100))]
+    pub max_proposals_per_hour: u32,
+}
+fn d_max_notes() -> u32 {
+    20
+}
+fn d_max_note_chars() -> u32 {
+    500
+}
+fn d_note_ttl_days() -> u32 {
+    7
+}
+fn d_max_proposals_per_hour() -> u32 {
+    10
+}
+impl Default for LearningSpec {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: LearningMode::Review,
+            max_notes: d_max_notes(),
+            max_note_chars: d_max_note_chars(),
+            note_ttl_days: d_note_ttl_days(),
+            from_peers: false,
+            max_proposals_per_hour: d_max_proposals_per_hour(),
+        }
+    }
+}
+
+/// An active memory note as the runtime receives it (`agent_spec_json.memory`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeNote {
+    pub id: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MeshSpec {
     #[serde(default = "default_mesh_port")]
@@ -73,7 +305,7 @@ pub enum AgentType {
     Orchestrator,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentSpec {
     pub name: String,
@@ -81,12 +313,41 @@ pub struct AgentSpec {
     pub agent_type: AgentType,
     /// A Claude model id (e.g. `claude-opus-5-5`) or `mock`.
     pub model: String,
+    /// System prompt, at most 32768 bytes.
     #[serde(default)]
+    #[schemars(length(max = 32768))]
     pub system: String,
     #[serde(default)]
     pub tools: Vec<ToolSpec>,
     #[serde(default)]
     pub budgets: Budgets,
+    /// Names of top-level `skills` this agent uses, each at most once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(extend("uniqueItems" = true), inner(pattern(DNS_LABEL_PATTERN)))]
+    pub skills: Vec<String>,
+    /// Retries, timeouts and the fallback model. Absent = the defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<HarnessSpec>,
+    /// Governed learning. Absent = off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub learning: Option<LearningSpec>,
+}
+
+impl AgentSpec {
+    /// `harness` with the defaults filled.
+    pub fn harness_or_default(&self) -> HarnessSpec {
+        self.harness.clone().unwrap_or_default()
+    }
+
+    /// `learning` with the defaults filled.
+    pub fn learning_or_default(&self) -> LearningSpec {
+        self.learning.clone().unwrap_or_default()
+    }
+
+    /// Is learning on for this agent?
+    pub fn learning_enabled(&self) -> bool {
+        self.learning.as_ref().is_some_and(|l| l.enabled)
+    }
 }
 
 fn default_agent_type() -> AgentType {
@@ -101,7 +362,7 @@ pub enum ToolType {
     Http,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ToolSpec {
     pub name: String,
@@ -124,7 +385,7 @@ pub struct ToolSpec {
     pub url: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Budgets {
     #[serde(default = "d_max_tokens")]
@@ -159,7 +420,7 @@ impl Default for Budgets {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Guardrails {
     #[serde(default = "d_max_input_bytes")]
@@ -195,7 +456,7 @@ impl Default for Guardrails {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RegexRule {
     pub name: String,
@@ -210,7 +471,7 @@ pub enum Decision {
     Deny,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Authz {
     #[serde(default)]
@@ -221,7 +482,7 @@ pub struct Authz {
     pub services: Vec<ServiceRule>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CallerRule {
     /// `local` (the app container) or a SPIFFE ID.
@@ -234,7 +495,7 @@ pub struct CallerRule {
     pub caller_agents: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceRule {
     pub name: String,
@@ -259,7 +520,7 @@ pub enum AuditSink {
     File,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AuditSpec {
     #[serde(default)]
@@ -277,13 +538,40 @@ pub enum CharterError {
     Io(#[from] std::io::Error),
     #[error("charter is not valid YAML or has unknown fields: {0}")]
     Parse(#[from] serde_yaml_ng::Error),
+    #[error("charter has unknown fields or wrong types: {0}")]
+    Json(#[from] serde_json::Error),
     #[error("charter is invalid:\n{}", .0.iter().map(|e| format!("  - {e}")).collect::<Vec<_>>().join("\n"))]
     Invalid(Vec<String>),
 }
 
 impl Charter {
+    /// Parse and validate a charter, plain or in the custom resource form (`metadata` + `spec`).
     pub fn from_yaml(text: &str) -> Result<Charter, CharterError> {
-        let charter: Charter = serde_yaml_ng::from_str(text)?;
+        if text.len() > MAX_CHARTER_BYTES {
+            return Err(CharterError::Invalid(vec![format!(
+                "charter is {} bytes, more than the {MAX_CHARTER_BYTES} allowed",
+                text.len()
+            )]));
+        }
+        // Parsed twice: once to see which form it is, then typed from the text, so that errors
+        // keep their YAML path ("guardrails: unknown field …").
+        let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(text)?;
+        let charter = if resource::is_resource_yaml(&doc) {
+            serde_yaml_ng::from_str::<CharterResource>(text)?.into_charter()?
+        } else {
+            serde_yaml_ng::from_str::<Charter>(text)?
+        };
+        charter.validate()?;
+        Ok(charter)
+    }
+
+    /// [`Charter::from_yaml`] for a JSON value (e.g. a custom resource read from the API server).
+    pub fn from_value(value: &serde_json::Value) -> Result<Charter, CharterError> {
+        let charter = if resource::is_resource(value) {
+            CharterResource::deserialize(value)?.into_charter()?
+        } else {
+            Charter::deserialize(value)?
+        };
         charter.validate()?;
         Ok(charter)
     }
@@ -293,8 +581,84 @@ impl Charter {
         Self::from_yaml(&text)
     }
 
+    /// The plain YAML document (the form `CharterUpdate.charter_yaml` carries).
+    pub fn to_yaml(&self) -> Result<String, CharterError> {
+        Ok(serde_yaml_ng::to_string(self)?)
+    }
+
+    /// The custom resource form: `metadata: {name, namespace}` from `service`, `spec` = the rest.
+    pub fn to_resource(&self) -> CharterResource {
+        CharterResource::from_charter(self)
+    }
+
     pub fn agent(&self, name: &str) -> Option<&AgentSpec> {
         self.agents.iter().find(|a| a.name == name)
+    }
+
+    pub fn skill(&self, name: &str) -> Option<&SkillSpec> {
+        self.skills.iter().find(|s| s.name == name)
+    }
+
+    /// `telemetry` with the defaults filled.
+    pub fn telemetry_or_default(&self) -> TelemetrySpec {
+        self.telemetry.clone().unwrap_or_default()
+    }
+
+    /// 1 when the charter uses only v0.1 fields, 2 when it uses any v0.2 field (`skills`,
+    /// `telemetry`, `service.service_accounts`, `agents[].skills`, `harness` or `learning`).
+    /// Empty lists count as unused: they are left out when the charter is serialized.
+    pub fn schema_level(&self) -> u32 {
+        let v2 = !self.skills.is_empty()
+            || self.telemetry.is_some()
+            || !self.service.service_accounts.is_empty()
+            || self
+                .agents
+                .iter()
+                .any(|a| !a.skills.is_empty() || a.harness.is_some() || a.learning.is_some());
+        if v2 { 2 } else { 1 }
+    }
+
+    /// `ExecuteRequest.agent_spec_json` for `agent` (design §4 "What the runtime receives"): the
+    /// agent's entry after `guardrails.allowed_tools` (exactly [`Charter::agent_for_runtime`]),
+    /// with `skills` resolved to `[{name, description, instructions, inline}]` (`inline` when the
+    /// instructions are shorter than [`INLINE_SKILL_MAX_BYTES`]), `harness` and `learning` with
+    /// the defaults filled, and `memory` = `[{id, text}]` (the active notes, oldest first).
+    /// `Value::Null` for an agent the charter does not declare.
+    pub fn runtime_spec(&self, agent: &str, memory: &[RuntimeNote]) -> serde_json::Value {
+        use serde_json::{Value, json};
+        let Some(a) = self.agent(agent) else {
+            return Value::Null;
+        };
+        let mut spec = serde_json::to_value(self.agent_for_runtime(a)).unwrap_or(Value::Null);
+        if let Value::Object(map) = &mut spec {
+            let skills = a
+                .skills
+                .iter()
+                .filter_map(|name| self.skill(name))
+                .map(|s| {
+                    json!({
+                        "name": s.name,
+                        "description": s.description,
+                        "instructions": s.instructions,
+                        "inline": s.instructions.len() < INLINE_SKILL_MAX_BYTES,
+                    })
+                })
+                .collect();
+            map.insert("skills".into(), Value::Array(skills));
+            map.insert(
+                "harness".into(),
+                serde_json::to_value(a.harness_or_default()).unwrap_or(Value::Null),
+            );
+            map.insert(
+                "learning".into(),
+                serde_json::to_value(a.learning_or_default()).unwrap_or(Value::Null),
+            );
+            map.insert(
+                "memory".into(),
+                serde_json::to_value(memory).unwrap_or(Value::Null),
+            );
+        }
+        spec
     }
 
     /// `spiffe://attache/ns/<namespace>/svc/<service>`
@@ -371,6 +735,14 @@ impl Charter {
         if self.service.app_port == 0 {
             errs.push("service.app_port must be > 0".into());
         }
+        for (i, sa) in self.service.service_accounts.iter().enumerate() {
+            if !is_dns_label(sa) {
+                errs.push(format!(
+                    "service.service_accounts[{i}] {sa:?} is not a DNS-1123 label"
+                ));
+            }
+        }
+        self.validate_skills(&mut errs);
         let mut seen = std::collections::BTreeSet::new();
         for (i, agent) in self.agents.iter().enumerate() {
             let at = format!("agents[{i}] ({})", agent.name);
@@ -380,9 +752,16 @@ impl Charter {
             if !seen.insert(agent.name.clone()) {
                 errs.push(format!("{at}: duplicate agent name"));
             }
-            if agent.model.trim().is_empty() {
-                errs.push(format!("{at}: model is required"));
+            if let Err(e) = check_model(&agent.model) {
+                errs.push(format!("{at}: model {e}"));
             }
+            if agent.system.len() > MAX_SYSTEM_BYTES {
+                errs.push(format!(
+                    "{at}: system is {} bytes, more than {MAX_SYSTEM_BYTES}",
+                    agent.system.len()
+                ));
+            }
+            self.validate_agent_v02(agent, &at, &mut errs);
             if agent.budgets.max_tokens_per_call == 0
                 || agent.budgets.max_calls_per_minute == 0
                 || agent.budgets.max_steps == 0
@@ -412,6 +791,11 @@ impl Charter {
                 }
                 if !tool_names.insert(tool.name.clone()) {
                     errs.push(format!("{tt}: duplicate tool name"));
+                }
+                if tool.name == LOAD_SKILL_TOOL {
+                    errs.push(format!(
+                        "{tt}: the tool name {LOAD_SKILL_TOOL} is reserved for skills"
+                    ));
                 }
                 if tool.description.trim().is_empty() {
                     errs.push(format!("{tt}: description is required"));
@@ -568,12 +952,184 @@ impl Charter {
         if self.audit.sink == AuditSink::File && self.audit.file.is_none() {
             errs.push("audit.sink: file requires audit.file".into());
         }
+        if let Some(TelemetrySpec {
+            otlp_endpoint: Some(e),
+            ..
+        }) = &self.telemetry
+            && let Err(why) = check_otlp_endpoint(e)
+        {
+            errs.push(format!("telemetry.otlp_endpoint {e:?}: {why}"));
+        }
+        let memory: u64 = self
+            .agents
+            .iter()
+            .filter_map(|a| a.learning.as_ref().filter(|l| l.enabled))
+            .map(|l| u64::from(l.max_notes) * u64::from(l.max_note_chars))
+            .sum();
+        if memory > MAX_MEMORY_BYTES as u64 {
+            errs.push(format!(
+                "learning: the agents with learning enabled may keep {memory} characters of notes \
+                 (max_notes × max_note_chars), more than the {MAX_MEMORY_BYTES} a service's memory holds"
+            ));
+        }
+        match serde_json::to_vec(self) {
+            Ok(json) if json.len() > MAX_CHARTER_BYTES => errs.push(format!(
+                "charter is {} bytes serialized, more than the {MAX_CHARTER_BYTES} allowed",
+                json.len()
+            )),
+            Ok(_) => {}
+            Err(e) => errs.push(format!("charter cannot be serialized: {e}")),
+        }
         if errs.is_empty() {
             Ok(())
         } else {
             Err(CharterError::Invalid(errs))
         }
     }
+
+    /// Top-level `skills`: names, uniqueness, sizes (design §4 rules 1 and 7).
+    fn validate_skills(&self, errs: &mut Vec<String>) {
+        if self.skills.len() > MAX_SKILLS {
+            errs.push(format!(
+                "skills: at most {MAX_SKILLS} skills, got {}",
+                self.skills.len()
+            ));
+        }
+        let mut names = BTreeSet::new();
+        for (i, s) in self.skills.iter().enumerate() {
+            let at = format!("skills[{i}] ({})", s.name);
+            if !is_dns_label(&s.name) {
+                errs.push(format!("{at}: name is not a DNS-1123 label"));
+            }
+            if !names.insert(s.name.as_str()) {
+                errs.push(format!("{at}: duplicate skill name"));
+            }
+            let chars = s.description.chars().count();
+            if s.description.trim().is_empty() || chars > MAX_SKILL_DESCRIPTION_CHARS {
+                errs.push(format!(
+                    "{at}: description must be 1 to {MAX_SKILL_DESCRIPTION_CHARS} characters, got {chars}"
+                ));
+            }
+            if s.instructions.trim().is_empty()
+                || s.instructions.len() > MAX_SKILL_INSTRUCTIONS_BYTES
+            {
+                errs.push(format!(
+                    "{at}: instructions must be 1 to {MAX_SKILL_INSTRUCTIONS_BYTES} bytes, got {}",
+                    s.instructions.len()
+                ));
+            }
+        }
+    }
+
+    /// An agent's `skills`, `harness` and `learning` (design §4 rules 1, 2, 4 and 6).
+    fn validate_agent_v02(&self, agent: &AgentSpec, at: &str, errs: &mut Vec<String>) {
+        let allowed = self.allowed_tools(agent);
+        let mut used = BTreeSet::new();
+        for name in &agent.skills {
+            if !used.insert(name.as_str()) {
+                errs.push(format!("{at}: skill {name:?} is listed twice"));
+                continue;
+            }
+            let Some(skill) = self.skill(name) else {
+                errs.push(format!("{at}: unknown skill {name:?}"));
+                continue;
+            };
+            for t in &skill.tools {
+                if !allowed.contains(t) {
+                    errs.push(format!(
+                        "{at}: skill {name:?} uses tool {t:?}, which this agent does not declare or may not use (guardrails.allowed_tools)"
+                    ));
+                }
+            }
+        }
+        if let Some(h) = &agent.harness {
+            if h.max_retries > 10 {
+                errs.push(format!("{at}: harness.max_retries must be 0..=10"));
+            }
+            if !(1..=600).contains(&h.request_timeout_seconds) {
+                errs.push(format!(
+                    "{at}: harness.request_timeout_seconds must be 1..=600"
+                ));
+            }
+            if !(100..=200_000).contains(&h.tool_result_max_chars) {
+                errs.push(format!(
+                    "{at}: harness.tool_result_max_chars must be 100..=200000"
+                ));
+            }
+            if let Some(f) = &h.fallback_model {
+                if let Err(e) = check_model(f) {
+                    errs.push(format!("{at}: harness.fallback_model {e}"));
+                } else if f == &agent.model {
+                    errs.push(format!(
+                        "{at}: harness.fallback_model must differ from model"
+                    ));
+                }
+            }
+        }
+        if let Some(l) = &agent.learning {
+            for (field, value, range) in [
+                ("max_notes", l.max_notes, 1..=200),
+                ("max_note_chars", l.max_note_chars, 50..=4000),
+                ("note_ttl_days", l.note_ttl_days, 1..=365),
+                ("max_proposals_per_hour", l.max_proposals_per_hour, 1..=100),
+            ] {
+                if !range.contains(&value) {
+                    errs.push(format!(
+                        "{at}: learning.{field} must be {}..={}",
+                        range.start(),
+                        range.end()
+                    ));
+                }
+            }
+            if l.mode == LearningMode::Auto && !l.enabled {
+                errs.push(format!(
+                    "{at}: learning.mode: auto requires learning.enabled: true"
+                ));
+            }
+        }
+    }
+}
+
+/// The `model` rules, shared by `harness.fallback_model`: a model id (or `mock`) — not empty, no
+/// whitespace or control characters, at most 128 bytes.
+fn check_model(model: &str) -> Result<(), &'static str> {
+    if model.trim().is_empty() {
+        return Err("is required");
+    }
+    if model.len() > 128 || model.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err("is not a model id (no whitespace, at most 128 bytes)");
+    }
+    Ok(())
+}
+
+/// `telemetry.otlp_endpoint`: an `http`/`https` URL with a host, no userinfo, and no path (other
+/// than `/`), query or fragment.
+pub fn check_otlp_endpoint(endpoint: &str) -> Result<(), String> {
+    if !(endpoint.starts_with("http://") || endpoint.starts_with("https://")) {
+        return Err("must be an http:// or https:// URL".into());
+    }
+    let url = url::Url::parse(endpoint).map_err(|e| format!("is not a URL: {e}"))?;
+    if url.host_str().is_none_or(str::is_empty) {
+        return Err("has no host".into());
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("may not carry credentials".into());
+    }
+    if url.query().is_some() || endpoint.contains('?') {
+        return Err("may not have a query".into());
+    }
+    if url.fragment().is_some() || endpoint.contains('#') {
+        return Err("may not have a fragment".into());
+    }
+    // `Url` turns an empty path into `/` and resolves dot segments; the raw text must not have
+    // more than a `/` after the authority either.
+    let after_authority = endpoint
+        .split_once("://")
+        .map_or("", |(_, rest)| rest.find('/').map_or("", |i| &rest[i..]));
+    if url.path() != "/" || !(after_authority.is_empty() || after_authority == "/") {
+        return Err("may not have a path (other than /)".into());
+    }
+    Ok(())
 }
 
 pub fn spiffe_id(namespace: &str, service: &str) -> String {

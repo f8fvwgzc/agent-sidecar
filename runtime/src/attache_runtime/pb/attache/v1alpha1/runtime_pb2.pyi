@@ -132,3 +132,25 @@ class AuditEvent(_message.Message):
     JSON_FIELD_NUMBER: _ClassVar[int]
     json: str
     def __init__(self, json: _Optional[str] = ...) -> None: ...
+
+class LessonRequest(_message.Message):
+    __slots__ = ("ctx", "note", "rationale", "run_request_id")
+    CTX_FIELD_NUMBER: _ClassVar[int]
+    NOTE_FIELD_NUMBER: _ClassVar[int]
+    RATIONALE_FIELD_NUMBER: _ClassVar[int]
+    RUN_REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    ctx: ToolContext
+    note: str
+    rationale: str
+    run_request_id: str
+    def __init__(self, ctx: _Optional[_Union[ToolContext, _Mapping]] = ..., note: _Optional[str] = ..., rationale: _Optional[str] = ..., run_request_id: _Optional[str] = ...) -> None: ...
+
+class LessonResponse(_message.Message):
+    __slots__ = ("decision", "rule", "reason")
+    DECISION_FIELD_NUMBER: _ClassVar[int]
+    RULE_FIELD_NUMBER: _ClassVar[int]
+    REASON_FIELD_NUMBER: _ClassVar[int]
+    decision: str
+    rule: str
+    reason: str
+    def __init__(self, decision: _Optional[str] = ..., rule: _Optional[str] = ..., reason: _Optional[str] = ...) -> None: ...

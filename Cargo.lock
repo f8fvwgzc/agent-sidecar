@@ -142,6 +142,7 @@ dependencies = [
  "serde_json",
  "serde_yaml_ng",
  "thiserror",
+ "url",
 ]
 
 [[package]]
@@ -152,7 +153,9 @@ dependencies = [
  "attache-charter",
  "attache-common",
  "clap",
+ "serde",
  "serde_json",
+ "serde_yaml_ng",
 ]
 
 [[package]]
@@ -168,6 +171,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror",
+ "tokio",
  "url",
  "uuid",
 ]

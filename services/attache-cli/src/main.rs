@@ -3,8 +3,50 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
 use attache_charter::Charter;
-use attache_common::audit::AuditRecord;
+use attache_common::audit::Tokens;
 use clap::{Parser, Subcommand};
+use serde::Deserialize;
+
+/// An audit record (CONTRACT.md §6) as the log reader needs it. `kind` and `direction` are kept
+/// as written: a record of a kind this CLI does not know (from a newer sidecar) is shown as-is,
+/// never dropped.
+#[derive(Debug, Deserialize)]
+struct LogRecord {
+    ts: String,
+    kind: String,
+    request_id: String,
+    trace_id: String,
+    service: String,
+    agent: Option<String>,
+    caller: String,
+    caller_agent: Option<String>,
+    callee: String,
+    direction: String,
+    tokens: Option<Tokens>,
+    cost_usd: Option<f64>,
+    latency_ms: u64,
+    decision: String,
+    rule: Option<String>,
+    error: Option<String>,
+}
+
+const V01_KINDS: [&str; 9] = [
+    "agent_invocation",
+    "model_call",
+    "tool_call",
+    "agent_call",
+    "service_call",
+    "http_call",
+    "authz",
+    "guardrail",
+    "budget",
+];
+
+/// A record and the JSON text it was read from (what `--raw` prints, unchanged).
+struct LogLine {
+    rec: LogRecord,
+    json: String,
+}
 
 #[derive(Parser)]
 #[command(
@@ -32,10 +74,16 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum CharterCmd {
-    /// Validate a charter; exit 1 with one error per line when invalid.
+    /// Validate a charter (plain or custom resource form); exit 1 with one error per line when invalid.
     Validate { file: std::path::PathBuf },
     /// Print the JSON Schema for charter.yaml.
-    Schema,
+    Schema {
+        /// Print the CustomResourceDefinition charters.attache.io (YAML) instead.
+        #[arg(long)]
+        crd: bool,
+    },
+    /// Print a charter as a `Charter` custom resource (metadata from `service`, the rest in `spec`).
+    ToCr { file: std::path::PathBuf },
 }
 
 #[derive(clap::Args)]
@@ -57,7 +105,7 @@ struct LogsArgs {
     /// Only records of this request id.
     #[arg(long)]
     request: Option<String>,
-    /// Only records of this kind (agent_invocation, model_call, tool_call, agent_call, service_call, http_call, authz, guardrail, budget).
+    /// Only records of this kind (agent_invocation, model_call, tool_call, agent_call, service_call, http_call, authz, guardrail, budget, config, learning, or any other kind a sidecar writes).
     #[arg(long)]
     kind: Option<String>,
     /// Only denials.
@@ -98,14 +146,35 @@ fn main() {
             }
         },
         Cmd::Charter {
-            cmd: CharterCmd::Schema,
+            cmd: CharterCmd::Schema { crd: true },
         } => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&attache_charter::json_schema()).unwrap()
-            );
+            print!("{}", attache_charter::crd::crd_yaml());
             0
         }
+        Cmd::Charter {
+            cmd: CharterCmd::Schema { crd: false },
+        } => match serde_json::to_string_pretty(&attache_charter::json_schema()) {
+            Ok(s) => {
+                println!("{s}");
+                0
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                1
+            }
+        },
+        Cmd::Charter {
+            cmd: CharterCmd::ToCr { file },
+        } => match Charter::load(&file).and_then(|c| c.to_resource().to_yaml()) {
+            Ok(yaml) => {
+                print!("{yaml}");
+                0
+            }
+            Err(e) => {
+                eprintln!("invalid: {}\n{e}", file.display());
+                1
+            }
+        },
         Cmd::Logs(args) => match logs(args) {
             Ok(()) => 0,
             Err(e) => {
@@ -166,15 +235,16 @@ fn logs(args: LogsArgs) -> anyhow::Result<()> {
     };
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    let mut records: Vec<AuditRecord> = Vec::new();
+    let mut records: Vec<LogLine> = Vec::new();
     for line in reader.lines() {
         let line = line?;
-        let trimmed = line.trim_start();
+        let trimmed = line.trim();
         let json_start = match trimmed.find('{') {
             Some(i) => i,
             None => continue,
         };
-        let Ok(rec) = serde_json::from_str::<AuditRecord>(&trimmed[json_start..]) else {
+        let json = &trimmed[json_start..];
+        let Ok(rec) = serde_json::from_str::<LogRecord>(json) else {
             continue;
         };
         if let Some(a) = &args.agent
@@ -194,23 +264,27 @@ fn logs(args: LogsArgs) -> anyhow::Result<()> {
             continue;
         }
         if let Some(k) = &args.kind
-            && serde_json::to_value(rec.kind)?.as_str() != Some(k.as_str())
+            && &rec.kind != k
         {
             continue;
         }
         if args.denied && rec.decision != "deny" {
             continue;
         }
+        let entry = LogLine {
+            rec,
+            json: json.to_string(),
+        };
         if args.follow {
-            print_record(&mut out, &rec, args.raw)?;
+            print_record(&mut out, &entry, args.raw)?;
         } else {
-            records.push(rec);
+            records.push(entry);
         }
     }
     // Without --follow, kubectl returns one pod's log after another: sort by time so a trace reads top to bottom.
-    records.sort_by(|a, b| a.ts.cmp(&b.ts));
-    for rec in &records {
-        print_record(&mut out, rec, args.raw)?;
+    records.sort_by(|a, b| a.rec.ts.cmp(&b.rec.ts));
+    for entry in &records {
+        print_record(&mut out, entry, args.raw)?;
     }
     // An empty table must mean "no records", never "kubectl failed".
     if let Some(mut child) = kubectl {
@@ -222,37 +296,33 @@ fn logs(args: LogsArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn print_record(out: &mut impl Write, rec: &AuditRecord, raw: bool) -> anyhow::Result<()> {
+fn print_record(out: &mut impl Write, entry: &LogLine, raw: bool) -> anyhow::Result<()> {
     if raw {
-        writeln!(out, "{}", rec.to_json_line())?;
+        writeln!(out, "{}", entry.json)?;
         return Ok(());
     }
+    let rec = &entry.rec;
     let ts = rec.ts.get(11..23).unwrap_or(&rec.ts);
-    let kind = serde_json::to_value(rec.kind)?
-        .as_str()
-        .unwrap_or("?")
-        .to_string();
-    let dir = serde_json::to_value(rec.direction)?
-        .as_str()
-        .unwrap_or("?")
-        .to_string();
+    let kind = &rec.kind;
+    let dir = &rec.direction;
     let caller = short_id(&rec.caller);
     let caller = match &rec.caller_agent {
-        Some(a)
-            if rec.kind != attache_common::audit::Kind::AgentInvocation
-                || rec.caller != "local" =>
-        {
+        Some(a) if rec.kind != "agent_invocation" || rec.caller != "local" => {
             format!("{caller} ({a})")
         }
         _ => caller,
     };
-    let decision = if rec.decision == "deny" {
-        format!("DENY {}", rec.rule.clone().unwrap_or_default())
-    } else {
-        match &rec.rule {
-            Some(r) if r.starts_with("guardrail.pii") => format!("allow {r}"),
-            _ => "allow".to_string(),
+    // The v0.1 kinds show an allow's rule only for PII redaction; `config`, `learning` and any
+    // kind this CLI does not know show the decision and rule as written.
+    let v01_kind = V01_KINDS.contains(&rec.kind.as_str());
+    let decision = match (rec.decision.as_str(), &rec.rule) {
+        ("deny", rule) => format!("DENY {}", rule.clone().unwrap_or_default()),
+        ("allow", Some(r)) if r.starts_with("guardrail.pii") || !v01_kind => {
+            format!("allow {r}")
         }
+        ("allow", _) => "allow".to_string(),
+        (other, Some(r)) => format!("{other} {r}"),
+        (other, None) => other.to_string(),
     };
     let extra = match (&rec.tokens, rec.cost_usd) {
         (Some(t), Some(c)) if t.input + t.output > 0 => {
@@ -276,7 +346,7 @@ fn print_record(out: &mut impl Write, rec: &AuditRecord, raw: bool) -> anyhow::R
         truncate(&rec.callee, 34),
         decision,
         rec.latency_ms,
-        &rec.trace_id[..rec.trace_id.len().min(8)],
+        rec.trace_id.chars().take(8).collect::<String>(),
     )?;
     Ok(())
 }

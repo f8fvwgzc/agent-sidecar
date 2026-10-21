@@ -91,7 +91,9 @@ Flags / environment of `attached` (flag wins over env):
 Top-level keys are exactly these; unknown keys anywhere are a validation
 error (`attache charter validate` exits 1 and names the path). JSON Schema:
 `schemas/charter.schema.json`, generated from the Rust types by
-`attache charter schema`; a test keeps the file in sync.
+`attache charter schema`; a test keeps the file in sync. Fields marked
+*v0.2* are optional additions (§3.3); a charter without them is a v0.1
+charter, unchanged.
 
 ```yaml
 apiVersion: attache.io/v1alpha1
@@ -100,20 +102,47 @@ service:
   name: orders                 # DNS-1123 label
   namespace: attache-demo      # DNS-1123 label
   app_port: 8080               # where the app container listens on localhost
+  service_accounts: [orders]   # v0.2: Kubernetes service accounts allowed to obtain this identity (default: [<service.name>])
 mesh:                          # optional
   port: 50002
   peers: {}                    # service name → host:port override
+skills:                        # v0.2, at most 64
+  - name: refund-policy        # DNS-1123 label, unique
+    description: How to decide whether a refund is allowed.   # 1..=1024 characters
+    instructions: |            # 1..=32768 bytes
+      Look up the order with lookup_order first. ...
+    tools: [lookup_order]      # optional; each must be allowed for every agent that uses the skill
+telemetry:                     # v0.2, optional; absent = these defaults
+  otlp_endpoint: http://otel-collector:4318   # optional; http(s)://host[:port], no path, query or fragment
+  traces: true
+  metrics: true
+  export_payloads: false       # spans carry inputs/outputs only if true
+  control_plane_payloads: true # audit records sent to the control plane keep their redacted, truncated input/output
 agents:
   - name: ops-assistant        # unique, DNS-1123 label
     type: orchestrator         # agent | orchestrator (orchestrator = may use `agent` tools)
     model: claude-opus-5-5     # any Claude model id, or `mock`
-    system: "..."              # system prompt
+    system: "..."              # system prompt, at most 32768 bytes
     tools: []                  # see below
     budgets:
       max_tokens_per_call: 2048      # max_tokens for each model call, 1..=128000 (thinking counts against it)
       max_calls_per_minute: 30       # inbound invocations of this agent, sliding window
       max_cost_usd_per_day: 5.0      # sum of model_call cost_usd per UTC day
       max_steps: 6                   # model-call iterations per invocation
+    skills: [refund-policy]          # v0.2: names from the top-level `skills`, each once
+    harness:                         # v0.2, optional; absent = these defaults
+      max_retries: 2                 # 0..=10
+      request_timeout_seconds: 120   # 1..=600, per attempt
+      fallback_model: claude-haiku-5-5   # optional; a model id other than `model`
+      tool_result_max_chars: 20000   # 100..=200000
+    learning:                        # v0.2, optional; absent = these defaults (off)
+      enabled: false
+      mode: review                   # review | auto (auto requires enabled: true)
+      max_notes: 20                  # 1..=200
+      max_note_chars: 500            # 50..=4000
+      note_ttl_days: 7               # 1..=365; auto notes only
+      from_peers: false              # also reflect on invocations whose caller is a peer service
+      max_proposals_per_hour: 10     # 1..=100
 guardrails:
   max_input_bytes: 16384
   pii_redact: true             # redact emails and phone numbers in agent output (response + audit)
@@ -203,6 +232,98 @@ literal segments, and one segment of one or more characters for each
 - `authz.services[].name` unique; `allow`/`deny` entries are `"<METHOD|*> <path-glob>"` where the glob supports a trailing `*` only, and the path is one a canonical path (§5.1) can be: the template characters above, no `?`, no empty, `.` or `..` segments.
 - Regexes must compile.
 - `budgets.*` positive; `audit.sink: file` requires `audit.file`.
+
+v0.2 rules (each has a passing and a failing test in `crates/attache-charter/tests/v02_rules.rs`;
+the JSON Schema mirrors what it can express: patterns, ranges, lengths, `maxItems`, `uniqueItems`,
+and `learning.mode: auto` ⇒ `enabled: true`):
+
+1. Skill names are DNS-1123 labels and unique; `agents[].skills` entries name a top-level skill
+   and are not repeated.
+2. For each agent using a skill, every `skill.tools` entry is in `Charter::allowed_tools(agent)`
+   (the declared tools, narrowed by `guardrails.allowed_tools`).
+3. No tool may be named `load_skill` (the runtime offers it for skills, §3.3).
+4. `harness.fallback_model` follows the `model` rules — not empty, no whitespace or control
+   characters, at most 128 bytes (`model` itself follows them too) — and differs from `model`.
+   `harness` ranges: `max_retries` 0..=10, `request_timeout_seconds` 1..=600,
+   `tool_result_max_chars` 100..=200000.
+5. `telemetry.otlp_endpoint` is an `http://` or `https://` URL with a host and no userinfo, path
+   (other than `/`), query or fragment.
+6. `learning.mode: auto` requires `learning.enabled: true`. `learning` ranges: `max_notes`
+   1..=200, `max_note_chars` 50..=4000, `note_ttl_days` 1..=365, `max_proposals_per_hour`
+   1..=100.
+7. Size limits: the charter is at most 256 KiB (the YAML text before it is parsed, and its JSON
+   serialization); at most 64 skills; `agents[].system` at most 32 KiB; a skill's `instructions`
+   1 to 32768 bytes and its `description` 1 to 1024 characters; and the agents with learning
+   enabled may keep at most 256 KiB of notes: the sum of their `max_notes × max_note_chars` is at
+   most 262144 (agents with learning off or absent hold no notes and do not count).
+8. `service.service_accounts` entries are DNS-1123 labels.
+
+### 3.3 Skills, harness, learning, telemetry (v0.2)
+
+- **Skills** are named instructions in the top-level `skills`; an agent lists the ones it uses.
+  The runtime receives them resolved (§4.3): a skill whose `instructions` are shorter than 2048
+  bytes is *inline* (appended to the system prompt); the others are offered through the
+  runtime's `load_skill` tool.
+- **Harness**: model-call retries, the per-attempt timeout, a fallback model tried once after the
+  last retryable failure, and the cut-off for tool results. Absent = the defaults above.
+- **Learning**: agents may propose lessons (`SidecarTools.ProposeLesson`, §4.3); in `review`
+  mode an editor decides, in `auto` mode a lesson becomes a note at once and expires after
+  `note_ttl_days`. Absent = off.
+- **Telemetry**: OpenTelemetry export and what audit leaves the pod. `otlp_endpoint` is honoured
+  only when the sidecar allows it (`--otlp-endpoint-allow`).
+- `service.service_accounts`: the pods allowed to obtain this service's certificate run as the
+  service account `<service.name>` or one of these.
+
+Defaults are filled by `attache-charter` (`AgentSpec::harness_or_default`,
+`learning_or_default`, `Charter::telemetry_or_default`); empty v0.2 lists and absent v0.2
+blocks are left out when a charter is serialized, so a v0.1 charter serializes exactly as before.
+
+### 3.4 Custom resource form
+
+A charter is also accepted as a Kubernetes custom resource; `Charter::from_yaml`,
+`Charter::from_value` (and so `attache charter validate`) read both forms. A document with a
+top-level `spec` or `metadata` is the resource form:
+
+```yaml
+apiVersion: attache.io/v1alpha1
+kind: Charter
+metadata:
+  name: orders                 # must equal spec.service.name
+  namespace: attache-demo      # spec.service.namespace defaults to it; if both are given they must be equal
+spec:                          # the plain charter without apiVersion and kind
+  service: { name: orders, app_port: 8080 }
+  agents: [...]
+```
+
+Other `metadata` fields (labels, annotations, uid, …) are kept as they are and ignored; `status`
+is written by embassy only and ignored when the charter is read; unknown fields anywhere else are
+errors, as in the plain form. A namespace in neither place is an error.
+
+- `attache charter to-cr <file>` prints the resource form of a charter (`metadata` from `service`,
+  `spec.service` without `namespace`); `Charter::to_resource` does the same in code.
+- `attache charter schema --crd` prints the CustomResourceDefinition `charters.attache.io`
+  (namespaced, `v1alpha1` served and stored, `status` subresource, printer columns Service,
+  Version, Valid, Synced, Age). Its `spec` schema is the charter's JSON Schema made structural
+  (references inlined, `Option` fields `nullable`, free-form values such as a tool's `parameters`
+  `x-kubernetes-preserve-unknown-fields`); `status` has `observedGeneration`, `appliedVersion`,
+  `conditions` (`Valid`, `Synced`), and free-form `memory` and `proposals`. The output is committed
+  as `deploy/crds/charters.attache.io.yaml`; a test keeps it in sync. The schema checks structure
+  and ranges only: the charter validator (the validating webhook) is the authority.
+
+### 3.5 Schema level and restart-only fields
+
+- `Charter::schema_level()` is 1 for a charter that uses only v0.1 fields and 2 when it uses any
+  v0.2 field (`skills`, `telemetry`, `service.service_accounts`, `agents[].skills`, `harness`,
+  `learning`; empty lists count as unused). `CHARTER_SCHEMA_LEVEL` = 2 is the level this build
+  understands (sent as `Hello.charter_schema_level`).
+- **Restart-only fields**: a hot reload may not change `service.name`, `service.namespace`,
+  `service.app_port`, `mesh.port`, `audit.sink`, `audit.file` or `telemetry.otlp_endpoint`
+  (`attache_charter::diff::restart_required` lists the ones that differ). A sidecar refuses such
+  an update with `config.invalid`; the control plane refuses such a write with 400
+  `config.restart_required` while instances are connected.
+- `attache_charter::diff::weakened` lists the changes that reduce protection (§6, `config`
+  records) and `attache_charter::diff::required_role` the role a change needs (viewer < editor <
+  admin, with one `"<field> requires admin"` reason per field that needs admin).
 
 ## 4. Wire protocol
 
@@ -297,6 +418,14 @@ exactly as far as its own `authz` rules say.
   charter entry **after** the sidecar applied `guardrails.allowed_tools` (the
   model never sees a tool it may not call). `depth` is the agent-call nesting
   depth; the sidecar refuses depth > 4 (`budget.max_depth`).
+  Since v0.2 it is `Charter::runtime_spec(agent, memory)`: that entry plus
+  `skills: [{name, description, instructions, inline}]` (the agent's skills
+  resolved, in its order; `inline` = instructions shorter than 2048 bytes),
+  `harness` and `learning` with the defaults filled (§3), and
+  `memory: [{id, text}]` (the agent's active notes, oldest first). The
+  runtime's `spec.py` parses exactly this (unknown fields are errors);
+  `schemas/runtime-agent-spec.example.json` is a generated example that the
+  Rust and Python tests both check.
 - `Health(Empty) → HealthResponse{ok, model_provider: "anthropic"|"mock"}`.
 
 `SidecarTools` (served by the sidecar on `sidecar.sock`, called by the runtime
@@ -323,6 +452,21 @@ declared path or URL template (§3.1) — else `guardrail.tool_spec`.
   audited as `http_call`.
 - `ReportEvent(AuditEvent{json}) → Empty` — the runtime's `model_call` records;
   the sidecar stamps `service`, `namespace`, redacts, and writes them.
+- `ProposeLesson(LessonRequest) → LessonResponse` (v0.2) — a lesson the runtime
+  drew from a finished run, for the agent's memory:
+  `LessonRequest {ToolContext ctx = 1; string note = 2; string rationale = 3; string run_request_id = 4;}`,
+  `LessonResponse {string decision = 1; string rule = 2; string reason = 3;}`.
+  The sidecar checks that learning is enabled for `ctx.agent`, that the run's
+  caller was `local` unless `learning.from_peers`, the rate limit
+  `max_proposals_per_hour`, and that `note` is at most `max_note_chars`. It
+  scrubs the note (every value remembered for `run_request_id` by
+  `audit.redact`, every withheld guardrail-denied input, then PII redaction),
+  runs `guardrails.input_deny` on it (a match → `learning.denied`), and writes a
+  `learning` record (§6). Managed, it sends a `LearningProposal` to the control
+  plane, the only writer of memory; unmanaged with `mode: auto` it adds the note
+  to its local memory; unmanaged with `mode: review` the proposal is only
+  audited. Rules: `learning.proposed`, `learning.applied`, `learning.denied`,
+  `learning.rate_limited`.
 
 The sidecar adds `traceparent` (a child span) and `x-attache-request-id` to
 every request it sends — local app, mesh, http tool — and, toward an app,
@@ -458,8 +602,8 @@ with `kubectl logs -c attached`, or `file`). Field order is fixed as below so
 
 ```json
 {
-  "ts": "2026-10-20T19:02:11.482Z",
-  "kind": "agent_invocation | model_call | tool_call | agent_call | service_call | http_call | authz | guardrail | budget",
+  "ts": "2026-10-20T19:02:11.482Z",               // the step's END time (RFC 3339, ms); start = ts − latency_ms
+  "kind": "agent_invocation | model_call | tool_call | agent_call | service_call | http_call | authz | guardrail | budget | config | learning",
   "request_id": "0c4a3f8e-…",             // one per top-level invocation, propagated unchanged across hops
   "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",   // W3C, propagated via traceparent
   "span_id": "00f067aa0ba902b7",           // this hop
@@ -528,18 +672,48 @@ Which records a single demo call produces (orders pod unless noted):
 ```
 
 Records are written when each step finishes, so an invocation's own record
-comes after its children's. A step whose handler is dropped before it finishes
+comes after its children's, and `ts` is that end time (a record's start is
+`ts − latency_ms`). A step whose handler is dropped before it finishes
 (the client disconnected, its deadline passed, the peer reset the stream)
 still writes the records it owes — `agent_invocation`; `tool_call` plus its
 `service_call` / `agent_call` / `http_call`; an inbound `service_call` — with
 the decision it was authorized with and `error: "cancelled: the caller went
 away or its deadline passed before this finished"`. The target may already
-have acted on it.
+have acted on it. That cancel guard stamps `ts` when it writes.
 
 And the denied call: on the inventory pod `service_call inbound
 spiffe://…/svc/orders (ops-assistant) → inventory POST /admin/reset deny
 rule=authz.services.deny-admin`; on the orders pod the matching `tool_call`
 with `decision: deny` and the same `request_id` and `trace_id`.
+
+### 6.1 `config` and `learning` records (v0.2)
+
+| kind | agent | caller | callee | direction | input | output | rules |
+| ---- | ----- | ------ | ------ | --------- | ----- | ------ | ----- |
+| `config` | null | `control-plane` or `file` | `charter` / `memory` / `certificate` | internal | `{source, epoch, version, sha256, weakened: [paths]}` | null | `config.applied`, `config.invalid`, `config.restart_required`, `cert.issued`, `cert.renew_failed` |
+| `learning` | the agent | `local` | `learning` | internal | `{request_id_of_run}` | `{note, rationale}` (after scrubbing) | `learning.proposed`, `learning.applied` (auto), `learning.denied`, `learning.rate_limited` |
+
+`weakened` lists the changes that reduce protection, as paths
+(`attache_charter::diff::weakened`): a removed `audit.redact` path
+(`audit.redact[<path>]`), `guardrails.pii_redact` true → false,
+`telemetry.export_payloads` false → true, `authz.default` deny → allow, and a
+removed `input_deny` / `output_deny` rule (`guardrails.input_deny[<name>]`; a
+rule whose regex changed counts as removed).
+
+**Unknown kinds.** A consumer that sees a `kind` it does not know keeps the
+record and shows the kind as written: `attache logs` and embassy never reject a
+record for its kind (`attache logs --kind <any>` filters on it as a string,
+`--raw` prints the line as it was read).
+
+### 6.2 Subscribing to the audit stream
+
+`AuditWriter::subscribe() → tokio::sync::broadcast::Receiver<Arc<AuditRecord>>`
+delivers every record written after the call — for every sink (`stdout`,
+`file`) — after redaction and truncation, exactly as written and in the sink's
+order. The channel holds 4096 records: a receiver that falls further behind
+loses the oldest (`RecvError::Lagged(n)`), and the writer never waits for a
+receiver. The OpenTelemetry exporter and the control-plane client use it; what
+leaves the pod has therefore always been redacted and truncated first.
 
 ## 7. Kubernetes packaging
 

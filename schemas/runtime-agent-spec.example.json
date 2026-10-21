@@ -1,0 +1,82 @@
+{
+  "name": "support",
+  "type": "orchestrator",
+  "model": "claude-opus-5-5",
+  "system": "You help customers of the shop.",
+  "tools": [
+    {
+      "name": "get_order",
+      "description": "Get one order.",
+      "type": "service",
+      "service": "orders",
+      "method": "GET",
+      "path": "/orders/{id}"
+    },
+    {
+      "name": "refund",
+      "description": "Refund one order.",
+      "type": "service",
+      "service": "orders",
+      "method": "POST",
+      "path": "/orders/{id}/refund"
+    },
+    {
+      "name": "triage",
+      "description": "Ask the triage agent.",
+      "type": "agent",
+      "agent": "triage"
+    },
+    {
+      "name": "partner",
+      "description": "Look a parcel up at the carrier.",
+      "type": "http",
+      "method": "GET",
+      "url": "https://api.partner.example/v1/parcels/{id}"
+    }
+  ],
+  "budgets": {
+    "max_tokens_per_call": 1024,
+    "max_calls_per_minute": 60,
+    "max_cost_usd_per_day": 10.0,
+    "max_steps": 8
+  },
+  "skills": [
+    {
+      "name": "refund-policy",
+      "description": "How to decide whether a refund is allowed.",
+      "instructions": "Look up the order with get_order first. Refund only within 30 days.\n",
+      "inline": true
+    },
+    {
+      "name": "escalation",
+      "description": "When to hand a case to a human.",
+      "instructions": "Escalate when the customer asks for a manager.\nCollect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. Collect the order id, the issue and what was tried. ",
+      "inline": false
+    }
+  ],
+  "harness": {
+    "max_retries": 2,
+    "request_timeout_seconds": 120,
+    "fallback_model": "claude-haiku-5-5",
+    "tool_result_max_chars": 20000
+  },
+  "learning": {
+    "enabled": true,
+    "mode": "review",
+    "max_notes": 20,
+    "max_note_chars": 500,
+    "note_ttl_days": 7,
+    "from_peers": false,
+    "max_proposals_per_hour": 10
+  },
+  "memory": [
+    {
+      "id": "6f1d2c3a-0000-4000-8000-000000000001",
+      "text": "Orders older than 30 days are never refunded."
+    },
+    {
+      "id": "6f1d2c3a-0000-4000-8000-000000000002",
+      "text": "Ask for the order id before looking anything up."
+    }
+  ]
+}
