@@ -215,38 +215,138 @@ pub enum ProposalVerdict {
     Reject,
 }
 
-/// Decide a pending proposal against the service's memory: the pure part of
-/// [`Store::approve_proposal`] and [`Store::reject_proposal`], which a store runs inside the one
-/// critical section (file store: its lock; Kubernetes store: one `status` replace with the read
-/// `resourceVersion`, since memory and proposals live in the same Charter status) that also
-/// writes the result.
+/// An agent's `learning` settings as far as memory writes need them, with the charter defaults
+/// (design §4: `max_notes` 20, `max_note_chars` 500).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AgentLearning {
+    pub enabled: bool,
+    pub max_notes: usize,
+    pub max_note_chars: usize,
+}
+
+impl AgentLearning {
+    pub const DEFAULT_MAX_NOTES: usize = 20;
+    pub const DEFAULT_MAX_NOTE_CHARS: usize = 500;
+
+    /// The `learning` of `agent` in a stored charter (`StoredCharter::charter_json`, plain or
+    /// custom-resource form); `None` when the charter has no such agent.
+    pub fn from_charter(charter_json: &serde_json::Value, agent: &str) -> Option<Self> {
+        let doc = match charter_json.get("spec") {
+            Some(spec) if charter_json.get("metadata").is_some() => spec,
+            _ => charter_json,
+        };
+        let a = doc
+            .get("agents")?
+            .as_array()?
+            .iter()
+            .find(|a| a.get("name").and_then(|n| n.as_str()) == Some(agent))?;
+        let l = a.get("learning");
+        let num = |key: &str, default: usize| {
+            l.and_then(|l| l.get(key))
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|n| usize::try_from(n).ok())
+                .unwrap_or(default)
+        };
+        Some(Self {
+            enabled: l
+                .and_then(|l| l.get("enabled"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            max_notes: num("max_notes", Self::DEFAULT_MAX_NOTES),
+            max_note_chars: num("max_note_chars", Self::DEFAULT_MAX_NOTE_CHARS),
+        })
+    }
+}
+
+/// What a store reads, inside one critical section, to decide a proposal: the stored charter
+/// (`None` when the service has none), the service's memory and the proposal.
+#[derive(Debug, Clone, Copy)]
+pub struct LearningState<'a> {
+    pub charter: Option<&'a serde_json::Value>,
+    pub memory: &'a MemoryDoc,
+    pub proposal: &'a Proposal,
+}
+
+/// Decide a pending proposal: the pure part of [`Store::approve_proposal`] and
+/// [`Store::reject_proposal`]. A store runs it inside the one critical section that also reads
+/// `state` and writes the result (file store: its lock over the charter, memory and proposal
+/// files; Kubernetes store: one `status` replace with the `resourceVersion` it read, since the
+/// charter `spec`, the memory and the proposals are one Charter object, so a concurrent charter
+/// change makes the replace fail).
 ///
-/// Refused with [`StoreError::Conflict`] (current = the memory version) when `if_match_memory` is
-/// not the memory version or the proposal is no longer pending, so of an approve and a reject
-/// racing for the same proposal exactly one wins. Approving appends the note (`source: review`,
-/// `approved_by` = the actor, id `note_id`, `ts`) to the agent's notes and bumps the memory
-/// version; rejecting leaves the memory as it is. Returns the new memory and the decided
-/// proposal.
+/// In this order:
+///
+/// 1. the proposal must be pending, else [`StoreError::NotPending`] with its status (so of an
+///    approve and a reject racing for the same proposal exactly one wins, and the loser learns
+///    why);
+/// 2. `if_match_memory` must be the memory version, else [`StoreError::Conflict`] with the
+///    current memory version;
+/// 3. approving only: the stored charter must enable learning for the agent (memory exists only
+///    for agents with learning enabled, design §3), the agent must have fewer than
+///    `learning.max_notes` notes (approving never evicts one: remove a note first) and the note
+///    must be at most `learning.max_note_chars` characters (the charter may have lowered it
+///    since the proposal), else [`StoreError::Invalid`]. Rejecting needs none of this: it
+///    leaves the memory alone, so pending proposals of an agent whose learning was turned off
+///    can still be rejected.
+///
+/// Approving appends the note (`source: review`, `approved_by` = the actor, id `note_id`, `ts`)
+/// to the agent's notes and bumps the memory version; rejecting leaves the memory as it is.
+/// Returns the new memory and the decided proposal.
 pub fn decide_proposal(
-    memory: &MemoryDoc,
-    proposal: &Proposal,
+    state: LearningState<'_>,
     verdict: ProposalVerdict,
     if_match_memory: &str,
     actor: &Actor,
     ts: &str,
     note_id: String,
 ) -> Result<(MemoryDoc, Proposal), StoreError> {
-    let conflict = || StoreError::Conflict {
-        current: memory.version.clone(),
-    };
-    if if_match_memory != memory.version || proposal.status != ProposalStatus::Pending {
-        return Err(conflict());
+    let LearningState {
+        charter,
+        memory,
+        proposal,
+    } = state;
+    if proposal.status != ProposalStatus::Pending {
+        return Err(StoreError::NotPending {
+            status: proposal.status,
+        });
+    }
+    if if_match_memory != memory.version {
+        return Err(StoreError::Conflict {
+            current: memory.version.clone(),
+        });
     }
     let mut decided = proposal.clone();
     let mut memory = memory.clone();
     match verdict {
         ProposalVerdict::Reject => decided.status = ProposalStatus::Rejected,
         ProposalVerdict::Approve => {
+            let agent = &proposal.agent;
+            let learning = charter.and_then(|c| AgentLearning::from_charter(c, agent));
+            let Some(learning) = learning.filter(|l| l.enabled) else {
+                return Err(StoreError::Invalid(vec![format!(
+                    "{agent}: the stored charter does not enable learning for this agent \
+                     (memory exists only for agents with learning enabled)"
+                )]));
+            };
+            let notes = memory.agents.get(agent).map_or(0, Vec::len);
+            let mut problems = Vec::new();
+            if notes >= learning.max_notes {
+                problems.push(format!(
+                    "{agent}: already has {notes} notes and learning.max_notes is {}; \
+                     remove a note before approving",
+                    learning.max_notes
+                ));
+            }
+            let chars = proposal.note.chars().count();
+            if chars > learning.max_note_chars {
+                problems.push(format!(
+                    "{agent}: the note has {chars} characters and learning.max_note_chars is {}",
+                    learning.max_note_chars
+                ));
+            }
+            if !problems.is_empty() {
+                return Err(StoreError::Invalid(problems));
+            }
             decided.status = ProposalStatus::Approved;
             let next = memory
                 .version
@@ -322,6 +422,9 @@ pub enum StoreError {
     /// The precondition failed; `current` is the current version (charter or memory).
     #[error("version conflict: the current version is {current}")]
     Conflict { current: String },
+    /// A decision on a proposal that was already decided (API: 409 `not_pending`).
+    #[error("the proposal is no longer pending: it is {status:?}")]
+    NotPending { status: ProposalStatus },
     #[error("invalid: {}", .0.join("; "))]
     Invalid(Vec<String>),
     #[error("store: {0}")]
@@ -386,14 +489,19 @@ pub trait Store: Send + Sync {
         dedup_key: Option<&str>,
     ) -> Result<ProposalPut, StoreError>;
 
-    /// Approve the pending proposal `id` of `key` atomically: in one critical section, check
-    /// that it is still pending and that the memory version is `if_match_memory`, add its note
-    /// to the agent's memory (new memory version) and mark it approved ([`decide_proposal`]).
-    /// An approve and a reject of the same proposal can therefore never both succeed. Errors:
-    /// [`StoreError::NotFound`] (no such proposal for this service), [`StoreError::Conflict`]
-    /// (stale memory version, or the proposal is no longer pending). Emits
-    /// [`StoreEvent::MemoryChanged`] and [`StoreEvent::ProposalChanged`]. The caller has checked
-    /// the stored charter first (learning still enabled for the agent, design §7).
+    /// Approve the pending proposal `id` of `key` atomically: in one critical section, read the
+    /// stored charter, the memory and the proposal, decide with [`decide_proposal`] (pending,
+    /// memory version, learning enabled for the agent in the stored charter, below
+    /// `learning.max_notes`, note within `learning.max_note_chars`), then write the new memory
+    /// and the approved proposal. The charter is read inside the same critical section as the
+    /// write, so a concurrent charter write that turns learning off (which drops the agent's
+    /// notes in the same change, design §3) is either seen or happens after the note is stored
+    /// (and then drops it); an approve and a reject of the same proposal never both succeed.
+    ///
+    /// Errors: [`StoreError::NotFound`] (no such proposal for this service),
+    /// [`StoreError::NotPending`] (already decided), [`StoreError::Conflict`] (stale memory
+    /// version), [`StoreError::Invalid`] (learning off, at `max_notes`, note too long). Emits
+    /// [`StoreEvent::MemoryChanged`] and [`StoreEvent::ProposalChanged`].
     async fn approve_proposal(
         &self,
         key: &ServiceKey,
@@ -402,9 +510,10 @@ pub trait Store: Send + Sync {
         actor: &Actor,
     ) -> Result<(MemoryDoc, Proposal), StoreError>;
 
-    /// Reject the pending proposal `id` of `key` atomically (same checks and errors as
-    /// [`Store::approve_proposal`]); the memory is returned unchanged. Emits
-    /// [`StoreEvent::ProposalChanged`].
+    /// Reject the pending proposal `id` of `key` atomically ([`decide_proposal`]: pending and
+    /// memory version are checked; learning need not be enabled any more); the memory is
+    /// returned unchanged. Errors: [`StoreError::NotFound`], [`StoreError::NotPending`],
+    /// [`StoreError::Conflict`]. Emits [`StoreEvent::ProposalChanged`].
     async fn reject_proposal(
         &self,
         key: &ServiceKey,
@@ -439,28 +548,58 @@ pub trait Store: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::sync::Arc;
 
-    /// The smallest store: no charters; memory and proposals in one mutex, decided with
+    /// What the test store keeps under its one lock: the stored charter, the memory and the
+    /// proposals of one service.
+    struct Learning {
+        charter: Option<serde_json::Value>,
+        memory: MemoryDoc,
+        proposals: Vec<Proposal>,
+    }
+
+    /// The smallest store: one service; charter, memory and proposals in one mutex, decided with
     /// [`decide_proposal`] the way a real store does. Proves the trait is implementable and
     /// usable as `Arc<dyn Store>`.
     struct Empty {
         tx: broadcast::Sender<StoreEvent>,
-        learning: std::sync::Mutex<(MemoryDoc, Vec<Proposal>)>,
+        learning: std::sync::Mutex<Learning>,
+    }
+
+    /// support's charter: `support-agent` learns in review mode (at most `max_notes` notes of
+    /// at most 400 characters), `faq` does not learn.
+    fn support_charter(enabled: bool, max_notes: u64) -> serde_json::Value {
+        json!({
+            "apiVersion": "attache.io/v1alpha1", "kind": "Charter",
+            "service": {"name": "support", "namespace": "attache-demo", "app_port": 8090},
+            "agents": [
+                {"name": "support-agent", "model": "claude-opus-5-5",
+                 "learning": {"enabled": enabled, "mode": "review", "max_notes": max_notes, "max_note_chars": 400}},
+                {"name": "faq", "model": "mock"}
+            ]
+        })
     }
 
     impl Empty {
         fn new(tx: broadcast::Sender<StoreEvent>, proposals: Vec<Proposal>) -> Self {
             Self {
                 tx,
-                learning: std::sync::Mutex::new((
-                    MemoryDoc {
+                learning: std::sync::Mutex::new(Learning {
+                    charter: Some(support_charter(true, 20)),
+                    memory: MemoryDoc {
                         version: "0".into(),
                         agents: BTreeMap::new(),
                     },
                     proposals,
-                )),
+                }),
             }
+        }
+
+        fn lock(&self) -> Result<std::sync::MutexGuard<'_, Learning>, StoreError> {
+            self.learning
+                .lock()
+                .map_err(|_| StoreError::Io("poisoned".into()))
         }
 
         fn decide(
@@ -471,18 +610,22 @@ mod tests {
             if_match: &str,
             actor: &Actor,
         ) -> Result<(MemoryDoc, Proposal), StoreError> {
-            let mut guard = self
-                .learning
-                .lock()
-                .map_err(|_| StoreError::Io("poisoned".into()))?;
-            let (memory, proposals) = &mut *guard;
+            let mut guard = self.lock()?;
+            let Learning {
+                charter,
+                memory,
+                proposals,
+            } = &mut *guard;
             let slot = proposals
                 .iter_mut()
                 .find(|p| p.id == id && p.namespace == key.namespace && p.service == key.service)
                 .ok_or(StoreError::NotFound)?;
             let (new_memory, decided) = decide_proposal(
-                memory,
-                slot,
+                LearningState {
+                    charter: charter.as_ref(),
+                    memory,
+                    proposal: slot,
+                },
                 verdict,
                 if_match,
                 actor,
@@ -503,6 +646,18 @@ mod tests {
                 id: id.to_string(),
             });
             Ok((new_memory, decided))
+        }
+
+        /// A charter write that turns `support-agent`'s learning off, dropping its notes in the
+        /// same change (design §3), under the same lock as the decisions.
+        fn disable_learning(&self) -> Result<(), StoreError> {
+            let mut guard = self.lock()?;
+            guard.charter = Some(support_charter(false, 20));
+            if guard.memory.agents.remove("support-agent").is_some() {
+                let next = guard.memory.version.parse::<u64>().unwrap() + 1;
+                guard.memory.version = next.to_string();
+            }
+            Ok(())
         }
     }
 
@@ -540,11 +695,7 @@ mod tests {
             Err(StoreError::NotFound)
         }
         async fn get_memory(&self, _: &ServiceKey) -> Result<MemoryDoc, StoreError> {
-            let guard = self
-                .learning
-                .lock()
-                .map_err(|_| StoreError::Io("poisoned".into()))?;
-            Ok(guard.0.clone())
+            Ok(self.lock()?.memory.clone())
         }
         async fn put_memory(
             &self,
@@ -562,19 +713,17 @@ mod tests {
             }
         }
         async fn list_proposals(&self, f: &ProposalFilter) -> Result<Vec<Proposal>, StoreError> {
-            let guard = self
-                .learning
-                .lock()
-                .map_err(|_| StoreError::Io("poisoned".into()))?;
-            Ok(guard.1.iter().filter(|p| f.matches(p)).cloned().collect())
+            Ok(self
+                .lock()?
+                .proposals
+                .iter()
+                .filter(|p| f.matches(p))
+                .cloned()
+                .collect())
         }
         async fn get_proposal(&self, id: &str) -> Result<Proposal, StoreError> {
-            let guard = self
-                .learning
-                .lock()
-                .map_err(|_| StoreError::Io("poisoned".into()))?;
-            guard
-                .1
+            self.lock()?
+                .proposals
                 .iter()
                 .find(|p| p.id == id)
                 .cloned()
@@ -709,16 +858,27 @@ mod tests {
 
     #[test]
     fn deciding_a_proposal() {
+        let charter = support_charter(true, 2);
         let memory = MemoryDoc {
             version: "4".into(),
             agents: BTreeMap::new(),
         };
         let p = proposal("p1", ProposalStatus::Pending);
         let ts = "2026-10-21T10:00:00.000Z";
+        fn with<'a>(
+            charter: &'a serde_json::Value,
+            memory: &'a MemoryDoc,
+            proposal: &'a Proposal,
+        ) -> LearningState<'a> {
+            LearningState {
+                charter: Some(charter),
+                memory,
+                proposal,
+            }
+        }
 
         let (m, d) = decide_proposal(
-            &memory,
-            &p,
+            with(&charter, &memory, &p),
             ProposalVerdict::Approve,
             "4",
             &alice(),
@@ -743,8 +903,7 @@ mod tests {
         );
 
         let (m, d) = decide_proposal(
-            &memory,
-            &p,
+            with(&charter, &memory, &p),
             ProposalVerdict::Reject,
             "4",
             &alice(),
@@ -755,21 +914,115 @@ mod tests {
         assert_eq!(d.status, ProposalStatus::Rejected);
         assert_eq!(m, memory, "rejecting leaves the memory alone");
 
-        // stale memory version, or no longer pending: conflict naming the memory version
-        for (p, if_match) in [
-            (p.clone(), "3"),
-            (proposal("p1", ProposalStatus::Rejected), "4"),
-            (proposal("p1", ProposalStatus::Approved), "4"),
-        ] {
+        // stale memory version: a conflict naming the memory version
+        for verdict in [ProposalVerdict::Approve, ProposalVerdict::Reject] {
+            assert_eq!(
+                decide_proposal(
+                    with(&charter, &memory, &p),
+                    verdict,
+                    "3",
+                    &alice(),
+                    ts,
+                    "n".into()
+                ),
+                Err(StoreError::Conflict {
+                    current: "4".into()
+                })
+            );
+        }
+        // no longer pending: says so (with any If-Match), so a client knows reloading the
+        // memory will not help
+        for status in [ProposalStatus::Rejected, ProposalStatus::Approved] {
+            let decided = proposal("p1", status);
             for verdict in [ProposalVerdict::Approve, ProposalVerdict::Reject] {
-                assert_eq!(
-                    decide_proposal(&memory, &p, verdict, if_match, &alice(), ts, "n".into()),
-                    Err(StoreError::Conflict {
-                        current: "4".into()
-                    })
-                );
+                for if_match in ["4", "3"] {
+                    assert_eq!(
+                        decide_proposal(
+                            with(&charter, &memory, &decided),
+                            verdict,
+                            if_match,
+                            &alice(),
+                            ts,
+                            "n".into()
+                        ),
+                        Err(StoreError::NotPending { status })
+                    );
+                }
             }
         }
+
+        // approving needs learning enabled in the stored charter; rejecting does not
+        let off = support_charter(false, 2);
+        let mut faq = proposal("p2", ProposalStatus::Pending);
+        faq.agent = "faq".into();
+        let mut ghost = proposal("p3", ProposalStatus::Pending);
+        ghost.agent = "ghost".into();
+        for (charter, p) in [
+            (Some(&off), &p),
+            (Some(&charter), &faq),
+            (Some(&charter), &ghost),
+            (None, &p),
+        ] {
+            let s = LearningState {
+                charter,
+                memory: &memory,
+                proposal: p,
+            };
+            let err = decide_proposal(s, ProposalVerdict::Approve, "4", &alice(), ts, "n".into())
+                .unwrap_err();
+            assert!(
+                matches!(&err, StoreError::Invalid(d) if d[0].contains("does not enable learning")),
+                "{err:?}"
+            );
+            let (m, d) =
+                decide_proposal(s, ProposalVerdict::Reject, "4", &alice(), ts, "n".into()).unwrap();
+            assert_eq!((m, d.status), (memory.clone(), ProposalStatus::Rejected));
+        }
+
+        // approving never goes past learning.max_notes (2 here) or max_note_chars (400)
+        let full = MemoryDoc {
+            version: "6".into(),
+            agents: BTreeMap::from([(
+                "support-agent".to_string(),
+                vec![
+                    Note {
+                        id: "a".into(),
+                        text: "a".into(),
+                        source: NoteSource::Manual,
+                        request_id: None,
+                        trace_id: None,
+                        approved_by: Some("alice".into()),
+                        ts: ts.into(),
+                        expires_at: None,
+                    };
+                    2
+                ],
+            )]),
+        };
+        let mut long = proposal("p4", ProposalStatus::Pending);
+        long.note = "x".repeat(401);
+        let err = decide_proposal(
+            with(&charter, &full, &long),
+            ProposalVerdict::Approve,
+            "6",
+            &alice(),
+            ts,
+            "n".into(),
+        )
+        .unwrap_err();
+        let StoreError::Invalid(problems) = err else {
+            panic!("{err:?}")
+        };
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(
+            problems[0].contains("learning.max_notes is 2"),
+            "{problems:?}"
+        );
+        assert!(
+            problems[1].contains("max_note_chars is 400"),
+            "{problems:?}"
+        );
+
         let broken = MemoryDoc {
             version: u64::MAX.to_string(),
             agents: BTreeMap::new(),
@@ -777,8 +1030,7 @@ mod tests {
         let v = broken.version.clone();
         assert!(matches!(
             decide_proposal(
-                &broken,
-                &p,
+                with(&charter, &broken, &p),
                 ProposalVerdict::Approve,
                 &v,
                 &alice(),
@@ -787,6 +1039,43 @@ mod tests {
             ),
             Err(StoreError::Io(_))
         ));
+    }
+
+    #[test]
+    fn learning_settings_come_from_the_stored_charter() {
+        let plain = support_charter(true, 7);
+        assert_eq!(
+            AgentLearning::from_charter(&plain, "support-agent"),
+            Some(AgentLearning {
+                enabled: true,
+                max_notes: 7,
+                max_note_chars: 400
+            })
+        );
+        // no learning block: off, with the charter defaults
+        assert_eq!(
+            AgentLearning::from_charter(&plain, "faq"),
+            Some(AgentLearning {
+                enabled: false,
+                max_notes: AgentLearning::DEFAULT_MAX_NOTES,
+                max_note_chars: AgentLearning::DEFAULT_MAX_NOTE_CHARS
+            })
+        );
+        assert_eq!(AgentLearning::from_charter(&plain, "ghost"), None);
+        // the custom-resource form
+        let mut spec = plain.clone();
+        let spec_map = spec.as_object_mut().unwrap();
+        spec_map.remove("apiVersion");
+        spec_map.remove("kind");
+        let cr = json!({
+            "apiVersion": "attache.io/v1alpha1", "kind": "Charter",
+            "metadata": {"name": "support", "namespace": "attache-demo"},
+            "spec": spec
+        });
+        assert_eq!(
+            AgentLearning::from_charter(&cr, "support-agent").map(|l| l.max_notes),
+            Some(7)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -817,11 +1106,11 @@ mod tests {
                     assert_eq!(stored.status, ProposalStatus::Approved);
                     assert_eq!((m.version.as_str(), &d), ("1", &stored));
                     assert_eq!(memory.agents["support-agent"].len(), 1);
-                    // the loser was told the memory version that is current now
+                    // the loser learns that the proposal was decided
                     assert_eq!(
                         e,
-                        StoreError::Conflict {
-                            current: "1".into()
+                        StoreError::NotPending {
+                            status: ProposalStatus::Approved
                         }
                     );
                     assert!(matches!(
@@ -835,8 +1124,8 @@ mod tests {
                     assert!(memory.agents.is_empty());
                     assert_eq!(
                         e,
-                        StoreError::Conflict {
-                            current: "0".into()
+                        StoreError::NotPending {
+                            status: ProposalStatus::Rejected
                         }
                     );
                 }
@@ -862,6 +1151,41 @@ mod tests {
             store.reject_proposal(&other, "p1", "0", &alice()).await,
             Err(StoreError::NotFound)
         );
+    }
+
+    /// The learning check happens inside the store's critical section: a charter write that
+    /// turns learning off for an agent without notes (so the memory version does not move)
+    /// either comes first, and the approve is refused, or comes after, and drops the note the
+    /// approve stored. Never a note for an agent whose learning is off.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn approve_never_outlives_learning_turned_off() {
+        let key = ServiceKey::new("attache-demo", "support");
+        let (mut refused, mut dropped) = (0, 0);
+        for round in 0..50 {
+            let (tx, _) = broadcast::channel(16);
+            let store = Arc::new(Empty::new(
+                tx,
+                vec![proposal("p1", ProposalStatus::Pending)],
+            ));
+            let (a, b) = (store.clone(), store.clone());
+            let k = key.clone();
+            let approve =
+                tokio::spawn(async move { a.approve_proposal(&k, "p1", "0", &alice()).await });
+            let off = tokio::spawn(async move { b.disable_learning() });
+            let approve = approve.await.unwrap();
+            off.await.unwrap().unwrap();
+            let memory = store.get_memory(&key).await.unwrap();
+            assert!(
+                !memory.agents.contains_key("support-agent"),
+                "round {round}: a note survived learning turned off: {memory:?}"
+            );
+            match approve {
+                Ok(_) => dropped += 1,
+                Err(StoreError::Invalid(_)) => refused += 1,
+                Err(e) => panic!("round {round}: {e:?}"),
+            }
+        }
+        assert_eq!(refused + dropped, 50);
     }
 
     #[test]

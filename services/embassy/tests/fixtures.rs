@@ -330,7 +330,21 @@ fn fixtures_agree_with_each_other() {
         for inst in &svc.instances {
             assert_eq!(inst.acked_version, svc.charter_version);
         }
+        // degraded: connected, and an instance has an ack error, lags or is not ready
+        let lagging = svc.instances.iter().any(|i| {
+            i.ack_error.is_some() || i.acked_version != svc.charter_version || !i.runtime_ready
+        });
+        let want = match (svc.instances.is_empty(), lagging) {
+            (true, _) => ServiceStatus::Disconnected,
+            (false, true) => ServiceStatus::Degraded,
+            (false, false) => ServiceStatus::Connected,
+        };
+        assert_eq!(svc.status, want, "{}", svc.service);
     }
+    assert!(
+        services.iter().any(|s| s.status == ServiceStatus::Degraded),
+        "a degraded service (an instance with an ack error)"
+    );
 
     // orders: history and agent view; support: memory and proposals
     let support = services
@@ -444,27 +458,33 @@ fn sse_transcript_follows_the_design_rules() {
     let frames = sse_frames();
     assert!(frames.windows(2).all(|w| w[0].id < w[1].id), "ids increase");
     let mut kinds = BTreeSet::new();
-    let mut audit_traces = BTreeSet::new();
-    for f in &frames {
+    let mut graph_version: u64 = graph.version.parse().unwrap();
+    for (i, f) in frames.iter().enumerate() {
         kinds.insert(f.event.clone());
         match SseEvent::parse(&f.event, &f.data).expect("parses") {
             SseEvent::Audit(a) => {
                 assert_eq!(a.animate, a.edge_id.is_some(), "id {}", f.id);
                 if let Some(e) = &a.edge_id {
+                    // an edge the snapshot does not have yet: a graph event announces it
                     assert!(
-                        edges.contains(e.as_str()),
-                        "id {}: edge {e} not in the graph",
+                        edges.contains(e.as_str())
+                            || frames[i + 1..].iter().any(|g| g.event == "graph"),
+                        "id {}: edge {e} not in the graph and no graph event follows",
                         f.id
                     );
                 }
                 assert!(services.iter().any(|s| s.service == a.record.service));
                 assert!(a.record.ts > graph.generated_at, "after the snapshot");
-                audit_traces.insert(a.record.trace_id.clone());
             }
             SseEvent::Graph(g) => {
-                let (old, new): (u64, u64) =
-                    (graph.version.parse().unwrap(), g.version.parse().unwrap());
-                assert!(new > old, "graph versions increase");
+                let new: u64 = g.version.parse().unwrap();
+                assert!(new > graph_version, "graph versions increase");
+                graph_version = new;
+            }
+            SseEvent::Lagged(l) => {
+                // the 1024 queued events and the one that did not fit, at least
+                assert!(l.dropped > 1024, "id {}: dropped {}", f.id, l.dropped);
+                assert!(f.id - frames[i - 1].id >= l.dropped, "id {}: id gap", f.id);
             }
             _ => {}
         }
@@ -487,22 +507,93 @@ fn sse_transcript_follows_the_design_rules() {
         acks.contains(&true) && acks.contains(&false),
         "an applied and a failed ack"
     );
-    // the request audit events are one call across two pods; config records have their own
-    let request_records: Vec<AuditRecord> = frames
+    // the request audit events: every request keeps one trace and one request id; one request
+    // crosses pods (the stock question), and the record kinds the UI must animate or not are there
+    let records: Vec<AuditRecord> = frames
         .iter()
         .filter_map(|f| match SseEvent::parse(&f.event, &f.data) {
-            Ok(SseEvent::Audit(a)) if a.record.kind != "config" => Some(a.record),
+            Ok(SseEvent::Audit(a)) => Some(a.record),
             _ => None,
         })
         .collect();
-    let traces: BTreeSet<&str> = request_records
-        .iter()
-        .map(|r| r.trace_id.as_str())
-        .collect();
-    assert_eq!(traces.len(), 1, "one call: {traces:?}");
-    let pods: BTreeSet<&str> = request_records.iter().map(|r| r.service.as_str()).collect();
-    assert_eq!(pods.len(), 2, "the call crosses pods");
-    assert!(audit_traces.len() > traces.len(), "a config record too");
+    let mut by_request: BTreeMap<&str, (BTreeSet<&str>, BTreeSet<&str>)> = BTreeMap::new();
+    for r in records.iter().filter(|r| r.kind != "config") {
+        let (traces, pods) = by_request.entry(r.request_id.as_str()).or_default();
+        traces.insert(r.trace_id.as_str());
+        pods.insert(r.service.as_str());
+    }
+    assert!(by_request.values().all(|(traces, _)| traces.len() == 1));
+    assert!(
+        by_request.values().any(|(_, pods)| pods.len() == 2),
+        "a call across pods"
+    );
+    let has = |pred: &dyn Fn(&AuditRecord) -> bool| records.iter().any(pred);
+    assert!(has(&|r| r.kind == "config"), "a config record");
+    assert!(
+        has(&|r| r.kind == "agent_invocation" && r.caller == "local" && r.caller_agent.is_some()),
+        "a local orchestrator's call"
+    );
+    assert!(has(&|r| r.kind == "http_call"), "an http_call");
+    assert!(
+        has(&|r| r.kind == "model_call" && r.callee == "mock"),
+        "a model_call to the mock model"
+    );
+}
+
+/// Every charter in the fixtures passes `attache charter validate` (the CLI of this workspace).
+/// `cargo test --workspace` builds the CLI before it runs any test (its own tests need it); a
+/// lone `cargo test -p embassy` may not have it, and then this test says so and passes, except
+/// in CI (`CI` set), where the CLI must be there.
+#[test]
+fn fixture_charters_pass_the_cli_validator() {
+    let exe = std::env::current_exe().expect("test executable");
+    // target/<profile>/deps/fixtures-<hash> -> target/<profile>/attache
+    let cli = exe
+        .parent()
+        .and_then(Path::parent)
+        .map(|dir| dir.join(format!("attache{}", std::env::consts::EXE_SUFFIX)))
+        .expect("target directory");
+    if !cli.exists() {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "{} is missing: CI runs cargo test --workspace, which builds it",
+            cli.display()
+        );
+        eprintln!(
+            "skipped: {} is not built (cargo build -p attache-cli)",
+            cli.display()
+        );
+        return;
+    }
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(fixtures()).expect("ui/fixtures exists") {
+        let name = entry.expect("dir entry").file_name().into_string().unwrap();
+        let yaml = match name.as_str() {
+            // the candidate is JSON, which YAML reads as it is
+            "charter-validate.json" => {
+                let v: ValidateResult = typed(&name);
+                serde_json::to_string_pretty(&v.charter).unwrap()
+            }
+            n if n.starts_with("charter-") => typed::<CharterDoc>(n).yaml,
+            _ => continue,
+        };
+        let file = dir.path().join(name.replace(".json", ".yaml"));
+        std::fs::write(&file, yaml).expect("write charter");
+        let out = std::process::Command::new(&cli)
+            .args(["charter", "validate"])
+            .arg(&file)
+            .output()
+            .expect("run attache charter validate");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.starts_with("valid: "),
+            "{name}: attache charter validate: {stdout} {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        checked += 1;
+    }
+    assert!(checked >= 5, "only {checked} charters checked");
 }
 
 /// Every `$ref` of the OpenAPI document resolves, every SSE event is documented, and every

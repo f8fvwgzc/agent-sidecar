@@ -212,7 +212,7 @@
       "label": "support",
       "namespace": "attache-demo",
       "service": "support",
-      "status": "connected",
+      "status": "degraded",
       "instances": 2,
       "charter_version": "4"
     },
@@ -292,9 +292,9 @@
         "errors": 2,
         "p50_ms": 5120,
         "p95_ms": 6890,
-        "tokens_in": 21612,
-        "tokens_out": 707,
-        "cost_usd": 0.100588
+        "tokens_in": 23569,
+        "tokens_out": 748,
+        "cost_usd": 0.109236
       }
     },
     {
@@ -745,11 +745,11 @@
       "target_port": "model",
       "declared": true,
       "stats": {
-        "calls": 14,
+        "calls": 15,
         "denied": 0,
         "errors": 4,
-        "avg_ms": 1297,
-        "last_ts": "2026-10-21T09:59:35.064Z"
+        "avg_ms": 1364,
+        "last_ts": "2026-10-21T09:59:37.382Z"
       }
     },
     {

@@ -97,7 +97,7 @@
   {
     "namespace": "attache-demo",
     "service": "support",
-    "status": "connected",
+    "status": "degraded",
     "epoch": "230841f8-0603-4845-aa9b-b8c2f6c3ee10",
     "charter_version": "4",
     "memory_version": "2",
@@ -123,7 +123,7 @@
         "last_heartbeat": "2026-10-21T09:59:56.388Z",
         "runtime_ready": true,
         "acked_version": "4",
-        "ack_error": null,
+        "ack_error": "persist charter version 4: write /run/attache/state/charter.yaml: No space left on device (os error 28); version 3 stays applied",
         "cert_expires_in_s": 80310,
         "audit_dropped": 0
       }

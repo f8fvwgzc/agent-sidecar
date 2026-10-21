@@ -69,7 +69,10 @@ info:
       `namespaces` (`["*"]` = all). A service outside the scope answers 404, exactly like a
       service that does not exist.
     - **Payloads**: a token without `payloads: true` receives every audit record with `input` and
-      `output` set to null (the `*_sha256` hashes are kept), in `/events/recent` and on `/events`.
+      `output` set to null (the `*_sha256` hashes are kept), in `/events/recent` and on `/events`,
+      and without the top-level record fields this document does not list (a field a newer
+      sidecar adds may carry a payload; see `AuditRecord`). `?payloads=false` on `/events` does
+      the same for any token.
 
     ## Versions and optimistic concurrency
 
@@ -93,8 +96,8 @@ info:
 
     Every error body is an `Error`: `{"error": "<code>", "details": ["..."], "current_version": "<v>"?}`.
     Codes: 400 `invalid` | `config.restart_required` | `version_skew`; 401 `unauthenticated`;
-    403 `forbidden`; 404 `not_found`; 409 `version_conflict` | `in_use`; 421 `misdirected_request`;
-    429 `rate_limited`; 500 `internal`.
+    403 `forbidden`; 404 `not_found`; 409 `version_conflict` | `in_use` | `not_pending`;
+    421 `misdirected_request`; 429 `rate_limited`; 500 `internal`.
 servers:
   - url: /api/v1
 security:
@@ -831,20 +834,22 @@ paths:
         and every note to add; agents and stored notes left out are removed (`MemoryPut`).
         Each entry is either:
 
-        - a full `Note`, exactly as `GET` returned it: keeps that stored note;
-        - a `NoteInput` with an `id`: keeps the stored note with that id (its `text` must be the
-          stored text);
-        - a `NoteInput` without an `id`: a new note. The server assigns its `id` (UUIDv4),
+        - a full `Note`, exactly as `GET` returned it: keeps that stored note (existing notes
+          are always sent in full);
+        - a `NoteInput` `{id?, text}`: a new note. The server assigns its `id` (a fresh UUIDv4),
           `source: manual`, `ts` (now) and `approved_by` (the caller); `request_id`, `trace_id`
-          and `expires_at` are null.
+          and `expires_at` are null. The input's optional `id` (a client's draft id, say) is
+          never used as the note's id and is not checked, so it never keeps or names a stored
+          note.
 
-        Provenance always comes from the store: a kept note whose fields differ from the stored
-        note, an `id` the agent does not have, an `id` listed twice or an empty `text` is 400
-        `invalid` (notes are not edited in place: remove one and add another). Kept notes stay
-        in stored order, new notes follow in the order given. Every agent must exist in the
-        stored charter with learning enabled (memory exists only for those, design §3); per
-        agent at most `learning.max_notes` notes of at most `learning.max_note_chars`
-        characters; at most 262144 characters per service. Audited as `memory_put`.
+        Provenance always comes from the store: a full `Note` whose fields differ from the
+        stored note, a full `Note` whose `id` the agent does not have, one listed twice, or a
+        `NoteInput` with an empty `text` is 400 `invalid` (notes are not edited in place:
+        remove one and add another). Kept notes stay in stored order, new notes follow in the
+        order given. Every agent must exist in the stored charter with learning enabled (memory
+        exists only for those, design §3); per agent at most `learning.max_notes` notes of at
+        most `learning.max_note_chars` characters; at most 262144 characters per service.
+        Audited as `memory_put`.
       x-required-role: editor
       parameters:
         - $ref: "#/components/parameters/Csrf"
@@ -924,13 +929,22 @@ paths:
       summary: Approve a pending proposal; its note joins the agent's memory.
       description: |
         If-Match is the service's memory version. The note gets `source: review` and
-        `approved_by` = the caller. The decision is atomic in the store: the proposal's status,
-        the memory version and both writes are checked and made together, so an approve and a
-        reject of the same proposal never both succeed. 409 `version_conflict`
-        (`current_version` = the memory version) when the memory version is stale or the
-        proposal is no longer pending; 400 `invalid` when the stored charter no longer enables
-        learning for the agent (memory exists only for agents with learning enabled, design
-        §3). Audited as `proposal_approve`.
+        `approved_by` = the caller. The decision is atomic in the store: the stored charter, the
+        proposal's status and the memory version are read, checked and written in one critical
+        section, so an approve and a reject of the same proposal never both succeed, and a
+        charter write that turns the agent's learning off cannot slip in between. In this order:
+
+        - 409 `not_pending` when the proposal was already approved or rejected (`details` name
+          its status; no `current_version`: reloading the memory will not help);
+        - 409 `version_conflict` (`current_version` = the memory version) when the memory
+          version is stale;
+        - 400 `invalid` when the stored charter does not enable learning for the agent (memory
+          exists only for agents with learning enabled, design §3), when the agent already has
+          `learning.max_notes` notes (approving never evicts a note: remove one first), or when
+          the note is longer than `learning.max_note_chars` (the charter may have lowered it
+          since the proposal was made); `details` name every problem.
+
+        Audited as `proposal_approve`.
       x-required-role: editor
       parameters:
         - $ref: "#/components/parameters/Csrf"
@@ -966,9 +980,11 @@ paths:
       operationId: rejectProposal
       summary: Reject a pending proposal (memory is unchanged).
       description: |
-        If-Match is the service's memory version. Atomic like approve: 409 `version_conflict`
-        (`current_version` = the memory version) when the memory version is stale or the
-        proposal is no longer pending. Audited as `proposal_reject`.
+        If-Match is the service's memory version. Atomic like approve: 409 `not_pending` when
+        the proposal was already decided, 409 `version_conflict` (`current_version` = the memory
+        version) when the memory version is stale. Learning need not be enabled any more: the
+        pending proposals of an agent whose learning was turned off can still be rejected.
+        Audited as `proposal_reject`.
       x-required-role: editor
       parameters:
         - $ref: "#/components/parameters/Csrf"
@@ -1085,10 +1101,13 @@ paths:
         one `reset` event, whose `id` is the current counter, and continues live; the client
         then refetches `/graph` and `/services`.
 
-        **Back-pressure.** Each client has a queue of 1024 events. When it overflows, the queued
-        events are dropped and a `lagged` event `{dropped}` is sent; the client refetches like
-        after `reset`. The `lagged` event's `id` is the `seq` of the last dropped event, so it is
-        at least `dropped` above the id of the event before it.
+        **Back-pressure.** Each client has a queue of 1024 events. An event that finds the queue
+        full is dropped together with the 1024 queued events, and so is every further event
+        until the client has read the `lagged` event `{dropped}` that takes their place; the
+        client then refetches like after `reset`. `dropped` counts them all, so it is at least
+        1025. The `lagged` event's `id` is the `seq` of the last dropped event, so it is at least
+        `dropped` above the id of the event before it (more when events outside the client's
+        filters were skipped in between).
 
         **Audit events** come in arrival order: a pod's records in the order its sidecar wrote
         them (see `/events/recent` for the order of equal timestamps). Their `edge_id` and
@@ -1130,7 +1149,7 @@ paths:
             $ref: "#/components/schemas/DnsLabel"
         - name: payloads
           in: query
-          description: "`false` sets `input`/`output` of every audit record to null, whatever the token allows."
+          description: "`false` sets `input`/`output` of every audit record to null and leaves out its unknown top-level fields, whatever the token allows."
           schema:
             type: boolean
             default: true
@@ -1349,7 +1368,7 @@ components:
             error: not_found
             details: ["no charter for attache-demo/billing"]
     Conflict:
-      description: "`version_conflict` (stale If-Match; `current_version` is set) or `in_use`."
+      description: "`version_conflict` (stale If-Match; `current_version` is set), `in_use`, or `not_pending` (a decision on a proposal that was already decided)."
       content:
         application/json:
           schema:
@@ -1424,6 +1443,7 @@ components:
             - not_found
             - version_conflict
             - in_use
+            - not_pending
             - misdirected_request
             - rate_limited
             - internal
@@ -2284,8 +2304,7 @@ components:
       required: [agents]
       description: |
         The service's notes after the write (a full replacement). Per agent, each entry is a
-        stored note to keep (a full `Note`, or a `NoteInput` with its `id`) or a new note (a
-        `NoteInput` without `id`); see `PUT .../memory`.
+        stored note to keep (a full `Note`) or a new note (a `NoteInput`); see `PUT .../memory`.
       properties:
         agents:
           type: object
@@ -2300,13 +2319,15 @@ components:
       additionalProperties: false
       required: [text]
       description: |
-        A note written with `PUT .../memory`. Without `id`: a new note (the server assigns
-        `id`, `source: manual`, `ts` and `approved_by`). With `id`: the stored note with that id,
-        kept unchanged (`text` must be its stored text).
+        A new note written with `PUT .../memory`. The server assigns its `id` (a fresh UUIDv4),
+        `source: manual`, `ts` and `approved_by`.
       properties:
         id:
           type: string
-          format: uuid
+          description: |
+            Optional, any string (a client's draft id, say). Never used as the note's id and
+            not checked: the server assigns a fresh one, and a `NoteInput` never keeps or names
+            a stored note.
         text:
           type: string
           minLength: 1
@@ -2402,8 +2423,18 @@ components:
         **Lenient view** (design §5, `attache_common::audit::AuditRecordView`): records come
         from sidecars one minor version older or newer than the control plane, so `kind`,
         `direction` and `decision` are any string (the values listed are the ones v0.2 writes),
-        `tokens` accepts fields it does not know, and top-level fields this document does not
-        list are kept and served again unchanged.
+        `tokens` keeps counters it does not know, and top-level fields this document does not
+        list are kept and served again unchanged. A received record needs only the fields that
+        identify it (`ts`, `kind`, `request_id`, `trace_id`, `service`, `caller`, `callee`,
+        `direction`, `decision`); every other field defaults when absent (`""` for `span_id` and
+        `namespace`, 0 for `latency_ms`, null otherwise). The server always serves every field
+        listed here, which is why they are all `required` below.
+
+        **Payload hiding** (design §8.3) wins over re-serving: a caller that does not see
+        payloads (a token without `payloads: true`, or `/events?payloads=false`) gets `input`
+        and `output` null and none of the unknown top-level fields, since a field a newer
+        sidecar adds may carry a payload. `tokens` keeps its unknown counters (usage, not
+        payload).
 
         **What the control plane keeps** (design §7): Every received audit record: the control plane overwrites `service`/`namespace` with the stream's identity; drops records > 64 KiB, and records whose `agent` is non-null and not in the stored charter **unless** `direction` is `inbound` (inbound records carry the calling peer's agent); caps undeclared nodes and edges at 200 per service (oldest evicted).
       required:
@@ -2512,7 +2543,10 @@ components:
     Tokens:
       type: object
       additionalProperties: true
-      description: Token usage. Fields a later sidecar adds are accepted (and not served back).
+      description: |
+        Token usage (`attache_common::audit::TokensView`). `input` and `output` are 0 when a
+        received record leaves them out, and always served. Counters a later sidecar adds are
+        kept and served again as written.
       required: [input, output]
       properties:
         input:
@@ -2703,11 +2737,11 @@ components:
       type: object
       additionalProperties: false
       required: [dropped]
-      description: "`event: lagged` — this client's queue (1024 events) overflowed; refetch `/graph` and `/services`."
+      description: "`event: lagged` — this client's queue (1024 events) overflowed and `dropped` events (the queued ones, the one that did not fit and any more until this event was read; at least 1025) were dropped; refetch `/graph` and `/services`."
       properties:
         dropped:
           type: integer
-          minimum: 1
+          minimum: 1025
     ResetEvent:
       type: object
       additionalProperties: false

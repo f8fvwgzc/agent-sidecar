@@ -7,36 +7,44 @@ Run from anywhere:
 What it checks (every check names the file and the place that failed):
 
 - the OpenAPI document: every `$ref` resolves; every operation's role agrees with the role table
-  of design §10; every mutating operation takes the CSRF header and documents 400 and 403;
-  adoption is `editor` without role-on-diff; `PUT .../memory` takes `Note` or `NoteInput`; the
-  record → edge mapping (design §10.1) and the audit drop rule (design §7) are quoted exactly;
+  of design §10, both ways (an operation checked on the diff says so in the table, or is listed in
+  DESIGN_TABLE_GAPS and printed as a note); every mutating operation takes the CSRF header and
+  documents 400 and 403; adoption is `editor` without role-on-diff; `PUT .../memory` takes `Note`
+  or `NoteInput` (a new note: the server assigns its id); the lenient audit view and payload
+  hiding; proposal decisions answer `not_pending`; the record → edge mapping (design §10.1) and
+  the audit drop rule (design §7) are quoted exactly; the SSE back-pressure numbers;
 - every fixture validates against the schema of the operation that names it (`x-fixture`), and
   every SSE event against its `x-sse-events` schema; every fixture file is named by an operation;
 - id formats (node and edge ids, UUIDs, trace and span ids, timestamps, versions, hashes);
 - the graph follows the design rules: derived from the stored charters, every edge endpoint is a
   node, placeholders for unknown peers, statuses and learning badges agree with the other files;
 - the record → edge mapping (design §10.1) for every SSE audit event, and the edge stats
-  against the records of events-recent.json;
+  against the records of events-recent.json; a `lagged` event drops at least the queue plus one;
+- every `learning.proposed` record has its reflection `model_call` (design §12);
 - the drop rule (design §7) for events-recent.json and the SSE audit events;
 - the order of events-recent.json (newest first, equal timestamps in reverse write order) and of
   the audit events of events.sse (write order);
-- the charters: plain YAML equal to their JSON, valid against schemas/charter.schema.json and,
-  when the attache CLI is built (target/debug/attache, or --attache PATH), `attache charter
-  validate`;
+- the charters: plain YAML equal to their JSON, valid against schemas/charter.schema.json and
+  `attache charter validate` (target/debug/attache, built with cargo when missing, or --attache
+  PATH; --skip-cli skips it and says so, and the run then exits 3, not 0);
 - the fixtures cover every v0.2 UI path of design §11.
 
-Exit status 0 when everything holds, 1 with one line per problem otherwise. `--self-test` then
-also applies known-bad edits to an in-memory copy (a tie out of order, an inbound record made
-outbound, a wrong `edge_id`, adoption checked on the diff, ...) and fails unless each is reported.
-Lint with `ruff check --line-length 120` (the runtime's settings).
+Exit status 0 when everything holds, 1 with one line per problem otherwise (2 for a usage error,
+3 when everything else held but --skip-cli skipped the CLI). `--self-test` then also applies
+known-bad edits to an in-memory copy (a tie out of order, an inbound record made outbound, a wrong
+`edge_id`, adoption checked on the diff, ...) and fails unless each is reported.
+Lint with `ruff check --line-length 120` and `ruff format --check --line-length 120` (the
+runtime's settings).
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import itertools
 import json
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -47,7 +55,9 @@ from urllib.parse import urlsplit
 
 import yaml
 from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
 from referencing import Registry
+from referencing.exceptions import Unresolvable
 from referencing.jsonschema import DRAFT202012
 
 REPO = Path(__file__).resolve().parents[2]
@@ -88,11 +98,22 @@ MAX_RECORD_BYTES = 64 * 1024  # design §7
 # agent_invocation.
 WRITE_RANK = {"tool_call": 0, "agent_call": 1, "service_call": 1, "http_call": 1, "agent_invocation": 3}
 MUTATING = ("post", "put", "delete", "patch")
+SSE_QUEUE = 1024  # design §10.2: a client's queue; an overflow drops it and the event that did not fit
+# Charter writes that OpenAPI marks `x-role-on-diff: true` while the design §10 table names only
+# their minimum role. Design §8.3 and §8.4 check every charter write on the diff, so they agree in
+# substance; the table rows still need "(+role on diff)" (the design is not this unit's file).
+# Printed as notes, and reported as stale once the table says it.
+DESIGN_TABLE_GAPS = {
+    ("PUT", "/services/{ns}/{svc}/skills/{skill}"),
+    ("DELETE", "/services/{ns}/{svc}/skills/{skill}"),
+    ("DELETE", "/services/{ns}/{svc}/agents/{agent}"),
+}
 
 
 class Problems:
     def __init__(self) -> None:
         self.items: list[str] = []
+        self.notes: list[str] = []
         self.checks = 0
 
     def check(self, ok: bool, where: str, what: str) -> bool:
@@ -257,8 +278,22 @@ def check_openapi(doc, design: str) -> None:
         if not P.check(want is not None, "design §10", f"{method} {path}: unknown role {role!r}"):
             continue
         P.check(got in want, where, f"{method} {path}: x-required-role {got!r}, design §10 says {role!r}")
-        if "diff" in role or "(same service)" in role:
+        table_diff = "diff" in role or "(same service)" in role
+        if table_diff:
             P.check(diff, where, f"{method} {path}: design §10 says {role!r}, x-role-on-diff is not true")
+            P.check(
+                key not in DESIGN_TABLE_GAPS,
+                "check_fixtures.py",
+                f"DESIGN_TABLE_GAPS lists {method} {path}, but design §10 says {role!r} now: remove it",
+            )
+        elif diff:
+            if key in DESIGN_TABLE_GAPS:
+                P.notes.append(
+                    f"design §10 lists {method} {path} as {role!r}; OpenAPI checks it on the diff "
+                    "(design §8.3/§8.4): the table row needs '(+role on diff)'"
+                )
+            else:
+                P.check(False, where, f"{method} {path}: x-role-on-diff is true, design §10 says only {role!r}")
     for key in ops:
         P.check(key in seen, where, f"{key[0]} {key[1]} is not in the design §10 table")
 
@@ -308,6 +343,15 @@ def check_openapi(doc, design: str) -> None:
         where,
         "NoteInput is {id?, text}",
     )
+    note_id = note_input.get("properties", {}).get("id", {})
+    P.check(
+        note_id.get("type") == "string" and "format" not in note_id and "pattern" not in note_id,
+        where,
+        "NoteInput.id is any string (a client's draft id): the server assigns the note's id",
+    )
+    memory_put = norm(ops.get(("PUT", "/services/{ns}/{svc}/memory"), {}).get("description", ""))
+    for want in ("server assigns its `id`", "never used as the note's id", "always sent in full"):
+        P.check(want in memory_put, where, f"PUT .../memory description does not say {want!r}")
 
     # the lenient audit view (design §5)
     rec = schemas["AuditRecord"]
@@ -315,6 +359,29 @@ def check_openapi(doc, design: str) -> None:
     for f in ("kind", "direction", "decision"):
         P.check("enum" not in rec["properties"][f], where, f"AuditRecord.{f} must be any string")
     P.check(schemas["Tokens"].get("additionalProperties") is not False, where, "Tokens must accept unknown fields")
+    P.check(
+        "served again" in norm(schemas["Tokens"].get("description", "")),
+        where,
+        "Tokens keeps unknown counters and serves them again (design §5)",
+    )
+    rec_text = norm(rec.get("description", ""))
+    for want in ("**Payload hiding**", "none of the unknown top-level fields", "needs only the fields that identify"):
+        P.check(want in rec_text, where, f"AuditRecord.description does not say {want!r}")
+    P.check("not_pending" in schemas["Error"]["properties"]["error"]["enum"], where, "Error.error lacks not_pending")
+    for verb in ("approve", "reject"):
+        text = norm(ops.get(("POST", f"/proposals/{{id}}/{verb}"), {}).get("description", ""))
+        P.check("409 `not_pending`" in text, where, f"{verb}: an already decided proposal is not 409 not_pending")
+    approve = norm(ops.get(("POST", "/proposals/{id}/approve"), {}).get("description", ""))
+    for want in ("`learning.max_notes`", "`learning.max_note_chars`", "one critical section"):
+        P.check(want in approve, where, f"approve description does not say {want!r}")
+    lagged = schemas["LaggedEvent"]["properties"]["dropped"]
+    P.check(
+        lagged.get("minimum") == SSE_QUEUE + 1,
+        where,
+        f"LaggedEvent.dropped minimum {lagged.get('minimum')}, want {SSE_QUEUE + 1}",
+    )
+    stream = norm(doc["paths"]["/events"]["get"]["description"])
+    P.check(f"queue of {SSE_QUEUE} events" in stream, where, f"/events does not give the {SSE_QUEUE}-event queue")
 
     # design text quoted exactly
     start = design.index("**Record → edge mapping**")
@@ -361,7 +428,7 @@ def validators(doc):
 def validate(v, instance, where: str) -> None:
     try:
         errors = sorted(v.iter_errors(instance), key=lambda e: list(e.absolute_path))
-    except Exception as e:  # an unresolvable $ref: reported by check_openapi too
+    except (Unresolvable, SchemaError) as e:  # a broken schema: check_openapi reports it too
         P.check(False, where, f"schema: cannot validate: {type(e).__name__}: {str(e)[:120]}")
         return
     for e in errors[:5]:
@@ -892,7 +959,9 @@ def run_cli_validate(w: World, attache: Path | None) -> None:
         for name, text in texts:
             f = Path(tmp) / (name.removesuffix(".json") + ".yaml")
             f.write_text(text)
-            r = subprocess.run([str(attache), "charter", "validate", str(f)], capture_output=True, text=True)
+            r = subprocess.run(
+                [str(attache), "charter", "validate", str(f)], check=False, capture_output=True, text=True
+            )
             P.check(
                 r.returncode == 0 and r.stdout.startswith("valid: "),
                 name,
@@ -964,7 +1033,7 @@ def check_drop_rule(w: World, records, where: str) -> None:
 def check_records(w: World) -> None:
     recent = w.recent
     # order: strictly newest first; equal ts in reverse write order
-    for i, (a, b) in enumerate(zip(recent, recent[1:], strict=False)):
+    for i, (a, b) in enumerate(itertools.pairwise(recent)):
         at = f"events-recent.json [{i}]/[{i + 1}]"
         P.check(a["ts"] >= b["ts"], at, f"{a['ts']} before {b['ts']}: not newest first")
         if a["ts"] == b["ts"]:
@@ -1044,8 +1113,31 @@ def check_records(w: World) -> None:
                 n["stats"]["denied"] >= sum(r["decision"] == "deny" for r in inbound), nid, "denied below the records"
             )
 
+    # every learning.proposed record has its reflection: a model_call of the same run, parent = the
+    # invocation span, after the invocation ended and before the learning record (design §12)
+    every = recent + [d["record"] for _, ev, d in w.frames if ev == "audit"]
+    for r in every:
+        if r["kind"] != "learning" or r["rule"] != "learning.proposed":
+            continue
+        run = next((x for x in every if x["kind"] == "agent_invocation" and x["span_id"] == r["parent_span_id"]), None)
+        at = f"{r['service']} learning {r['ts']}"
+        if not P.check(run is not None, at, "no agent_invocation for the learning record's parent span"):
+            continue
+        P.check(
+            any(
+                x["kind"] == "model_call"
+                and x["request_id"] == r["request_id"]
+                and x["parent_span_id"] == r["parent_span_id"]
+                and ts(x["ts"]) - timedelta(milliseconds=x["latency_ms"]) >= ts(run["ts"])
+                and x["ts"] <= r["ts"]
+                for x in every
+            ),
+            at,
+            "no reflection model_call for this learning.proposed record (design §12)",
+        )
+
     # learning and config records agree with proposals and charters
-    for r in recent + [d["record"] for _, ev, d in w.frames if ev == "audit"]:
+    for r in every:
         at = f"{r['service']} {r['kind']} {r['ts']}"
         if r["kind"] == "learning" and r["rule"] == "learning.proposed":
             P.check(
@@ -1089,6 +1181,11 @@ def check_sse(w: World) -> None:
                 prev is not None and fid - prev >= d["dropped"],
                 at,
                 f"id gap {fid - (prev or 0)} below dropped {d['dropped']}",
+            )
+            P.check(
+                d["dropped"] >= SSE_QUEUE + 1,
+                at,
+                f"dropped {d['dropped']}: an overflow drops the {SSE_QUEUE} queued events and the one that did not fit",
             )
         elif ev == "graph":
             v = int(d["version"])
@@ -1163,7 +1260,7 @@ def check_sse(w: World) -> None:
     check_drop_rule(w, [d["record"] for _, ev, d in frames if ev == "audit"], "events.sse")
     # per pod, audit events arrive in write order
     for key, recs in audit_by_service.items():
-        for a, b in zip(recs, recs[1:], strict=False):
+        for a, b in itertools.pairwise(recs):
             P.check(
                 a["ts"] < b["ts"] or (a["ts"] == b["ts"] and rank(a) < rank(b)),
                 f"events.sse {key[1]}",
@@ -1175,8 +1272,13 @@ def check_coverage(w: World) -> None:
     """Design §11: every UI path has data."""
     where = "coverage (design §11)"
     statuses = {s["status"] for s in w.services}
-    for st in ("connected", "disconnected", "no_charter"):
+    for st in ("connected", "degraded", "disconnected", "no_charter"):
         P.check(st in statuses, where, f"no service with status {st}")
+    P.check(
+        any(i["ack_error"] for s in w.services for i in s["instances"]),
+        where,
+        "no instance with ack_error (the Instances tab's error chip)",
+    )
     P.check(any(s["pending_adoption"] for s in w.services if s["status"] == "no_charter"), where, "no pending adoption")
     P.check(any(n.get("placeholder") for n in w.graph["nodes"]), where, "no placeholder node")
     agent_status = {n["status"] for n in w.graph["nodes"] if n["type"] == "agent" and not n.get("placeholder")}
@@ -1227,6 +1329,22 @@ def check_coverage(w: World) -> None:
     ):
         P.check(k in kinds, where, f"no audit record of kind {k}")
     P.check(any(r["callee"].startswith("load_skill:") for r in w.recent), where, "no load_skill record")
+    sse = [d for _, ev, d in w.frames if ev == "audit"]
+    for what, pred in (
+        (
+            "an agent_invocation by a local orchestrator (caller local, caller_agent set)",
+            lambda r: r["kind"] == "agent_invocation" and r["caller"] == "local" and r["caller_agent"] is not None,
+        ),
+        ("an http_call", lambda r: r["kind"] == "http_call"),
+        ("a model_call to the mock model", lambda r: r["kind"] == "model_call" and r["callee"] == "mock"),
+        ("a config record that failed", lambda r: r["kind"] == "config" and r["decision"] != "allow"),
+    ):
+        P.check(any(pred(d["record"]) for d in sse), where, f"events.sse has no audit event for {what}")
+    P.check(
+        any(d["edge_id"] and d["edge_id"] not in w.edges for d in sse),
+        where,
+        "events.sse has no audit event on an edge that is not in graph.json yet",
+    )
     events = {ev for _, ev, _ in w.frames}
     for ev in ("audit", "graph", "registry", "config", "ack", "proposal", "cp_audit", "lagged", "reset"):
         P.check(ev in events, where, f"events.sse has no {ev} event")
@@ -1289,6 +1407,63 @@ def _sse_edit(event_name: str, edit, nth: int = 0):
     return mutate
 
 
+def _sse_edit_where(pred, edit):
+    """Edit the `data` of the first `audit` event in events.sse whose record matches `pred`."""
+
+    def mutate(src: Source) -> None:
+        blocks = src.files["events.sse"].split("\n\n")
+        for i, block in enumerate(blocks):
+            if "\nevent: audit\n" not in f"\n{block}\n":
+                continue
+            head, _, data = block.partition("data: ")
+            d = json.loads(data)
+            if pred(d["record"]):
+                edit(d)
+                blocks[i] = head + "data: " + json.dumps(d, separators=(",", ":"), ensure_ascii=False)
+                break
+        src.files["events.sse"] = "\n\n".join(blocks)
+
+    return mutate
+
+
+def _set_edge(edge):
+    def edit(d):
+        d["edge_id"] = edge
+        d["animate"] = edge is not None
+
+    return edit
+
+
+def _local_orchestrated(r):
+    return r["kind"] == "agent_invocation" and r["caller"] == "local" and r["caller_agent"] is not None
+
+
+def _drop_reflection(data):
+    """Remove the model_calls of a learning record's run that ended after the run did."""
+    learning = next(r for r in data if r["kind"] == "learning")
+    run = next(r for r in data if r["kind"] == "agent_invocation" and r["span_id"] == learning["parent_span_id"])
+    data[:] = [
+        r
+        for r in data
+        if not (r["kind"] == "model_call" and r["parent_span_id"] == run["span_id"] and r["ts"] > run["ts"])
+    ]
+
+
+def _no_degraded(src: Source) -> None:
+    services = json.loads(src.files["services.json"])
+    for s in services:
+        if s["status"] == "degraded":
+            s["status"] = "connected"
+            for i in s["instances"]:
+                i["ack_error"] = None
+    src.files["services.json"] = json.dumps(services, indent=2)
+    graph = json.loads(src.files["graph.json"])
+    for n in graph["nodes"]:
+        if n.get("status") == "degraded":
+            n["status"] = "connected"
+    src.files["graph.json"] = json.dumps(graph, indent=2)
+
+
 def _recent_find(data, kind, service, nth=0):
     return [i for i, r in enumerate(data) if r["kind"] == kind and r["service"] == service][nth]
 
@@ -1318,7 +1493,13 @@ def _drop_node(node_id):
 
 
 def _sse_ids(src: Source) -> None:
-    src.files["events.sse"] = src.files["events.sse"].replace("id: 48262\n", "id: 48240\n")
+    """Pull the lagged event's id down to just above the event before it."""
+    text = src.files["events.sse"]
+    blocks = text.split("\n\n")
+    i = next(i for i, b in enumerate(blocks) if "\nevent: lagged\n" in f"\n{b}\n")
+    prev = int(blocks[i - 1].split("\n", 1)[0].removeprefix("id: "))
+    blocks[i] = re.sub(r"^id: \d+", f"id: {prev + 2}", blocks[i])
+    src.files["events.sse"] = "\n\n".join(blocks)
 
 
 MUTATIONS = [
@@ -1341,9 +1522,10 @@ MUTATIONS = [
     ),
     (
         "a service status off its instances",
-        _json_edit("services.json", lambda s: s[-1].__setitem__("status", "degraded")),
+        _json_edit("services.json", lambda s: s[0].__setitem__("status", "degraded")),
         "status",
     ),
+    ("no degraded service and no ack error", _no_degraded, "no service with status degraded"),
     (
         "notes for an agent without learning",
         _json_edit("memory.json", lambda m: m["agents"].__setitem__("faq", m["agents"]["support-agent"])),
@@ -1408,6 +1590,53 @@ MUTATIONS = [
         _sse_edit("cp_audit", lambda c: c.__setitem__("sha256_before", "0" * 64)),
         "sha256_before",
     ),
+    (
+        "a local orchestrator's call animating the invoke edge",
+        _sse_edit_where(
+            _local_orchestrated,
+            _set_edge("edge:invoke:app:attache-demo/orders->agent:attache-demo/orders/order-triage"),
+        ),
+        "design §10.1 says",
+    ),
+    (
+        "a mock model_call drawn to Anthropic",
+        _sse_edit_where(
+            lambda r: r["kind"] == "model_call" and r["callee"] == "mock",
+            _set_edge("edge:model:agent:attache-demo/support/faq->model:anthropic"),
+        ),
+        "design §10.1 says",
+    ),
+    (
+        "an http_call that does not animate",
+        _sse_edit_where(lambda r: r["kind"] == "http_call", _set_edge(None)),
+        "design §10.1 says",
+    ),
+    ("a lagged event below the queue", _sse_edit("lagged", lambda d: d.__setitem__("dropped", 31)), "did not fit"),
+    ("a learning record without its reflection", _json_edit("events-recent.json", _drop_reflection), "reflection"),
+    (
+        "a NoteInput id that must be a uuid",
+        _doc_edit(lambda d: d["components"]["schemas"]["NoteInput"]["properties"]["id"].__setitem__("format", "uuid")),
+        "server assigns",
+    ),
+    (
+        "unknown fields served without payloads",
+        _doc_edit(
+            lambda d: d["components"]["schemas"]["AuditRecord"].__setitem__(
+                "description", d["components"]["schemas"]["AuditRecord"]["description"].replace("Payload hiding", "")
+            )
+        ),
+        "Payload hiding",
+    ),
+    (
+        "a decided proposal answered with version_conflict",
+        _doc_edit(lambda d: d["components"]["schemas"]["Error"]["properties"]["error"]["enum"].remove("not_pending")),
+        "not_pending",
+    ),
+    (
+        "a role on the diff the design table does not show",
+        _doc_edit(lambda d: _op(d, "/services/{ns}/{svc}/memory", "put").__setitem__("x-role-on-diff", True)),
+        "x-role-on-diff is true",
+    ),
 ]
 
 
@@ -1422,8 +1651,8 @@ def self_test(attache: Path | None) -> int:
         mutate(src)
         try:
             found = run_all(src, None).items
-        except Exception as e:  # a crash is not a report
-            found = [f"crashed: {type(e).__name__}: {e}"]
+        except (KeyError, IndexError, TypeError, ValueError, AttributeError, StopIteration) as e:
+            found = [f"crashed: {type(e).__name__}: {e}"]  # a crash is not a report
         if not any(want in p for p in found):
             failed.append(f"{name}: no problem mentions {want!r}; got {found[:3]}")
     for f in failed:
@@ -1432,36 +1661,60 @@ def self_test(attache: Path | None) -> int:
     return 1 if failed else 0
 
 
+def find_attache(given: Path | None) -> Path | None:
+    """The attache CLI: --attache, else target/debug/attache, built with cargo when missing."""
+    if given is not None:
+        return given if given.exists() else None
+    built = REPO / "target" / "debug" / "attache"
+    if not built.exists():
+        cargo = shutil.which("cargo")
+        if cargo is None:
+            return None
+        print("building the attache CLI (cargo build -p attache-cli --bin attache) ...", flush=True)
+        r = subprocess.run([cargo, "build", "--quiet", "-p", "attache-cli", "--bin", "attache"], check=False, cwd=REPO)
+        if r.returncode != 0:
+            return None
+    return built if built.exists() else None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--attache", type=Path, help="the attache CLI (default: target/debug/attache when built)")
+    ap.add_argument(
+        "--attache", type=Path, help="the attache CLI (default: target/debug/attache, built with cargo when missing)"
+    )
+    ap.add_argument(
+        "--skip-cli", action="store_true", help="skip `attache charter validate` (the run then exits 3, not 0)"
+    )
     ap.add_argument("--fixtures", type=Path, default=FIXTURES, help="the fixture directory (default: ui/fixtures)")
     ap.add_argument(
         "--self-test", action="store_true", help="also check that known-bad edits of the fixtures are reported"
     )
     args = ap.parse_args()
-    attache = args.attache or (REPO / "target" / "debug" / "attache")
-    if not attache.exists():
-        if args.attache:
-            print(f"--attache {attache}: no such file")
+    attache = None
+    if not args.skip_cli:
+        attache = find_attache(args.attache)
+        if attache is None:
+            print(
+                f"no attache CLI at {args.attache or 'target/debug/attache'} and it could not be built: "
+                "build it (cargo build -p attache-cli) or pass --skip-cli"
+            )
             return 2
-        attache = None
-    if attache is None:
-        print(
-            "note: target/debug/attache is not built; `attache charter validate` is skipped "
-            "(the JSON Schema check runs)"
-        )
 
     src = Source.from_disk(args.fixtures)
     problems = run_all(src, attache)
+    for n in problems.notes:
+        print(f"note: {n}")
     if problems.items:
         for p in problems.items:
             print(p)
         print(f"FAILED: {len(problems.items)} of {problems.checks} checks")
         return 1
     print(f"ok: {problems.checks} checks over {len(src.files)} files in {args.fixtures}")
-    if args.self_test:
-        return self_test(attache)
+    if args.self_test and self_test(attache):
+        return 1
+    if attache is None:
+        print("SKIPPED: `attache charter validate` (--skip-cli): the charters were not validated by the CLI")
+        return 3
     return 0
 
 
