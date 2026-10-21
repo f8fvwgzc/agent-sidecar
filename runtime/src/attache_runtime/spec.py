@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class Budgets(BaseModel):
@@ -106,6 +106,14 @@ class AgentSpec(BaseModel):
     harness: Harness = Field(default_factory=Harness)
     learning: Learning = Field(default_factory=Learning)
     memory: list[MemoryNote] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _memory_needs_learning(self) -> AgentSpec:
+        """Memory exists only for agents with learning enabled (design §3): the sidecar sends none
+        for the others, and should notes arrive anyway they never reach the model."""
+        if not self.learning.enabled and self.memory:
+            self.memory = []
+        return self
 
     def tool(self, name: str) -> ToolSpec | None:
         return next((t for t in self.tools if t.name == name), None)

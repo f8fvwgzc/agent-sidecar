@@ -239,3 +239,37 @@ fn logs_filters_and_sorts_records_from_a_file() {
     let v: serde_json::Value = serde_json::from_str(agent.trim()).unwrap();
     assert_eq!(v["agent"], "order-triage");
 }
+
+#[test]
+fn logs_read_records_of_any_version() {
+    // tokens with a count this CLI does not know and more than u32 can hold, an unknown field,
+    // and a JSON diagnostic that is not a record at all
+    let newer = r#"{"ts":"2026-10-21T10:00:03.000Z","kind":"model_call","request_id":"r11","trace_id":"eeee1111","span_id":"s","parent_span_id":null,"service":"orders","namespace":"shop","agent":"support","caller":"local","caller_agent":null,"callee":"anthropic:claude-opus-5-5","direction":"outbound","input":null,"output":null,"input_sha256":null,"output_sha256":null,"tokens":{"input":5000000000,"output":2,"cache_read":7},"cost_usd":1.5,"latency_ms":9,"decision":"allow","rule":null,"reason":null,"error":null,"attempt":"2/3"}"#;
+    let diagnostic = r#"{"timestamp":"2026-10-21T10:00:04Z","level":"INFO","fields":{"message":"charter reloaded"}}"#;
+    let run = |args: &[&str]| -> String {
+        let mut child = attache()
+            .args(["logs", "--file", "-"])
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all([newer, diagnostic].join("\n").as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let text = run(&[]);
+    assert_eq!(text.lines().count(), 1, "{text}");
+    assert!(
+        text.contains("tokens=5000000000/2 $1.5000"),
+        "the record is shown: {text}"
+    );
+    // --raw prints the line as it was read, unknown fields and all
+    assert_eq!(run(&["--raw"]).trim_end(), newer);
+}

@@ -3,32 +3,13 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
 use attache_charter::Charter;
-use attache_common::audit::Tokens;
+use attache_common::audit::AuditRecordView;
 use clap::{Parser, Subcommand};
-use serde::Deserialize;
 
-/// An audit record (CONTRACT.md §6) as the log reader needs it. `kind` and `direction` are kept
-/// as written: a record of a kind this CLI does not know (from a newer sidecar) is shown as-is,
-/// never dropped.
-#[derive(Debug, Deserialize)]
-struct LogRecord {
-    ts: String,
-    kind: String,
-    request_id: String,
-    trace_id: String,
-    service: String,
-    agent: Option<String>,
-    caller: String,
-    caller_agent: Option<String>,
-    callee: String,
-    direction: String,
-    tokens: Option<Tokens>,
-    cost_usd: Option<f64>,
-    latency_ms: u64,
-    decision: String,
-    rule: Option<String>,
-    error: Option<String>,
-}
+/// An audit record (CONTRACT.md §6) as any sidecar version wrote it: `kind`, `direction` and
+/// `decision` are kept as written, so a record of a kind this CLI does not know (from a newer
+/// sidecar) is shown as-is, never dropped.
+type LogRecord = AuditRecordView;
 
 const V01_KINDS: [&str; 9] = [
     "agent_invocation",
@@ -244,7 +225,7 @@ fn logs(args: LogsArgs) -> anyhow::Result<()> {
             None => continue,
         };
         let json = &trimmed[json_start..];
-        let Ok(rec) = serde_json::from_str::<LogRecord>(json) else {
+        let Ok(rec) = LogRecord::from_json(json) else {
             continue;
         };
         if let Some(a) = &args.agent
@@ -325,7 +306,7 @@ fn print_record(out: &mut impl Write, entry: &LogLine, raw: bool) -> anyhow::Res
         (other, None) => other.to_string(),
     };
     let extra = match (&rec.tokens, rec.cost_usd) {
-        (Some(t), Some(c)) if t.input + t.output > 0 => {
+        (Some(t), Some(c)) if t.input.saturating_add(t.output) > 0 => {
             format!(" tokens={}/{} ${:.4}", t.input, t.output, c)
         }
         _ => String::new(),

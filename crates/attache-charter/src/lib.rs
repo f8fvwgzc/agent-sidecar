@@ -27,8 +27,18 @@ pub const MAX_TOKENS_PER_CALL_LIMIT: u32 = 128_000;
 /// The charter schema level this build understands: 1 = v0.1 fields only, 2 = v0.2
 /// (`skills`, `telemetry`, `service.service_accounts`, `agents[].skills/harness/learning`).
 pub const CHARTER_SCHEMA_LEVEL: u32 = 2;
-/// A serialized charter (the YAML text, and its JSON form) is at most this many bytes.
+/// A charter is at most this many bytes, measured the same way whatever form it arrived in
+/// ([`Charter::validate`]): its JSON serialization and its plain YAML ([`Charter::to_yaml`], the
+/// text `CharterUpdate.charter_yaml` and the file store carry) are each at most this size, so a
+/// charter accepted in one form is accepted in every form it is converted to. A plain charter's
+/// YAML text, comments included, is also refused beyond this size before it is parsed. In the
+/// custom resource form the limit applies to the charter `spec` describes, never to `status` or
+/// `metadata`.
 pub const MAX_CHARTER_BYTES: usize = 256 * 1024;
+/// A custom resource document (`spec` plus `metadata` and the `status` embassy writes, which
+/// holds the service's memory and proposals) is not even parsed beyond this many bytes: the
+/// Kubernetes API server's own request limit.
+pub const MAX_RESOURCE_BYTES: usize = 3 * 1024 * 1024;
 /// At most this many entries in the top-level `skills`.
 pub const MAX_SKILLS: usize = 64;
 /// `agents[].system` is at most this many bytes.
@@ -37,9 +47,13 @@ pub const MAX_SYSTEM_BYTES: usize = 32 * 1024;
 pub const MAX_SKILL_INSTRUCTIONS_BYTES: usize = 32 * 1024;
 /// A skill's `description` is 1 to this many characters.
 pub const MAX_SKILL_DESCRIPTION_CHARS: usize = 1024;
-/// The memory of one service is at most this many bytes, so the learning agents'
-/// `max_notes × max_note_chars` must add up to no more.
-pub const MAX_MEMORY_BYTES: usize = 256 * 1024;
+/// The memory of one service is at most this many characters (design §3), so the
+/// `max_notes × max_note_chars` of the agents with learning enabled must add up to no more.
+/// Agents with learning off hold no memory at all.
+pub const MAX_MEMORY_CHARS: usize = 262_144;
+/// The former name of [`MAX_MEMORY_CHARS`], kept for code written against it. The limit counts
+/// characters, not bytes; new code uses `MAX_MEMORY_CHARS`.
+pub const MAX_MEMORY_BYTES: usize = MAX_MEMORY_CHARS;
 /// A skill whose instructions are shorter than this (bytes) goes into the system prompt; a
 /// longer one is loaded on demand with the `load_skill` tool.
 pub const INLINE_SKILL_MAX_BYTES: usize = 2048;
@@ -47,8 +61,16 @@ pub const INLINE_SKILL_MAX_BYTES: usize = 2048;
 pub const LOAD_SKILL_TOOL: &str = "load_skill";
 /// A DNS-1123 label, as JSON Schema `pattern`.
 pub const DNS_LABEL_PATTERN: &str = "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$";
-/// `http(s)://host[:port]` with at most a `/` after it, as JSON Schema `pattern`.
-pub const OTLP_ENDPOINT_PATTERN: &str = r"^https?://[^/?#@\s]+/?$";
+/// `http(s)://host[:port]` with at most a `/` after it and no whitespace or control character
+/// anywhere, as JSON Schema `pattern` ([`check_otlp_endpoint`] is the full rule).
+pub const OTLP_ENDPOINT_PATTERN: &str = r"^https?://[^/?#@\s\x00-\x1f\x7f-\x9f]+/?$";
+/// A tool name (the model API's tool-name rule), as JSON Schema `pattern`.
+pub const TOOL_NAME_PATTERN: &str = "^[a-zA-Z0-9_-]{1,64}$";
+/// `model` and `harness.fallback_model` are at most this many bytes.
+pub const MAX_MODEL_BYTES: usize = 128;
+/// A model id: not empty, no whitespace or control characters, as JSON Schema `pattern` (the
+/// schema adds `maxLength` 128; the validator counts [`MAX_MODEL_BYTES`] bytes).
+pub const MODEL_PATTERN: &str = r"^[^\s\x00-\x1f\x7f-\x9f]+$";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -171,8 +193,10 @@ pub struct HarnessSpec {
     #[serde(default = "d_request_timeout_seconds")]
     #[schemars(range(min = 1, max = 600))]
     pub request_timeout_seconds: u32,
-    /// Model tried once after the last retryable failure; a valid model id other than `model`.
+    /// Model tried once after the last retryable failure; a valid model id other than `model`
+    /// (the `model` rules: not empty, no whitespace or control characters, at most 128 bytes).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(pattern(MODEL_PATTERN), length(max = 128))]
     pub fallback_model: Option<String>,
     /// Tool results are cut to this many characters, 100..=200000.
     #[serde(default = "d_tool_result_max_chars")]
@@ -311,7 +335,9 @@ pub struct AgentSpec {
     pub name: String,
     #[serde(rename = "type", default = "default_agent_type")]
     pub agent_type: AgentType,
-    /// A Claude model id (e.g. `claude-opus-5-5`) or `mock`.
+    /// A Claude model id (e.g. `claude-opus-5-5`) or `mock`: not empty, no whitespace or control
+    /// characters, at most 128 bytes.
+    #[schemars(pattern(MODEL_PATTERN), length(max = 128))]
     pub model: String,
     /// System prompt, at most 32768 bytes.
     #[serde(default)]
@@ -365,6 +391,9 @@ pub enum ToolType {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ToolSpec {
+    /// The name the model sees, unique per agent: `^[a-zA-Z0-9_-]{1,64}$`, and never
+    /// `load_skill` (the runtime's tool for skills).
+    #[schemars(pattern(TOOL_NAME_PATTERN), extend("not" = {"const": "load_skill"}))]
     pub name: String,
     pub description: String,
     #[serde(rename = "type")]
@@ -546,18 +575,28 @@ pub enum CharterError {
 
 impl Charter {
     /// Parse and validate a charter, plain or in the custom resource form (`metadata` + `spec`).
+    ///
+    /// Size: the charter is measured by [`Charter::validate`] (its JSON serialization and its
+    /// plain YAML, each at most [`MAX_CHARTER_BYTES`]), the same in both forms. In the resource
+    /// form that is the charter `spec` describes, not `status` (embassy keeps the service's
+    /// memory and proposals there) or `metadata`; the whole document is at most
+    /// [`MAX_RESOURCE_BYTES`]. A plain charter's text is also at most [`MAX_CHARTER_BYTES`], and
+    /// a bigger text that cannot be the resource form ([`resource::may_be_resource_text`]) is
+    /// refused before it is parsed.
     pub fn from_yaml(text: &str) -> Result<Charter, CharterError> {
-        if text.len() > MAX_CHARTER_BYTES {
-            return Err(CharterError::Invalid(vec![format!(
-                "charter is {} bytes, more than the {MAX_CHARTER_BYTES} allowed",
-                text.len()
-            )]));
+        if text.len() > MAX_RESOURCE_BYTES {
+            return Err(too_big("charter", text.len(), MAX_RESOURCE_BYTES));
+        }
+        if text.len() > MAX_CHARTER_BYTES && !resource::may_be_resource_text(text) {
+            return Err(too_big("charter", text.len(), MAX_CHARTER_BYTES));
         }
         // Parsed twice: once to see which form it is, then typed from the text, so that errors
         // keep their YAML path ("guardrails: unknown field …").
         let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(text)?;
         let charter = if resource::is_resource_yaml(&doc) {
             serde_yaml_ng::from_str::<CharterResource>(text)?.into_charter()?
+        } else if text.len() > MAX_CHARTER_BYTES {
+            return Err(too_big("charter", text.len(), MAX_CHARTER_BYTES));
         } else {
             serde_yaml_ng::from_str::<Charter>(text)?
         };
@@ -566,6 +605,8 @@ impl Charter {
     }
 
     /// [`Charter::from_yaml`] for a JSON value (e.g. a custom resource read from the API server).
+    /// The size limit is [`Charter::validate`]'s, as in `from_yaml`: in the resource form it
+    /// applies to the charter `spec` describes only.
     pub fn from_value(value: &serde_json::Value) -> Result<Charter, CharterError> {
         let charter = if resource::is_resource(value) {
             CharterResource::deserialize(value)?.into_charter()?
@@ -623,7 +664,9 @@ impl Charter {
     /// with `skills` resolved to `[{name, description, instructions, inline}]` (`inline` when the
     /// instructions are shorter than [`INLINE_SKILL_MAX_BYTES`]), `harness` and `learning` with
     /// the defaults filled, and `memory` = `[{id, text}]` (the active notes, oldest first).
-    /// `Value::Null` for an agent the charter does not declare.
+    /// Memory exists only for agents with learning enabled (design §3): for any other agent
+    /// `memory` is `[]`, whatever notes are passed in. `Value::Null` for an agent the charter does
+    /// not declare.
     pub fn runtime_spec(&self, agent: &str, memory: &[RuntimeNote]) -> serde_json::Value {
         use serde_json::{Value, json};
         let Some(a) = self.agent(agent) else {
@@ -653,6 +696,7 @@ impl Charter {
                 "learning".into(),
                 serde_json::to_value(a.learning_or_default()).unwrap_or(Value::Null),
             );
+            let memory: &[RuntimeNote] = if a.learning_enabled() { memory } else { &[] };
             map.insert(
                 "memory".into(),
                 serde_json::to_value(memory).unwrap_or(Value::Null),
@@ -960,31 +1004,57 @@ impl Charter {
         {
             errs.push(format!("telemetry.otlp_endpoint {e:?}: {why}"));
         }
+        // Only agents with learning enabled have memory (design §3).
         let memory: u64 = self
             .agents
             .iter()
-            .filter_map(|a| a.learning.as_ref().filter(|l| l.enabled))
+            .filter(|a| a.learning_enabled())
+            .map(|a| a.learning_or_default())
             .map(|l| u64::from(l.max_notes) * u64::from(l.max_note_chars))
             .sum();
-        if memory > MAX_MEMORY_BYTES as u64 {
+        if memory > MAX_MEMORY_CHARS as u64 {
             errs.push(format!(
                 "learning: the agents with learning enabled may keep {memory} characters of notes \
-                 (max_notes × max_note_chars), more than the {MAX_MEMORY_BYTES} a service's memory holds"
+                 (max_notes × max_note_chars), more than the {MAX_MEMORY_CHARS} characters a \
+                 service's memory holds"
             ));
         }
-        match serde_json::to_vec(self) {
-            Ok(json) if json.len() > MAX_CHARTER_BYTES => errs.push(format!(
-                "charter is {} bytes serialized, more than the {MAX_CHARTER_BYTES} allowed",
-                json.len()
-            )),
-            Ok(_) => {}
-            Err(e) => errs.push(format!("charter cannot be serialized: {e}")),
+        if let Err(e) = self.check_size() {
+            errs.push(e);
         }
         if errs.is_empty() {
             Ok(())
         } else {
             Err(CharterError::Invalid(errs))
         }
+    }
+
+    /// Rule 7, the charter's size, measured on the parsed charter so that every form agrees:
+    /// its JSON serialization and its plain YAML ([`Charter::to_yaml`], what sidecars receive in
+    /// `CharterUpdate.charter_yaml` and the file store keeps) are each at most
+    /// [`MAX_CHARTER_BYTES`]. YAML block scalars indent every line of a system prompt or a
+    /// skill's instructions, so the YAML can be the bigger of the two; bounding both means a
+    /// charter accepted as a resource or as JSON is never refused when it arrives as YAML.
+    fn check_size(&self) -> Result<(), String> {
+        let json = serde_json::to_vec(self)
+            .map_err(|e| format!("charter cannot be serialized: {e}"))?
+            .len();
+        if json > MAX_CHARTER_BYTES {
+            return Err(format!(
+                "charter is {json} bytes serialized, more than the {MAX_CHARTER_BYTES} allowed"
+            ));
+        }
+        let yaml = self
+            .to_yaml()
+            .map_err(|e| format!("charter cannot be serialized: {e}"))?
+            .len();
+        if yaml > MAX_CHARTER_BYTES {
+            return Err(format!(
+                "charter is {yaml} bytes serialized as plain YAML (the form sidecars receive), \
+                 more than the {MAX_CHARTER_BYTES} allowed"
+            ));
+        }
+        Ok(())
     }
 
     /// Top-level `skills`: names, uniqueness, sizes (design §4 rules 1 and 7).
@@ -1090,21 +1160,39 @@ impl Charter {
     }
 }
 
+fn too_big(what: &str, len: usize, max: usize) -> CharterError {
+    CharterError::Invalid(vec![format!(
+        "{what} is {len} bytes, more than the {max} allowed"
+    )])
+}
+
+/// Whitespace (Unicode `White_Space`, plus U+FEFF, which JSON Schema's ECMA-262 `\s` also
+/// counts) or a control character: never part of a model id or an endpoint.
+fn is_space_or_control(c: char) -> bool {
+    c.is_whitespace() || c.is_control() || c == '\u{feff}'
+}
+
 /// The `model` rules, shared by `harness.fallback_model`: a model id (or `mock`) — not empty, no
-/// whitespace or control characters, at most 128 bytes.
+/// whitespace or control characters, at most 128 bytes ([`MODEL_PATTERN`] and `maxLength` in the
+/// JSON Schema).
 fn check_model(model: &str) -> Result<(), &'static str> {
     if model.trim().is_empty() {
         return Err("is required");
     }
-    if model.len() > 128 || model.chars().any(|c| c.is_whitespace() || c.is_control()) {
+    if model.len() > MAX_MODEL_BYTES || model.chars().any(is_space_or_control) {
         return Err("is not a model id (no whitespace, at most 128 bytes)");
     }
     Ok(())
 }
 
 /// `telemetry.otlp_endpoint`: an `http`/`https` URL with a host, no userinfo, and no path (other
-/// than `/`), query or fragment.
+/// than `/`), query or fragment. Whitespace and control characters are refused before the URL is
+/// parsed: the URL parser would quietly drop them (a trailing space, a tab inside the host), so
+/// the endpoint used would not be the text that was checked. [`OTLP_ENDPOINT_PATTERN`] agrees.
 pub fn check_otlp_endpoint(endpoint: &str) -> Result<(), String> {
+    if endpoint.chars().any(is_space_or_control) {
+        return Err("may not contain whitespace or control characters".into());
+    }
     if !(endpoint.starts_with("http://") || endpoint.starts_with("https://")) {
         return Err("must be an http:// or https:// URL".into());
     }

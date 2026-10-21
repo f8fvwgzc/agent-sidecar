@@ -6,8 +6,16 @@
 //! the structure, no `additionalProperties: false`, no `uniqueItems`, defaults that are its
 //! business). [`structural`] turns the charter's JSON Schema into one: references are inlined,
 //! `Option<T>` becomes `nullable: true`, and a subtree JSON Schema features cannot be expressed in
-//! falls back to `x-kubernetes-preserve-unknown-fields: true`. The full rules (unknown fields,
-//! uniqueness, cross-field checks) stay with the charter validator behind the validating webhook.
+//! falls back to `x-kubernetes-preserve-unknown-fields: true`.
+//!
+//! **No pruning** (design §13). Every object node carries `x-kubernetes-preserve-unknown-fields:
+//! true`, so the API server never drops a field it does not know. Pruning happens before
+//! admission, and the validating webhook (the charter validator, which rejects unknown fields)
+//! must see exactly what the user wrote, not a silently trimmed copy. The one exception is the
+//! root `metadata`, where Kubernetes allows nothing but restrictions on `name` and
+//! `generateName` (`ObjectMeta` is the API server's own business). The full rules (unknown
+//! fields, uniqueness, cross-field checks) stay with the charter validator behind the validating
+//! webhook.
 
 use serde_json::{Map, Value, json};
 
@@ -72,9 +80,11 @@ pub fn custom_resource_definition() -> Value {
                 "schema": {"openAPIV3Schema": {
                     "type": "object",
                     "description": "Charter: the agents and policy of one service, applied by its attache sidecars.",
+                    PRESERVE: true,
                     "properties": {
                         "apiVersion": {"type": "string"},
                         "kind": {"type": "string"},
+                        // only name/generateName restrictions are allowed here: no PRESERVE
                         "metadata": {"type": "object"},
                         "spec": spec,
                         "status": status_schema(),
@@ -104,6 +114,7 @@ fn status_schema() -> Value {
     json!({
         "type": "object",
         "description": "Written by embassy only.",
+        PRESERVE: true,
         "properties": {
             "observedGeneration": {"type": "integer", "format": "int64"},
             "appliedVersion": {"type": "string", "description": "The charter version embassy applied from this resource."},
@@ -113,6 +124,7 @@ fn status_schema() -> Value {
                 "x-kubernetes-list-map-keys": ["type"],
                 "items": {
                     "type": "object",
+                    PRESERVE: true,
                     "required": ["type", "status"],
                     "properties": {
                         "type": {"type": "string", "description": "Valid or Synced."},
@@ -277,25 +289,26 @@ fn convert(node: &Value, defs: &Map<String, Value>, depth: usize) -> Value {
             .collect();
         out.insert("properties".into(), Value::Object(converted));
     }
-    match obj.get("additionalProperties") {
-        // closed objects: pruning drops unknown fields; the validator rejects them
-        None | Some(Value::Bool(false)) => {}
-        Some(Value::Bool(true)) => {
-            out.insert(PRESERVE.into(), Value::Bool(true));
-        }
-        Some(schema) if props.is_none() => {
-            out.insert(
-                "additionalProperties".into(),
-                convert(schema, defs, depth + 1),
-            );
-        }
-        // `properties` and a schema for the others cannot both be structural
-        Some(_) => {
-            out.insert(PRESERVE.into(), Value::Bool(true));
-        }
+    // A map (a schema for every value, no `properties`) keeps that schema. `false` (a closed
+    // object), `true`, and a schema next to `properties` (which cannot be structural) are not
+    // for the API server: unknown fields are the validator's to reject, never pruned.
+    if props.is_none()
+        && let Some(schema) = obj.get("additionalProperties").filter(|s| s.is_object())
+    {
+        out.insert(
+            "additionalProperties".into(),
+            convert(schema, defs, depth + 1),
+        );
     }
     if let Some(Value::Array(req)) = obj.get("required") {
         out.insert("required".into(), Value::Array(req.clone()));
+    }
+    // Every object keeps the fields it does not declare (see the module docs): the API server
+    // never prunes, so the validating webhook sees the resource exactly as written.
+    if out.get("type").and_then(Value::as_str) == Some("object")
+        || obj.get("additionalProperties") == Some(&Value::Bool(true))
+    {
+        out.insert(PRESERVE.into(), Value::Bool(true));
     }
     if !out.contains_key("type") && !out.contains_key(PRESERVE) {
         // untyped (e.g. a free-form JSON value such as a tool's `parameters`)

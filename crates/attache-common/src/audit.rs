@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::io::Write;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Instant;
 use tokio::sync::broadcast;
 
@@ -64,6 +64,23 @@ pub enum Direction {
     Internal,
 }
 
+impl Direction {
+    /// The wire name (`"inbound"`, `"outbound"`, `"internal"`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Direction::Inbound => "inbound",
+            Direction::Outbound => "outbound",
+            Direction::Internal => "internal",
+        }
+    }
+}
+
+impl std::fmt::Display for Direction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditRecord {
     pub ts: String,
@@ -96,6 +113,130 @@ pub struct AuditRecord {
 pub struct Tokens {
     pub input: u32,
     pub output: u32,
+}
+
+/// An audit record as any version of the sidecar wrote it (design §5): what the CLI, embassy and
+/// the OpenTelemetry exporter read when the record may come from another version.
+///
+/// - `kind`, `direction` and `decision` are strings, so a kind this build does not know
+///   (`"teleport"`) is kept and shown as written, never rejected ([`AuditRecordView::known_kind`]
+///   maps it to a [`Kind`] when there is one).
+/// - `tokens` is [`TokensView`], which accepts and keeps fields it does not know.
+/// - Unknown top-level fields are kept in `extra` and serialized again unchanged (after the
+///   known fields, which keep the wire order of CONTRACT.md §6).
+/// - The fields that identify a record (`ts`, `kind`, `request_id`, `trace_id`, `service`,
+///   `caller`, `callee`, `direction`, `decision`) are required, so a JSON line that is not an
+///   audit record (a sidecar diagnostic) does not parse; every other field defaults when absent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AuditRecordView {
+    pub ts: String,
+    pub kind: String,
+    pub request_id: String,
+    pub trace_id: String,
+    #[serde(default)]
+    pub span_id: String,
+    #[serde(default)]
+    pub parent_span_id: Option<String>,
+    pub service: String,
+    #[serde(default)]
+    pub namespace: String,
+    #[serde(default)]
+    pub agent: Option<String>,
+    pub caller: String,
+    #[serde(default)]
+    pub caller_agent: Option<String>,
+    pub callee: String,
+    pub direction: String,
+    #[serde(default)]
+    pub input: Value,
+    #[serde(default)]
+    pub output: Value,
+    #[serde(default)]
+    pub input_sha256: Option<String>,
+    #[serde(default)]
+    pub output_sha256: Option<String>,
+    #[serde(default)]
+    pub tokens: Option<TokensView>,
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+    #[serde(default)]
+    pub latency_ms: u64,
+    pub decision: String,
+    #[serde(default)]
+    pub rule: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+    /// Top-level fields this build does not know, kept as written.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
+}
+
+/// `tokens` of an [`AuditRecordView`]: `input` and `output` (0 when absent), and any other
+/// count a newer writer adds, kept as written.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TokensView {
+    #[serde(default)]
+    pub input: u64,
+    #[serde(default)]
+    pub output: u64,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
+}
+
+impl AuditRecordView {
+    /// Parse one JSON record (a line of an audit log, an `AuditBatch` entry).
+    pub fn from_json(text: &str) -> serde_json::Result<AuditRecordView> {
+        serde_json::from_str(text)
+    }
+
+    /// The record as one JSON line: the known fields in wire order, then `extra` unchanged.
+    pub fn to_json_line(&self) -> String {
+        serde_json::to_string(self)
+            .unwrap_or_else(|e| format!("{{\"error\":\"serialize audit record: {e}\"}}"))
+    }
+
+    /// `kind` as a [`Kind`] this build knows, or `None` for any other kind.
+    pub fn known_kind(&self) -> Option<Kind> {
+        serde_json::from_value(Value::String(self.kind.clone())).ok()
+    }
+}
+
+impl From<&AuditRecord> for AuditRecordView {
+    fn from(r: &AuditRecord) -> Self {
+        AuditRecordView {
+            ts: r.ts.clone(),
+            kind: r.kind.as_str().to_string(),
+            request_id: r.request_id.clone(),
+            trace_id: r.trace_id.clone(),
+            span_id: r.span_id.clone(),
+            parent_span_id: r.parent_span_id.clone(),
+            service: r.service.clone(),
+            namespace: r.namespace.clone(),
+            agent: r.agent.clone(),
+            caller: r.caller.clone(),
+            caller_agent: r.caller_agent.clone(),
+            callee: r.callee.clone(),
+            direction: r.direction.as_str().to_string(),
+            input: r.input.clone(),
+            output: r.output.clone(),
+            input_sha256: r.input_sha256.clone(),
+            output_sha256: r.output_sha256.clone(),
+            tokens: r.tokens.map(|t| TokensView {
+                input: u64::from(t.input),
+                output: u64::from(t.output),
+                extra: serde_json::Map::new(),
+            }),
+            cost_usd: r.cost_usd,
+            latency_ms: r.latency_ms,
+            decision: r.decision.clone(),
+            rule: r.rule.clone(),
+            reason: r.reason.clone(),
+            error: r.error.clone(),
+            extra: serde_json::Map::new(),
+        }
+    }
 }
 
 pub fn now_rfc3339() -> String {
@@ -350,13 +491,22 @@ fn truncate(v: &mut Value) {
     }
 }
 
+/// What [`AuditWriter::write`] redacts: the `audit.redact` paths and `guardrails.pii_redact`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Redaction {
+    paths: Vec<String>,
+    pii_redact: bool,
+}
+
 /// Writes records to stdout or a file, one line each, serialised, and publishes each written
 /// record to [`AuditWriter::subscribe`] receivers.
 pub struct AuditWriter {
     service: String,
     namespace: String,
-    redact: Vec<String>,
-    pii_redact: bool,
+    /// Swapped whole by [`AuditWriter::set_redaction`] (a charter hot reload); each write takes
+    /// one snapshot, so a record is never redacted half with the old settings and half with the
+    /// new ones.
+    redaction: RwLock<Arc<Redaction>>,
     /// request_id → values found at `audit.redact` paths, scrubbed from every later record of that
     /// request (the same value reappears as text inside model prompts and tool results).
     secrets: Mutex<std::collections::HashMap<String, (std::time::Instant, Vec<String>)>>,
@@ -394,8 +544,10 @@ impl AuditWriter {
         Self {
             service: service.into(),
             namespace: namespace.into(),
-            redact,
-            pii_redact: false,
+            redaction: RwLock::new(Arc::new(Redaction {
+                paths: redact,
+                pii_redact: false,
+            })),
             secrets: Mutex::new(std::collections::HashMap::new()),
             sink: Mutex::new(sink),
             published: broadcast::channel(SUBSCRIBE_CAPACITY).0,
@@ -412,19 +564,52 @@ impl AuditWriter {
 
     /// With `guardrails.pii_redact`, emails and phone numbers are rewritten in every payload written.
     pub fn with_pii_redact(mut self, on: bool) -> Self {
-        self.pii_redact = on;
+        let redaction = self
+            .redaction
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner);
+        Arc::make_mut(redaction).pii_redact = on;
         self
+    }
+
+    /// Replace the `audit.redact` paths and the `guardrails.pii_redact` switch, for a charter hot
+    /// reload: every record written after this call uses the new settings. The writer stays the
+    /// same, so its sink, its remembered values and its [`AuditWriter::subscribe`] receivers are
+    /// unaffected.
+    pub fn set_redaction(&self, paths: Vec<String>, pii_redact: bool) {
+        let new = Arc::new(Redaction { paths, pii_redact });
+        *self
+            .redaction
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = new;
+    }
+
+    /// The `audit.redact` paths and the `guardrails.pii_redact` switch in force.
+    pub fn redaction(&self) -> (Vec<String>, bool) {
+        let r = self.snapshot();
+        (r.paths.clone(), r.pii_redact)
+    }
+
+    fn snapshot(&self) -> Arc<Redaction> {
+        self.redaction
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Remember the values at `audit.redact` paths of a payload (`side` = "input" | "output")
     /// so later records of the same request never carry them, even embedded in text.
     pub fn remember(&self, request_id: &str, side: &str, payload: &Value) {
-        if self.redact.is_empty() || request_id.is_empty() {
+        self.remember_with(&self.snapshot().paths, request_id, side, payload);
+    }
+
+    fn remember_with(&self, paths: &[String], request_id: &str, side: &str, payload: &Value) {
+        if paths.is_empty() || request_id.is_empty() {
             return;
         }
         let mut found = Vec::new();
         let prefix = format!("{side}.");
-        for p in &self.redact {
+        for p in paths {
             if let Some(rest) = p.strip_prefix(&prefix) {
                 collect_path(payload, rest, &mut found);
             } else if p == side {
@@ -467,12 +652,18 @@ impl AuditWriter {
     /// Stamp, hash (over the original payloads), redact paths, scrub remembered values, redact PII,
     /// then truncate — redaction always sees the whole payload (CONTRACT.md §6).
     pub fn write(&self, mut record: AuditRecord) {
+        let redaction = self.snapshot();
         record.service = self.service.clone();
         record.namespace = self.namespace.clone();
         record.ensure_hashes();
-        self.remember(&record.request_id, "input", &record.input);
-        self.remember(&record.request_id, "output", &record.output);
-        record.redact_paths(&self.redact);
+        self.remember_with(&redaction.paths, &record.request_id, "input", &record.input);
+        self.remember_with(
+            &redaction.paths,
+            &record.request_id,
+            "output",
+            &record.output,
+        );
+        record.redact_paths(&redaction.paths);
         if let Some((_, secrets)) = self
             .secrets
             .lock()
@@ -482,7 +673,7 @@ impl AuditWriter {
             scrub(&mut record.input, secrets);
             scrub(&mut record.output, secrets);
         }
-        if self.pii_redact {
+        if redaction.pii_redact {
             redact_pii_value(&mut record.input);
             redact_pii_value(&mut record.output);
         }
@@ -977,6 +1168,226 @@ mod tests {
         let line = &buf.lines()[0];
         assert_ne!(line["ts"], "2000-01-01T00:00:00.000Z");
         assert!(line["ts"].as_str().unwrap().ends_with('Z'));
+    }
+
+    #[test]
+    fn set_redaction_applies_to_later_records_and_keeps_subscribers() {
+        let buf = Buf::default();
+        let w = Arc::new(
+            AuditWriter::with_sink(
+                "orders",
+                "shop",
+                vec!["input.card".into()],
+                Box::new(buf.clone()),
+            )
+            .with_pii_redact(false),
+        );
+        let mut rx = w.subscribe();
+        let t = TraceContext::new_root();
+        let rec = |request_id: &str| {
+            AuditRecord::new(
+                Kind::ToolCall,
+                Direction::Internal,
+                request_id,
+                &t,
+                None,
+                "local",
+                None,
+                "t",
+                serde_json::json!({"card": "4111-1111", "token": "tok-123456", "mail": "a@example.com"}),
+                Value::Null,
+            )
+        };
+        w.write(rec("r1"));
+        assert_eq!(
+            w.redaction(),
+            (vec!["input.card".to_string()], false),
+            "the settings it was built with"
+        );
+        // a hot reload: through a shared reference, no new writer
+        w.set_redaction(vec!["input.token".into()], true);
+        assert_eq!(w.redaction(), (vec!["input.token".to_string()], true));
+        w.write(rec("r2"));
+
+        let lines = buf.lines();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["input"]["card"], "[redacted]");
+        assert_eq!(lines[0]["input"]["token"], "tok-123456");
+        assert_eq!(lines[0]["input"]["mail"], "a@example.com");
+        assert_eq!(lines[1]["input"]["card"], "4111-1111", "path removed");
+        assert_eq!(lines[1]["input"]["token"], "[redacted]", "path added");
+        assert_eq!(
+            lines[1]["input"]["mail"], "[redacted:email]",
+            "pii_redact on"
+        );
+        // the receiver subscribed before the reload gets both, exactly as written
+        let first = rx.try_recv().expect("first record");
+        let second = rx.try_recv().expect("second record");
+        assert_eq!(serde_json::to_value(&*first).unwrap(), lines[0]);
+        assert_eq!(serde_json::to_value(&*second).unwrap(), lines[1]);
+        assert!(rx.try_recv().is_err());
+        // values remembered under the new paths are scrubbed from later records of the request
+        w.write(AuditRecord::new(
+            Kind::ModelCall,
+            Direction::Outbound,
+            "r2",
+            &t,
+            None,
+            "local",
+            None,
+            "mock",
+            Value::String("the tool said tok-123456".into()),
+            Value::Null,
+        ));
+        assert_eq!(buf.lines()[2]["input"], "the tool said [redacted]");
+        // and switching pii_redact off again works the same way
+        w.set_redaction(vec![], false);
+        w.write(rec("r3"));
+        let last = &buf.lines()[3];
+        assert_eq!(last["input"]["mail"], "a@example.com");
+        assert_eq!(last["input"]["token"], "tok-123456");
+        assert_eq!(rx.try_recv().unwrap().request_id, "r2");
+        assert_eq!(rx.try_recv().unwrap().request_id, "r3");
+    }
+
+    #[test]
+    fn set_redaction_is_safe_while_other_threads_write() {
+        let buf = Buf::default();
+        let w = Arc::new(AuditWriter::with_sink(
+            "s",
+            "n",
+            vec!["input.a".into()],
+            Box::new(buf.clone()),
+        ));
+        let t = TraceContext::new_root();
+        let writers: Vec<_> = (0..4)
+            .map(|i| {
+                let w = Arc::clone(&w);
+                let t = t.clone();
+                std::thread::spawn(move || {
+                    for j in 0..200 {
+                        w.write(AuditRecord::new(
+                            Kind::ToolCall,
+                            Direction::Internal,
+                            &format!("r{i}-{j}"),
+                            &t,
+                            None,
+                            "local",
+                            None,
+                            "t",
+                            serde_json::json!({"a": "value-a", "b": "value-b"}),
+                            Value::Null,
+                        ));
+                    }
+                })
+            })
+            .collect();
+        for k in 0..100 {
+            let path = if k % 2 == 0 { "input.a" } else { "input.b" };
+            w.set_redaction(vec![path.into()], k % 3 == 0);
+        }
+        for h in writers {
+            h.join().unwrap();
+        }
+        let lines = buf.lines();
+        assert_eq!(lines.len(), 800);
+        // every record was redacted with one consistent snapshot: exactly one of a / b
+        for l in &lines {
+            let a = l["input"]["a"] == "[redacted]";
+            let b = l["input"]["b"] == "[redacted]";
+            assert!(a ^ b, "{l}");
+        }
+    }
+
+    #[test]
+    fn the_view_reads_any_kind_and_keeps_unknown_fields() {
+        let line = r#"{"ts":"2026-10-21T10:00:02.000Z","kind":"teleport","request_id":"r10","trace_id":"dddd1111","span_id":"s","parent_span_id":null,"service":"orders","namespace":"shop","agent":"support","caller":"local","caller_agent":null,"callee":"mars","direction":"sideways","input":{"to":"mars"},"output":null,"input_sha256":"ab","output_sha256":null,"tokens":{"input":12,"output":3,"cache_read":40},"cost_usd":0.25,"latency_ms":1,"decision":"maybe","rule":"teleport.ok","reason":null,"error":null,"new_field":{"x":[1,2]},"z_last":"kept"}"#;
+        let view = AuditRecordView::from_json(line).unwrap();
+        assert_eq!(view.kind, "teleport");
+        assert_eq!(view.known_kind(), None);
+        assert_eq!(view.direction, "sideways");
+        assert_eq!(view.decision, "maybe");
+        let tokens = view.tokens.clone().unwrap();
+        assert_eq!((tokens.input, tokens.output), (12, 3));
+        assert_eq!(tokens.extra["cache_read"], 40);
+        assert_eq!(view.extra["new_field"], serde_json::json!({"x": [1, 2]}));
+        assert_eq!(view.extra["z_last"], "kept");
+        // re-serialized unchanged: the same JSON value, unknown fields included
+        let original: Value = serde_json::from_str(line).unwrap();
+        let again: Value = serde_json::from_str(&view.to_json_line()).unwrap();
+        assert_eq!(again, original);
+        // and the known fields keep the wire order, the unknown ones follow
+        let text = view.to_json_line();
+        let pos = |k: &str| text.find(&format!("\"{k}\":")).unwrap();
+        assert!(pos("ts") < pos("kind") && pos("kind") < pos("decision"));
+        assert!(pos("error") < pos("new_field") && pos("new_field") < pos("z_last"));
+        // a strict reader refuses the same line; the view is what other versions' records need
+        assert!(serde_json::from_str::<AuditRecord>(line).is_err());
+        // it round-trips through the view a second time too
+        assert_eq!(AuditRecordView::from_json(&text).unwrap(), view);
+    }
+
+    #[test]
+    fn the_view_of_this_builds_records() {
+        let t = TraceContext::new_root();
+        let mut rec = AuditRecord::new(
+            Kind::Learning,
+            Direction::Internal,
+            "r1",
+            &t,
+            Some("support"),
+            "local",
+            None,
+            "learning",
+            serde_json::json!({"request_id_of_run": "r0"}),
+            Value::Null,
+        );
+        rec.tokens = Some(Tokens {
+            input: 5,
+            output: 7,
+        });
+        rec.rule = Some("learning.proposed".into());
+        let view = AuditRecordView::from(&rec);
+        assert_eq!(view.known_kind(), Some(Kind::Learning));
+        assert_eq!(view.direction, "internal");
+        assert!(view.extra.is_empty());
+        // the same JSON as the record itself
+        assert_eq!(
+            serde_json::to_value(&view).unwrap(),
+            serde_json::to_value(&rec).unwrap()
+        );
+        assert_eq!(
+            AuditRecordView::from_json(&rec.to_json_line()).unwrap(),
+            view
+        );
+        for d in [Direction::Inbound, Direction::Outbound, Direction::Internal] {
+            assert_eq!(serde_json::to_value(d).unwrap(), d.as_str());
+            assert_eq!(d.to_string(), d.as_str());
+        }
+    }
+
+    #[test]
+    fn the_view_refuses_lines_that_are_not_records_and_defaults_the_rest() {
+        // a diagnostic that happens to be JSON
+        assert!(
+            AuditRecordView::from_json(r#"{"timestamp":"x","level":"INFO","fields":{}}"#).is_err()
+        );
+        // the identifying fields are enough; the others default
+        let v = AuditRecordView::from_json(
+            r#"{"ts":"t","kind":"config","request_id":"","trace_id":"","service":"s","caller":"file","callee":"charter","direction":"internal","decision":"allow"}"#,
+        )
+        .unwrap();
+        assert_eq!(v.latency_ms, 0);
+        assert!(v.input.is_null() && v.tokens.is_none() && v.extra.is_empty());
+        assert_eq!(v.known_kind(), Some(Kind::Config));
+        // tokens without the usual counts still parse
+        let v = AuditRecordView::from_json(
+            r#"{"ts":"t","kind":"model_call","request_id":"r","trace_id":"x","service":"s","caller":"local","callee":"mock","direction":"outbound","decision":"allow","tokens":{"reasoning":9}}"#,
+        )
+        .unwrap();
+        let tokens = v.tokens.unwrap();
+        assert_eq!((tokens.input, tokens.output), (0, 0));
+        assert_eq!(tokens.extra["reasoning"], 9);
     }
 
     #[test]

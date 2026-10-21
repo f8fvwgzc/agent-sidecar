@@ -96,6 +96,26 @@ pub fn is_resource_yaml(doc: &serde_yaml_ng::Value) -> bool {
         .is_some_and(|m| m.contains_key("spec") || m.contains_key("metadata"))
 }
 
+/// May this YAML (or JSON) text be the custom resource form? Judged without parsing it, so that
+/// [`Charter::from_yaml`] refuses a plain charter over [`crate::MAX_CHARTER_BYTES`] before the
+/// parser sees it, while a resource (whose `status` may be much bigger) is still parsed.
+///
+/// Yes when `spec` or `metadata` is followed, after an optional closing quote and whitespace, by
+/// `:` anywhere in the text: that covers the key in block YAML, flow YAML and JSON, minified or
+/// not. It errs towards yes (the words in a system prompt count too; the text is then parsed, up
+/// to [`crate::MAX_RESOURCE_BYTES`], and its form decided properly) and says no only for a text
+/// that has neither key, or writes it with escapes (`"sp\x65c"`). Linear in the text's length.
+pub fn may_be_resource_text(text: &str) -> bool {
+    ["spec", "metadata"].iter().any(|key| {
+        text.match_indices(key).any(|(at, _)| {
+            text[at + key.len()..]
+                .trim_start_matches(['"', '\''])
+                .trim_start()
+                .starts_with(':')
+        })
+    })
+}
+
 impl CharterResource {
     /// The custom resource of a charter: `metadata: {name, namespace}` from `service`, and
     /// `spec.service` without `namespace` (it lives in `metadata`).
