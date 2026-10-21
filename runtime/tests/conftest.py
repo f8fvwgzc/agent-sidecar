@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 from attache_runtime.spec import AgentSpec
-from attache_runtime.tools import CallContext, ToolDenied
+from attache_runtime.tools import CallContext, LessonOutcome, ToolDenied
 
 STOCK = {"sku": "WIDGET-1", "on_hand": 42, "reorder_point": 50, "warehouse_contact": "ops-lead@example.com"}
 
@@ -17,8 +17,13 @@ class FakeSidecar:
     def __init__(self) -> None:
         self.calls: list[tuple[str, Any]] = []
         self.events: list[dict[str, Any]] = []
+        self.contexts: list[CallContext] = []  # the ToolContext of every tool call
+        self.lessons: list[tuple[CallContext, str, str, str]] = []
+        self.report_rule: str | None = None  # what ReportEvent answers with (x-attache-rule)
+        self.lesson_outcome = LessonOutcome("allow", "learning.proposed", "")
 
     async def invoke_service(self, ctx: CallContext, tool: str, service: str, method: str, path: str, headers, body):
+        self.contexts.append(ctx)
         self.calls.append(("service", (tool, service, method, path, body)))
         if path.startswith("/admin"):
             raise ToolDenied("authz.services.deny-admin", f"{method} {path} on {service} matches deny pattern")
@@ -31,15 +36,22 @@ class FakeSidecar:
     async def invoke_agent(
         self, ctx: CallContext, tool: str, target_service: str, target_agent: str, input: str
     ) -> str:
+        self.contexts.append(ctx)
         self.calls.append(("agent", (tool, target_service, target_agent, input)))
         return f"{target_agent} says: WIDGET-1 has 42 on hand, reorder point 50, reorder now."
 
     async def invoke_http(self, ctx: CallContext, tool: str, method: str, url: str, headers, body):
+        self.contexts.append(ctx)
         self.calls.append(("http", (tool, method, url, body)))
         return 200, b'{"ok": true}'
 
-    async def report_event(self, record: dict[str, Any]) -> None:
+    async def report_event(self, record: dict[str, Any]) -> str | None:
         self.events.append(record)
+        return self.report_rule
+
+    async def propose_lesson(self, ctx: CallContext, note: str, rationale: str, run_request_id: str) -> LessonOutcome:
+        self.lessons.append((ctx, note, rationale, run_request_id))
+        return self.lesson_outcome
 
 
 @pytest.fixture

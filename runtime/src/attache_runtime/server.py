@@ -5,24 +5,33 @@ from __future__ import annotations
 import logging
 import sys
 import time
+from collections.abc import Callable
 
 import grpc
 from pydantic import ValidationError
 
 from . import __version__
 from .agent import run_agent
-from .models import anthropic_available, model_for
+from .learning import LEARNER, Learner, Reflection
+from .models import Model, anthropic_available, model_for
 from .pb.attache.v1alpha1 import common_pb2, runtime_pb2, runtime_pb2_grpc
 from .sidecar import GrpcSidecar
 from .spec import AgentSpec
-from .tools import CallContext
+from .tools import CallContext, SidecarClient
 
 log = logging.getLogger("attache-runtime")
 
 
 class RuntimeServicer(runtime_pb2_grpc.RuntimeServicer):
-    def __init__(self, sidecar: GrpcSidecar) -> None:
+    def __init__(
+        self,
+        sidecar: SidecarClient,
+        learner: Learner | None = None,
+        models: Callable[[str], Model] = model_for,
+    ) -> None:
         self._sidecar = sidecar
+        self._learner = LEARNER if learner is None else learner
+        self._models = models
 
     async def Health(self, request, context):
         provider = "anthropic" if anthropic_available() else "mock"
@@ -37,7 +46,8 @@ class RuntimeServicer(runtime_pb2_grpc.RuntimeServicer):
         remaining = context.time_remaining()
         deadline = time.monotonic() + remaining if remaining is not None else None
         ctx = CallContext(request.request_id, request.trace_id, request.span_id, spec.name, request.depth, deadline)
-        model = model_for(spec.model)
+        model = self._models(spec.model)
+        fallback = self._models(spec.harness.fallback_model) if spec.harness.fallback_model else None
         log.info(
             "execute agent=%s model=%s provider=%s request=%s",
             spec.name,
@@ -46,9 +56,17 @@ class RuntimeServicer(runtime_pb2_grpc.RuntimeServicer):
             request.request_id,
         )
         result = await run_agent(
-            spec, request.input, request.context_json, ctx, model, self._sidecar, request.caller, request.caller_agent
+            spec,
+            request.input,
+            request.context_json,
+            ctx,
+            model,
+            self._sidecar,
+            request.caller,
+            request.caller_agent,
+            fallback=fallback,
         )
-        return runtime_pb2.ExecuteResponse(
+        response = runtime_pb2.ExecuteResponse(
             status=result.status,
             output=result.output,
             usage=common_pb2.Usage(
@@ -68,6 +86,11 @@ class RuntimeServicer(runtime_pb2_grpc.RuntimeServicer):
             rule=result.rule,
             reason=result.reason,
         )
+        # The reflection, if any, runs after this handler has returned its response (design §12).
+        self._learner.after_run(
+            Reflection(spec, ctx, request.caller, request.caller_agent, model, self._sidecar, result)
+        )
+        return response
 
 
 async def serve(listen: str, sidecar_address: str) -> None:

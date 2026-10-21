@@ -58,7 +58,26 @@ class SidecarClient(Protocol):
         self, ctx: CallContext, tool: str, method: str, url: str, headers: dict[str, str], body: bytes
     ) -> tuple[int, bytes]: ...
 
-    async def report_event(self, record: dict[str, Any]) -> None: ...
+    # Returns the rule the sidecar attached to its answer (gRPC `x-attache-rule`), if any: the sidecar
+    # names `budget.max_cost_usd_per_day` there once a reported cost exhausts the agent's daily budget.
+    async def report_event(self, record: dict[str, Any]) -> str | None: ...
+
+    async def propose_lesson(
+        self, ctx: CallContext, note: str, rationale: str, run_request_id: str
+    ) -> LessonOutcome: ...
+
+
+# The rule a sidecar names when an agent's daily cost budget is used up.
+RULE_COST_BUDGET = "budget.max_cost_usd_per_day"
+
+
+@dataclass
+class LessonOutcome:
+    """The sidecar's answer to ProposeLesson; decision `error` when the call itself failed."""
+
+    decision: str
+    rule: str
+    reason: str
 
 
 class ToolDenied(Exception):
