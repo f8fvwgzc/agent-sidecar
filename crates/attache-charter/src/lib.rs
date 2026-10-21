@@ -430,9 +430,9 @@ impl Charter {
                             errs.push(format!("{tt}: service tools may not set agent or url"));
                         }
                         if let Some(p) = &tool.path
-                            && !p.starts_with('/')
+                            && let Err(e) = PathTemplate::parse(p)
                         {
-                            errs.push(format!("{tt}: path must start with /"));
+                            errs.push(format!("{tt}: path {p:?}: {e}"));
                         }
                     }
                     ToolType::Agent => {
@@ -465,12 +465,14 @@ impl Charter {
                         if tool.method.is_none() || tool.url.is_none() {
                             errs.push(format!("{tt}: http tools need method and url"));
                         }
-                        if let Some(u) = &tool.url
-                            && http_origin(u).is_none()
-                        {
-                            errs.push(format!(
-                                "{tt}: url must be http(s)://host[:port]/… with no {{param}} in the scheme, host or port"
-                            ));
+                        if let Some(u) = &tool.url {
+                            if http_origin(u).is_none() {
+                                errs.push(format!(
+                                    "{tt}: url must be http(s)://host[:port]/… with no {{param}} in the scheme, host or port"
+                                ));
+                            } else if let Err(e) = PathTemplate::parse(http_url_path(u)) {
+                                errs.push(format!("{tt}: url {u:?}: {e}"));
+                            }
                         }
                         if tool.service.is_some() || tool.agent.is_some() || tool.path.is_some() {
                             errs.push(format!(
@@ -600,6 +602,17 @@ pub fn http_origin(url: &str) -> Option<String> {
     Some(format!("{scheme}://{}", authority.to_ascii_lowercase()))
 }
 
+/// The path and query of an http(s) URL template (`https://h/v1/{id}?q=1` → `/v1/{id}?q=1`);
+/// `/` when it has no path.
+pub fn http_url_path(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let rest = rest.split('#').next().unwrap_or(rest);
+    match rest.find(['/', '?']) {
+        Some(i) if rest[i..].starts_with('/') => &rest[i..],
+        _ => "/",
+    }
+}
+
 pub fn is_method(m: &str) -> bool {
     matches!(
         m,
@@ -607,10 +620,44 @@ pub fn is_method(m: &str) -> bool {
     )
 }
 
-/// `"<METHOD|*> <path>"` with an optional trailing `*` on the path.
+/// RFC 3986 `pchar` without `%`: what a canonical path segment is written in.
+fn is_path_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || "-._~!$&'()*+,;=:@".contains(c)
+}
+
+/// The percent-escapes of a URL path made canonical (RFC 3986 §6.2.2): an escaped unreserved
+/// character is decoded (`%61` → `a`, `%2E` → `.`), any other escape gets uppercase hex. An
+/// escaped `/`, `\` or NUL, which a server may turn back into a separator, is an error, and so
+/// is a `%` that does not start an escape.
+pub fn normalize_percent_escapes(path: &str) -> Result<String, String> {
+    let mut out = String::with_capacity(path.len());
+    let mut rest = path;
+    while let Some(i) = rest.find('%') {
+        out.push_str(&rest[..i]);
+        let byte = rest
+            .get(i + 1..i + 3)
+            .filter(|h| h.bytes().all(|b| b.is_ascii_hexdigit()))
+            .and_then(|h| u8::from_str_radix(h, 16).ok())
+            .ok_or("has a % that does not start a %XX escape")?;
+        match byte {
+            b'/' | b'\\' | 0 => return Err("contains an encoded slash, backslash or NUL".into()),
+            b if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') => {
+                out.push(b as char)
+            }
+            b => out.push_str(&format!("%{b:02X}")),
+        }
+        rest = &rest[i + 3..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+/// `"<METHOD|*> <path>"` with an optional trailing `*` on the path, matched against the
+/// canonical method and path (CONTRACT.md §5.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathPattern {
     pub method: Option<String>,
+    /// Canonical: unreserved escapes decoded, no trailing `/` unless the pattern is `/` or ends in `/*`.
     pub prefix: String,
     pub wildcard: bool,
 }
@@ -633,11 +680,25 @@ impl PathPattern {
             return Err("path must start with /".into());
         }
         let (prefix, wildcard) = match p.strip_suffix('*') {
-            Some(pre) => (pre.to_string(), true),
-            None => (p.to_string(), false),
+            Some(pre) => (pre, true),
+            None => (p, false),
         };
         if prefix.contains('*') {
             return Err("only a trailing * is supported".into());
+        }
+        // A pattern only ever meets canonical paths, so one that could never match is an error.
+        if let Some(c) = prefix
+            .chars()
+            .find(|&c| !is_path_char(c) && c != '/' && c != '%')
+        {
+            return Err(format!("{c:?} never appears in a canonical path"));
+        }
+        let mut prefix = normalize_percent_escapes(prefix)?;
+        if prefix.contains("//") || prefix.split('/').any(|s| s == "." || s == "..") {
+            return Err("empty, . and .. segments never appear in a canonical path".into());
+        }
+        if !wildcard && prefix.len() > 1 && prefix.ends_with('/') {
+            prefix.pop();
         }
         Ok(PathPattern {
             method,
@@ -646,18 +707,181 @@ impl PathPattern {
         })
     }
 
+    /// Exact match, as `allow` patterns use it: a case variant of an allowed path is not allowed.
+    /// A `GET` pattern also matches `HEAD`, and one trailing `/` on the path is ignored.
     pub fn matches(&self, method: &str, path: &str) -> bool {
+        self.matches_with(method, path, false)
+    }
+
+    /// [`PathPattern::matches`], but ignoring ASCII case in the path, as `deny` patterns use it:
+    /// `/ADMIN` meets `* /admin`, because many routers ignore case.
+    pub fn matches_ignore_case(&self, method: &str, path: &str) -> bool {
+        self.matches_with(method, path, true)
+    }
+
+    fn matches_with(&self, method: &str, path: &str, ignore_case: bool) -> bool {
         if let Some(m) = &self.method
-            && m != method
+            && !m.eq_ignore_ascii_case(method)
+            && !(m == "GET" && method.eq_ignore_ascii_case("HEAD"))
         {
             return false;
         }
         let path = path.split('?').next().unwrap_or(path);
+        let path = match path.strip_suffix('/') {
+            Some(p) if !p.is_empty() => p,
+            _ => path,
+        };
+        let (p, pre) = (path.as_bytes(), self.prefix.as_bytes());
+        let eq = |a: &[u8], b: &[u8]| {
+            if ignore_case {
+                a.eq_ignore_ascii_case(b)
+            } else {
+                a == b
+            }
+        };
         if self.wildcard {
-            path.starts_with(&self.prefix) && path.len() > self.prefix.len()
+            p.len() > pre.len() && eq(&p[..pre.len()], pre)
         } else {
-            path == self.prefix
+            eq(p, pre)
         }
+    }
+}
+
+/// A tool's path template, `/orders/{order_id}` or `/stock/{sku?}`, as the sidecar checks a call
+/// against it (CONTRACT.md §3.1). A `{param}` stands for a non-empty segment, or a non-empty part
+/// of one (`/files/{name}.json`); `{param?}`, only as the whole last segment, may also be left out
+/// together with its `/`. The query (from `?` on) is not part of the template.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathTemplate {
+    segments: Vec<Vec<TemplatePart>>,
+    optional_last: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TemplatePart {
+    Literal(String),
+    Param,
+}
+
+impl PathTemplate {
+    pub fn parse(template: &str) -> Result<PathTemplate, String> {
+        // the query starts at the first `?` outside `{…}` (`{sku?}` is a param, not a query)
+        let mut depth = 0usize;
+        let end = template
+            .char_indices()
+            .find(|&(_, c)| {
+                match c {
+                    '{' => depth += 1,
+                    '}' => depth = depth.saturating_sub(1),
+                    _ => {}
+                }
+                c == '?' && depth == 0
+            })
+            .map_or(template.len(), |(i, _)| i);
+        let path = template[..end]
+            .strip_prefix('/')
+            .ok_or("must start with /")?;
+        let raw: Vec<&str> = path.split('/').collect();
+        let mut segments = Vec::with_capacity(raw.len());
+        let mut optional_last = false;
+        for (i, seg) in raw.iter().enumerate() {
+            let last = i + 1 == raw.len();
+            if let Some(name) = seg.strip_prefix('{').and_then(|s| s.strip_suffix("?}")) {
+                if !last {
+                    return Err(format!("{{{name}?}} may only be the last segment"));
+                }
+                param_name(name)?;
+                optional_last = true;
+                break;
+            }
+            if seg.is_empty() && !last {
+                return Err("has an empty segment (//)".into());
+            }
+            let parts = template_segment(seg)?;
+            if let [TemplatePart::Literal(l)] = parts.as_slice()
+                && (l == "." || l == "..")
+            {
+                return Err("has a . or .. segment".into());
+            }
+            segments.push(parts);
+        }
+        Ok(PathTemplate {
+            segments,
+            optional_last,
+        })
+    }
+
+    /// Does the canonical `path` (its query ignored) fit this template?
+    pub fn matches(&self, path: &str) -> bool {
+        let path = path.split('?').next().unwrap_or(path);
+        let Some(path) = path.strip_prefix('/') else {
+            return false;
+        };
+        let segs: Vec<&str> = path.split('/').collect();
+        if segs.iter().any(|s| *s == "." || *s == "..") {
+            return false;
+        }
+        let n = self.segments.len();
+        let fixed: &[&str] = if segs.len() == n {
+            &segs
+        } else if self.optional_last && segs.len() == n + 1 && !segs[n].is_empty() {
+            &segs[..n]
+        } else if self.optional_last && n == 0 && segs == [""] {
+            &[] // `/{param?}` left out is `/`
+        } else {
+            return false;
+        };
+        self.segments
+            .iter()
+            .zip(fixed)
+            .all(|(parts, s)| segment_fits(parts, s))
+    }
+}
+
+fn param_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err(format!(
+            "{{{name}}} is not a parameter: names match ^[a-zA-Z0-9_]+$, and an optional {{name?}} is a whole last segment"
+        ));
+    }
+    Ok(())
+}
+
+fn template_segment(seg: &str) -> Result<Vec<TemplatePart>, String> {
+    let mut parts = Vec::new();
+    let mut rest = seg;
+    while !rest.is_empty() {
+        if let Some(after) = rest.strip_prefix('{') {
+            let end = after.find('}').ok_or("has a { without }")?;
+            param_name(&after[..end])?;
+            parts.push(TemplatePart::Param);
+            rest = &after[end + 1..];
+            continue;
+        }
+        let end = rest.find(['{', '}']).unwrap_or(rest.len());
+        let lit = &rest[..end];
+        if lit.is_empty() {
+            return Err("has a } without {".into());
+        }
+        if let Some(c) = lit.chars().find(|&c| !is_path_char(c) && c != '%') {
+            return Err(format!("{c:?} never appears in a canonical path"));
+        }
+        parts.push(TemplatePart::Literal(normalize_percent_escapes(lit)?));
+        rest = &rest[end..];
+    }
+    Ok(parts)
+}
+
+/// A param takes one or more characters; literals must be equal.
+fn segment_fits(parts: &[TemplatePart], s: &str) -> bool {
+    match parts.split_first() {
+        None => s.is_empty(),
+        Some((TemplatePart::Literal(l), rest)) => s
+            .strip_prefix(l.as_str())
+            .is_some_and(|r| segment_fits(rest, r)),
+        Some((TemplatePart::Param, rest)) => (1..=s.len())
+            .filter(|&i| s.is_char_boundary(i))
+            .any(|i| segment_fits(rest, &s[i..])),
     }
 }
 
@@ -803,6 +1027,132 @@ mod tests {
         assert!(PathPattern::parse("FETCH /x").is_err());
         assert!(PathPattern::parse("GET x").is_err());
         assert!(PathPattern::parse("GET /a/*/b").is_err());
+    }
+
+    #[test]
+    fn path_patterns_trailing_slash_head_and_case() {
+        // one trailing slash on the path is ignored: /x/ is /x, for /x and /x/* alike
+        let exact = PathPattern::parse("* /admin").unwrap();
+        assert!(exact.matches("POST", "/admin/"));
+        assert!(!exact.matches("POST", "/admin//"));
+        let sub = PathPattern::parse("* /admin/*").unwrap();
+        assert!(sub.matches("POST", "/admin/reset/"));
+        assert!(!sub.matches("POST", "/admin/"), "like /admin, not under it");
+        assert_eq!(PathPattern::parse("GET /stock/").unwrap().prefix, "/stock");
+        assert!(PathPattern::parse("GET /").unwrap().matches("GET", "/"));
+        assert!(!PathPattern::parse("GET /*").unwrap().matches("GET", "/"));
+        // GET rules cover HEAD; a HEAD rule covers only HEAD; request methods are compared uppercased
+        let get = PathPattern::parse("GET /export/*").unwrap();
+        assert!(get.matches("HEAD", "/export/x"));
+        assert!(get.matches("get", "/export/x"));
+        assert!(!get.matches("POST", "/export/x"));
+        let head = PathPattern::parse("HEAD /export/*").unwrap();
+        assert!(!head.matches("GET", "/export/x"));
+        // case: allow-style matching is exact, deny-style ignores ASCII case
+        assert!(!exact.matches("GET", "/ADMIN"));
+        assert!(exact.matches_ignore_case("GET", "/ADMIN"));
+        assert!(sub.matches_ignore_case("GET", "/Admin/Reset/"));
+        assert!(!sub.matches_ignore_case("GET", "/Administrator"));
+        // escapes in a pattern are canonical too; anything a canonical path never holds is refused
+        assert_eq!(
+            PathPattern::parse("* /%61dmin/%3a*").unwrap().prefix,
+            "/admin/%3A"
+        );
+        for bad in [
+            "* /a b",
+            "* /a?x=1",
+            "* /a#b",
+            "* /a\\b",
+            "* //a",
+            "* /a/../b",
+            "* /a/./*",
+            "* /a%2Fb",
+            "* /a%",
+            "* /ä",
+        ] {
+            assert!(PathPattern::parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn path_templates() {
+        let t = PathTemplate::parse("/orders/{order_id}").unwrap();
+        assert!(t.matches("/orders/1001"));
+        assert!(t.matches("/orders/a%20b?x=1"), "the query is not checked");
+        assert!(!t.matches("/orders"), "a required param cannot be left out");
+        assert!(!t.matches("/orders/"));
+        assert!(!t.matches("/orders/1/cancel"));
+        assert!(!t.matches("/admin/reset"));
+        assert!(!t.matches("/Orders/1"));
+        assert!(!t.matches("/orders/.."));
+        let cancel = PathTemplate::parse("/orders/{id}/cancel").unwrap();
+        assert!(cancel.matches("/orders/7/cancel"));
+        assert!(!cancel.matches("/orders/cancel"));
+        assert!(!cancel.matches("/cancel"));
+        let opt = PathTemplate::parse("/stock/{sku?}").unwrap();
+        assert!(opt.matches("/stock"));
+        assert!(opt.matches("/stock/WIDGET-1"));
+        assert!(!opt.matches("/stock/"));
+        assert!(!opt.matches("/stock/a/b"));
+        assert!(!opt.matches("/"));
+        let root_opt = PathTemplate::parse("/{x?}").unwrap();
+        assert!(root_opt.matches("/") && root_opt.matches("/a") && !root_opt.matches("/a/b"));
+        let mixed = PathTemplate::parse("/v{version}/files/{name}.json?raw={raw}").unwrap();
+        assert!(mixed.matches("/v2/files/report.json"));
+        assert!(
+            !mixed.matches("/v/files/report.json"),
+            "a param takes at least one character"
+        );
+        assert!(!mixed.matches("/v2/files/.json"));
+        assert!(!mixed.matches("/v2/files/report.xml"));
+        let slash = PathTemplate::parse("/orders/").unwrap();
+        assert!(slash.matches("/orders/") && !slash.matches("/orders"));
+        assert!(PathTemplate::parse("/").unwrap().matches("/"));
+        assert!(PathTemplate::parse("/%61pi/x").unwrap().matches("/api/x"));
+        for bad in [
+            "orders/{id}",
+            "/orders//{id}",
+            "/a/../b",
+            "/a/%2E/b",
+            "/stock/{sku?}/history",
+            "/stock/x{sku?}",
+            "/stock/{}",
+            "/stock/{a-b}",
+            "/stock/{sku",
+            "/stock/sku}",
+            "/a b/{x}",
+            "/a%2Fb/{x}",
+        ] {
+            assert!(PathTemplate::parse(bad).is_err(), "{bad}");
+        }
+        assert_eq!(
+            http_url_path("https://h:8443/v1/{id}?q=1#f"),
+            "/v1/{id}?q=1"
+        );
+        assert_eq!(http_url_path("https://h"), "/");
+        assert_eq!(http_url_path("https://h?q=1"), "/");
+    }
+
+    #[test]
+    fn tool_templates_are_validated() {
+        let mut c = Charter::from_yaml(INVENTORY).unwrap();
+        c.agents[0].tools[0].path = Some("/stock/{sku?}/history".into());
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("may only be the last segment"), "{err}");
+        let mut c = Charter::from_yaml(ORDERS).unwrap();
+        c.agents[0].tools.push(ToolSpec {
+            name: "partner".into(),
+            description: "d".into(),
+            tool_type: ToolType::Http,
+            parameters: None,
+            service: None,
+            method: Some("GET".into()),
+            path: None,
+            agent: None,
+            url: Some("https://api.example.com/v1//items/{id}".into()),
+        });
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("empty segment"), "{err}");
     }
 
     #[test]

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use attache_charter::{Charter, ToolSpec, ToolType};
 use attache_proto::mesh_client::MeshClient;
 use attache_proto::sidecar_tools_client::SidecarToolsClient;
-use attache_proto::{InvokeAgentRequest, ToolContext, ToolServiceRequest};
+use attache_proto::{InvokeAgentRequest, ToolContext, ToolHttpRequest, ToolServiceRequest};
 use attached::{Config, Sidecar};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -38,10 +38,10 @@ async fn fake_inventory_app() -> std::net::SocketAddr {
     let app = Router::new()
         .route(
             "/stock/{sku}",
-            get(|axum::extract::Path(sku): axum::extract::Path<String>, headers: axum::http::HeaderMap| async move {
+            get(|axum::extract::Path(sku): axum::extract::Path<String>, axum::extract::RawQuery(query): axum::extract::RawQuery, headers: axum::http::HeaderMap| async move {
                 let all = |k: &str| headers.get_all(k).iter().map(|v| v.to_str().unwrap_or("").to_string()).collect::<Vec<_>>();
                 Json(json!({
-                    "sku": sku, "on_hand": 42, "reorder_point": 50, "warehouse_contact": "ops-lead@example.com",
+                    "sku": sku, "query": query, "on_hand": 42, "reorder_point": 50, "warehouse_contact": "ops-lead@example.com",
                     "seen_by_app": { "x-attache-caller": all("x-attache-caller"), "traceparent": all("traceparent") }
                 }))
             }),
@@ -136,11 +136,28 @@ async fn mesh_mtls_end_to_end() {
         agent: None,
         url: None,
     });
-    ord.guardrails
+    // and an http tool aimed at the same fake app, to check the URL template on InvokeHttp
+    ops.tools.push(ToolSpec {
+        name: "fetch_stock".into(),
+        description: "read stock over plain http".into(),
+        tool_type: ToolType::Http,
+        parameters: None,
+        service: None,
+        method: Some("GET".into()),
+        path: None,
+        agent: None,
+        url: Some(format!(
+            "http://127.0.0.1:{}/stock/{{sku}}",
+            app_addr.port()
+        )),
+    });
+    let allowed = ord
+        .guardrails
         .allowed_tools
         .get_mut("ops-assistant")
-        .unwrap()
-        .push("check_stock".into());
+        .unwrap();
+    allowed.push("check_stock".into());
+    allowed.push("fetch_stock".into());
     ord.audit.sink = attache_charter::AuditSink::File;
     let ord_audit = root.join("orders-audit.jsonl");
     ord.audit.file = Some(ord_audit.to_string_lossy().into_owned());
@@ -323,8 +340,9 @@ async fn mesh_mtls_end_to_end() {
             .contains("1111111111")
     );
 
-    // 5c. dot segments are resolved before authz, so a traversal meets the deny rule it aims past,
-    //     and encoded slashes are refused outright — on the caller's sidecar and on the callee's.
+    // 5c. dot segments are resolved before anything is checked, so a traversal leaves the tool's
+    //     template (`/stock/{sku}`), encoded slashes are refused outright, and so is a path that
+    //     drops the param — on the caller's sidecar; the callee's check follows below.
     let traversal = |path: &str| ToolServiceRequest {
         ctx: ctx("check_stock", "req-traversal"),
         service: "inventory".into(),
@@ -334,9 +352,14 @@ async fn mesh_mtls_end_to_end() {
         body: vec![],
     };
     for (path, rule) in [
-        ("/stock/../admin/reset", "authz.default.deny"),
-        ("/stock/%2e%2e/admin/reset", "authz.default.deny"),
+        ("/stock/../admin/reset", "guardrail.tool_spec"),
+        ("/stock/%2e%2e/admin/reset", "guardrail.tool_spec"),
+        ("/stock/..", "guardrail.tool_spec"),
+        ("/stock", "guardrail.tool_spec"),
+        ("/stock/", "guardrail.tool_spec"),
+        ("/stock/W-1/x", "guardrail.tool_spec"),
         ("/stock/..%2Fadmin%2Freset", "guardrail.path"),
+        ("/stock//W-1", "guardrail.path"),
     ] {
         let err = tools.invoke_service(traversal(path)).await.expect_err(path);
         assert_eq!(err.code(), tonic::Code::PermissionDenied, "{path}: {err:?}");
@@ -366,7 +389,100 @@ async fn mesh_mtls_end_to_end() {
         "authz.services.deny-admin"
     );
 
-    // 5d. the runtime cannot borrow a tool's name for a different request.
+    // 5d. other spellings of /admin from a peer meet the deny pattern too (a router would decode
+    //     `%61`, ignore the trailing slash or the case); an empty segment is refused outright.
+    let inbound = |method: &str, path: &str| {
+        let mut req = tonic::Request::new(attache_proto::ServiceRequest {
+            method: method.into(),
+            path: path.into(),
+            headers: Default::default(),
+            body: vec![],
+            request_id: "req-spelling-inbound".into(),
+            traceparent: String::new(),
+            agent: String::new(),
+        });
+        req.metadata_mut()
+            .insert("x-attache-agent", "ops-assistant".parse().unwrap());
+        req
+    };
+    for (method, path, rule) in [
+        ("POST", "/%61dmin/reset", "authz.services.deny-admin"),
+        ("POST", "/admin/", "authz.services.deny-admin"),
+        ("POST", "/admin/reset/", "authz.services.deny-admin"),
+        ("post", "/ADMIN/reset", "authz.services.deny-admin"),
+        ("POST", "//admin/reset", "guardrail.path"),
+        ("POST", "/admin%2Freset", "guardrail.path"),
+        ("FETCH", "/stock/WIDGET-1", "guardrail.path"),
+    ] {
+        let err = mesh
+            .invoke_service(inbound(method, path))
+            .await
+            .expect_err(path);
+        assert_eq!(
+            err.metadata().get("x-attache-rule").unwrap(),
+            rule,
+            "{method} {path}"
+        );
+    }
+    // HEAD is held to the GET rules: `GET /stock/*` allows it, and the app's GET handler answers.
+    let head = mesh
+        .invoke_service(inbound("head", "/stock/WIDGET-1"))
+        .await
+        .expect("HEAD falls under GET /stock/*")
+        .into_inner();
+    assert_eq!(head.status, 200);
+
+    // 5e. an encoded slash in the query is data, not a path: a leftover argument such as a date
+    //     reaches the app unchanged; a lowercase method is the declared GET.
+    let mut dated = traversal("/stock/WIDGET-1?since=2026%2F10%2F21");
+    dated.method = "get".into();
+    let resp = tools
+        .invoke_service(dated)
+        .await
+        .expect("a / in the query is fine")
+        .into_inner();
+    let body: serde_json::Value = serde_json::from_slice(&resp.body).unwrap();
+    assert_eq!(body["query"], "since=2026%2F10%2F21");
+
+    // 5f. an http tool's URL is held to its template the same way; the origin was already fixed.
+    let fetch = |url: String| ToolHttpRequest {
+        ctx: ctx("fetch_stock", "req-http"),
+        method: "GET".into(),
+        url,
+        headers: Default::default(),
+        body: vec![],
+    };
+    let base = format!("http://127.0.0.1:{}", app_addr.port());
+    let resp = tools
+        .invoke_http(fetch(format!(
+            "{base}/stock/%57IDGET-1?since=2026%2F10%2F21"
+        )))
+        .await
+        .expect("fits /stock/{sku}")
+        .into_inner();
+    let body: serde_json::Value = serde_json::from_slice(&resp.body).unwrap();
+    assert_eq!(body["sku"], "WIDGET-1");
+    assert_eq!(body["query"], "since=2026%2F10%2F21");
+    for (path, rule) in [
+        ("/stock/..", "guardrail.tool_spec"),
+        ("/stock/%2e%2e/admin/reset", "guardrail.tool_spec"),
+        ("/stock", "guardrail.tool_spec"),
+        ("/admin/reset", "guardrail.tool_spec"),
+        ("/stock/a%2Fb", "guardrail.path"),
+        ("//stock/x", "guardrail.path"),
+    ] {
+        let err = tools
+            .invoke_http(fetch(format!("{base}{path}")))
+            .await
+            .expect_err(path);
+        assert_eq!(
+            err.metadata().get("x-attache-rule").unwrap(),
+            rule,
+            "{path}"
+        );
+    }
+
+    // 5g. the runtime cannot borrow a tool's name for a different request.
     let mut wrong = traversal("/stock/WIDGET-1");
     wrong.method = "DELETE".into();
     let err = tools

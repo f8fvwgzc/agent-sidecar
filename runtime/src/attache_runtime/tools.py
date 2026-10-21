@@ -59,32 +59,74 @@ class ToolFailed(Exception):
     pass
 
 
+RULE_TOOL_SPEC = "guardrail.tool_spec"
+_PARAM = re.compile(r"\{([a-zA-Z0-9_]+)(\?)?\}")
+
+
 def fill_path(template: str, args: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    """Substitute `{param}` segments; return the path and the arguments that were not used."""
-    rest = dict(args)
+    """Substitute `{param}`s in a service path or http URL; return it and the arguments not used.
 
-    def sub(m: re.Match[str]) -> str:
-        key = m.group(1)
-        if key in rest:
-            # Encoded, so a value can never add path segments: "../admin" arrives as "..%2Fadmin",
-            # which the sidecar refuses (CONTRACT.md §5.1).
-            return quote(str(rest.pop(key)), safe="")
-        return ""
+    A path value is percent-encoded, so it is exactly one segment: "../admin" arrives as
+    "..%2Fadmin", which the sidecar refuses (CONTRACT.md §3.1, §5.1). A missing or empty value, or
+    one of only dots, would drop or climb a segment and retarget the call (DELETE /orders/{id}
+    becoming DELETE /orders), so it raises ToolDenied instead — except for an optional last
+    segment `{param?}`, which is then left out together with its `/`.
+    """
+    used: set[str] = set()
+    origin, path, query = _split_template(template)
 
-    path = re.sub(r"\{([a-zA-Z0-9_]+)\}", sub, template)
-    scheme, sep, tail = path.partition("://")
-    if not sep:
-        scheme, tail = "", path
-    tail = re.sub(r"/{2,}", "/", tail)
-    if len(tail) > 1 and tail.endswith("/"):
-        tail = tail[:-1]
-    return f"{scheme}{sep}{tail}", rest
+    if m := re.search(r"/\{([a-zA-Z0-9_]+)\?\}$", path):
+        used.add(m.group(1))
+        if _blank(args.get(m.group(1))):
+            path = path[: m.start()] or "/"
+
+    def sub_path(m: re.Match[str]) -> str:
+        name = m.group(1)
+        used.add(name)
+        value = args.get(name)
+        if _blank(value) or not str(value).strip("."):
+            raise ToolDenied(
+                RULE_TOOL_SPEC,
+                f"path parameter {name!r} needs a non-empty value other than '.' or '..', got {value!r}",
+            )
+        return quote(str(value), safe="")
+
+    def sub_query(m: re.Match[str]) -> str:
+        used.add(m.group(1))
+        value = args.get(m.group(1))
+        return "" if value is None else quote(str(value), safe="")
+
+    path = _PARAM.sub(sub_path, path)
+    query = _PARAM.sub(sub_query, query)
+    rest = {k: v for k, v in args.items() if k not in used}
+    return f"{origin}{path}{query}", rest
 
 
-def _encode_query(args: dict[str, Any]) -> str:
+def _blank(value: Any) -> bool:
+    return value is None or str(value) == ""
+
+
+def _split_template(template: str) -> tuple[str, str, str]:
+    """`scheme://authority`, path and `?query` of a template; the `?` of `{param?}` is not a query."""
+    origin = ""
+    if "://" in template:
+        scheme, _, tail = template.partition("://")
+        cut = min((i for i in (tail.find("/"), tail.find("?")) if i >= 0), default=len(tail))
+        origin, template = f"{scheme}://{tail[:cut]}", tail[cut:]
+    q = re.search(r"\?(?![^{]*\})", template)
+    if q is None:
+        return origin, template, ""
+    return origin, template[: q.start()], template[q.start() :]
+
+
+def with_query(path: str, args: dict[str, Any]) -> str:
+    """Append `args` as query parameters, after any query the template already has."""
     from urllib.parse import urlencode
 
-    return urlencode({k: (json.dumps(v) if isinstance(v, (dict, list)) else v) for k, v in args.items()})
+    query = urlencode({k: (json.dumps(v) if isinstance(v, (dict, list)) else v) for k, v in args.items()})
+    if "?" not in path:
+        return f"{path}?{query}"
+    return f"{path}{'' if path.endswith(('?', '&')) else '&'}{query}"
 
 
 async def run_tool(tool: ToolSpec, args: dict[str, Any], ctx: CallContext, sidecar: SidecarClient) -> ToolOutcome:
@@ -98,7 +140,7 @@ async def run_tool(tool: ToolSpec, args: dict[str, Any], ctx: CallContext, sidec
             headers = {"accept": "application/json"}
             body = b""
             if rest and method in {"GET", "DELETE", "HEAD"}:
-                path = f"{path}?{_encode_query(rest)}"
+                path = with_query(path, rest)
             elif rest or method in {"POST", "PUT", "PATCH"}:
                 body = json.dumps(rest).encode()
                 headers["content-type"] = "application/json"
@@ -117,7 +159,7 @@ async def run_tool(tool: ToolSpec, args: dict[str, Any], ctx: CallContext, sidec
         headers = {"accept": "application/json"}
         body = b""
         if rest and method in {"GET", "DELETE", "HEAD"}:
-            url = f"{url}?{_encode_query(rest)}"
+            url = with_query(url, rest)
         elif rest:
             body = json.dumps(rest).encode()
             headers["content-type"] = "application/json"
