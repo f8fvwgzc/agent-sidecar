@@ -36,12 +36,13 @@ import {
   setIn,
   getIn,
 } from '../js/util.js';
-import { G, nodeBox, portPoint, bezier, edgePath, frameRect, rectsOverlap } from '../js/geometry.js';
+import { G, nodeBox, portPoint, bezier, edgePath, frameRect, emptyFrameRect, rectsOverlap } from '../js/geometry.js';
 import { autoLayout, resolvePositions, depths } from '../js/layout.js';
 import { createFixtureServer, synthAgentView, toolTarget, validateAgent, judgeCharter } from '../js/fixtures.js';
 import { Api, ApiError, parseEtag } from '../js/api.js';
 import { viewPayload, normalizeView } from '../js/tab-config.js';
 import { targetFor, tabsFor } from '../js/inspector.js';
+import { learningTurnedOff } from '../js/tab-yaml.js';
 import { loadPositions, savePositions, clearPositions, POSITIONS_KEY } from '../js/store.js';
 
 const FIX = join(dirname(fileURLToPath(import.meta.url)), '..', 'fixtures');
@@ -358,6 +359,104 @@ test('resolvePositions keeps saved positions and puts a new agent below its hand
   assert.deepEqual(pos.get('agent:attache-demo/orders/new-one'), { x: 1000, y: 1400 + boxOf(triage).h + 40 });
 });
 
+/** Every card and frame of `g` at `pos`; a frame may only contain its own cards. */
+function overlapsIn(g, pos) {
+  const byId = new Map(g.nodes.map((n) => [n.id, n]));
+  const rects = [];
+  const kids = new Map();
+  for (const n of g.nodes) {
+    if (n.type === 'service') continue;
+    const p = pos.get(n.id);
+    const r = { id: n.id, x: p.x, y: p.y, w: boxOf(n).w, h: boxOf(n).h };
+    rects.push(r);
+    if (n.parent) kids.set(n.parent, [...(kids.get(n.parent) || []), r]);
+  }
+  for (const n of g.nodes) {
+    if (n.type !== 'service') continue;
+    const k = kids.get(n.id);
+    rects.push({ id: `frame ${n.id}`, frame: n.id, ...(k ? frameRect(k) : emptyFrameRect(pos.get(n.id))) });
+  }
+  const bad = [];
+  for (let i = 0; i < rects.length; i++) {
+    for (let j = i + 1; j < rects.length; j++) {
+      const [a, b] = [rects[i], rects[j]];
+      const own = (a.frame && byId.get(b.id)?.parent === a.frame) || (b.frame && byId.get(a.id)?.parent === b.frame);
+      if (!own && rectsOverlap(a, b)) bad.push(`${a.id} / ${b.id}`);
+    }
+  }
+  return bad;
+}
+
+test('resolvePositions: nothing saved is exactly the auto-layout', () => {
+  const g = json('graph.json');
+  assert.deepEqual([...resolvePositions(g, new Map(), boxOf)], [...autoLayout(g, boxOf)]);
+});
+
+test('resolvePositions: services, providers and origins that appear later do not cover placed cards', () => {
+  const g = json('graph.json');
+  const before = resolvePositions(g, new Map(), boxOf);
+  const g2 = clone(g);
+  // Sorts first among the services and the externals, so its auto-layout slot is taken.
+  g2.nodes.push(
+    { id: 'svc:attache-demo/aaa', type: 'service', label: 'aaa', status: 'connected', instances: 1, charter_version: '1' },
+    { id: 'app:attache-demo/aaa', type: 'app', parent: 'svc:attache-demo/aaa', label: 'aaa app', ports: { in: [], out: ['invoke'] } },
+    { id: 'agent:attache-demo/aaa/bot', type: 'agent', parent: 'svc:attache-demo/aaa', label: 'bot', agent_type: 'agent', ports: { in: ['invoke'], out: ['model'] }, tools: [] },
+    { id: 'svc:attache-demo/idle', type: 'service', label: 'idle', status: 'no_charter', instances: 1, charter_version: null },
+    { id: 'external:https://aaa.example', type: 'external', label: 'aaa.example', ports: { in: ['http'], out: [] } },
+    { id: 'model:mock', type: 'model_provider', label: 'Mock', ports: { in: ['model'], out: [] } },
+  );
+  const pos = resolvePositions(g2, before, boxOf);
+  for (const [id, p] of before) assert.deepEqual(pos.get(id), p, `${id} stays where it was`);
+  assert.deepEqual(overlapsIn(g2, pos), []);
+  const column = before.get('external:https://api.partner.example').x;
+  for (const id of ['external:https://aaa.example', 'model:mock']) {
+    assert.equal(pos.get(id).x, column, `${id} joins the final column`);
+    assert.ok(pos.get(id).y > before.get('external:https://api.partner.example').y, `${id} goes below it`);
+  }
+  assert.ok(pos.get('app:attache-demo/aaa').x < column, 'a new service stays left of the final column');
+
+  // The same with hand-placed cards: the user stacked everything in one column.
+  const stacked = new Map();
+  let y = 0;
+  for (const id of before.keys()) {
+    const n = g.nodes.find((x) => x.id === id);
+    stacked.set(id, { x: 0, y });
+    y += boxOf(n).h + 120;
+  }
+  const pos2 = resolvePositions(g2, stacked, boxOf);
+  assert.deepEqual(overlapsIn(g2, pos2), []);
+
+  // A service whose frame was empty keeps the frame's place when its first agent arrives.
+  const g3 = clone(g2);
+  g3.nodes.push({ id: 'agent:attache-demo/idle/first', type: 'agent', parent: 'svc:attache-demo/idle', label: 'first', agent_type: 'agent', ports: { in: ['invoke'], out: ['model'] }, tools: [] });
+  const pos3 = resolvePositions(g3, pos, boxOf);
+  const frame = frameRect([{ ...pos3.get('agent:attache-demo/idle/first'), ...boxOf(g3.nodes.at(-1)) }]);
+  assert.deepEqual({ x: frame.x, y: frame.y }, pos.get('svc:attache-demo/idle'));
+  assert.deepEqual(overlapsIn(g3, pos3), []);
+});
+
+test('resolvePositions: a new card next to hand-placed cards of the other kind keeps its offset', () => {
+  const g = json('graph.json');
+  const auto = autoLayout(g, boxOf);
+  const saved = new Map([...auto].filter(([id]) => id !== 'agent:attache-demo/inventory/stock-analyst'));
+  saved.set('app:attache-demo/inventory', { x: auto.get('app:attache-demo/inventory').x + 500, y: 900 });
+  const pos = resolvePositions(g, saved, boxOf);
+  const app = pos.get('app:attache-demo/inventory');
+  const agent = pos.get('agent:attache-demo/inventory/stock-analyst');
+  const a = auto.get('app:attache-demo/inventory');
+  const b = auto.get('agent:attache-demo/inventory/stock-analyst');
+  assert.deepEqual({ dx: agent.x - app.x, dy: agent.y - app.y }, { dx: b.x - a.x, dy: b.y - a.y });
+  assert.deepEqual(overlapsIn(g, pos), []);
+});
+
+test('learningTurnedOff names the agents a charter change takes learning away from', () => {
+  const before = { agents: [{ name: 'a', learning: { enabled: true } }, { name: 'b', learning: { enabled: true } }, { name: 'c' }, { name: 'gone', learning: { enabled: true } }] };
+  const after = { agents: [{ name: 'a', learning: { enabled: true, mode: 'auto' } }, { name: 'b', learning: { enabled: false } }, { name: 'c', learning: { enabled: true } }] };
+  assert.deepEqual(learningTurnedOff(before, after), ['b']);
+  assert.deepEqual(learningTurnedOff(null, after), []);
+  assert.deepEqual(learningTurnedOff(before, { agents: [{ name: 'a' }] }), ['a']);
+});
+
 // ---- store -------------------------------------------------------------------------------------------
 
 test('positions survive a round trip through storage; malformed entries are dropped', () => {
@@ -539,11 +638,24 @@ test('fixture links: cross-namespace refused, cross-service needs admin, admin a
   assert.ok(view.allowed_tools.includes('ask_stock'));
 });
 
-test('fixture proposals: approve needs the memory version, stores the note, then refuses again', async () => {
+test('fixture proposals: approve needs the memory version and learning, stores the note, then refuses again', async () => {
   const { s } = await server();
   const id = '784722e9-e727-4c29-9f39-e116fd9afcd5';
-  assert.equal((await s.handle('POST', `/proposals/${id}/approve`, { headers: { ...W, 'If-Match': '"0"' } })).status, 409);
-  const r = await s.handle('POST', `/proposals/${id}/approve`, { headers: { ...W, 'If-Match': '"1"' } });
+  const approve = (v) => s.handle('POST', `/proposals/${id}/approve`, { headers: { ...W, 'If-Match': `"${v}"` } });
+  assert.equal((await approve(0)).status, 409);
+  // The golden orders charter has no learning block for ops-assistant: no memory to write to.
+  const off = await approve(1);
+  assert.equal(off.status, 400);
+  assert.match(off.data.details[0], /learning is off/);
+  const path = '/services/attache-demo/orders/agents/ops-assistant';
+  const setLearning = async (enabled) => {
+    const cur = await s.handle('GET', path);
+    const body = clone(cur.data);
+    body.agent.learning = { enabled };
+    return s.handle('PUT', path, { headers: { ...W, 'If-Match': cur.etag }, body });
+  };
+  assert.equal((await setLearning(true)).status, 200);
+  const r = await approve(1);
   assert.equal(r.status, 200);
   assert.equal(r.data.memory_version, '2');
   assert.equal(r.data.proposal.status, 'approved');
@@ -553,6 +665,15 @@ test('fixture proposals: approve needs the memory version, stores the note, then
   assert.equal((await s.handle('POST', `/proposals/${id}/reject`, { headers: { ...W, 'If-Match': '"2"' } })).status, 409);
   const put = await s.handle('PUT', '/services/attache-demo/orders/memory', { headers: { ...W, 'If-Match': '"2"' }, body: { agents: {} } });
   assert.equal(put.data.version, '3');
+  // Turning learning off drops the agent's notes in the same change (design §3).
+  const back = await s.handle('PUT', '/services/attache-demo/orders/memory', { headers: { ...W, 'If-Match': '"3"' }, body: { agents: { 'ops-assistant': [{ text: 'Keep answers short.' }] } } });
+  assert.equal(back.status, 200);
+  assert.equal((await setLearning(false)).status, 200);
+  const after = await s.handle('GET', '/services/attache-demo/orders/memory');
+  assert.deepEqual(after.data.agents, {});
+  assert.equal(after.data.version, '5');
+  const refused = await s.handle('PUT', '/services/attache-demo/orders/memory', { headers: { ...W, 'If-Match': '"5"' }, body: { agents: { 'ops-assistant': [{ text: 'x' }] } } });
+  assert.equal(refused.status, 400);
 });
 
 test('fixture events/recent filters (agent matches caller_agent) and hides payloads per token', async () => {

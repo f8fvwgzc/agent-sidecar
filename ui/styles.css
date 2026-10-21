@@ -1296,6 +1296,10 @@ input[type="checkbox"] {
   stroke-width: 3;
 }
 
+.node.link-candidate.link-linked .port.in circle {
+  stroke: var(--warn);
+}
+
 .node.drop-target .card-outline {
   stroke: var(--ok);
   stroke-width: 2.5;

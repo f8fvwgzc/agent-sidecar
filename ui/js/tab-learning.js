@@ -3,7 +3,7 @@
 
 import { h, clear, toast, toastError, icon, ICONS, pill } from './dom.js';
 import { button, errorBox } from './forms.js';
-import { relTime, shortId, clone } from './util.js';
+import { relTime, shortId, clone, agentNodeId } from './util.js';
 
 export class LearningTab {
   constructor(ctx) {
@@ -54,7 +54,11 @@ export class LearningTab {
       if (data.status === 'approved') this.load();
       else this.render();
     }
+    // A charter change can turn learning off, which drops the agent's notes (design §3).
+    if (type === 'config' && data && data.namespace === ns && data.service === svc) this.load();
     if (type === 'reset' || type === 'lagged') this.load();
+    // Learning on/off and the counts come from the graph: redraw when they change.
+    if (type === 'graph-updated' && !this.loading && this.learningSig() !== this.drawnSig) this.render();
   }
 
   agentsInScope() {
@@ -66,7 +70,13 @@ export class LearningTab {
     return [...new Set([...fromGraph, ...fromMemory, ...fromProps])];
   }
 
+  learningSig() {
+    const { ns, svc } = this.ctx.target;
+    return JSON.stringify(this.ctx.app.agentsOf(ns, svc).map((n) => [n.id, n.learning || null]));
+  }
+
   render() {
+    this.drawnSig = this.learningSig();
     const { agent } = this.ctx.target;
     const agents = this.agentsInScope();
     const props = this.proposals.filter((p) => agents.includes(p.agent));
@@ -87,8 +97,9 @@ export class LearningTab {
               ? l.mode === 'auto'
                 ? 'Lessons are stored at once and expire after note_ttl_days.'
                 : 'Lessons wait here for review before they become context.'
-              : 'Existing notes and proposals stay listed; the control plane refuses new memory for agents without learning.',
+              : 'The agent gets no memory: the control plane refuses memory writes for agents without learning, so proposals cannot be approved, and turning learning off drops the agent’s notes in the same change. Turn learning on in Config to collect lessons.',
           }),
+          !l.enabled && notes.length ? h('div', { class: 'muted', text: 'The notes listed below are not passed to the agent.' }) : null,
         ),
       );
     }
@@ -105,16 +116,31 @@ export class LearningTab {
     clear(this.el).append(...body);
   }
 
+  /** False when the graph says the agent has learning off: it has no memory to approve into. */
+  learningOn(agent) {
+    const node = this.ctx.app.node(agentNodeId(this.ctx.target.ns, this.ctx.target.svc, agent));
+    return !(node && node.learning && node.learning.enabled === false);
+  }
+
   proposalCard(p, actionable) {
     const now = this.ctx.api.now();
     const busy = this.busy.has(p.id);
+    const off = !this.learningOn(p.agent);
     const actions =
       actionable && this.canEdit
         ? h(
             'div',
             { class: 'card-actions' },
-            button(busy ? 'Working…' : 'Approve', { kind: 'primary', small: true, disabled: busy, iconNode: icon(ICONS.check, { size: 14 }), onClick: () => this.decide(p, 'approve') }),
+            button(busy ? 'Working…' : 'Approve', {
+              kind: 'primary',
+              small: true,
+              disabled: busy || off,
+              title: off ? `Learning is off for ${p.agent}: the control plane refuses memory for it` : undefined,
+              iconNode: icon(ICONS.check, { size: 14 }),
+              onClick: () => this.decide(p, 'approve'),
+            }),
             button('Reject', { kind: 'danger-ghost', small: true, disabled: busy, iconNode: icon(ICONS.x, { size: 14 }), onClick: () => this.decide(p, 'reject') }),
+            off ? h('span', { class: 'muted small', text: 'Approving needs learning on.' }) : null,
           )
         : null;
     return h(

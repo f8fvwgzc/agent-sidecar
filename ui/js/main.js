@@ -329,7 +329,8 @@ function wireToolbar() {
     if (ev.key === 'f' || ev.key === 'F') view && view.fit();
     if (ev.key === 'Escape' && inspector && inspector.isOpen) inspector.close();
   });
-  window.addEventListener('resize', throttle(() => view && view.updateFramesAndEdges(), 200));
+  // GraphView watches its own size (ResizeObserver); this covers browsers without it.
+  window.addEventListener('resize', throttle(() => view && view.resized(), 150));
 }
 
 function setFilters(f) {

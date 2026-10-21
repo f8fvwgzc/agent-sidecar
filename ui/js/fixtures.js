@@ -555,6 +555,15 @@ export class FixtureServer {
     s.pending_adoption = null;
     s.status = this.statusOf(s);
     this.syncGraph(ns, svc);
+    // Design §3: turning learning off drops the agent's notes in the same change.
+    const learns = (c) => new Set(((c && c.agents) || []).filter((a) => a.learning && a.learning.enabled).map((a) => a.name));
+    const now = learns(charter);
+    const mem = this.memoryOf(ns, svc);
+    const dropped = [...learns(prev && prev.charter)].filter((a) => !now.has(a) && hasOwn(mem.agents, a));
+    if (dropped.length) {
+      for (const a of dropped) delete mem.agents[a];
+      this.bumpMemory(ns, svc);
+    }
     this.emit('config', { namespace: ns, service: svc, version, actor, source });
     this.emit('graph', { version: this.graph.version });
     this.scheduleAcks(ns, svc, 'charter', version);
@@ -727,6 +736,12 @@ export class FixtureServer {
 
   // ---- memory and proposals --------------------------------------------------------------------
 
+  /** Memory exists only for agents with learning enabled (design §3). */
+  learningOn(charter, name) {
+    const a = ((charter && charter.agents) || []).find((x) => x.name === name);
+    return !!(a && a.learning && a.learning.enabled);
+  }
+
   memoryOf(ns, svc) {
     const key = `${ns}/${svc}`;
     let m = this.memory.get(key);
@@ -761,6 +776,7 @@ export class FixtureServer {
     for (const [name, notes] of Object.entries(agents)) {
       if (!known.has(name)) return err(400, 'invalid', [`agents.${name}: not in the stored charter`]);
       if (!Array.isArray(notes)) return err(400, 'invalid', [`agents.${name}: a list of notes`]);
+      if (!this.learningOn(entry.charter, name) && notes.some((n) => !n.id)) return err(400, 'invalid', [`agents.${name}: learning is off; there is no memory for this agent`]);
       next[name] = notes.map((n) =>
         n.id
           ? n
@@ -790,6 +806,10 @@ export class FixtureServer {
     const pre = this.precondition(H, m.version);
     if (pre) return pre;
     if (p.status !== 'pending') return err(409, 'version_conflict', [`the proposal is already ${p.status}`], m.version);
+    const entry = this.charters.get(`${p.namespace}/${p.service}`);
+    if (action === 'approve' && !(entry && this.learningOn(entry.charter, p.agent))) {
+      return err(400, 'invalid', [`agents.${p.agent}: learning is off; there is no memory for this agent`]);
+    }
     if (action === 'approve') {
       const list = (m.agents[p.agent] = m.agents[p.agent] || []);
       list.push({ id: uuid(), text: p.note, source: 'review', request_id: p.request_id, trace_id: p.trace_id, approved_by: this.me.name, ts: this.iso(), expires_at: null });

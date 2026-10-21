@@ -141,8 +141,36 @@ export function openLinkDialog(app, from, to) {
   const b = parseNodeId(to.id);
   const allowed = roleAtLeast(me.role, req.level);
   const existingTools = (from.tools || []).map((t) => t.name).concat((from.ports && from.ports.out) || []);
-  const draft = { name: suggestToolName(b.agent, existingTools), description: a.svc === b.svc ? `Ask the local ${b.agent} agent.` : `Ask the ${b.svc} service's ${b.agent} agent.` };
+  // Agent tools of the caller that already reach this agent (the graph resolves their targets).
+  const linked = (from.tools || []).filter((t) => t.type === 'agent' && t.target === to.id);
+  const draft = { name: suggestToolName(b.agent, existingTools), description: a.svc === b.svc ? `Ask the local ${b.agent} agent.` : `Ask the ${b.svc} service's ${b.agent} agent.`, again: false };
   const form = new Form({ onChange: () => sync() });
+  const already = linked.length
+    ? h(
+        'div',
+        { class: 'notice notice-warn link-exists' },
+        h('div', { class: 'notice-title', text: `${from.label} already calls ${to.label}.` }),
+        h(
+          'div',
+          null,
+          h('span', { text: linked.length === 1 ? 'Through its tool ' : 'Through its tools ' }),
+          linked.flatMap((t, i) => [i ? h('span', { text: ', ' }) : null, h('code', { text: t.name }), t.allowed === false ? h('span', { class: 'muted', text: ' (not offered to the model)' }) : null]),
+          h('span', { text: '. A link adds one more agent tool next to it; to change the existing one, edit it in Config.' }),
+        ),
+        h(
+          'div',
+          { class: 'notice-actions' },
+          button(`Open ${from.label} Config`, {
+            small: true,
+            onClick: () => {
+              d.close();
+              app.openNode(from, 'config');
+            },
+          }),
+        ),
+        form.checkbox('Add another tool to the same agent anyway', draft, ['again']),
+      )
+    : null;
   const body = h(
     'div',
     { class: 'form' },
@@ -153,6 +181,7 @@ export function openLinkDialog(app, from, to) {
       h('div', { class: 'link-arrow' }, icon(ICONS.chevron, { size: 18 })),
       h('div', { class: 'link-end' }, h('span', { class: 'muted small', text: 'callee' }), h('span', { class: 'mono', text: to.label }), h('span', { class: 'muted small', text: `${b.ns}/${b.svc}` })),
     ),
+    already,
     form.text('Tool name', draft, ['name'], {
       mono: true,
       required: true,
@@ -168,10 +197,10 @@ export function openLinkDialog(app, from, to) {
       allowed ? null : h('div', { class: 'neg', text: `You are ${me.role}: the control plane will refuse this link.` }),
     ),
   );
-  const create = button('Create link', { kind: 'primary', disabled: !allowed, onClick: () => submit() });
-  const d = openDialog({ title: 'Link agents', subtitle: 'POST /links', body, actions: [button('Cancel', { onClick: () => d.close() }), create] });
+  const create = button(linked.length ? 'Add another link' : 'Create link', { kind: 'primary', disabled: !allowed, onClick: () => submit() });
+  const d = openDialog({ title: linked.length ? 'Already linked' : 'Link agents', subtitle: 'POST /links', body, actions: [button('Cancel', { onClick: () => d.close() }), create] });
   const sync = () => {
-    create.disabled = !allowed || form.hasErrors() || !draft.name || !draft.description;
+    create.disabled = !allowed || form.hasErrors() || !draft.name || !draft.description || (linked.length > 0 && !draft.again);
   };
   sync();
   const submit = async () => {

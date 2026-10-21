@@ -374,13 +374,59 @@ export class ConfigTab {
     );
   }
 
+  /**
+   * Whether this draft turns learning off. Memory exists only for agents with learning (design
+   * §3): the control plane drops the agent's notes in the same change that disables it.
+   */
+  disablesLearning() {
+    return !!(this.base && (this.base.agent.learning || {}).enabled) && !(this.draft.agent.learning || {}).enabled;
+  }
+
+  /** The agent's notes and pending proposals as the graph counts them (null when unknown). */
+  learningCounts() {
+    const node = this.ctx.app.node(this.ctx.target.id);
+    const l = node && node.learning;
+    return l ? { notes: Number(l.notes) || 0, pending: Number(l.pending) || 0 } : null;
+  }
+
+  /** Turning learning off deletes notes (unknown count: assume it does). */
+  dropsNotes() {
+    const c = this.learningCounts();
+    return this.disablesLearning() && (!c || c.notes > 0);
+  }
+
+  renderLearningDrop() {
+    const el = this.learningDrop;
+    if (!el) return;
+    const show = this.disablesLearning();
+    el.hidden = !show;
+    clear(el);
+    if (!show) return;
+    const c = this.learningCounts();
+    const pending = c && c.pending ? ` Its ${c.pending} pending proposal${c.pending === 1 ? '' : 's'} can no longer be approved.` : '';
+    el.classList.toggle('notice-warn', this.dropsNotes());
+    el.classList.toggle('notice-info', !this.dropsNotes());
+    if (!this.dropsNotes()) {
+      el.append(h('div', { class: 'notice-title', text: 'Saving turns learning off.' }), h('div', { text: `The agent has no notes; the control plane keeps no memory for it from then on.${pending}` }));
+      return;
+    }
+    const notes = c ? `${c.notes} note${c.notes === 1 ? '' : 's'}` : 'notes';
+    el.append(
+      h('div', { class: 'notice-title', text: `Saving turns learning off and deletes ${this.ctx.target.agent}'s memory.` }),
+      h('div', { text: `The control plane drops the agent's ${notes} in the same change; turning learning back on does not restore them.${pending}` }),
+    );
+  }
+
   learningSection(form) {
     const d = this.draft;
     const admin = roleAtLeast(this.ctx.app.me().role, 'admin');
     const baseAuto = ((this.base.agent.learning || {}).mode || '') === 'auto';
+    this.learningDrop = h('div', { class: 'notice notice-warn learning-drop', role: 'status', hidden: true });
+    this.renderLearningDrop();
     return section(
       'Learning',
-      form.checkbox('Enabled: the agent proposes lessons from its runs', d, ['agent', 'learning', 'enabled']),
+      form.checkbox('Enabled: the agent proposes lessons from its runs', d, ['agent', 'learning', 'enabled'], { onToggle: () => this.renderLearningDrop() }),
+      this.learningDrop,
       grid(
         form.select(
           'Mode',
@@ -496,7 +542,8 @@ export class ConfigTab {
     if (!this.footer) return;
     clear(this.footer);
     const dirty = this.isDirty();
-    const ver = h('span', { class: 'footer-meta', text: `Charter v${this.version ?? '?'}${dirty ? ' · unsaved changes' : ''}` });
+    const drops = dirty && this.dropsNotes();
+    const ver = h('span', { class: 'footer-meta', text: `Charter v${this.version ?? '?'}${dirty ? ' · unsaved changes' : ''}${drops ? ' · deletes the agent’s notes' : ''}` });
     if (dirty) ver.classList.add('dirty');
     if (!this.canEdit) {
       this.footer.append(ver);
@@ -514,7 +561,12 @@ export class ConfigTab {
           this.render();
         },
       }),
-      button(this.saving ? 'Saving…' : 'Save', { kind: 'primary', disabled: !dirty || errors || this.saving, title: errors ? 'Fix the highlighted fields first' : `PUT with If-Match "${this.version}"`, onClick: () => this.save() }),
+      button(this.saving ? 'Saving…' : drops ? 'Save and delete notes' : 'Save', {
+        kind: drops ? 'danger' : 'primary',
+        disabled: !dirty || errors || this.saving,
+        title: errors ? 'Fix the highlighted fields first' : `PUT with If-Match "${this.version}"${drops ? '; learning off drops the agent’s notes' : ''}`,
+        onClick: () => this.save(),
+      }),
     );
     if (this.ctx.onDirty) this.ctx.onDirty(this, dirty);
   }

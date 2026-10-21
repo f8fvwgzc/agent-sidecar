@@ -4,7 +4,7 @@
 
 import { G, nodeBox, portPoint, bezier, edgePath, frameRect, emptyFrameRect, rectContains } from './geometry.js';
 import { resolvePositions } from './layout.js';
-import { visibleGraph, fmtInt, fmtMs, fmtCost, fmtCompact, relTime, parseNodeId, linkRequirement } from './util.js';
+import { visibleGraph, fmtInt, fmtMs, fmtCost, fmtCompact, relTime, parseNodeId, linkRequirement, throttle } from './util.js';
 import { h, kv, showTooltip, hideTooltip } from './dom.js';
 import { loadPositions, savePositions, clearPositions } from './store.js';
 
@@ -73,7 +73,15 @@ export class GraphView {
     this.nodeEls = new Map();
     this.signatures = new Map();
     this.fitted = false;
+    // True while the view shows what the last Fit framed: a resize or new nodes then refit.
+    // Any pan or zoom by the viewer, or revealing a node, ends it until the next Fit.
+    this.autoFit = false;
+    this.size = null;
     this.build();
+    if (typeof ResizeObserver === 'function') {
+      this.resizeObserver = new ResizeObserver(throttle(() => this.resized(), 120));
+      this.resizeObserver.observe(host);
+    }
   }
 
   build() {
@@ -102,6 +110,7 @@ export class GraphView {
       .scaleExtent([0.15, 2.5])
       .on('zoom', (event) => {
         const t = event.transform;
+        if (event.sourceEvent) this.autoFit = false;
         this.viewport.attr('transform', t);
         const pt = `translate(${t.x},${t.y}) scale(${t.k})`;
         this.grid.attr('patternTransform', pt);
@@ -187,6 +196,10 @@ export class GraphView {
     if (!this.fitted && this.view.nodes.length) {
       this.fitted = true;
       this.fit(0);
+    } else if (this.autoFit && !this.allVisible(undefined, { W: this.host.clientWidth, H: this.host.clientHeight })) {
+      // A new service or origin appeared outside the fitted view (the docked inspector's
+      // share of the canvas does not count: opening it must not zoom the graph later).
+      this.fit(300);
     }
   }
 
@@ -660,18 +673,59 @@ export class GraphView {
     return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
   }
 
+  /** The visible part of the canvas in screen pixels (left of the inspector when it is docked). */
+  visibleSize() {
+    const inset = this.opts.rightInset ? this.opts.rightInset() : 0;
+    return { W: Math.max(120, this.host.clientWidth - inset), H: Math.max(120, this.host.clientHeight) };
+  }
+
+  /** Whether every card and frame is inside the visible area under transform `t`. */
+  allVisible(t = d3.zoomTransform(this.svg.node()), size = this.visibleSize()) {
+    const b = this.contentBounds();
+    if (!b) return true;
+    const slack = 2;
+    return t.applyX(b.x) >= -slack && t.applyY(b.y) >= -slack && t.applyX(b.x + b.w) <= size.W + slack && t.applyY(b.y + b.h) <= size.H + slack;
+  }
+
   fit(duration = 450) {
     const b = this.contentBounds();
     if (!b) return;
-    const inset = this.opts.rightInset ? this.opts.rightInset() : 0;
-    const W = Math.max(120, this.host.clientWidth - inset);
-    const H = Math.max(120, this.host.clientHeight);
+    const { W, H } = this.visibleSize();
+    this.size = { w: this.host.clientWidth, h: this.host.clientHeight };
+    this.autoFit = true;
     const k = Math.max(0.15, Math.min(1.15, 0.9 * Math.min(W / b.w, H / b.h)));
     const tx = (W - b.w * k) / 2 - b.x * k;
     const ty = (H - b.h * k) / 2 - b.y * k;
     const t = d3.zoomIdentity.translate(tx, ty).scale(k);
+    const cur = d3.zoomTransform(this.svg.node());
+    if (Math.abs(cur.k - k) < 1e-3 && Math.abs(cur.x - tx) < 0.5 && Math.abs(cur.y - ty) < 0.5) return;
+    this.svg.interrupt();
     if (duration) this.svg.transition().duration(duration).ease(d3.easeCubicOut).call(this.zoom.transform, t);
     else this.svg.call(this.zoom.transform, t);
+  }
+
+  /**
+   * After the canvas changed size (window resize, rotation, the banner): refit when the view
+   * was fitted and untouched, or when everything was visible before and no longer is;
+   * otherwise keep the point at the centre of the view in the centre.
+   */
+  resized() {
+    const w = this.host.clientWidth;
+    const h = this.host.clientHeight;
+    const prev = this.size;
+    this.size = { w, h };
+    if (!this.view) return;
+    this.updateFramesAndEdges();
+    if (!prev || !w || !h || (prev.w === w && prev.h === h) || !this.view.nodes.length) return;
+    const t = d3.zoomTransform(this.svg.node());
+    const inset = this.opts.rightInset ? this.opts.rightInset() : 0;
+    const before = { W: Math.max(120, prev.w - inset), H: Math.max(120, prev.h) };
+    const centred = t.translate((w - prev.w) / (2 * t.k), (h - prev.h) / (2 * t.k));
+    if (this.autoFit || (this.allVisible(t, before) && !this.allVisible(centred))) {
+      this.fit(0);
+      return;
+    }
+    this.svg.call(this.zoom.transform, centred);
   }
 
   /** Centers a node in view if it is off screen (used when the inspector opens). */
@@ -687,6 +741,7 @@ export class GraphView {
     const x1 = t.applyX(r.x + r.w);
     const y1 = t.applyY(r.y + r.h);
     if (x0 >= 0 && y0 >= 0 && x1 <= W && y1 <= H) return;
+    this.autoFit = false;
     const cx = r.x + r.w / 2;
     const cy = r.y + r.h / 2;
     this.svg.transition().duration(400).call(this.zoom.transform, d3.zoomIdentity.translate(W / 2 - cx * t.k, H / 2 - cy * t.k).scale(t.k));
@@ -772,6 +827,9 @@ export class GraphView {
     const cands = new Set(this.linkCandidates(from).map((n) => n.id));
     this.layers.nodes.selectAll('g.node').classed('link-candidate', (d) => cands.has(d.id) && linkRequirement(from.id, d.id).level !== 'refused');
     this.layers.nodes.selectAll('g.node').classed('link-refused', (d) => cands.has(d.id) && linkRequirement(from.id, d.id).level === 'refused');
+    // Agents the orchestrator already reaches through an agent tool: the dialog says so.
+    const linked = new Set((from.tools || []).filter((t) => t.type === 'agent').map((t) => t.target));
+    this.layers.nodes.selectAll('g.node').classed('link-linked', (d) => cands.has(d.id) && linked.has(d.id));
     this.ghost.attr('visibility', 'visible').attr('d', bezier(this.linking.start, this.linking.start));
   }
 
@@ -804,7 +862,7 @@ export class GraphView {
     this.linking = null;
     this.svg.classed('linking', false);
     this.ghost.attr('visibility', 'hidden').classed('snapped', false);
-    this.layers.nodes.selectAll('g.node').classed('link-candidate', false).classed('link-refused', false).classed('drop-target', false);
+    this.layers.nodes.selectAll('g.node').classed('link-candidate', false).classed('link-refused', false).classed('link-linked', false).classed('drop-target', false);
     if (target && this.opts.onLink) this.opts.onLink(from, target);
   }
 }

@@ -25,7 +25,9 @@ Untrusted text only reaches the page through `textContent` / d3 `.text()`; JSON 
 Open `index.html?fixtures=1` from any static server (for example
 `python3 -m http.server 8000 --directory ui`). The API answers from `fixtures/`, writes stay in
 the tab, and `fixtures/events.sse` is replayed as the live stream (the whole transcript once,
-then its traffic every 15 s). Extra parameters:
+then its traffic every 15 s). Like the control plane (design §3), it keeps memory only for
+agents with learning on: approving for an agent without learning is refused, and a save that
+turns learning off drops that agent's notes. Extra parameters:
 
 | Parameter | Effect |
 | --- | --- |
@@ -36,6 +38,17 @@ then its traffic every 15 s). Extra parameters:
 | `scenario=full` | add services in every status, placeholder peers, a mock model, a pending adoption |
 
 `#node=<node id>&tab=<tab>` opens the inspector on a node (in fixture mode and live).
+
+## Accepted deviations from §11
+
+- **Backward edges.** An edge whose target port is left of its source port (a call back to an
+  agent stacked above or to an earlier column) is not one cubic Bézier: a single curve between
+  those ports always cuts through the two cards. It leaves the source port to the right, runs
+  through the gap between the cards (or below both) and enters the target port from the left,
+  with rounded corners (`geometry.edgePath`). Forward edges are the cubic Bézier of §11.
+- **Frame title room.** A service frame is the bounding box of its cards plus 24 px on the left,
+  right and bottom, and 24 + 26 px on top, so the service name, status and version never sit on a
+  card (`geometry.frameRect`).
 
 ## Tests
 

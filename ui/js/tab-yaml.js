@@ -5,6 +5,17 @@ import { h, clear, append, toast, pill } from './dom.js';
 import { button, errorBox } from './forms.js';
 import { roleAtLeast, diffLines, diffHunks, relTime, shortId } from './util.js';
 
+/**
+ * Agents that have learning on in `before` and not in `after` (charter JSON documents). The
+ * control plane drops their notes in the same change (design §3).
+ */
+export function learningTurnedOff(before, after) {
+  const on = (c) => new Set(((c && c.agents) || []).filter((a) => a && a.learning && a.learning.enabled).map((a) => a.name));
+  const now = on(after);
+  const names = new Set(((after && after.agents) || []).map((a) => a && a.name));
+  return [...on(before)].filter((n) => names.has(n) && !now.has(n));
+}
+
 export class YamlTab {
   constructor(ctx) {
     this.ctx = ctx;
@@ -37,6 +48,7 @@ export class YamlTab {
       this.version = res.version || (res.data && res.data.version);
       this.epoch = res.data && res.data.epoch;
       this.base = (res.data && res.data.yaml) || '';
+      this.stored = (res.data && res.data.charter) || null;
       this.text = this.base;
       this.history = hist && Array.isArray(hist.data) ? hist.data : [];
       this.loaded = true;
@@ -156,6 +168,16 @@ export class YamlTab {
             : h('div', { class: 'muted', text: 'Nothing that weakens protection.' }),
         ),
       );
+      if (r.learningOff.length) {
+        this.statusHost.append(
+          h(
+            'div',
+            { class: 'notice notice-warn' },
+            h('div', { class: 'notice-title', text: `Turns learning off for ${r.learningOff.join(', ')}.` }),
+            h('div', { text: `The control plane drops ${r.learningOff.length === 1 ? 'that agent’s' : 'those agents’'} notes from memory in the same change.` }),
+          ),
+        );
+      }
     }
   }
 
@@ -211,7 +233,7 @@ export class YamlTab {
       this.footer.append(meta);
       return;
     }
-    const weakenedPending = this.confirmWeakened && this.result && this.result.weakened.length;
+    const weakenedPending = this.confirmWeakened && this.result && (this.result.weakened.length || this.result.learningOff.length);
     this.footer.append(
       meta,
       h('span', { class: 'spacer' }),
@@ -241,7 +263,7 @@ export class YamlTab {
     this.updateFooter();
     try {
       const res = await this.ctx.api.validateCharter(ns, svc, this.text);
-      this.result = { needs_role: res.data.needs_role, weakened: res.data.weakened || [] };
+      this.result = { needs_role: res.data.needs_role, weakened: res.data.weakened || [], learningOff: learningTurnedOff(this.stored, res.data.charter) };
       return this.result;
     } catch (e) {
       this.result = null;
@@ -261,7 +283,7 @@ export class YamlTab {
     const v = await this.validate();
     if (!v) return;
     if (!roleAtLeast(me.role, v.needs_role)) return;
-    if (v.weakened.length && !confirmed) {
+    if ((v.weakened.length || v.learningOff.length) && !confirmed) {
       this.confirmWeakened = true;
       this.updateFooter();
       return;
@@ -299,6 +321,7 @@ export class YamlTab {
     try {
       const res = await this.ctx.api.charter(ns, svc);
       const latest = (res.data && res.data.yaml) || '';
+      this.stored = (res.data && res.data.charter) || this.stored;
       this.conflict = { from: this.version, to: res.version || res.data.version, mineBase: this.base, latest };
       this.version = this.conflict.to;
       this.external = null;
