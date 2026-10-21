@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import json
-import time
 from typing import Any
 
 import grpc
 
 from .pb.attache.v1alpha1 import runtime_pb2, runtime_pb2_grpc
-from .tools import CallContext, ToolDenied, ToolFailed
+from .tools import CallContext, ToolDenied, ToolFailed, timeout_for
 
 # Tool responses up to this size reach the agent (it truncates what it shows the model).
 MAX_MESSAGE = 32 * 1024 * 1024
@@ -17,14 +16,6 @@ MAX_MESSAGE = 32 * 1024 * 1024
 # RUN_TIMEOUT); every call is further held inside the Execute deadline (CONTRACT.md §4.3).
 SERVICE_TIMEOUT = 120.0
 AGENT_TIMEOUT = 300.0
-# Left of the Execute deadline after a tool call gives up, so this run can still answer.
-HOP_MARGIN = 0.5
-
-
-def timeout_for(ctx: CallContext, cap: float) -> float:
-    if ctx.deadline is None:
-        return cap
-    return max(0.0, min(cap, ctx.deadline - time.monotonic() - HOP_MARGIN))
 
 
 def _rule_of(err: grpc.aio.AioRpcError) -> str:

@@ -23,6 +23,17 @@ class CallContext:
     deadline: float | None = None
 
 
+# Left of the Execute deadline after a call made inside it gives up, so this run can still answer.
+HOP_MARGIN = 0.5
+
+
+def timeout_for(ctx: CallContext, cap: float) -> float:
+    """Seconds a call made on this Execute's behalf may take: `cap`, held inside the deadline."""
+    if ctx.deadline is None:
+        return cap
+    return max(0.0, min(cap, ctx.deadline - time.monotonic() - HOP_MARGIN))
+
+
 @dataclass
 class ToolOutcome:
     content: str

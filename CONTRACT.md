@@ -322,8 +322,9 @@ its behalf carries what is left of it, less 500 ms, as its own `grpc-timeout`,
 so the inner call gives up first and the outer one still answers and audits.
 App gRPC or mesh `InvokeAgent` → runtime `Execute` (at most 300 s; the HTTP
 API sets no deadline, so 300 s); `Execute` → the runtime's tool RPCs (at most
-120 s for service and http tools, 300 s for agent tools); a tool RPC → the
-peer over the mesh, or the local app and http tools (at most 30 s).
+120 s for service and http tools, 300 s for agent tools) and its model
+requests (at most 600 s; §9); a tool RPC → the peer over the mesh, or the local
+app and http tools (at most 30 s).
 
 Outcomes, for all three tool RPCs (message = reason, metadata `x-attache-rule`):
 
@@ -560,6 +561,16 @@ record:
   `input = {system, messages, tools}` and `output = content blocks`; tokens
   from the API `usage`; `cost_usd` from the pricing table in
   `runtime/src/attache_runtime/pricing.py` (per 1M tokens; `mock` = 0).
+  Every model call that ran is reported, because the provider bills it: a
+  failed call carries the usage the API had reported before it failed (its
+  input tokens once `message_start` arrived) and `error`; a call still running
+  when its `Execute` is cancelled finishes in the background and is reported
+  with `error: "cancelled: …"`, so its cost still counts toward
+  `max_cost_usd_per_day`.
+- Deadline: each model request gets what is left of the `Execute` deadline,
+  less 500 ms, as its SDK timeout (which bounds the connect and each wait for
+  the next streamed chunk, not the whole stream). With 500 ms or less left, no
+  new step starts: status `error`, rule `deadline.exceeded`.
 - Provider selection: `ANTHROPIC_API_KEY` set and `model != mock` → Anthropic
   SDK, else the deterministic mock. Requests are streamed and collected
   (`messages.stream(...).get_final_message()`), so large `max_tokens` never
@@ -588,7 +599,8 @@ record:
   the audit log, dropped and timed-out calls still audited, deadlines
   propagated).
 - `cd runtime && uv run pytest` — mock model routing, agent loop with a fake
-  sidecar, pricing, event shape.
+  sidecar, pricing, event shape, model calls reported after a cancel or a
+  failure, deadlines.
 - `services/attache-cli/tests/cli.rs` — `charter validate` accepts the demo
   charters and rejects `examples/charters/invalid-unknown-field.charter.yaml`;
   `logs --file` filters and sorts.
@@ -606,6 +618,4 @@ record:
 - Server-side refusal fallbacks (`fallbacks: "default"`) are not enabled; a
   refusal is surfaced as `model.refusal`.
 - An `output_deny` match cannot retract the `model_call` record the runtime
-  already reported for the turn that produced the output; and a model call in
-  flight when its `Execute` is cancelled is never reported, so its cost is not
-  counted toward `max_cost_usd_per_day`.
+  already reported for the turn that produced the output.
