@@ -19,7 +19,7 @@ agents:
         type: service
         service: inventory
         method: GET
-        path: /stock/{sku}
+        path: /stock/{sku?}      # {sku?} may be left out: then the call is GET /stock (every SKU)
         parameters:
           type: object
           properties:

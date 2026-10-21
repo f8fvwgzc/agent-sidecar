@@ -153,6 +153,14 @@ pub fn is_reserved_header(name: &str) -> bool {
         || n.starts_with("x-attache-")
 }
 
+/// Does the canonical `path` fit the tool's declared path template? A runtime that sends a path
+/// the template does not produce (`/orders` for `/orders/{id}`) is not making that tool's call.
+fn fits_template(template: Option<&str>, path: &str) -> bool {
+    template
+        .and_then(|t| attache_charter::PathTemplate::parse(t).ok())
+        .is_some_and(|t| t.matches(path))
+}
+
 /// One tool call in flight: its context, its span and the records it owes the audit log.
 struct Call<'a> {
     svc: &'a ToolsService,
@@ -363,6 +371,16 @@ impl SidecarTools for ToolsService {
             Ok(x) => x,
             Err(v) => return Err(call.deny(&input, v)),
         };
+        let method = req.method.to_ascii_uppercase();
+        let mismatch = |path: &str| {
+            Verdict::deny(
+                RULE_TOOL_SPEC,
+                format!(
+                    "{} {path} on {} does not match tool {} ({:?} {:?} on {:?})",
+                    req.method, req.service, tool.name, tool.method, tool.path, tool.service
+                ),
+            )
+        };
         let declared = tool.tool_type == ToolType::Service
             && tool.service.as_deref() == Some(req.service.as_str())
             && tool
@@ -370,42 +388,31 @@ impl SidecarTools for ToolsService {
                 .as_deref()
                 .map(str::to_ascii_uppercase)
                 .as_deref()
-                == Some(req.method.as_str());
+                == Some(method.as_str());
         if !declared {
-            return Err(call.deny(
-                &input,
-                Verdict::deny(
-                    RULE_TOOL_SPEC,
-                    format!(
-                        "{} {} on {} does not match tool {} ({:?} {:?} on {:?})",
-                        req.method,
-                        req.path,
-                        req.service,
-                        tool.name,
-                        tool.method,
-                        tool.path,
-                        tool.service
-                    ),
-                ),
-            ));
+            return Err(call.deny(&input, mismatch(&req.path)));
         }
         let target = req.service.clone();
         let v = self.check_service(spec, &target);
         if !v.allow {
             return Err(call.deny(&input, v));
         }
-        // 2. authorize exactly the path that will be sent
+        // 2. authorize exactly the path that will be sent, and only one the tool's template allows
         let path = match authz::canonical_path(&req.path) {
             Ok(p) => p,
             Err(reason) => return Err(call.deny(&input, Verdict::deny(authz::RULE_PATH, reason))),
         };
+        input["method"] = json!(method);
         input["path"] = json!(path);
+        if !fits_template(tool.path.as_deref(), &path) {
+            return Err(call.deny(&input, mismatch(&path)));
+        }
         let v = authz::authorize_service_call(
             &self.state.charter,
             Some(authz::LOCAL),
             Some(&call.c.agent),
             &target,
-            &req.method,
+            &method,
             &path,
         );
         if !v.allow {
@@ -413,7 +420,7 @@ impl SidecarTools for ToolsService {
         }
 
         // 3. perform it: our own app on localhost, or a peer's sidecar over mTLS
-        let callee = format!("{target} {} {path}", req.method);
+        let callee = format!("{target} {method} {path}");
         let child = call.trace.child();
         let is_self = self.is_self(Some(&target));
         let dir = if is_self {
@@ -422,7 +429,7 @@ impl SidecarTools for ToolsService {
             Direction::Outbound
         };
         let result: Result<ServiceResponse, Status> = if is_self {
-            self.call_local_app(&call.c, &child, &req.method, &path, &req.headers, &req.body)
+            self.call_local_app(&call.c, &child, &method, &path, &req.headers, &req.body)
                 .await
                 .map_err(|e| status_with_rule(Code::Unavailable, RULE_APP_UNAVAILABLE, &e))
         } else {
@@ -440,7 +447,7 @@ impl SidecarTools for ToolsService {
                         .map(|(k, v)| (k.clone(), v.clone()))
                         .collect();
                     let msg = ServiceRequest {
-                        method: req.method.clone(),
+                        method: method.clone(),
                         path: path.clone(),
                         headers,
                         body: req.body.clone(),
@@ -711,11 +718,22 @@ impl SidecarTools for ToolsService {
             trace,
             started: Instant::now(),
         };
-        let input = json!({ "method": req.method, "url": req.url, "body": body_value(&req.body) });
+        let mut input =
+            json!({ "method": req.method, "url": req.url, "body": body_value(&req.body) });
 
         let (_spec, tool) = match self.tool_spec(&call.c.agent, &call.c.tool) {
             Ok(x) => x,
             Err(v) => return Err(call.deny(&input, v)),
+        };
+        let method = req.method.to_ascii_uppercase();
+        let mismatch = |url: &str| {
+            Verdict::deny(
+                RULE_TOOL_SPEC,
+                format!(
+                    "{} {url} does not match tool {} ({:?} {:?})",
+                    req.method, tool.name, tool.method, tool.url
+                ),
+            )
         };
         // the origin (scheme://host:port) is fixed by the charter; the model only fills the path
         let declared_origin = tool.url.as_deref().and_then(attache_charter::http_origin);
@@ -729,26 +747,42 @@ impl SidecarTools for ToolsService {
                 .as_deref()
                 .map(str::to_ascii_uppercase)
                 .as_deref()
-                == Some(req.method.as_str())
+                == Some(method.as_str())
             && declared_origin.is_some()
             && origin == declared_origin
             && url
                 .as_ref()
                 .is_some_and(|u| u.username().is_empty() && u.password().is_none());
-        let Some(url) = url.filter(|_| declared) else {
-            return Err(call.deny(
-                &input,
-                Verdict::deny(
-                    RULE_TOOL_SPEC,
-                    format!(
-                        "{} {} does not match tool {} ({:?} {:?})",
-                        req.method, req.url, tool.name, tool.method, tool.url
-                    ),
-                ),
-            ));
+        let Some(mut url) = url.filter(|_| declared) else {
+            return Err(call.deny(&input, mismatch(&req.url)));
         };
+        // the path and query are canonicalised like a service path (§5.1), and the path must fit
+        // the declared URL's template, so a `{param}` can neither climb out nor go missing
+        let pq =
+            match authz::canonical_path(&url[url::Position::BeforePath..url::Position::AfterQuery])
+            {
+                Ok(p) => p,
+                Err(reason) => {
+                    return Err(call.deny(&input, Verdict::deny(authz::RULE_PATH, reason)));
+                }
+            };
+        let (path, query) = match pq.split_once('?') {
+            Some((p, q)) => (p, Some(q)),
+            None => (pq.as_str(), None),
+        };
+        url.set_path(path);
+        url.set_query(query);
+        url.set_fragment(None);
+        input["method"] = json!(method);
+        input["url"] = json!(url.as_str());
+        if !fits_template(
+            tool.url.as_deref().map(attache_charter::http_url_path),
+            path,
+        ) {
+            return Err(call.deny(&input, mismatch(url.as_str())));
+        }
         let v = Verdict::allow("guardrail.allowed_tools");
-        let m = match reqwest::Method::from_bytes(req.method.as_bytes()) {
+        let m = match reqwest::Method::from_bytes(method.as_bytes()) {
             Ok(m) => m,
             Err(e) => return Err(call.deny(&input, Verdict::deny(RULE_TOOL_SPEC, e.to_string()))),
         };
@@ -765,7 +799,7 @@ impl SidecarTools for ToolsService {
         if !req.body.is_empty() {
             hreq = hreq.body(req.body.clone());
         }
-        let callee = format!("{} {}", req.method, url);
+        let callee = format!("{method} {url}");
         match hreq.send().await {
             Ok(resp) => {
                 let sr = to_service_response(resp).await;

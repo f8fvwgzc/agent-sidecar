@@ -159,6 +159,7 @@ audit:
   service: orders              # target service name; this service's own name = local app
   method: GET
   path: /orders/{order_id}     # `{param}` is substituted from the tool input; leftovers become the JSON body (POST/PUT/PATCH) or query (GET/DELETE)
+                               # `{param?}` as the whole last segment is optional: /stock/{sku?} → /stock
   # type: agent — invoke another agent (orchestrator pattern)
   agent: stock-analyst
   service: inventory           # omit for a local agent
@@ -172,8 +173,21 @@ audit:
 Only `type: orchestrator` agents may declare `agent` tools. An `agent` tool
 whose `service` is this charter's own service is a local agent tool.
 
-`{param}` values are percent-encoded by the runtime (`/` becomes `%2F`), so a
-value can never add path segments.
+`{param}` values are percent-encoded by the runtime (`/` becomes `%2F`, `;`
+becomes `%3B`), so a path value is exactly one segment: it can never add segments, and since a
+missing or empty value, or one made only of dots (`.`, `..`), is refused
+before anything is sent (`is_error` tool result `denied by
+guardrail.tool_spec: …`), it can never drop or climb one either
+(`DELETE /orders/{id}` never becomes `DELETE /orders`). Only `{param?}`, as the
+whole last segment, may be left out (or empty): the segment goes with its `/`.
+A `{param}` may also be part of a segment (`/files/{name}.json`) or sit in the
+query (`/search?q={term}`, where it may be empty). Leftover arguments are
+appended to the query with `&` when the template already has one.
+
+The sidecar holds every `service` and `http` call to its template: the
+canonical path (§5.1; for `http`, the URL's path) must have the template's
+literal segments, and one segment of one or more characters for each
+`{param}` — else `guardrail.tool_spec`. The query is not checked.
 
 ### 3.2 Validation rules (all enforced by `attache-charter`)
 
@@ -182,10 +196,11 @@ value can never add path segments.
 - Agent names unique; tool names unique per agent.
 - `agent` tools only on orchestrators; a local `agent` tool (no `service`, or this service) must name an agent in this charter; an agent may not call itself.
 - `http` tool `url` is `http(s)://host[:port]/…` with no `{param}` and no userinfo before the path.
+- A `service` tool `path` and the path of an `http` tool `url` are templates: they start with `/`; have no empty (`//`), `.` or `..` segments; their literal text is RFC 3986 path characters except `;` (`A–Z a–z 0–9 -._~!$&'()*+,=:@`, plus `%XX` escapes other than `%2F`, `%5C`, `%00`; a `;` is written `%3B`); `{name}` has `name` matching `^[a-zA-Z0-9_]+$`; `{name?}` is only the whole last segment.
 - `budgets.max_tokens_per_call` ≤ 128000.
 - `service` tools need `service`, `method`, `path`; `http` tools need `method`, `url`; `agent` tools need `agent`.
 - `guardrails.allowed_tools` / `allowed_services` keys must be agent names and the values must be declared tools / referenced services.
-- `authz.services[].name` unique; `allow`/`deny` entries are `"<METHOD|*> <path-glob>"` where the glob supports a trailing `*` only.
+- `authz.services[].name` unique; `allow`/`deny` entries are `"<METHOD|*> <path-glob>"` where the glob supports a trailing `*` only, and the path is one a canonical path (§5.1) can be: the template characters above, no `?`, no empty, `.` or `..` segments.
 - Regexes must compile.
 - `budgets.*` positive; `audit.sink: file` requires `audit.file`.
 
@@ -289,18 +304,23 @@ for every tool call so the sidecar can authorize and audit it):
 
 The sidecar does not trust the runtime (it is driven by a model). Every call
 must name a tool the agent declared and may use (`guardrail.allowed_tools`)
-and must match that tool's declaration — same service and method, same agent
-target, same http origin — else `guardrail.tool_spec`.
+and must match that tool's declaration — same service and method (compared
+uppercased), same agent target, same http origin, and a path that fits the
+declared path or URL template (§3.1) — else `guardrail.tool_spec`.
 
 - `InvokeService(ToolServiceRequest) → ServiceResponse` — tool check,
-  `guardrail.allowed_services`, path canonicalisation (§5.1,
-  `guardrail.path`), `authz.services` with `identity = local`,
-  `service = target`; then the local app (`service == self`) or the mesh.
+  `guardrail.allowed_services`, method and path canonicalisation (§5.1,
+  `guardrail.path`), the template check (`guardrail.tool_spec`),
+  `authz.services` with `identity = local`, `service = target`; then the
+  local app (`service == self`) or the mesh.
 - `InvokeAgent(ToolAgentRequest) → InvokeAgentResponse` — tool check; a local
   agent re-enters the invocation pipeline with `caller = local`,
   `caller_agent` set; a remote one goes over the mesh.
 - `InvokeHttp(ToolHttpRequest) → ServiceResponse` — tool check (origin must
-  equal the declared URL's), then plain HTTP egress, audited as `http_call`.
+  equal the declared URL's), canonicalisation of the URL's path and query
+  (§5.1, `guardrail.path`), the template check against the declared URL's
+  path (`guardrail.tool_spec`), then plain HTTP egress of the canonical URL,
+  audited as `http_call`.
 - `ReportEvent(AuditEvent{json}) → Empty` — the runtime's `model_call` records;
   the sidecar stamps `service`, `namespace`, redacts, and writes them.
 
@@ -375,14 +395,40 @@ the caller identity, its `agent` (if set) equals the calling agent and its
 `authz.default` (`authz.default.deny` / `authz.default.allow`). A pattern is
 `"<METHOD> <path>"` with `*` as the method wildcard and an optional trailing
 `*` on the path (`/stock/*` matches `/stock/x` and `/stock/x/y`, not `/stock`).
+Patterns meet the canonical method and path (below), and:
 
-Path canonicalisation (`guardrail.path`): before any `authz.services` match,
-on both sides, the path is resolved with the same WHATWG URL parser the
-sidecar uses to send the request, so `.`/`..` and percent-encoded dot segments
-(`%2e%2e`) are removed first — `/stock/../admin/reset` is matched, audited and
-sent as `/admin/reset`. A path that does not start with `/`, or contains
-whitespace, a control character, `\`, `#`, or an encoded `/`, `\` or NUL
-(`%2f`, `%5c`, `%00`), is denied with `guardrail.path`.
+- one trailing `/` on the path is ignored: `/x/` is `/x`, so `* /admin`
+  denies `POST /admin/`, and `/stock/*` matches neither `/stock` nor `/stock/`;
+- a `GET` pattern also matches `HEAD` (routers answer HEAD with the GET
+  handler); a `HEAD` pattern matches only `HEAD`;
+- `deny` patterns ignore ASCII case in the path (`* /admin` denies `/ADMIN`,
+  as many routers ignore case); `allow` patterns do not, so a case variant of
+  an allowed path is never allowed by accident;
+- the query is never matched.
+
+A deny list is a backstop for the spellings above, not a sandbox: `default:
+deny` with narrow `allow` patterns is the posture to rely on.
+
+Canonicalisation (`guardrail.path`): before any `authz.services` match, on
+both sides, the method is uppercased and must be one of `GET`, `POST`, `PUT`,
+`PATCH`, `DELETE`, `HEAD`, `OPTIONS`, and the path is made canonical:
+percent-escapes of unreserved characters (`A–Z a–z 0–9 - . _ ~`) are decoded
+(`/%61dmin` is `/admin`) and every other escape gets uppercase hex; then the
+path is resolved with the same WHATWG URL parser the sidecar uses to send the
+request, so `.`/`..` and percent-encoded dot segments (`%2e%2e`) are removed —
+`/stock/../admin/reset` is matched, audited and sent as `/admin/reset`.
+Denied with `guardrail.path`: a path that does not start with `/`; whitespace,
+a control character, `\` or `#` anywhere; in the path component (not the
+query, where they are only data) an encoded `/`, `\` or NUL (`%2f`, `%5c`,
+`%00`), a `%` that does not start an escape, and a literal `;`; and an empty
+segment (`//`). The `;` rule is for path parameters (RFC 3986 §3.3): Tomcat,
+Spring and Jetty cut `;…` off each segment before routing, so `/admin;x/reset`
+would reach their `/admin/reset` and `/stock/..;/admin` their `/admin`, while
+Go and Starlette route the segment as written. Rather than guess which router
+the app runs, the sidecar refuses the spelling. Those routers split on the raw
+`;` before decoding, so an escaped `%3B` is data to all of them and is kept
+(the runtime sends a `;` in a value that way); a `;` in the query is data too.
+The canonical method and path are what is authorized, audited and sent.
 
 `identity: local` in `authz.services` matches calls made by this pod's own
 agents (egress and self calls); a SPIFFE identity matches inbound calls from
@@ -554,7 +600,8 @@ record:
   rejection and schema sync), authz matcher, guardrails, redaction, trace
   parsing, PKI issue/parse round trip, and an in-process mTLS mesh test (two
   sidecar cores on localhost: allowed call succeeds, `/admin` denied with the
-  rule name, wrong identity rejected).
+  rule name — also as `/%61dmin`, `/admin/` and `/ADMIN` — tool paths held to
+  their templates, wrong identity rejected).
 - `cd runtime && uv run pytest` — mock model routing, agent loop with a fake
   sidecar, pricing, event shape.
 - `services/attache-cli/tests/cli.rs` — `charter validate` accepts the demo

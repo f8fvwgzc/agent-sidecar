@@ -212,9 +212,11 @@ impl Mesh for MeshService {
             .latency(started)
         };
 
-        // The peer's sidecar canonicalised the path already; a peer is still not trusted to have.
-        let path = match authz::canonical_path(&req.path) {
-            Ok(p) => p,
+        // The peer's sidecar canonicalised method and path already; a peer is still not trusted to have.
+        let canonical = authz::canonical_method(&req.method)
+            .and_then(|m| authz::canonical_path(&req.path).map(|p| (m, p)));
+        let (method, path) = match canonical {
+            Ok(mp) => mp,
             Err(reason) => {
                 let v = Verdict::deny(authz::RULE_PATH, reason);
                 self.state
@@ -223,14 +225,15 @@ impl Mesh for MeshService {
                 return Err(deny_status(&v));
             }
         };
+        input["method"] = json!(method);
         input["path"] = json!(path);
-        let callee = format!("{me} {} {path}", req.method);
+        let callee = format!("{me} {method} {path}");
         let v = authz::authorize_service_call(
             &self.state.charter,
             Some(&caller),
             inb.agent.as_deref(),
             &me,
-            &req.method,
+            &method,
             &path,
         );
         if !v.allow {
@@ -241,13 +244,10 @@ impl Mesh for MeshService {
         }
 
         let url = format!("{}{}", self.state.app_base_url(), path);
-        let method = match reqwest::Method::from_bytes(req.method.as_bytes()) {
+        let method = match reqwest::Method::from_bytes(method.as_bytes()) {
             Ok(m) => m,
             Err(e) => {
-                let v = Verdict::deny(
-                    authz::RULE_PATH,
-                    format!("bad method {:?}: {e}", req.method),
-                );
+                let v = Verdict::deny(authz::RULE_PATH, format!("bad method {method:?}: {e}"));
                 self.state
                     .audit
                     .write(record(&callee, &input, Value::Null).verdict(&v));

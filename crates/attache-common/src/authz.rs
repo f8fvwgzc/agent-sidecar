@@ -33,9 +33,14 @@ impl Verdict {
 
 /// The path the sidecar authorizes, audits and forwards — one string for all three (CONTRACT.md §5.1).
 ///
-/// It is resolved with the same WHATWG URL parser reqwest uses to send the request, so `..`,
-/// `%2e%2e` and friends are removed *before* matching instead of after. Encoded `/` or `\`,
-/// backslashes, fragments, whitespace and control characters are refused outright.
+/// Escaped unreserved characters are decoded first (`/%61dmin` is `/admin`, `%2e%2e` is `..`) and
+/// other escapes get uppercase hex; then the path is resolved with the same WHATWG URL parser
+/// reqwest uses to send the request, so `.` and `..` are removed *before* matching instead of
+/// after. Refused outright: a literal `;` in the path (Tomcat, Spring and Jetty cut `;…` path
+/// parameters off a segment before routing, so `/admin;x/reset` would reach `/admin/reset`; an
+/// escaped `%3B` is data to them and stays), an encoded `/`, `\` or NUL in the path (not in the
+/// query, where they are only data), an empty segment (`//`), and backslashes, fragments,
+/// whitespace and control characters anywhere.
 pub fn canonical_path(raw: &str) -> Result<String, String> {
     if !raw.starts_with('/') {
         return Err(format!("path {raw:?} must start with /"));
@@ -48,16 +53,27 @@ pub fn canonical_path(raw: &str) -> Result<String, String> {
             "path {raw:?} contains whitespace, a control character, a backslash or a fragment"
         ));
     }
-    let lower = raw.to_ascii_lowercase();
-    if lower.contains("%2f") || lower.contains("%5c") || lower.contains("%00") {
+    let (path, query) = match raw.split_once('?') {
+        Some((p, q)) => (p, Some(q)),
+        None => (raw, None),
+    };
+    if path.contains(';') {
         return Err(format!(
-            "path {raw:?} contains an encoded slash, backslash or NUL"
+            "path {raw:?} has a ';' path parameter (a ; that is data is sent as %3B)"
         ));
     }
-    let url = url::Url::parse(&format!("http://attache.invalid{raw}"))
-        .map_err(|e| format!("path {raw:?}: {e}"))?;
+    let path = attache_charter::normalize_percent_escapes(path)
+        .map_err(|e| format!("path {raw:?} {e}"))?;
+    let url = match query {
+        Some(q) => format!("http://attache.invalid{path}?{q}"),
+        None => format!("http://attache.invalid{path}"),
+    };
+    let url = url::Url::parse(&url).map_err(|e| format!("path {raw:?}: {e}"))?;
     if url.host_str() != Some("attache.invalid") {
         return Err(format!("path {raw:?} changes the target host"));
+    }
+    if url.path().contains("//") {
+        return Err(format!("path {raw:?} has an empty segment (//)"));
     }
     let mut out = url.path().to_string();
     if let Some(q) = url.query() {
@@ -65,6 +81,18 @@ pub fn canonical_path(raw: &str) -> Result<String, String> {
         out.push_str(q);
     }
     Ok(out)
+}
+
+/// The method the sidecar authorizes, audits and sends: uppercased, and one `is_method` knows.
+pub fn canonical_method(raw: &str) -> Result<String, String> {
+    let m = raw.to_ascii_uppercase();
+    if attache_charter::is_method(&m) {
+        Ok(m)
+    } else {
+        Err(format!(
+            "method {raw:?} is not one of GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS"
+        ))
+    }
 }
 
 pub const RULE_PATH: &str = "guardrail.path";
@@ -144,7 +172,7 @@ pub fn authorize_service_call(
         applied = true;
         for p in &rule.deny {
             if PathPattern::parse(p)
-                .map(|pp| pp.matches(method, path))
+                .map(|pp| pp.matches_ignore_case(method, path))
                 .unwrap_or(false)
             {
                 return Verdict::deny(
@@ -238,17 +266,56 @@ mod tests {
         assert_eq!(canonical_path("/stock/.%2E/admin/x").unwrap(), "/admin/x");
         assert_eq!(canonical_path("/stock/./a?x=1").unwrap(), "/stock/a?x=1");
         assert_eq!(canonical_path("/../../etc").unwrap(), "/etc");
+        // escaped unreserved characters are decoded, other escapes only get uppercase hex
+        assert_eq!(canonical_path("/%61dmin/reset").unwrap(), "/admin/reset");
+        assert_eq!(canonical_path("/stock/%7E%2d%5F").unwrap(), "/stock/~-_");
+        assert_eq!(canonical_path("/q/a%3ab%20c").unwrap(), "/q/a%3Ab%20c");
+        assert_eq!(
+            canonical_path("/q/a%2561").unwrap(),
+            "/q/a%2561",
+            "no double decoding"
+        );
+        assert_eq!(canonical_path("/x/%2E%2E/admin").unwrap(), "/admin");
+        // a trailing slash is kept (the matcher ignores it); the query may carry encoded / \ NUL
+        assert_eq!(canonical_path("/admin/").unwrap(), "/admin/");
+        assert_eq!(
+            canonical_path("/x?since=2026%2F10%2F21&u=http%3A%2F%2Fh%2Fy&b=%5c").unwrap(),
+            "/x?since=2026%2F10%2F21&u=http%3A%2F%2Fh%2Fy&b=%5c"
+        );
+        assert_eq!(canonical_path("/x?a=1?b").unwrap(), "/x?a=1?b");
+        // `;` is data only when escaped: %3B stays (with uppercase hex), and the query may carry `;`
+        assert_eq!(canonical_path("/stock/A%3bx=1").unwrap(), "/stock/A%3Bx=1");
+        assert_eq!(canonical_path("/x?a=1;b=2").unwrap(), "/x?a=1;b=2");
         for bad in [
+            "/admin;x",
+            "/admin;x/reset",
+            "/%61dmin;x",
+            "/admin;",
+            "/stock/..;/admin/reset",
+            "/admin;x/../reset",
             "stock",
             "http://evil/x",
             "/stock/..%2fadmin",
+            "/stock/%2F",
+            "/a%5Cb",
             "/a\\b",
             "/a#b",
             "/a b",
             "/a%00",
+            "/a%",
+            "/a%2",
+            "/a%zz",
+            "//admin/x",
+            "/admin//x",
+            "/a/.//b",
+            "/x?q=a b",
         ] {
             assert!(canonical_path(bad).is_err(), "{bad} must be rejected");
         }
+        assert_eq!(canonical_method("get").unwrap(), "GET");
+        assert_eq!(canonical_method("Head").unwrap(), "HEAD");
+        assert!(canonical_method("FETCH").is_err());
+        assert!(canonical_method("").is_err());
         // what authz sees is what is sent: the traversal now meets the deny rule
         let c = Charter::from_yaml(INVENTORY).unwrap();
         let p = canonical_path("/stock/../admin/reset").unwrap();
@@ -261,6 +328,106 @@ mod tests {
             &p,
         );
         assert_eq!(v.rule, "authz.services.deny-admin");
+    }
+
+    /// With `default: allow` the deny patterns are all that stand in the way, so every spelling
+    /// a router would send to `/admin` or a GET handler must meet them.
+    #[test]
+    fn deny_patterns_hold_against_other_spellings() {
+        let mut c = Charter::from_yaml(INVENTORY).unwrap();
+        c.authz.default = Decision::Allow;
+        let rule = c
+            .authz
+            .services
+            .iter_mut()
+            .find(|r| r.name == "deny-admin")
+            .unwrap();
+        rule.deny.push("GET /export/*".into());
+        let check = |method: &str, raw: &str| {
+            let path = canonical_path(raw).unwrap();
+            let method = canonical_method(method).unwrap();
+            authorize_service_call(
+                &c,
+                Some(ORDERS_ID),
+                Some("ops-assistant"),
+                "inventory",
+                &method,
+                &path,
+            )
+        };
+        for (method, raw) in [
+            ("POST", "/admin/reset"),
+            ("POST", "/%61dmin/reset"),
+            ("POST", "/%41DMIN/reset"),
+            ("post", "/admin"),
+            ("POST", "/admin/"),
+            ("POST", "/admin/reset/"),
+            ("DELETE", "/ADMIN"),
+            ("PUT", "/Admin/x?y=1"),
+            ("GET", "/export/x"),
+            ("HEAD", "/export/x"),
+            ("head", "/EXPORT/x/"),
+        ] {
+            let v = check(method, raw);
+            assert!(!v.allow, "{method} {raw} must be denied: {v:?}");
+            assert_eq!(v.rule, "authz.services.deny-admin", "{method} {raw}");
+        }
+        for (method, raw) in [
+            ("POST", "/administrator"),
+            ("POST", "/export/x"),
+            ("GET", "/export"),
+        ] {
+            assert!(check(method, raw).allow, "{method} {raw}");
+        }
+        for raw in ["//admin/x", "/admin//x", "/%2Fadmin"] {
+            assert!(
+                canonical_path(raw).is_err(),
+                "{raw} never reaches the matcher"
+            );
+        }
+        // Tomcat, Spring and Jetty cut `;…` off each segment before routing (`/admin;x/reset` is
+        // their `/admin/reset`, `/stock/..;/admin` their `/admin`), so a literal `;` in the path
+        // never reaches the matcher either.
+        for raw in [
+            "/admin;x",
+            "/admin;x/reset",
+            "/%61dmin;x",
+            "/ADMIN;jsessionid=1/reset",
+            "/stock/..;/admin/reset",
+        ] {
+            let err = canonical_path(raw).unwrap_err();
+            assert!(err.contains("';' path parameter"), "{raw}: {err}");
+        }
+        // Those routers split on the raw `;` before decoding, so %3B is data: the segment below is
+        // `admin;x`, not `admin`, and goes on (the deny rule is about /admin, not this path).
+        assert_eq!(
+            canonical_path("/admin%3Bx/reset").unwrap(),
+            "/admin%3Bx/reset"
+        );
+        assert!(check("POST", "/admin%3Bx/reset").allow);
+    }
+
+    #[test]
+    fn allow_patterns_take_head_for_get_but_not_case_variants() {
+        let c = Charter::from_yaml(INVENTORY).unwrap();
+        let check = |method: &str, path: &str| {
+            authorize_service_call(
+                &c,
+                Some(ORDERS_ID),
+                Some("ops-assistant"),
+                "inventory",
+                method,
+                path,
+            )
+        };
+        assert!(check("HEAD", "/stock/WIDGET-1").allow);
+        assert!(check("GET", "/stock/").allow, "/stock/ is /stock");
+        // a value holding `;` arrives as %3B (the runtime encodes it) and is an ordinary segment
+        let semi = canonical_path("/stock/WIDGET%3b1").unwrap();
+        assert!(check("GET", &semi).allow, "{semi}");
+        let upper = check("GET", "/STOCK/WIDGET-1");
+        assert!(!upper.allow, "{upper:?}");
+        assert_eq!(upper.rule, "authz.default.deny");
     }
 
     #[test]
