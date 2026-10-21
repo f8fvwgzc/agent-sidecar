@@ -1,0 +1,39 @@
+{
+  "trace_id": "c8b314edc10d8422d5f4e619ab46c92c",
+  "spans": [
+    {
+      "span_id": "38ef8ef1b0663af9",
+      "parent_span_id": null,
+      "kind": "agent_invocation",
+      "agent": "agent:attache-demo/orders/ops-assistant",
+      "namespace": "attache-demo",
+      "service": "orders",
+      "callee": "ops-assistant",
+      "callee_node": "agent:attache-demo/orders/ops-assistant",
+      "start": "2026-10-21T09:59:20.000Z",
+      "end": "2026-10-21T09:59:20.001Z",
+      "latency_ms": 1,
+      "status": "denied",
+      "decision": "deny",
+      "rule": "guardrail.input_deny.no-secrets",
+      "request_id": "a6cd1b82-8713-4940-a670-ea20303e6b47",
+      "caller": "local",
+      "caller_agent": null,
+      "tokens_in": null,
+      "tokens_out": null,
+      "cost_usd": null,
+      "call_index": 1,
+      "segment": "invocation",
+      "attempt": 1,
+      "fallback": false,
+      "events": [
+        {
+          "kind": "guardrail",
+          "rule": "guardrail.input_deny.no-secrets",
+          "decision": "deny",
+          "ts": "2026-10-21T09:59:20.001Z"
+        }
+      ]
+    }
+  ]
+}
