@@ -67,12 +67,28 @@ class ModelResponse:
         return [b for b in self.content if b.get("type") == "tool_use"]
 
 
+class ModelError(Exception):
+    """A failed model call, with the usage the provider had reported when it failed (and may bill)."""
+
+    def __init__(self, cause: Exception, input_tokens: int, output_tokens: int) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+
+
 class Model(Protocol):
     name: str
     provider: str
 
+    # `timeout`: seconds left for this call (None: the provider's default).
     def complete(
-        self, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]], max_tokens: int
+        self,
+        system: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        max_tokens: int,
+        timeout: float | None = None,
     ) -> ModelResponse: ...
 
 
@@ -130,7 +146,12 @@ class MockModel:
         return args
 
     def complete(
-        self, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]], max_tokens: int
+        self,
+        system: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        max_tokens: int,
+        timeout: float | None = None,
     ) -> ModelResponse:
         user_input = ""
         tool_results: list[tuple[str, str]] = []
@@ -182,7 +203,12 @@ class AnthropicModel:
         self._client = anthropic.Anthropic()
 
     def complete(
-        self, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]], max_tokens: int
+        self,
+        system: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        max_tokens: int,
+        timeout: float | None = None,
     ) -> ModelResponse:
         kwargs: dict[str, Any] = {"model": self.name, "max_tokens": max_tokens, "messages": messages}
         if system:
@@ -192,14 +218,33 @@ class AnthropicModel:
         if supports_effort(self.name):
             # Budgets are small by design; keep reasoning short.
             kwargs["output_config"] = {"effort": "low"}
+        if timeout is not None:
+            # Bounds the connect and each wait for the next chunk, not the whole stream.
+            kwargs["timeout"] = timeout
         # Streaming, collected into one message: the SDK refuses large non-streaming max_tokens,
         # and a stream never hits the HTTP read timeout on a long turn.
-        with self._client.messages.stream(**kwargs) as stream:
-            resp = stream.get_final_message()
+        stream = None
+        try:
+            with self._client.messages.stream(**kwargs) as stream:
+                resp = stream.get_final_message()
+        except Exception as e:
+            raise ModelError(e, *_usage_so_far(stream)) from e
         content = [b.model_dump(exclude_none=True) for b in resp.content]
         return ModelResponse(
             content, resp.stop_reason or "end_turn", resp.usage.input_tokens, resp.usage.output_tokens, raw=resp
         )
+
+
+def _usage_so_far(stream: Any) -> tuple[int, int]:
+    """Tokens the API had reported when a stream broke: none before `message_start`, then its input
+    count and the output count it last sent (the full output count only comes in the final delta)."""
+    if stream is None:
+        return 0, 0
+    try:
+        usage = stream.current_message_snapshot.usage
+    except (AssertionError, AttributeError):  # no message_start yet
+        return 0, 0
+    return usage.input_tokens or 0, usage.output_tokens or 0
 
 
 # Models that reject output_config.effort (CONTRACT.md §9). Everything newer accepts it.

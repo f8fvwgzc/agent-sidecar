@@ -19,6 +19,8 @@ pub fn client_channel(tls: &TlsMaterial, addr: &str, server_name: &str) -> anyho
     let endpoint = Endpoint::from_shared(format!("https://{addr}"))?
         .tls_config(cfg)?
         .connect_timeout(std::time::Duration::from_secs(5))
-        .timeout(std::time::Duration::from_secs(120));
+        // A backstop only: every mesh call carries the caller's own deadline (grpc-timeout), which
+        // is never longer than what the callee lets its runtime run.
+        .timeout(crate::deadline::RUN_TIMEOUT);
     Ok(endpoint.connect_lazy())
 }

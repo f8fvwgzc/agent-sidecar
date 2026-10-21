@@ -4,6 +4,11 @@ use regex::Regex;
 
 use crate::authz::Verdict;
 
+/// Rule prefixes of the content rules. A payload one of them matched is withheld from the audit
+/// log (hash kept): it is the payload most likely to carry the secret the rule looks for.
+pub const INPUT_DENY: &str = "guardrail.input_deny.";
+pub const OUTPUT_DENY: &str = "guardrail.output_deny.";
+
 pub struct CompiledGuardrails {
     pub max_input_bytes: usize,
     pub pii_redact: bool,
@@ -54,7 +59,7 @@ impl CompiledGuardrails {
         for (name, re) in &self.input_deny {
             if re.is_match(input) || (!context.is_empty() && re.is_match(context)) {
                 return Verdict::deny(
-                    format!("guardrail.input_deny.{name}"),
+                    format!("{INPUT_DENY}{name}"),
                     format!("input matches deny rule {name}"),
                 );
             }
@@ -66,7 +71,7 @@ impl CompiledGuardrails {
         for (name, re) in &self.output_deny {
             if re.is_match(output) {
                 return Verdict::deny(
-                    format!("guardrail.output_deny.{name}"),
+                    format!("{OUTPUT_DENY}{name}"),
                     format!("output matches deny rule {name}"),
                 );
             }

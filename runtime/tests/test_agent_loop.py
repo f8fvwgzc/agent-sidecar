@@ -1,7 +1,11 @@
 import asyncio
+import threading
 
+import pytest
+
+from attache_runtime import pricing
 from attache_runtime.agent import run_agent
-from attache_runtime.models import MockModel
+from attache_runtime.models import MockModel, ModelError, ModelResponse
 
 
 def run(coro):
@@ -50,7 +54,7 @@ def test_service_tool_substitutes_path_params(ops_assistant, sidecar, ctx):
 
 def test_max_steps_is_enforced(ops_assistant, sidecar, ctx):
     class LoopingModel(MockModel):
-        def complete(self, system, messages, tools, max_tokens):
+        def complete(self, system, messages, tools, max_tokens, timeout=None):
             r = super().complete(system, messages, tools, max_tokens)
             # never finish: keep asking for the stock analyst
             r.content = [{"type": "tool_use", "id": "t", "name": "stock_analyst", "input": {"input": "again"}}]
@@ -66,7 +70,7 @@ def test_max_steps_is_enforced(ops_assistant, sidecar, ctx):
 
 def test_refusal_becomes_denied(ops_assistant, sidecar, ctx):
     class RefusingModel(MockModel):
-        def complete(self, system, messages, tools, max_tokens):
+        def complete(self, system, messages, tools, max_tokens, timeout=None):
             r = super().complete(system, messages, tools, max_tokens)
             r.content, r.stop_reason = [], "refusal"
             return r
@@ -80,7 +84,7 @@ def test_context_is_appended_to_the_first_message(ops_assistant, sidecar, ctx):
     captured = {}
 
     class Spy(MockModel):
-        def complete(self, system, messages, tools, max_tokens):
+        def complete(self, system, messages, tools, max_tokens, timeout=None):
             captured["first"] = messages[0]["content"]
             r = super().complete(system, messages, tools, max_tokens)
             r.content, r.stop_reason = [{"type": "text", "text": "ok"}], "end_turn"
@@ -88,3 +92,50 @@ def test_context_is_appended_to_the_first_message(ops_assistant, sidecar, ctx):
 
     run(run_agent(ops_assistant, "hi", '{"customer": "c-1"}', ctx, Spy(), sidecar))
     assert captured["first"].startswith("hi\n\n<context>")
+
+
+def test_a_model_call_in_flight_when_execute_is_cancelled_is_still_reported(ops_assistant, sidecar, ctx):
+    """The provider bills a call nobody waits for any more, so its cost still reaches the budget (§9)."""
+    started, release = threading.Event(), threading.Event()
+
+    class Slow(MockModel):
+        def complete(self, system, messages, tools, max_tokens, timeout=None):
+            started.set()
+            release.wait(5)
+            return ModelResponse([{"type": "text", "text": "too late"}], "end_turn", 1200, 345)
+
+    async def cancel_mid_call():
+        reported = asyncio.Event()
+        report = sidecar.report_event
+
+        async def spy(record):
+            await report(record)
+            reported.set()
+
+        sidecar.report_event = spy
+        execute = asyncio.create_task(run_agent(ops_assistant, "stock?", "", ctx, Slow("claude-opus-5-5"), sidecar))
+        assert await asyncio.to_thread(started.wait, 5)
+        execute.cancel()  # what grpc.aio does to the handler when the sidecar gives up on Execute
+        with pytest.raises(asyncio.CancelledError):
+            await execute
+        assert sidecar.events == [], "the model call is still running"
+        release.set()
+        await asyncio.wait_for(reported.wait(), 5)
+
+    asyncio.run(cancel_mid_call())
+    [ev] = sidecar.events
+    assert ev["kind"] == "model_call" and ev["tokens"] == {"input": 1200, "output": 345}
+    assert ev["cost_usd"] == pricing.cost_usd("claude-opus-5-5", 1200, 345) > 0
+    assert ev["output"] == [{"type": "text", "text": "too late"}] and ev["error"].startswith("cancelled: ")
+
+
+def test_a_failed_model_call_reports_the_usage_it_was_billed_for(ops_assistant, sidecar, ctx):
+    class Broken(MockModel):
+        def complete(self, system, messages, tools, max_tokens, timeout=None):
+            raise ModelError(ConnectionError("stream reset"), 900, 40)
+
+    res = run(run_agent(ops_assistant, "stock?", "", ctx, Broken("claude-opus-5-5"), sidecar))
+    assert res.status == "error" and res.rule == "model.error" and res.reason == "ConnectionError: stream reset"
+    [ev] = sidecar.events
+    assert ev["tokens"] == {"input": 900, "output": 40} and ev["error"] == "stream reset"
+    assert (res.input_tokens, res.output_tokens) == (900, 40) and res.cost_usd == ev["cost_usd"] > 0

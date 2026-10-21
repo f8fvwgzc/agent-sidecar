@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::io::Write;
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
+use std::time::Instant;
 
 pub const MAX_PAYLOAD_BYTES: usize = 8 * 1024;
 
@@ -134,8 +135,27 @@ impl AuditRecord {
         self
     }
 
-    pub fn latency(mut self, started: std::time::Instant) -> Self {
+    pub fn latency(mut self, started: Instant) -> Self {
         self.latency_ms = started.elapsed().as_millis() as u64;
+        self
+    }
+
+    /// Replace `input` with `"[redacted:<rule>]"`, keeping the hash of the original: a payload a
+    /// content guardrail denied is the one most likely to hold the secret it matched (CONTRACT.md §6).
+    pub fn withhold_input(mut self, rule: &str) -> Self {
+        self.ensure_hashes();
+        if !self.input.is_null() {
+            self.input = withheld(rule);
+        }
+        self
+    }
+
+    /// `withhold_input` for `output`.
+    pub fn withhold_output(mut self, rule: &str) -> Self {
+        self.ensure_hashes();
+        if !self.output.is_null() {
+            self.output = withheld(rule);
+        }
         self
     }
 
@@ -179,6 +199,10 @@ impl AuditRecord {
         serde_json::to_string(self)
             .unwrap_or_else(|e| format!("{{\"error\":\"serialize audit record: {e}\"}}"))
     }
+}
+
+fn withheld(rule: &str) -> Value {
+    Value::String(format!("[redacted:{rule}]"))
 }
 
 /// String values found at a dotted path (arrays are walked), for scrubbing them elsewhere.
@@ -362,10 +386,24 @@ impl AuditWriter {
                 collect_leaves(payload, &mut found);
             }
         }
-        if found.is_empty() {
+        self.keep_secrets(request_id, found);
+    }
+
+    /// Scrub these values (whole payloads a guardrail denied) from every later record of the
+    /// request: the same text comes back inside the calling agent's next prompt.
+    pub fn withhold(&self, request_id: &str, values: impl IntoIterator<Item = String>) {
+        let found = values
+            .into_iter()
+            .filter(|v| v.chars().count() >= MIN_SECRET_LEN)
+            .collect();
+        self.keep_secrets(request_id, found);
+    }
+
+    fn keep_secrets(&self, request_id: &str, found: Vec<String>) {
+        if found.is_empty() || request_id.is_empty() {
             return;
         }
-        let mut secrets = self.secrets.lock().unwrap();
+        let mut secrets = self.secrets.lock().unwrap_or_else(PoisonError::into_inner);
         let now = std::time::Instant::now();
         secrets.retain(|_, (t, _)| now.duration_since(*t) < SECRET_TTL);
         let entry = secrets
@@ -390,7 +428,12 @@ impl AuditWriter {
         self.remember(&record.request_id, "input", &record.input);
         self.remember(&record.request_id, "output", &record.output);
         record.redact_paths(&self.redact);
-        if let Some((_, secrets)) = self.secrets.lock().unwrap().get(&record.request_id) {
+        if let Some((_, secrets)) = self
+            .secrets
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&record.request_id)
+        {
             scrub(&mut record.input, secrets);
             scrub(&mut record.output, secrets);
         }
@@ -400,9 +443,49 @@ impl AuditWriter {
         }
         record.truncate_payloads();
         let line = record.to_json_line();
-        let mut sink = self.sink.lock().unwrap();
+        // A guard may write while a panic unwinds; a poisoned lock must not turn that into an abort.
+        let mut sink = self.sink.lock().unwrap_or_else(PoisonError::into_inner);
         let _ = writeln!(sink, "{line}");
         let _ = sink.flush();
+    }
+
+    /// Records owed for work about to be awaited. Dropped before `disarm` — the server dropped the
+    /// handler because the client went away or its deadline passed — they are written with
+    /// `error: "cancelled: …"`, so side effects that already ran are never left unaudited.
+    pub fn on_cancel(&self, records: Vec<AuditRecord>, started: Instant) -> OnCancel<'_> {
+        OnCancel {
+            writer: self,
+            records,
+            started,
+        }
+    }
+}
+
+pub const CANCELLED: &str =
+    "cancelled: the caller went away or its deadline passed before this finished";
+
+/// See [`AuditWriter::on_cancel`].
+#[must_use = "dropping the guard writes its records as cancelled"]
+pub struct OnCancel<'a> {
+    writer: &'a AuditWriter,
+    records: Vec<AuditRecord>,
+    started: Instant,
+}
+
+impl OnCancel<'_> {
+    /// The work finished and wrote its own records.
+    pub fn disarm(mut self) {
+        self.records.clear();
+    }
+}
+
+impl Drop for OnCancel<'_> {
+    fn drop(&mut self) {
+        for mut rec in self.records.drain(..) {
+            rec = rec.latency(self.started);
+            rec.error = Some(CANCELLED.into());
+            self.writer.write(rec);
+        }
     }
 }
 
@@ -568,6 +651,91 @@ mod tests {
         assert_eq!(
             lines[2]["input"], "cust-SECRET-99",
             "other requests are untouched"
+        );
+    }
+
+    #[test]
+    fn withheld_payloads_keep_their_hash_and_leave_no_text_behind() {
+        let buf = Buf::default();
+        let w = AuditWriter::with_sink("s", "n", vec![], Box::new(buf.clone()));
+        let t = TraceContext::new_root();
+        let secret = "use api_key = sk-123 please";
+        let rule = "guardrail.input_deny.no-secrets";
+        w.withhold("r1", [secret.to_string(), "ab".to_string()]);
+        w.write(
+            AuditRecord::new(
+                Kind::Guardrail,
+                Direction::Internal,
+                "r1",
+                &t,
+                None,
+                "local",
+                None,
+                "a",
+                Value::String(secret.into()),
+                Value::Null,
+            )
+            .withhold_input(rule)
+            .withhold_output(rule),
+        );
+        // the calling agent's next prompt quotes the denied input
+        w.write(AuditRecord::new(
+            Kind::ModelCall,
+            Direction::Outbound,
+            "r1",
+            &t,
+            None,
+            "local",
+            None,
+            "mock",
+            serde_json::json!({"messages": [{"content": format!("asked: {secret}")}, {"content": "ab"}]}),
+            Value::Null,
+        ));
+        let lines = buf.lines();
+        assert_eq!(lines[0]["input"], format!("[redacted:{rule}]"));
+        assert_eq!(lines[0]["input_sha256"], sha256_hex(secret.as_bytes()));
+        assert!(lines[0]["output"].is_null() && lines[0]["output_sha256"].is_null());
+        assert_eq!(
+            lines[1]["input"]["messages"][0]["content"],
+            "asked: [redacted]"
+        );
+        assert_eq!(
+            lines[1]["input"]["messages"][1]["content"], "ab",
+            "too short to scrub"
+        );
+    }
+
+    #[test]
+    fn a_dropped_guard_writes_its_records_as_cancelled() {
+        let buf = Buf::default();
+        let w = AuditWriter::with_sink("s", "n", vec![], Box::new(buf.clone()));
+        let t = TraceContext::new_root();
+        let rec = |callee: &str| {
+            AuditRecord::new(
+                Kind::ToolCall,
+                Direction::Internal,
+                "r",
+                &t,
+                None,
+                "local",
+                None,
+                callee,
+                Value::String("args".into()),
+                Value::Null,
+            )
+        };
+        w.on_cancel(vec![rec("finished")], Instant::now()).disarm();
+        drop(w.on_cancel(vec![rec("a"), rec("b")], Instant::now()));
+        let lines = buf.lines();
+        let callees: Vec<&str> = lines
+            .iter()
+            .map(|l| l["callee"].as_str().unwrap())
+            .collect();
+        assert_eq!(callees, ["a", "b"]);
+        assert!(
+            lines.iter().all(|l| l["error"] == CANCELLED
+                && l["decision"] == "allow"
+                && l["input"] == "args")
         );
     }
 

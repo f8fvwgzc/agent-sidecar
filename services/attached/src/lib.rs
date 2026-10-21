@@ -1,5 +1,6 @@
 //! `attached` — the sidecar. See CONTRACT.md; module names follow its sections.
 pub mod config;
+pub mod deadline;
 pub mod grpc_app;
 pub mod http_api;
 pub mod mesh;

@@ -330,6 +330,22 @@ every request it sends — local app, mesh, http tool — and, toward an app,
 `tracestate`, `host`, `content-length` and any `x-attache-*` header supplied by
 the runtime or a peer are dropped, never forwarded.
 
+The sidecar never follows a redirect. A 3xx from the local app (tool or mesh
+forward) or from an http tool's origin goes back to the caller unchanged
+(status, headers including `Location`, body): authz, the path canonicalisation
+and the http origin check only ever saw the first URL. Requests toward the app
+on loopback never use an HTTP(S) proxy; http tools use the environment's
+proxy, if any.
+
+Deadlines: a gRPC caller's `grpc-timeout` is honoured, and every call made on
+its behalf carries what is left of it, less 500 ms, as its own `grpc-timeout`,
+so the inner call gives up first and the outer one still answers and audits.
+App gRPC or mesh `InvokeAgent` → runtime `Execute` (at most 300 s; the HTTP
+API sets no deadline, so 300 s); `Execute` → the runtime's tool RPCs (at most
+120 s for service and http tools, 300 s for agent tools) and its model
+requests (at most 600 s; §9); a tool RPC → the peer over the mesh, or the local
+app and http tools (at most 30 s).
+
 Outcomes, for all three tool RPCs (message = reason, metadata `x-attache-rule`):
 
 | outcome | gRPC status | runtime sees | audit `decision` |
@@ -472,6 +488,14 @@ Redaction, in this order, over the full payloads:
 
 1. `input_sha256` / `output_sha256` are computed over the full original bytes,
    so a consumer can prove a payload later without the sidecar storing it.
+   A payload a content guardrail denied is then withheld whole: it is written
+   as `"[redacted:<rule>]"`, only its hash remains. That is the invocation's
+   input (with its `context`) in the `guardrail` and `agent_invocation` records
+   of a `guardrail.input_deny.*` denial, the final output in the `guardrail`
+   record of a `guardrail.output_deny.*` denial, and the input of the calling
+   agent's `tool_call` / `agent_call` records when the callee's input rule
+   denied it. The denied input is also scrubbed (`[redacted]`) from every later
+   record of the same request in that sidecar, like the values in step 2.
 2. `audit.redact` dotted paths are replaced with `"[redacted]"` inside
    `input`/`output` (arrays are walked). Values found at those paths (strings
    and numbers of 4+ characters) are also remembered per `request_id` for 15
@@ -504,7 +528,13 @@ Which records a single demo call produces (orders pod unless noted):
 ```
 
 Records are written when each step finishes, so an invocation's own record
-comes after its children's.
+comes after its children's. A step whose handler is dropped before it finishes
+(the client disconnected, its deadline passed, the peer reset the stream)
+still writes the records it owes — `agent_invocation`; `tool_call` plus its
+`service_call` / `agent_call` / `http_call`; an inbound `service_call` — with
+the decision it was authorized with and `error: "cancelled: the caller went
+away or its deadline passed before this finished"`. The target may already
+have acted on it.
 
 And the denied call: on the inventory pod `service_call inbound
 spiffe://…/svc/orders (ops-assistant) → inventory POST /admin/reset deny
@@ -577,6 +607,16 @@ record:
   `input = {system, messages, tools}` and `output = content blocks`; tokens
   from the API `usage`; `cost_usd` from the pricing table in
   `runtime/src/attache_runtime/pricing.py` (per 1M tokens; `mock` = 0).
+  Every model call that ran is reported, because the provider bills it: a
+  failed call carries the usage the API had reported before it failed (its
+  input tokens once `message_start` arrived) and `error`; a call still running
+  when its `Execute` is cancelled finishes in the background and is reported
+  with `error: "cancelled: …"`, so its cost still counts toward
+  `max_cost_usd_per_day`.
+- Deadline: each model request gets what is left of the `Execute` deadline,
+  less 500 ms, as its SDK timeout (which bounds the connect and each wait for
+  the next streamed chunk, not the whole stream). With 500 ms or less left, no
+  new step starts: status `error`, rule `deadline.exceeded`.
 - Provider selection: `ANTHROPIC_API_KEY` set and `model != mock` → Anthropic
   SDK, else the deterministic mock. Requests are streamed and collected
   (`messages.stream(...).get_final_message()`), so large `max_tokens` never
@@ -601,9 +641,13 @@ record:
   parsing, PKI issue/parse round trip, and an in-process mTLS mesh test (two
   sidecar cores on localhost: allowed call succeeds, `/admin` denied with the
   rule name — also as `/%61dmin`, `/admin/` and `/ADMIN` — tool paths held to
-  their templates, wrong identity rejected).
+  their templates, wrong identity rejected), and a sidecar with a fake runtime and
+  app (redirects returned unfollowed, guardrail-denied payloads withheld from
+  the audit log, dropped and timed-out calls still audited, deadlines
+  propagated).
 - `cd runtime && uv run pytest` — mock model routing, agent loop with a fake
-  sidecar, pricing, event shape.
+  sidecar, pricing, event shape, model calls reported after a cancel or a
+  failure, deadlines.
 - `services/attache-cli/tests/cli.rs` — `charter validate` accepts the demo
   charters and rejects `examples/charters/invalid-unknown-field.charter.yaml`;
   `logs --file` filters and sorts.
@@ -620,3 +664,5 @@ record:
   proxied by the sidecar; it is audited via `ReportEvent`, not intercepted.
 - Server-side refusal fallbacks (`fallbacks: "default"`) are not enabled; a
   refusal is surfaced as `model.refusal`.
+- An `output_deny` match cannot retract the `model_call` record the runtime
+  already reported for the turn that produced the output.

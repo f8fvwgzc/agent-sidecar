@@ -4,10 +4,12 @@ use std::time::Instant;
 
 use attache_common::audit::{AuditRecord, Direction, Kind, Tokens};
 use attache_common::authz::{self, Verdict};
+use attache_common::guardrails::INPUT_DENY;
 use attache_common::trace::TraceContext;
 use attache_proto::{ExecuteRequest, InvokeAgentResponse, Step, Usage};
 use serde_json::{Value, json};
 
+use crate::deadline;
 use crate::state::{AppState, MAX_DEPTH};
 
 /// One inbound request to run an agent, from the app, a peer sidecar or a local agent tool.
@@ -21,6 +23,8 @@ pub struct Invocation {
     pub caller: String,
     pub caller_agent: Option<String>,
     pub depth: u32,
+    /// When the caller stops waiting (its `grpc-timeout`); the runtime gets what is left of it.
+    pub deadline: Option<Instant>,
 }
 
 pub const RULE_UNKNOWN_AGENT: &str = "agent.unknown";
@@ -133,7 +137,8 @@ pub fn response_json(resp: &InvokeAgentResponse) -> Value {
     v
 }
 
-/// Run the full pipeline for one invocation. Always writes exactly one `agent_invocation` record.
+/// Run the full pipeline for one invocation. Always writes exactly one `agent_invocation` record,
+/// also when the caller drops this future while the runtime runs (`error: "cancelled: …"`).
 pub async fn invoke(state: &Arc<AppState>, inv: Invocation) -> InvokeAgentResponse {
     let started = Instant::now();
     let input_value = if inv.context_json.trim().is_empty() {
@@ -230,7 +235,7 @@ pub async fn invoke(state: &Arc<AppState>, inv: Invocation) -> InvokeAgentRespon
         .guardrails
         .check_input_with_context(&inv.input, &inv.context_json);
     if !v.allow {
-        let rec = AuditRecord::new(
+        let mut rec = AuditRecord::new(
             Kind::Guardrail,
             Direction::Internal,
             &inv.request_id,
@@ -239,14 +244,23 @@ pub async fn invoke(state: &Arc<AppState>, inv: Invocation) -> InvokeAgentRespon
             &inv.caller,
             inv.caller_agent.as_deref(),
             &inv.agent,
-            Value::String(inv.input.clone()),
+            input_value.clone(),
             Value::Null,
         )
         .verdict(&v);
+        let mut inv_rec = record(Value::Null).verdict(&v).latency(started);
+        // A content rule matched: the log keeps the input's hash, never the secret it may hold
+        // (CONTRACT.md §6) — here, and in this request's later records (the caller's next prompt).
+        if v.rule.starts_with(INPUT_DENY) {
+            state.audit.withhold(
+                &inv.request_id,
+                [inv.input.clone(), inv.context_json.clone()],
+            );
+            rec = rec.withhold_input(&v.rule);
+            inv_rec = inv_rec.withhold_input(&v.rule);
+        }
         state.audit.write(rec);
-        state
-            .audit
-            .write(record(Value::Null).verdict(&v).latency(started));
+        state.audit.write(inv_rec);
         return denied(&inv, &v, vec![step("guardrail", &inv.agent, &v, 0, "")]);
     }
 
@@ -263,8 +277,15 @@ pub async fn invoke(state: &Arc<AppState>, inv: Invocation) -> InvokeAgentRespon
         caller_agent: inv.caller_agent.clone().unwrap_or_default(),
         depth: inv.depth,
     };
+    let mut req = tonic::Request::new(req);
+    req.set_timeout(deadline::budget(inv.deadline, deadline::RUN_TIMEOUT));
     let mut client = state.runtime.clone();
-    let exec = match client.execute(req).await {
+    // From here the runtime acts (model calls, tools). If the caller drops this future — client
+    // gone, deadline passed — the record is still written, as cancelled.
+    let pending = state.audit.on_cancel(vec![record(Value::Null)], started);
+    let exec = client.execute(req).await;
+    pending.disarm();
+    let exec = match exec {
         Ok(r) => r.into_inner(),
         Err(status) => {
             let reason = format!("runtime: {} {}", status.code(), status.message());
@@ -317,7 +338,8 @@ pub async fn invoke(state: &Arc<AppState>, inv: Invocation) -> InvokeAgentRespon
             Value::Null,
             Value::String(exec.output.clone()),
         )
-        .verdict(&v);
+        .verdict(&v)
+        .withhold_output(&v.rule);
         state.audit.write(rec);
         let mut rec = record(Value::Null).verdict(&v).latency(started);
         rec.tokens = tokens;
