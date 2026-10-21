@@ -9,10 +9,13 @@ url: https://f8fvwgzc.github.io
 baseurl: /agent-sidecar
 lang: en
 author: f8fvwgzc
-image: /docs/assets/social-preview.png
 logo: /docs/assets/social-preview.png
-twitter:
-  card: summary_large_image
+# Every page gets the social preview image as its og:image / twitter:image.
+defaults:
+  - scope:
+      path: ""
+    values:
+      image: /docs/assets/social-preview.png
 theme: jekyll-theme-cayman
 show_downloads: false
 markdown: kramdown
