@@ -8,7 +8,7 @@ This document is the build contract for v0.2. When it is implemented, the normat
 | Goal | What we build |
 | --- | --- |
 | Observability | OpenTelemetry export (OTLP/HTTP JSON traces and metrics) from every sidecar. |
-| Central UI | A node-graph console (D3.js, ComfyUI style). Each agent is a node; edges show how agents, apps, peer services, model providers and external APIs talk, with live traffic and the real (redacted) requests and responses. |
+| Central UI | Two views: a node-graph console (D3.js, ComfyUI style) and an agent timeline (swimlanes per agent, orchestrator first, live bars for every run with connected calls). Each agent is a node; edges show how agents, apps, peer services, model providers and external APIs talk, with live traffic and the real (redacted) requests and responses. |
 | Live configuration | Create agents and change agents, skills, budgets, guardrails and authz from the UI or API. The control plane validates, stores and pushes the change; sidecars apply it without a restart. |
 | Kubernetes native | `Charter` custom resource with a validating webhook, Istio/Dapr-style injection by pod label, per-pod certificates from the control plane, Helm chart. |
 | Agent capabilities | Per-agent skills, a configurable harness (retries, timeouts, fallback model), governed learning (agents propose lessons; approved lessons become context). |
@@ -158,6 +158,8 @@ Standalone mode (no `--control-plane`) is v0.1 behaviour plus hot reload of the 
 
 Subscribe to the audit writer; queue at most 4096 records or 8 MiB (drop oldest, count drops, report the count in the next heartbeat); batch per §3. If `telemetry.control_plane_payloads` is false, set `input`/`output` to null before sending (hashes stay).
 
+**Span starts (for the timeline).** In managed mode the sidecar sends `SpanStart` when an `agent_invocation` begins (on receipt, before any check, so a later denial closes a red bar), and when an `agent_call`, `service_call` or `http_call` tool call begins. The span id is the one the closing audit record will carry. A nested local `agent_invocation` gets its own new span id with `parent_span_id` = the caller's `agent_call` span id (never a reused id). Span starts use their own bounded queue (1024, drop oldest) and are not written to the audit log or OTel. Model calls are drawn when their record arrives.
+
 ### 6.5 Runtime-facing RPCs (SidecarTools) — tightened
 
 - `ReportEvent` accepts only: `model_call` records, and `tool_call` records whose `callee` is `load_skill:<skill>` where `<skill>` is one of that agent's skills. The record's `agent` and `request_id` must match an Execute currently in flight (the sidecar keeps a map request_id → agent). Anything else: `INVALID_ARGUMENT`, and an `authz` record with rule `runtime.report_rejected`.
@@ -189,6 +191,7 @@ message SidecarMessage {
     AuditBatch audit = 3;
     ConfigAck ack = 4;
     LearningProposal proposal = 5;
+    SpanStart span_start = 6;
   }
 }
 message Hello {
@@ -207,6 +210,8 @@ message Hello {
 message Heartbeat { uint64 seq = 1; bool runtime_ready = 2; string charter_version = 3; uint64 audit_dropped = 4; int64 cert_expires_in_s = 5; }
 message AuditBatch { repeated string records_json = 1; }
 message ConfigAck { string epoch = 1; string version = 2; bool applied = 3; string error = 4; string kind = 5; } // kind: charter | memory
+// Sent when an invocation or a tool call starts, so the UI can draw running work. Not an audit record; never written to the log or OTel.
+message SpanStart { string request_id = 1; string trace_id = 2; string span_id = 3; string parent_span_id = 4; string kind = 5; string agent = 6; string caller = 7; string caller_agent = 8; string callee = 9; string direction = 10; string ts = 11; }
 message LearningProposal { string dedup_key = 1; string agent = 2; string note = 3; string rationale = 4; string request_id = 5; string trace_id = 6; bool auto = 7; }
 
 message ControlMessage {
@@ -361,6 +366,8 @@ The exact shapes are in [`docs/api/openapi.yaml`](../api/openapi.yaml) and the g
 | `POST /proposals/{id}/approve` / `reject` (If-Match = memory version) | editor |
 | `GET /events/recent?limit=&namespace=&service=&agent=&trace_id=&request_id=&kind=` → newest first | viewer |
 | `GET /events?namespace=&service=&payloads=false` → SSE | viewer |
+| `GET /traces?limit=&namespace=&service=&agent=&status=` → `[TraceSummary]` newest first | viewer |
+| `GET /traces/{trace_id}` → `{trace_id, spans: [Span]}` | viewer |
 | `GET /healthz`, `GET /readyz` | none |
 
 **AgentView**: `{agent: <charter agent object>, allowed_tools: [..]|null, allowed_services: [..]|null, callers: [{identity, caller_agents: [..]|null}]}`. Cascades: POST without `callers` adds the agent to the `identity: local` caller rule (creating `{identity: local, agents: [name]}` if none). DELETE removes the agent's `allowed_*` keys and its name from every `authz.callers[].agents` (dropping rules left empty); 409 if a local orchestrator's agent tool still targets it. PUT prunes `allowed_tools` entries for removed tools. `/links` refuses cross-namespace targets; it edits the target's `authz.callers` first (admin), then the source's tools and `allowed_*`.
@@ -412,6 +419,15 @@ Rules: node `status` enums — service `connected|degraded|disconnected|no_chart
 
 A record that maps to an edge not in the graph creates an undeclared edge (`declared: false`) and triggers `event: graph`.
 
+### 10.1.1 Traces (for the timeline)
+
+Embassy keeps, per trace, the span starts and audit records it holds in its ring and builds spans from them.
+
+- `TraceSummary`: `{trace_id, root_agent: <node id>, root_request_id, started_at, ended_at|null, duration_ms|null, status: running|ok|denied|error, agents, invocations, model_calls, tool_calls, tokens_in, tokens_out, cost_usd}`.
+- `Span`: `{span_id, parent_span_id, kind, agent: <node id>|null, namespace, service, callee, callee_node: <node id>|null, start, end|null, latency_ms|null, status: running|ok|denied|error, decision|null, rule|null, request_id, caller, caller_agent, tokens_in, tokens_out, cost_usd, call_index}`. `start` comes from the `SpanStart` if seen, else `ts − latency_ms`; `end` is the audit record's `ts`. `call_index` numbers repeated calls from the same caller agent to the same callee within the trace (1, 2, 3, …). Spans for kinds `agent_invocation`, `agent_call`, `service_call`, `http_call`, `model_call`, `tool_call`; other kinds attach to their span as `events: [{kind, rule, decision, ts}]`.
+- A span with a start and no end after 15 min is closed with `status: error`, `rule: span.timeout`.
+- Payload and namespace visibility rules apply as everywhere.
+
 ### 10.2 Server-Sent Events
 
 Every event has `id: <monotonic seq>`. On reconnect the server replays from `Last-Event-ID` if still in the ring, else sends `event: reset` (the UI refetches `/graph` and `/services`). Events:
@@ -422,6 +438,7 @@ Every event has `id: <monotonic seq>`. On reconnect the server replays from `Las
 - `config` — `{namespace, service, version, actor, source: api|kubernetes|adopt|rollback|file}`
 - `ack` — `{namespace, service, instance_id, pod, kind, version, applied, error}`
 - `proposal` — a proposal object
+- `span_start` — `{namespace, service, request_id, trace_id, span_id, parent_span_id, kind, agent, agent_node, caller, caller_agent, callee, callee_node, ts, call_index}` (the matching `audit` event closes the span)
 - `cp_audit` — admins only
 - `lagged` — `{dropped}` when the client's queue (1024 events) overflowed
 - a comment line every 15 s
@@ -439,6 +456,19 @@ ComfyUI-style node canvas only (no other ComfyUI layout).
 - **Create:** "+ Agent" (choose service) → form → POST. Drag from an orchestrator's "+" port onto another agent's `invoke` port → dialog for tool name and description → `POST /links` (shows when admin is needed; refuses cross-namespace).
 - **Toolbar:** Fit, Auto-layout, namespace/service filter, Live on/off, connection status, user + role; pending adoptions banner with Adopt button.
 - **Auth:** sign-in screen (token → `/login`); viewers see the canvas read-only; payload fields show "hidden" when the token lacks `payloads`.
+
+### 11.1 Agent timeline view
+
+A second view, switched in the toolbar (Graph | Timeline; URL hash `#graph` / `#timeline`). Filters and the inspector are shared.
+
+- **Modes.** *Live*: a rolling window (default 2 min, adjustable 30 s – 30 min), a "now" line at the right edge, auto-follow (Space toggles follow). *Trace*: one trace chosen from a list (`GET /traces`), fitted to its duration. Data: live from SSE `span_start` + `audit` events; a trace from `GET /traces/{trace_id}`.
+- **Lanes (left list).** One lane per agent. In a trace: depth-first order of the call tree, the root orchestrator first, each callee in first-call order, indented by depth. In Live: orchestrators first, then agents in the order they first appear; lanes with no activity in the window collapse unless "show idle" is on. Each lane label shows a status dot, agent name, service, the number of invocations in view, and a pulsing badge with the number running now.
+- **Bars.** Every `agent_invocation` is a bar from start to end in its agent's lane. Running (started, not ended) bars grow to "now" with animated stripes. Colours: running blue, ok green, denied red, error amber. Inside a bar, model calls are thin segments and tool calls small markers.
+- **Milestones.** A diamond at each invocation start ("started"), a circle at its end ("done", "denied" or "error"). On an orchestrator lane, a marker at each `agent_call` start ("called stock-analyst #2") and end ("returned").
+- **Connectors.** A curved arrow from the caller's `agent_call` start to the callee's invocation start, and a return arrow from the callee's end to the `agent_call` end. Cross-service hops are dashed. Repeated calls show `#n` (`call_index`). A denied call shows a red ✕ on the caller lane and no callee bar. Service and http tool calls show a short stub arrow to a labelled marker (app or origin), not a lane.
+- **Interaction.** Horizontal zoom and pan (d3-zoom on x only), a brush to select a range, hover tooltip (agent, kind, start, duration, decision, rule, tokens, cost), click a bar to open the inspector Traffic tab filtered by its `request_id`.
+- **Performance.** SVG with virtualization (only lanes and bars in view are rendered); at most 2000 spans in Live mode (oldest dropped); rendering on `requestAnimationFrame`.
+- **Security.** The same rules as §11 (text only through `textContent`).
 
 ## 12. Runtime (`attache-runtime`)
 
@@ -496,6 +526,8 @@ ComfyUI-style node canvas only (no other ComfyUI layout).
 | B4 UI | `ui/**` except fixtures | §11 |
 | B5 Runtime | `runtime/**` except stubs and spec.py | §12 |
 | B6 Packaging | `deploy/helm/**`, `deploy/compose/**`, `docker/**`, `.github/workflows/release.yml`, `Makefile` | §13–14, release workflow |
+| T0 Timeline foundation | `proto/**` (SpanStart), stubs, CONTRACT §4/§6, `docs/api/openapi.yaml`, `ui/fixtures/**`, `docs/api/check_fixtures.py`, embassy `api/types.rs` | `SpanStart` message, `/traces` endpoints and `span_start` SSE in OpenAPI, fixtures (`traces.json`, `trace-<id>.json`, span_start events) |
+| B4b Timeline UI | `ui/js/timeline*.js`, toolbar/view switch in `ui/**` | §11.1 |
 | C Integration | — | merge, wire OTel into the sidecar, end-to-end on Compose and minikube, fixes |
 | D Review | — | adversarial security and correctness review against §15, fixes |
 | E Docs | CONTRACT.md, docs, README | final documentation |
