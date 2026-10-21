@@ -17,6 +17,9 @@ use super::client::{ApiError, CharterApi, FIELD_MANAGER, KubeApi, WebhookKind};
 
 type Key = (String, String);
 
+/// A kubectl change: the Charter's namespace and name, the field manager, the edit.
+type KubectlEdit = (String, String, String, Box<dyn FnOnce(&mut Value) + Send>);
+
 fn key(ns: &str, name: &str) -> Key {
     (ns.to_string(), name.to_string())
 }
@@ -40,6 +43,8 @@ struct State {
     status_conflicts: usize,
     /// The next charter `replace` is refused (an admission webhook said no).
     refuse_next_replace: Option<String>,
+    /// A kubectl change that lands just before the next `replace_status` (a race).
+    before_next_status_write: Option<KubectlEdit>,
     refuse_secret_creates: bool,
     /// A Secret that appears when the next create is attempted (a lost race).
     secret_on_next_create: Option<(Key, Secret)>,
@@ -141,9 +146,26 @@ impl FakeCluster {
     }
 
     /// What `kubectl apply`/`edit` does: create or change a Charter as `manager` (the spec
-    /// changes, so `generation` moves; annotations are kept unless `f` changes them).
+    /// changes, so `generation` moves; annotations are kept unless `f` changes them). It goes
+    /// around the validating webhook (as if it were not installed).
     pub fn kubectl(&self, ns: &str, name: &str, manager: &str, f: impl FnOnce(&mut Value)) {
-        let mut st = self.st();
+        Self::kubectl_in(&mut self.st(), ns, name, manager, f);
+    }
+
+    /// [`Self::kubectl`] just before embassy's next status write reaches the API server (the
+    /// write then conflicts and is retried on a fresh read).
+    pub fn kubectl_before_next_status_write(
+        &self,
+        ns: &str,
+        name: &str,
+        manager: &str,
+        f: impl FnOnce(&mut Value) + Send + 'static,
+    ) {
+        self.st().before_next_status_write =
+            Some((ns.into(), name.into(), manager.into(), Box::new(f)));
+    }
+
+    fn kubectl_in(st: &mut State, ns: &str, name: &str, manager: &str, f: impl FnOnce(&mut Value)) {
         let time = st.tick();
         let rv = st.next_rv();
         let k = key(ns, name);
@@ -452,6 +474,9 @@ impl CharterApi for FakeCluster {
         object: &Value,
     ) -> Result<Value, ApiError> {
         let mut st = self.st();
+        if let Some((ns, name, manager, f)) = st.before_next_status_write.take() {
+            Self::kubectl_in(&mut st, &ns, &name, &manager, f);
+        }
         if st.status_conflicts > 0 {
             st.status_conflicts -= 1;
             st.next_rv();

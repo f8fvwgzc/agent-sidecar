@@ -4,8 +4,15 @@
 //!
 //! **`/mutate`** (`attache-sidecar-injector`, pods labelled `attache.io/inject: "true"`): adds
 //! the `attached` native sidecar (an init container with `restartPolicy: Always` and a
-//! `startupProbe` that runs `attache-ready`, which asks the sidecar's `/readyz` on
-//! `127.0.0.1:3500`, where the app API listens) with a JSONPatch:
+//! `startupProbe` on the sidecar's `/readyz`) with a JSONPatch. `/readyz` is served by the app
+//! API, which listens on `127.0.0.1:3500` only (the app shares the pod's loopback; the kubelet's
+//! `httpGet` probes connect to the pod IP and cannot reach it), so the probe is an `exec` of
+//! [`READY_COMMAND`] inside the sidecar container. **Image contract:** whatever image is
+//! injected (the official `attached` image, `--injector-image`, or annotation
+//! `attache.io/sidecar-image`) must have [`READY_COMMAND`] on its `PATH`, exiting 0 exactly when
+//! `GET http://127.0.0.1:3500/readyz` answers 200; the official image ships it
+//! (`docker/attache-ready`, which needs `python3`). An image without it never passes the probe:
+//! the pod waits [`STARTUP_PROBE_SECONDS`] and the sidecar is restarted. The patch:
 //!
 //! - env for managed mode: `ATTACHE_CONTROL_PLANE=embassy.<cp-ns>.svc:15012`,
 //!   `ATTACHE_CA_ADDRESS=embassy-ca.<cp-ns>.svc:15012`, `ATTACHE_SERVICE`, `ATTACHE_NAMESPACE`,
@@ -27,11 +34,20 @@
 //!
 //! **`/validate-charter`** (`attache-charter-validator`, CREATE/UPDATE of `charters`): the
 //! charter validator ([`attache_charter::Charter::from_value`] on the whole resource, so unknown
-//! fields are refused) and the `ControlPlaneConfig` policy ([`policy_violations`]). Each
-//! decision is a control-plane audit record `cr_external_edit` with actor
-//! `k8s:<userInfo.username>` (embassy's own writes, by its service accounts in the
+//! fields are refused) and the `ControlPlaneConfig` policy ([`policy_violations`]). An UPDATE by
+//! anyone but embassy that changes annotation `attache.io/version` or `attache.io/spec-sha256`
+//! ([`crate::k8s::store::PROTECTED_ANNOTATIONS`]) is refused: they are embassy's record of its
+//! own writes, and an old exported manifest re-applied with them would otherwise look like one
+//! (a CREATE may carry them: a new Charter is a new epoch, and the store ignores annotations it
+//! did not write there). Each decision is a control-plane audit record `cr_external_edit` with
+//! actor `k8s:<userInfo.username>` (embassy's own writes, by its service accounts in the
 //! control-plane namespace, are validated but not audited here: the store audits what it
 //! applies).
+//!
+//! [`policy_violations`] is the one implementation of the policy check (design §8.2, §8.4: every
+//! write passes validator → policy → role-on-diff → skew → store). The REST API's write path
+//! must call it too, after the validator, so that admission and the API never disagree (for
+//! example on how an `http` tool's origin is normalised).
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -79,6 +95,13 @@ pub const TOKEN_FILE: &str = "/var/run/secrets/attache/token";
 pub const TOKEN_AUDIENCE: &str = "attache";
 pub const TOKEN_EXPIRATION_SECONDS: i64 = 3600;
 pub const MESH_PORT: i32 = 50002;
+/// The startup probe's command (see the module docs for the image contract).
+pub const READY_COMMAND: &str = "attache-ready";
+/// Probe period and failures before the sidecar is restarted: 2 s × 150 = 300 s for the first
+/// certificate, the charter and the agent runtime.
+const STARTUP_PROBE_PERIOD: i32 = 2;
+const STARTUP_PROBE_FAILURES: i32 = 150;
+pub const STARTUP_PROBE_SECONDS: i32 = STARTUP_PROBE_PERIOD * STARTUP_PROBE_FAILURES;
 /// The control-plane Services' gRPC port (design §13).
 pub const CONTROL_PLANE_PORT: u16 = 15012;
 /// The env var with the chart → injector template.
@@ -643,13 +666,14 @@ fn sidecar_container(inj: &Injector, p: &PodRequest) -> Container {
                 ..Default::default()
             },
         ]),
+        // /readyz listens on loopback only: an exec probe (module docs, image contract)
         startup_probe: Some(Probe {
             exec: Some(ExecAction {
-                command: Some(vec!["attache-ready".into()]),
+                command: Some(vec![READY_COMMAND.into()]),
             }),
-            period_seconds: Some(2),
+            period_seconds: Some(STARTUP_PROBE_PERIOD),
             timeout_seconds: Some(3),
-            failure_threshold: Some(150),
+            failure_threshold: Some(STARTUP_PROBE_FAILURES),
             ..Default::default()
         }),
         resources: Some(inj.template.resources()),
@@ -756,6 +780,12 @@ pub fn mutate(inj: &Injector, req: &AdmissionRequest) -> Decision {
 // ---- /validate-charter ------------------------------------------------------------------------------
 
 /// The `ControlPlaneConfig` `policy` rules a charter breaks (design §8.2), each naming its rule.
+///
+/// The one implementation of the policy check: admission ([`validate_charter`]) and the REST
+/// API's write path (after the validator, before role-on-diff, design §8.4) both call it, so
+/// they cannot disagree. An `http` tool's origin is compared after `url::Url` normalisation
+/// (scheme and host lower-cased, default port dropped), the canonical form the config
+/// validation requires of every `http_origin_allowlist` entry.
 pub fn policy_violations(
     charter: &attache_charter::Charter,
     policy: Option<&PolicyConfig>,
@@ -818,6 +848,32 @@ fn is_embassy(username: &str, cp_namespace: &str) -> bool {
         .any(|sa| username == format!("system:serviceaccount:{cp_namespace}:{sa}"))
 }
 
+/// Changes an UPDATE makes to the annotations only embassy writes, one message each.
+fn protected_annotation_changes(req: &AdmissionRequest, object: &Value) -> Vec<String> {
+    if req.operation != "UPDATE" {
+        return Vec::new();
+    }
+    let read = |obj: Option<&Value>, name: &str| -> Option<Value> {
+        obj?.get("metadata")?.get("annotations")?.get(name).cloned()
+    };
+    let show = |v: &Option<Value>| v.as_ref().map_or("absent".to_string(), Value::to_string);
+    crate::k8s::store::PROTECTED_ANNOTATIONS
+        .iter()
+        .filter_map(|name| {
+            let old = read(req.old_object.as_ref(), name);
+            let new = read(Some(object), name);
+            (old != new).then(|| {
+                format!(
+                    "annotation {name} is written by embassy only ({} → {}); keep its current \
+                     value",
+                    show(&old),
+                    show(&new)
+                )
+            })
+        })
+        .collect()
+}
+
 /// The `/validate-charter` decision for one request, audited.
 pub async fn validate_charter(state: &WebhookState, req: &AdmissionRequest) -> Decision {
     if !matches!(req.operation.as_str(), "CREATE" | "UPDATE") {
@@ -835,8 +891,28 @@ pub async fn validate_charter(state: &WebhookState, req: &AdmissionRequest) -> D
     {
         meta.insert("namespace".into(), Value::String(ns.clone()));
     }
-    let (decision, result, reason) = match attache_charter::Charter::from_value(&object) {
-        Err(e) => {
+    let username = req.user_info.username.clone().unwrap_or_default();
+    let embassy = is_embassy(&username, &state.injector.cp_namespace);
+    let protected = if embassy {
+        Vec::new()
+    } else {
+        protected_annotation_changes(req, &object)
+    };
+    let checked = if protected.is_empty() {
+        attache_charter::Charter::from_value(&object).map_err(Some)
+    } else {
+        Err(None)
+    };
+    let (decision, result, reason) = match checked {
+        Err(None) => {
+            let p = protected.join("; ");
+            (
+                Decision::deny(403, format!("the Charter update is refused: {p}")),
+                CpResult::Denied,
+                p,
+            )
+        }
+        Err(Some(e)) => {
             let errors = match e {
                 attache_charter::CharterError::Invalid(list) => list.join("; "),
                 other => other.to_string(),
@@ -869,8 +945,7 @@ pub async fn validate_charter(state: &WebhookState, req: &AdmissionRequest) -> D
             }
         }
     };
-    let username = req.user_info.username.clone().unwrap_or_default();
-    if !is_embassy(&username, &state.injector.cp_namespace) {
+    if !embassy {
         let actor = Actor {
             name: format!(
                 "k8s:{}",
@@ -895,14 +970,12 @@ pub async fn validate_charter(state: &WebhookState, req: &AdmissionRequest) -> D
             .and_then(Value::as_str)
             .or(req.name.as_deref())
             .map(str::to_string);
+        // the version served before the change (embassy's status, not a user-written annotation)
         rec.from_version = req
             .old_object
             .as_ref()
-            .and_then(|o| o.get("metadata"))
-            .and_then(|m| m.get("annotations"))
-            .and_then(|a| a.get(crate::k8s::store::VERSION_ANNOTATION))
-            .and_then(Value::as_str)
-            .map(str::to_string);
+            .and_then(|o| crate::k8s::store::applied_version(o).ok().flatten())
+            .map(|v| v.to_string());
         rec.sha256_after = object.get("spec").map(crate::k8s::store::spec_sha256);
         let dry = if req.dry_run == Some(true) {
             " (dry run)"
@@ -1314,10 +1387,15 @@ mod tests {
     #[tokio::test]
     async fn a_valid_charter_is_admitted_and_audited() {
         let (st, mut rx) = state(None);
-        let mut req = charter_request(charter_cr(json!({})), "alice@example.com");
+        let annotations = json!({"attache.io/version": "4", "attache.io/spec-sha256": "ab"});
+        let mut new = charter_cr(json!({}));
+        new["metadata"]["annotations"] = annotations.clone();
+        let mut req = charter_request(new, "alice@example.com");
         req.operation = "UPDATE".into();
         let mut old = charter_cr(json!({}));
-        old["metadata"]["annotations"] = json!({"attache.io/version": "4"});
+        old["metadata"]["annotations"] = annotations;
+        // the version served before: embassy's status, not the annotation
+        old["status"] = json!({"appliedVersion": "4"});
         req.old_object = Some(old);
         let d = validate_charter(&st, &req).await;
         assert_eq!(d, Decision::allow());
@@ -1437,6 +1515,81 @@ mod tests {
         let mut del = charter_request(charter_cr(json!({})), "alice");
         del.operation = "DELETE".into();
         assert!(validate_charter(&st, &del).await.allowed);
+    }
+
+    #[tokio::test]
+    async fn only_embassy_may_change_the_version_annotations() {
+        let (st, mut rx) = state(None);
+        let with = |version: Option<&str>, hash: Option<&str>| {
+            let mut o = charter_cr(json!({}));
+            let mut a = Map::new();
+            if let Some(v) = version {
+                a.insert("attache.io/version".into(), json!(v));
+            }
+            if let Some(h) = hash {
+                a.insert("attache.io/spec-sha256".into(), json!(h));
+            }
+            o["metadata"]["annotations"] = Value::Object(a);
+            o
+        };
+        let update = |old: Value, new: Value, user: &str| {
+            let mut r = charter_request(new, user);
+            r.operation = "UPDATE".into();
+            r.old_object = Some(old);
+            r
+        };
+        let current = with(Some("3"), Some("h3"));
+        // an old export re-applied: the version goes back
+        let d = validate_charter(
+            &st,
+            &update(current.clone(), with(Some("1"), Some("h1")), "alice"),
+        )
+        .await;
+        assert!(!d.allowed);
+        let (code, msg) = d.status.unwrap();
+        assert_eq!(code, 403);
+        assert!(
+            msg.contains(
+                "annotation attache.io/version is written by embassy only (\"3\" → \"1\")"
+            ),
+            "{msg}"
+        );
+        assert!(msg.contains("attache.io/spec-sha256"), "{msg}");
+        let rec = rx.recv().await.unwrap();
+        assert_eq!(
+            (rec.action, rec.result, rec.actor.as_str()),
+            (CpAction::CrExternalEdit, CpResult::Denied, "k8s:alice")
+        );
+        // removing them (kubectl replace of a manifest without them) is a change too
+        let d = validate_charter(&st, &update(current.clone(), with(None, None), "alice")).await;
+        assert!(d.status.unwrap().1.contains("(\"3\" → absent)"));
+        // a spec change that keeps them is fine
+        let mut edited = current.clone();
+        edited["spec"]["agents"][0]["model"] = json!("claude-sonnet-5-5");
+        assert!(
+            validate_charter(&st, &update(current.clone(), edited, "alice"))
+                .await
+                .allowed
+        );
+        // embassy writes them
+        assert!(
+            validate_charter(
+                &st,
+                &update(
+                    current.clone(),
+                    with(Some("4"), Some("h4")),
+                    "system:serviceaccount:attache-system:embassy"
+                )
+            )
+            .await
+            .allowed
+        );
+        // a create may carry them (a restore; the store treats it as a new epoch)
+        assert!(
+            validate_charter(&st, &charter_request(with(Some("7"), Some("h7")), "velero"))
+                .await
+                .allowed
+        );
     }
 
     async fn post(app: Router, path: &str, body: Value) -> (StatusCode, Value) {

@@ -9,8 +9,16 @@
 //! | [`ca_bundle`] | `clientConfig.caBundle` of both webhook configurations, reconciled every 30 s |
 //!
 //! [`load_ca_secret`] reads `--ca-secret` (and creates the CA there on first start).
+//!
+//! **Integration (the `controlplane` component).** The `Charter` condition `Synced` (design
+//! §8.4: `Synced=False` lists pods and their `ConfigAck.error`) is fed by the control plane,
+//! which holds the store as `Arc<dyn Store>` (the [`Store`] trait has no ack hook): whenever a
+//! `ConfigAck` of kind `charter` arrives or an instance disconnects, it calls
+//! [`report_synced`] with the service's current `(pod, error)` failures (empty when every
+//! connected instance applied the stored version). For a store opened by [`open_store`] that
+//! sets the condition; for any other store it does nothing.
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 
 use anyhow::{Context, anyhow, bail};
 use k8s_openapi::ByteString;
@@ -19,7 +27,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
 use crate::ca::CaMaterial;
 use crate::serve::{Component, ServeArgs};
-use crate::store::Store;
+use crate::store::{ServiceKey, Store, StoreError};
 
 pub mod ca_bundle;
 pub mod client;
@@ -45,6 +53,48 @@ pub async fn open_store(args: &ServeArgs) -> anyhow::Result<Arc<dyn Store>> {
     Ok(store)
 }
 
+/// The Kubernetes stores of this process, by the address of their data, so that
+/// [`report_synced`] can reach [`KubeStore::set_synced`] through an `Arc<dyn Store>`.
+static KUBE_STORES: Mutex<Vec<(usize, Weak<KubeStore>)>> = Mutex::new(Vec::new());
+
+fn data_address<T: ?Sized>(arc: &Arc<T>) -> usize {
+    Arc::as_ptr(arc).cast::<()>() as usize
+}
+
+/// Make `store` reachable by [`report_synced`] (done by [`open_kube_store`]).
+pub fn register_kube_store(store: &Arc<KubeStore>) {
+    let mut stores = KUBE_STORES.lock().unwrap_or_else(|p| p.into_inner());
+    stores.retain(|(_, w)| w.strong_count() > 0);
+    stores.push((data_address(store), Arc::downgrade(store)));
+}
+
+fn kube_store_of(store: &Arc<dyn Store>) -> Option<Arc<KubeStore>> {
+    let address = data_address(store);
+    let stores = KUBE_STORES.lock().unwrap_or_else(|p| p.into_inner());
+    stores
+        .iter()
+        .filter(|(a, _)| *a == address)
+        .filter_map(|(_, w)| w.upgrade())
+        .find(|s| data_address(s) == address)
+}
+
+/// Condition `Synced` of `key` (design §8.4) for the control plane: `failures` are the
+/// `(pod, ConfigAck.error)` pairs of the service's connected instances that did not apply the
+/// stored charter, empty when all did. Sets the condition when `store` was opened by
+/// [`open_store`] / [`open_kube_store`] (or registered with [`register_kube_store`]); `Ok(())`
+/// without doing anything for any other store. Unchanged conditions are not rewritten, so it
+/// may be called on every ack.
+pub async fn report_synced(
+    store: &Arc<dyn Store>,
+    key: &ServiceKey,
+    failures: &[(String, String)],
+) -> Result<(), StoreError> {
+    match kube_store_of(store) {
+        Some(kube) => kube.set_synced(key, failures).await,
+        None => Ok(()),
+    }
+}
+
 /// [`open_store`] with the concrete type (for [`KubeStore::set_synced`]).
 pub async fn open_kube_store(args: &ServeArgs) -> anyhow::Result<Arc<KubeStore>> {
     let client = KubeClient::try_default()
@@ -63,7 +113,9 @@ pub async fn open_kube_store(args: &ServeArgs) -> anyhow::Result<Arc<KubeStore>>
     if args.has(Component::Controlplane) {
         store.spawn_watcher(client.client().clone());
     }
-    Ok(Arc::new(store))
+    let store = Arc::new(store);
+    register_kube_store(&store);
+    Ok(store)
 }
 
 /// The CA material in Secret `<namespace>/<name>` (`--ca-secret`, keys `ca.crt` and `ca.key`,

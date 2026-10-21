@@ -22,8 +22,12 @@
 //!
 //! The leaf has the URI SAN, the four DNS SANs, EKU serverAuth + clientAuth and the lifetime
 //! `issuance.workload_cert_ttl` ([`crate::ca::CaMaterial::sign_workload`]). Every issuance and
-//! refusal is a control-plane audit record (`cert_issue` / `cert_denied`) naming the identity,
-//! the pod or join token, and the public key's SHA-256 (`sha256_after`).
+//! refusal is a control-plane audit record (`cert_issue` / `cert_denied`) naming the identity
+//! (`namespace`, `service`), the pod or join token, and the public key's SHA-256
+//! (`sha256_after`). The actor of an issuance follows the `sidecar:<spiffe id>/<pod>` convention
+//! of design §7 (`sidecar:spiffe://attache/ns/<ns>/svc/<svc>/<pod>`, or `.../join:<token name>`
+//! for a join token); a refusal never names the identity that was asked for but only what the
+//! credential showed: `sidecar:pod:<ns>/<pod>`, `sidecar:join:<token name>` or `sidecar:unknown`.
 //!
 //! **Serving it.** In split mode (`embassy-ca`, no `controlplane` component) [`crate::ca_components`]
 //! serves [`issuance_service`] alone on `--grpc-addr`. When the `controlplane` component runs in
@@ -105,13 +109,22 @@ pub fn issuance_service(ctx: &ServeContext) -> anyhow::Result<CertificateAuthori
     Ok(issuer.into_server())
 }
 
+/// What a credential showed about its holder (the audit actor).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Caller {
+    /// A pod-bound Kubernetes token: the pod.
+    Pod { namespace: String, name: String },
+    /// A join token, by its `issuance.join_tokens` name.
+    Join { name: String },
+}
+
 /// A refusal: the gRPC status and what the audit record says.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Denial {
     code: Code,
     message: String,
-    /// The pod or `join:<token name>` when known.
-    who: Option<String>,
+    /// Who the credential showed the caller to be, when it showed anything.
+    who: Option<Caller>,
 }
 
 fn deny(code: Code, message: impl Into<String>) -> Denial {
@@ -124,31 +137,20 @@ fn deny(code: Code, message: impl Into<String>) -> Denial {
 
 /// What granted an identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Grant {
-    Kubernetes {
-        pod: String,
-        service_account: String,
-    },
-    Join {
-        name: String,
-    },
+struct Grant {
+    caller: Caller,
+    /// The pod's service account (Kubernetes tokens).
+    service_account: Option<String>,
 }
 
 impl Grant {
-    fn who(&self) -> String {
-        match self {
-            Grant::Kubernetes { pod, .. } => pod.clone(),
-            Grant::Join { name } => format!("join:{name}"),
-        }
-    }
-
     fn describe(&self) -> String {
-        match self {
-            Grant::Kubernetes {
-                pod,
-                service_account,
-            } => format!("kubernetes pod {pod}, service account {service_account}"),
-            Grant::Join { name } => format!("join token {name}"),
+        match (&self.caller, &self.service_account) {
+            (Caller::Pod { namespace, name }, sa) => format!(
+                "kubernetes pod {namespace}/{name}, service account {}",
+                sa.as_deref().unwrap_or("default")
+            ),
+            (Caller::Join { name }, _) => format!("join token {name}"),
         }
     }
 }
@@ -295,7 +297,9 @@ impl Issuer {
         let Some(entry) = found else {
             return Err(deny(Code::Unauthenticated, "unknown join token"));
         };
-        let who = Some(format!("join:{}", entry.name));
+        let who = Some(Caller::Join {
+            name: entry.name.clone(),
+        });
         let refuse = |message: String| Denial {
             code: Code::PermissionDenied,
             message,
@@ -320,8 +324,11 @@ impl Issuer {
                 entry.name
             )));
         }
-        Ok(Grant::Join {
-            name: entry.name.clone(),
+        Ok(Grant {
+            caller: Caller::Join {
+                name: entry.name.clone(),
+            },
+            service_account: None,
         })
     }
 
@@ -376,7 +383,10 @@ impl Issuer {
                  token with audience attache)",
             ));
         };
-        let who = Some(format!("{token_ns}/{pod_name}"));
+        let who = Some(Caller::Pod {
+            namespace: token_ns.to_string(),
+            name: pod_name.clone(),
+        });
         let refuse = |message: String| Denial {
             code: Code::PermissionDenied,
             message,
@@ -457,20 +467,31 @@ impl Issuer {
                 allowed.join(", ")
             )));
         }
-        Ok(Grant::Kubernetes {
-            pod: format!("{token_ns}/{pod_name}"),
-            service_account: pod_sa,
+        Ok(Grant {
+            caller: Caller::Pod {
+                namespace: token_ns.to_string(),
+                name: pod_name,
+            },
+            service_account: Some(pod_sa),
         })
     }
 
-    fn actor(namespace: &str, service: &str, who: Option<&str>) -> Actor {
-        let name = if is_dns_label(namespace) && is_dns_label(service) {
-            format!(
-                "sidecar:spiffe://attache/ns/{namespace}/svc/{service}/{}",
-                who.unwrap_or("unknown")
-            )
-        } else {
-            "sidecar:unknown".into()
+    /// The audit actor (module docs): the identity and pod (or join token) for an issuance;
+    /// for a refusal only what the credential showed, never the identity asked for.
+    fn actor(namespace: &str, service: &str, who: Option<&Caller>, issued: bool) -> Actor {
+        let name = match (who, issued) {
+            (Some(caller), true) if is_dns_label(namespace) && is_dns_label(service) => {
+                let slot = match caller {
+                    Caller::Pod { name, .. } => name.clone(),
+                    Caller::Join { name } => format!("join:{name}"),
+                };
+                format!("sidecar:spiffe://attache/ns/{namespace}/svc/{service}/{slot}")
+            }
+            (Some(Caller::Pod { namespace, name }), false) => {
+                format!("sidecar:pod:{namespace}/{name}")
+            }
+            (Some(Caller::Join { name }), false) => format!("sidecar:join:{name}"),
+            _ => "sidecar:unknown".into(),
         };
         Actor {
             name,
@@ -482,7 +503,7 @@ impl Issuer {
     async fn audit(
         &self,
         req: &CertificateRequest,
-        who: Option<&str>,
+        who: Option<&Caller>,
         key_sha256: Option<String>,
         result: Result<String, &Denial>,
     ) {
@@ -490,11 +511,8 @@ impl Issuer {
             Ok(reason) => (CpAction::CertIssue, CpResult::Ok, reason),
             Err(d) => (CpAction::CertDenied, CpResult::Denied, d.message.clone()),
         };
-        let mut rec = CpAudit::entry(
-            action,
-            &Self::actor(&req.namespace, &req.service, who),
-            outcome,
-        );
+        let actor = Self::actor(&req.namespace, &req.service, who, outcome == CpResult::Ok);
+        let mut rec = CpAudit::entry(action, &actor, outcome);
         if is_dns_label(&req.namespace) {
             rec.namespace = Some(req.namespace.clone());
         }
@@ -539,7 +557,7 @@ impl Issuer {
         let grant = match granted {
             Ok(g) => g,
             Err(d) => {
-                self.audit(&req, d.who.as_deref(), Some(key_sha), Err(&d))
+                self.audit(&req, d.who.as_ref(), Some(key_sha), Err(&d))
                     .await;
                 return Err(Status::new(d.code, d.message));
             }
@@ -554,9 +572,9 @@ impl Issuer {
                 let d = Denial {
                     code: Code::Internal,
                     message: format!("signing failed: {e:#}"),
-                    who: Some(grant.who()),
+                    who: Some(grant.caller.clone()),
                 };
-                self.audit(&req, d.who.as_deref(), Some(key_sha), Err(&d))
+                self.audit(&req, d.who.as_ref(), Some(key_sha), Err(&d))
                     .await;
                 return Err(Status::new(d.code, d.message));
             }
@@ -565,7 +583,7 @@ impl Issuer {
             DateTime::<Utc>::from(leaf.not_after).to_rfc3339_opts(SecondsFormat::Secs, true);
         self.audit(
             &req,
-            Some(&grant.who()),
+            Some(&grant.caller),
             Some(key_sha),
             Ok(format!("{}; expires {expires_at}", grant.describe())),
         )
@@ -822,9 +840,10 @@ mod tests {
         let rec = r.audit.recv().await.unwrap();
         assert_eq!(rec.action, CpAction::CertIssue);
         assert_eq!(rec.result, CpResult::Ok);
+        // design §7: sidecar:<spiffe id>/<pod>
         assert_eq!(
             rec.actor,
-            "sidecar:spiffe://attache/ns/shop/svc/orders/shop/orders-0"
+            "sidecar:spiffe://attache/ns/shop/svc/orders/orders-0"
         );
         assert_eq!(rec.actor_kind, ActorKind::Sidecar);
         assert_eq!(
@@ -1039,6 +1058,23 @@ mod tests {
             let rec = r.audit.recv().await.unwrap();
             assert_eq!(rec.action, CpAction::CertDenied, "{}", row.name);
             assert_eq!(rec.result, CpResult::Denied);
+            // a refusal is attributed to what the token showed, never to the identity asked for
+            let want_actor = match row.name {
+                "audience missing"
+                | "other audience"
+                | "not authenticated"
+                | "not a service account"
+                | "not bound to a pod" => "sidecar:unknown",
+                "token namespace" => "sidecar:pod:other/orders-0",
+                _ => "sidecar:pod:shop/orders-0",
+            };
+            assert_eq!(rec.actor, want_actor, "{}", row.name);
+            assert_eq!(
+                (rec.namespace.as_deref(), rec.service.as_deref()),
+                (Some("shop"), Some(row.request_service)),
+                "{}",
+                row.name
+            );
             assert_eq!(rec.reason.as_deref(), Some(err.message()), "{}", row.name);
             assert!(
                 rec.sha256_after.as_ref().is_some_and(|h| h.len() == 64),
@@ -1139,13 +1175,14 @@ mod tests {
                 .contains("join token compose-orders")
         );
 
-        for (ns, svc, token, code, reason) in [
+        for (ns, svc, token, code, reason, actor) in [
             (
                 "demo",
                 "inventory",
                 "att_join_orders",
                 Code::PermissionDenied,
                 "does not list service \"inventory\"",
+                "sidecar:join:compose-orders",
             ),
             (
                 "shop",
@@ -1153,6 +1190,7 @@ mod tests {
                 "att_join_orders",
                 Code::PermissionDenied,
                 "is for namespace \"demo\"",
+                "sidecar:join:compose-orders",
             ),
             (
                 "demo",
@@ -1160,6 +1198,7 @@ mod tests {
                 "att_join_old",
                 Code::PermissionDenied,
                 "expired",
+                "sidecar:join:old",
             ),
             (
                 "demo",
@@ -1167,6 +1206,7 @@ mod tests {
                 "att_join_unknown",
                 Code::Unauthenticated,
                 "unknown join token",
+                "sidecar:unknown",
             ),
         ] {
             let err = r.issuer.issue(join(ns, svc, token)).await.unwrap_err();
@@ -1174,6 +1214,7 @@ mod tests {
             assert!(err.message().contains(reason), "{}", err.message());
             let rec = r.audit.recv().await.unwrap();
             assert_eq!(rec.action, CpAction::CertDenied);
+            assert_eq!(rec.actor, actor, "{ns}/{svc} {token}");
         }
     }
 
@@ -1207,8 +1248,18 @@ mod tests {
             assert!(rec.sha256_after.is_none());
         }
         // a garbage name never reaches the audit record verbatim as an identity
-        let rec_actor = Issuer::actor("Bad NS", "x", Some("p"));
-        assert_eq!(rec_actor.name, "sidecar:unknown");
+        let pod = Caller::Pod {
+            namespace: "shop".into(),
+            name: "p".into(),
+        };
+        assert_eq!(
+            Issuer::actor("Bad NS", "x", Some(&pod), true).name,
+            "sidecar:unknown"
+        );
+        assert_eq!(
+            Issuer::actor("shop", "orders", None, true).name,
+            "sidecar:unknown"
+        );
     }
 
     #[tokio::test]

@@ -549,49 +549,108 @@ async fn a_decision_racing_a_spec_change_decides_again() {
 }
 
 #[tokio::test]
-async fn decided_proposals_are_trimmed_and_pending_ones_capped() {
+async fn the_status_stays_within_the_object_budget() {
     let r = rig();
     put(&r.store, Precondition::NotExists, "m").await;
+    let big = "x".repeat(100_000);
     let mk = |i: usize, status: ProposalStatus| {
         let mut p = proposal(
-            &format!("p{i}"),
-            &format!("2026-10-21T{:02}:{:02}:00.000Z", i / 60, i % 60),
+            &format!("p{i:02}"),
+            &format!("2026-10-21T10:00:{i:02}.000Z"),
             status,
         );
-        p.request_id = String::new();
+        p.rationale = big.clone();
         p
     };
-    for i in 0..(MAX_DECIDED_PROPOSALS + 5) {
+    let size = |r: &Rig| {
+        serde_json::to_vec(&r.cluster.charter("shop", "support").unwrap())
+            .unwrap()
+            .len()
+    };
+    // decided proposals are kept until the object would outgrow the budget...
+    for i in 0..20 {
         r.store
             .put_proposal(&mk(i, ProposalStatus::Rejected), Some(&format!("d{i}")))
             .await
             .unwrap();
+        assert!(size(&r) <= MAX_OBJECT_BYTES, "{}", size(&r));
     }
     let all = r
         .store
         .list_proposals(&ProposalFilter::default())
         .await
         .unwrap();
-    assert_eq!(all.len(), MAX_DECIDED_PROPOSALS);
-    assert_eq!(all.last().unwrap().id, "p5", "the oldest decided ones go");
-    for i in 0..MAX_PENDING_PROPOSALS {
-        r.store
+    assert!((10..20).contains(&all.len()), "{}", all.len());
+    // ...then the oldest go first
+    assert_eq!(all[0].id, "p19");
+    assert_eq!(all.last().unwrap().id, format!("p{:02}", 20 - all.len()));
+
+    // pending proposals are never dropped: they push the decided ones out, then are refused
+    let mut stored = 0;
+    let err = loop {
+        match r
+            .store
             .put_proposal(
-                &mk(500 + i, ProposalStatus::Pending),
-                Some(&format!("q{i}")),
+                &mk(30 + stored, ProposalStatus::Pending),
+                Some(&format!("q{stored}")),
             )
             .await
-            .unwrap();
-    }
+        {
+            Ok(_) => stored += 1,
+            Err(e) => break e,
+        }
+        assert!(stored < 20);
+    };
+    assert!(
+        matches!(err, StoreError::Invalid(ref m) if m[0].contains("pending proposals") && m[0].contains("more than")),
+        "{err:?}"
+    );
+    let all = r
+        .store
+        .list_proposals(&ProposalFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(all.len(), stored);
+    assert!(all.iter().all(|p| p.status == ProposalStatus::Pending));
+    assert!(size(&r) <= MAX_OBJECT_BYTES);
+    // memory writes that do not fit are refused the same way, before etcd would
+    let huge = Note {
+        id: "n".into(),
+        text: "y".repeat(200_000),
+        source: crate::store::NoteSource::Manual,
+        request_id: None,
+        trace_id: None,
+        approved_by: Some("alice".into()),
+        ts: "2026-10-21T10:00:00.000Z".into(),
+        expires_at: None,
+    };
     let e = r
         .store
-        .put_proposal(&mk(900, ProposalStatus::Pending), Some("full"))
+        .put_memory(
+            &key(),
+            "0",
+            BTreeMap::from([("support-agent".to_string(), vec![huge])]),
+            &alice(),
+        )
         .await
         .unwrap_err();
-    assert!(
-        matches!(e, StoreError::Invalid(ref m) if m[0].contains("pending proposals")),
-        "{e:?}"
-    );
+    assert!(matches!(e, StoreError::Invalid(_)), "{e:?}");
+    // bookkeeping is never refused, and deciding makes room again
+    r.store
+        .set_synced(&key(), &[("p".into(), "e".into())])
+        .await
+        .unwrap();
+    r.store
+        .reject_proposal(&key(), "p30", "0", &alice())
+        .await
+        .unwrap();
+    r.store
+        .put_proposal(
+            &proposal("small", "2026-10-21T10:00:59.000Z", ProposalStatus::Pending),
+            Some("again"),
+        )
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -924,6 +983,430 @@ async fn pending_adoptions_are_kept_in_memory() {
         a
     );
     assert!(r.store.list_pending_adoptions().await.unwrap().is_empty());
+}
+
+fn audits(events: &[StoreEvent]) -> Vec<&CpAuditRecord> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            StoreEvent::CpAudit(r) => Some(&**r),
+            _ => None,
+        })
+        .collect()
+}
+
+fn changed_to(events: &[StoreEvent]) -> Vec<(String, String, String)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            StoreEvent::CharterChanged {
+                epoch,
+                version,
+                actor,
+                ..
+            } => Some((epoch.clone(), version.clone(), actor.name.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_version_annotation_set_back_with_kubectl_never_reuses_a_version() {
+    let mut r = rig();
+    let first = put(&r.store, Precondition::NotExists, "m1").await;
+    let exported_v1 = r.cluster.charter("shop", "support").unwrap();
+    put(&r.store, Precondition::Version("1".into()), "m2").await;
+    put(&r.store, Precondition::Version("2".into()), "m3").await;
+    drain(&mut r.events);
+
+    // a kubectl edit that also sets the version annotation back (the validating webhook
+    // refuses that; the store does not rely on it)
+    r.cluster.kubectl("shop", "support", "kubectl-edit", |o| {
+        o["spec"]["agents"][0]["model"] = json!("m-kubectl");
+        o["metadata"]["annotations"][VERSION_ANNOTATION] = json!("1");
+    });
+    r.store
+        .observe(&r.cluster.charter("shop", "support").unwrap())
+        .await;
+    let got = r.store.get_charter(&key()).await.unwrap();
+    assert_eq!(
+        (got.version.as_str(), got.epoch.as_str()),
+        ("4", first.epoch.as_str())
+    );
+    assert_eq!(got.charter_json["agents"][0]["model"], "m-kubectl");
+    assert!(
+        r.store
+            .get_revision(&key(), "2")
+            .await
+            .unwrap()
+            .contains("m2")
+    );
+    let events = drain(&mut r.events);
+    assert_eq!(
+        changed_to(&events),
+        [(first.epoch.clone(), "4".into(), "k8s:kubectl-edit".into())]
+    );
+    let a = audits(&events);
+    assert_eq!(a.len(), 1);
+    assert_eq!(
+        (a[0].from_version.as_deref(), a[0].to_version.as_deref()),
+        (Some("3"), Some("4"))
+    );
+
+    // an old export re-applied whole (spec and annotations of version 1)
+    r.cluster
+        .kubectl("shop", "support", "kubectl-client-side-apply", |o| {
+            o["spec"] = exported_v1["spec"].clone();
+            o["metadata"]["annotations"] = exported_v1["metadata"]["annotations"].clone();
+        });
+    r.store
+        .observe(&r.cluster.charter("shop", "support").unwrap())
+        .await;
+    let got = r.store.get_charter(&key()).await.unwrap();
+    assert_eq!(got.version, "5");
+    assert_eq!(got.charter_json["agents"][0]["model"], "m1");
+    let events = drain(&mut r.events);
+    assert_eq!(
+        changed_to(&events),
+        [(
+            first.epoch.clone(),
+            "5".into(),
+            "k8s:kubectl-client-side-apply".into()
+        )]
+    );
+    assert_eq!(audits(&events).len(), 1);
+
+    // only the annotation changed (no new generation): what is served does not move
+    r.cluster
+        .kubectl("shop", "support", "kubectl-annotate", |o| {
+            o["metadata"]["annotations"][VERSION_ANNOTATION] = json!("2");
+        });
+    let obj = r.cluster.charter("shop", "support").unwrap();
+    assert!(!needs_processing(&obj));
+    r.store.observe(&obj).await;
+    assert!(drain(&mut r.events).is_empty());
+    let got = r.store.get_charter(&key()).await.unwrap();
+    assert_eq!(
+        (
+            got.version.as_str(),
+            &got.charter_json["agents"][0]["model"]
+        ),
+        ("5", &json!("m1"))
+    );
+    // and the next write goes above every version this epoch ever had
+    let next = put(&r.store, Precondition::Version("5".into()), "m6").await;
+    assert_eq!(next.version, "6");
+    let versions: Vec<String> = r
+        .store
+        .history(&key())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|h| h.version)
+        .collect();
+    assert_eq!(versions, ["6", "5", "4", "3", "2", "1"]);
+}
+
+#[tokio::test]
+async fn a_charter_recreated_with_its_old_annotations_is_a_new_epoch_and_audited() {
+    let mut r = rig();
+    let first = put(&r.store, Precondition::NotExists, "m1").await;
+    let exported_v1 = r.cluster.charter("shop", "support").unwrap();
+    put(&r.store, Precondition::Version("1".into()), "m2").await;
+    let exported_v2 = r.cluster.charter("shop", "support").unwrap();
+
+    for (export, manager, model) in [
+        (&exported_v2, "velero-server", "m2"),
+        // version 1's annotations look like embassy's own first write: they are not
+        (&exported_v1, "kubectl-client-side-apply", "m1"),
+    ] {
+        let gone = r.cluster.kubectl_delete("shop", "support").unwrap();
+        r.store.observe_deleted(&gone);
+        drain(&mut r.events);
+        // a restore or a re-applied export: spec and annotations, no status
+        r.cluster.kubectl("shop", "support", manager, |o| {
+            o["spec"] = export["spec"].clone();
+            o["metadata"]["annotations"] = export["metadata"]["annotations"].clone();
+        });
+        let obj = r.cluster.charter("shop", "support").unwrap();
+        assert!(needs_processing(&obj));
+        // nothing is served before it was validated
+        assert_eq!(r.store.get_charter(&key()).await, Err(StoreError::NotFound));
+        r.store.observe(&obj).await;
+
+        let got = r.store.get_charter(&key()).await.unwrap();
+        assert_ne!(got.epoch, first.epoch);
+        assert_eq!(got.version, "1", "{manager}");
+        assert_eq!(got.charter_json["agents"][0]["model"], model);
+        let history = r.store.history(&key()).await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].actor, format!("k8s:{manager}"));
+        let events = drain(&mut r.events);
+        assert_eq!(
+            changed_to(&events),
+            [(got.epoch.clone(), "1".into(), format!("k8s:{manager}"))]
+        );
+        let a = audits(&events);
+        assert_eq!(a.len(), 1, "{manager}: {events:?}");
+        assert_eq!(
+            (a[0].action, a[0].result, a[0].actor.as_str()),
+            (
+                CpAction::CrExternalEdit,
+                CpResult::Ok,
+                format!("k8s:{manager}").as_str()
+            )
+        );
+        assert_eq!(
+            (a[0].from_version.as_deref(), a[0].to_version.as_deref()),
+            (None, Some("1"))
+        );
+    }
+}
+
+#[tokio::test]
+async fn our_own_spec_write_whose_revision_was_lost_is_finished_and_pushed() {
+    let mut r = rig();
+    let first = put(&r.store, Precondition::NotExists, "m1").await;
+    drain(&mut r.events);
+    // embassy wrote version 2's spec and annotations, then stopped before the revision
+    let mut obj = r.cluster.charter("shop", "support").unwrap();
+    obj["spec"]["agents"][0]["model"] = json!("m2");
+    let hash = spec_sha256(&obj["spec"]);
+    set_annotations(&mut obj, 2, &hash);
+    let obj = r.cluster.replace("shop", "support", &obj).await.unwrap();
+    assert!(needs_processing(&obj));
+    assert_eq!(r.store.get_charter(&key()).await.unwrap().version, "1");
+
+    r.store.observe(&obj).await;
+    let got = r.store.get_charter(&key()).await.unwrap();
+    assert_eq!(
+        (
+            got.version.as_str(),
+            &got.charter_json["agents"][0]["model"]
+        ),
+        ("2", &json!("m2"))
+    );
+    assert_eq!(r.store.history(&key()).await.unwrap()[0].actor, "system");
+    // the served version moved, so subscribers hear of it; it is not an external edit
+    let events = drain(&mut r.events);
+    assert_eq!(
+        changed_to(&events),
+        [(first.epoch.clone(), "2".into(), "system".into())]
+    );
+    assert!(audits(&events).is_empty());
+    assert!(r.out.records().is_empty());
+}
+
+#[tokio::test]
+async fn an_existing_revision_is_never_overwritten() {
+    let r = rig();
+    put(&r.store, Precondition::NotExists, "m1").await;
+    let obj = r.cluster.charter("shop", "support").unwrap();
+    let other = Applied {
+        yaml: "other".into(),
+        actor: alice(),
+        source: ChangeSource::Api,
+        spec_sha256: "0".repeat(64),
+    };
+    let e = r
+        .store
+        .inner
+        .record_revision(&obj, &key(), 1, &other)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(e, StoreError::Io(ref m) if m.contains("exists with another spec")),
+        "{e:?}"
+    );
+    assert!(
+        r.store
+            .get_revision(&key(), "1")
+            .await
+            .unwrap()
+            .contains("m1")
+    );
+    // the same write again (a retry) is fine
+    let same = Applied {
+        yaml: "again".into(),
+        actor: alice(),
+        source: ChangeSource::Api,
+        spec_sha256: spec_sha256(&obj["spec"]),
+    };
+    r.store
+        .inner
+        .record_revision(&obj, &key(), 1, &same)
+        .await
+        .unwrap();
+    assert!(
+        r.store
+            .get_revision(&key(), "1")
+            .await
+            .unwrap()
+            .contains("m1")
+    );
+}
+
+#[tokio::test]
+async fn a_kubectl_edit_racing_our_status_write_stays_unobserved() {
+    let mut r = rig();
+    let first = put(&r.store, Precondition::NotExists, "m1").await;
+    // the edit lands between embassy's spec write and its status write
+    r.cluster
+        .kubectl_before_next_status_write("shop", "support", "kubectl-edit", |o| {
+            o["spec"]["agents"][0]["model"] = json!("m-kubectl");
+        });
+    let second = put(&r.store, Precondition::Version("1".into()), "m2").await;
+    assert_eq!(second.version, "2");
+    let obj = r.cluster.charter("shop", "support").unwrap();
+    let generation = obj["metadata"]["generation"].as_i64().unwrap();
+    assert_eq!(obj["status"]["appliedVersion"], "2");
+    assert_eq!(obj["status"]["observedGeneration"], json!(generation - 1));
+    assert_eq!(
+        condition(&obj, "Valid").observed_generation,
+        Some(generation - 1)
+    );
+    assert!(needs_processing(&obj), "the kubectl edit is still to do");
+    assert_eq!(
+        r.store.get_charter(&key()).await.unwrap().charter_json["agents"][0]["model"],
+        "m2"
+    );
+    drain(&mut r.events);
+
+    r.store.observe(&obj).await;
+    let got = r.store.get_charter(&key()).await.unwrap();
+    assert_eq!(
+        (
+            got.version.as_str(),
+            &got.charter_json["agents"][0]["model"]
+        ),
+        ("3", &json!("m-kubectl"))
+    );
+    let events = drain(&mut r.events);
+    assert_eq!(
+        changed_to(&events),
+        [(first.epoch.clone(), "3".into(), "k8s:kubectl-edit".into())]
+    );
+    assert_eq!(audits(&events).len(), 1);
+    assert!(!needs_processing(
+        &r.cluster.charter("shop", "support").unwrap()
+    ));
+}
+
+#[tokio::test]
+async fn an_edit_racing_the_invalid_mark_is_processed_too() {
+    let mut r = rig();
+    put(&r.store, Precondition::NotExists, "m1").await;
+    drain(&mut r.events);
+    r.cluster.kubectl("shop", "support", "kubectl-edit", |o| {
+        o["spec"]["agents"][0]["modle"] = json!("typo");
+    });
+    let invalid = r.cluster.charter("shop", "support").unwrap();
+    // the fix lands while embassy marks the typo invalid
+    r.cluster
+        .kubectl_before_next_status_write("shop", "support", "kubectl-edit", |o| {
+            let agent = o["spec"]["agents"][0].as_object_mut().unwrap();
+            agent.remove("modle");
+            agent.insert("model".into(), json!("m-fixed"));
+        });
+    r.store.observe(&invalid).await;
+
+    let obj = r.cluster.charter("shop", "support").unwrap();
+    assert!(!needs_processing(&obj));
+    assert_eq!(condition(&obj, "Valid").status, "True");
+    let got = r.store.get_charter(&key()).await.unwrap();
+    assert_eq!(
+        (
+            got.version.as_str(),
+            &got.charter_json["agents"][0]["model"]
+        ),
+        ("2", &json!("m-fixed"))
+    );
+    let events = drain(&mut r.events);
+    let results: Vec<CpResult> = audits(&events).iter().map(|a| a.result).collect();
+    assert_eq!(results, [CpResult::Invalid, CpResult::Ok]);
+}
+
+#[tokio::test]
+async fn report_synced_reaches_the_kubernetes_store_behind_dyn_store() {
+    let cluster = Arc::new(FakeCluster::new());
+    let kube = Arc::new(KubeStore::with_writer(
+        cluster.clone(),
+        Box::new(std::io::sink()),
+    ));
+    crate::k8s::register_kube_store(&kube);
+    put(&kube, Precondition::NotExists, "m").await;
+    let store: Arc<dyn Store> = kube.clone();
+    let failures = [(
+        "support-0".to_string(),
+        "config.invalid: tool x".to_string(),
+    )];
+    crate::k8s::report_synced(&store, &key(), &failures)
+        .await
+        .unwrap();
+    let obj = cluster.charter("shop", "support").unwrap();
+    let synced = condition(&obj, "Synced");
+    assert_eq!(synced.status, "False");
+    assert!(
+        synced
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("support-0: config.invalid")
+    );
+    // the same report again writes nothing
+    let status_writes = |c: &FakeCluster| {
+        c.calls()
+            .iter()
+            .filter(|c| c.starts_with("replace status"))
+            .count()
+    };
+    let before = status_writes(&cluster);
+    crate::k8s::report_synced(&store, &key(), &failures)
+        .await
+        .unwrap();
+    assert_eq!(status_writes(&cluster), before);
+    crate::k8s::report_synced(&store, &key(), &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        condition(&cluster.charter("shop", "support").unwrap(), "Synced").status,
+        "True"
+    );
+    // any other store: nothing happens
+    let other_cluster = Arc::new(FakeCluster::new());
+    let other: Arc<dyn Store> = Arc::new(KubeStore::with_writer(
+        other_cluster.clone(),
+        Box::new(std::io::sink()),
+    ));
+    crate::k8s::report_synced(&other, &key(), &failures)
+        .await
+        .unwrap();
+    assert!(other_cluster.calls().is_empty());
+}
+
+#[test]
+fn embassy_wrote_last_needs_a_strictly_newer_entry() {
+    let fields = |entries: Value| json!({"metadata": {"managedFields": entries}});
+    assert!(embassy_wrote_last(&fields(json!([
+        {"manager": "kubectl-edit", "time": "2026-10-21T10:00:00Z"},
+        {"manager": "embassy", "time": "2026-10-21T10:00:01Z"},
+        {"manager": "kubectl-edit", "time": "2026-10-21T10:00:05Z", "subresource": "status"}
+    ]))));
+    // a tie, kubectl newer, or no entry of embassy's
+    for entries in [
+        json!([{"manager": "kubectl-edit", "time": "2026-10-21T10:00:01Z"},
+               {"manager": "embassy", "time": "2026-10-21T10:00:01Z"}]),
+        json!([{"manager": "embassy", "time": "2026-10-21T10:00:01Z"},
+               {"manager": "kubectl-edit", "time": "2026-10-21T10:00:02Z"}]),
+        json!([{"manager": "velero-server", "time": "2026-10-21T10:00:01Z"}]),
+        json!([]),
+    ] {
+        assert!(!embassy_wrote_last(&fields(entries.clone())), "{entries}");
+    }
+    // a restored status whose observedGeneration is above the fresh generation is processed
+    assert!(needs_processing(
+        &json!({"metadata": {"generation": 1}, "status": {"observedGeneration": 7}})
+    ));
 }
 
 #[test]
