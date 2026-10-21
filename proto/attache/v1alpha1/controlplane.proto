@@ -19,6 +19,7 @@ message SidecarMessage {
     AuditBatch audit = 3;
     ConfigAck ack = 4;
     LearningProposal proposal = 5;
+    SpanStart span_start = 6;
   }
 }
 
@@ -55,6 +56,22 @@ message ConfigAck {
   bool applied = 3;
   string error = 4;
   string kind = 5;                  // charter | memory
+}
+
+// Sent when an invocation or a tool call starts, so the console can draw running work (design §6.4, §11.1).
+// Not an audit record: never written to the audit log or exported to OTel.
+message SpanStart {
+  string request_id = 1;
+  string trace_id = 2;
+  string span_id = 3;
+  string parent_span_id = 4;
+  string kind = 5;           // agent_invocation | agent_call | service_call | http_call
+  string agent = 6;
+  string caller = 7;
+  string caller_agent = 8;
+  string callee = 9;
+  string direction = 10;
+  string ts = 11;            // start time, RFC 3339 with milliseconds
 }
 
 message LearningProposal {

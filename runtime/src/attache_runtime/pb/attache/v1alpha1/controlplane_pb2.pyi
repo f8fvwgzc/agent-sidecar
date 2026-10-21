@@ -7,18 +7,20 @@ from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 DESCRIPTOR: _descriptor.FileDescriptor
 
 class SidecarMessage(_message.Message):
-    __slots__ = ("hello", "heartbeat", "audit", "ack", "proposal")
+    __slots__ = ("hello", "heartbeat", "audit", "ack", "proposal", "span_start")
     HELLO_FIELD_NUMBER: _ClassVar[int]
     HEARTBEAT_FIELD_NUMBER: _ClassVar[int]
     AUDIT_FIELD_NUMBER: _ClassVar[int]
     ACK_FIELD_NUMBER: _ClassVar[int]
     PROPOSAL_FIELD_NUMBER: _ClassVar[int]
+    SPAN_START_FIELD_NUMBER: _ClassVar[int]
     hello: Hello
     heartbeat: Heartbeat
     audit: AuditBatch
     ack: ConfigAck
     proposal: LearningProposal
-    def __init__(self, hello: _Optional[_Union[Hello, _Mapping]] = ..., heartbeat: _Optional[_Union[Heartbeat, _Mapping]] = ..., audit: _Optional[_Union[AuditBatch, _Mapping]] = ..., ack: _Optional[_Union[ConfigAck, _Mapping]] = ..., proposal: _Optional[_Union[LearningProposal, _Mapping]] = ...) -> None: ...
+    span_start: SpanStart
+    def __init__(self, hello: _Optional[_Union[Hello, _Mapping]] = ..., heartbeat: _Optional[_Union[Heartbeat, _Mapping]] = ..., audit: _Optional[_Union[AuditBatch, _Mapping]] = ..., ack: _Optional[_Union[ConfigAck, _Mapping]] = ..., proposal: _Optional[_Union[LearningProposal, _Mapping]] = ..., span_start: _Optional[_Union[SpanStart, _Mapping]] = ...) -> None: ...
 
 class Hello(_message.Message):
     __slots__ = ("service", "namespace", "pod", "sidecar_version", "charter_epoch", "charter_version", "charter_yaml", "app_port", "mesh_port", "charter_schema_level", "memory_version")
@@ -79,6 +81,32 @@ class ConfigAck(_message.Message):
     error: str
     kind: str
     def __init__(self, epoch: _Optional[str] = ..., version: _Optional[str] = ..., applied: _Optional[bool] = ..., error: _Optional[str] = ..., kind: _Optional[str] = ...) -> None: ...
+
+class SpanStart(_message.Message):
+    __slots__ = ("request_id", "trace_id", "span_id", "parent_span_id", "kind", "agent", "caller", "caller_agent", "callee", "direction", "ts")
+    REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    TRACE_ID_FIELD_NUMBER: _ClassVar[int]
+    SPAN_ID_FIELD_NUMBER: _ClassVar[int]
+    PARENT_SPAN_ID_FIELD_NUMBER: _ClassVar[int]
+    KIND_FIELD_NUMBER: _ClassVar[int]
+    AGENT_FIELD_NUMBER: _ClassVar[int]
+    CALLER_FIELD_NUMBER: _ClassVar[int]
+    CALLER_AGENT_FIELD_NUMBER: _ClassVar[int]
+    CALLEE_FIELD_NUMBER: _ClassVar[int]
+    DIRECTION_FIELD_NUMBER: _ClassVar[int]
+    TS_FIELD_NUMBER: _ClassVar[int]
+    request_id: str
+    trace_id: str
+    span_id: str
+    parent_span_id: str
+    kind: str
+    agent: str
+    caller: str
+    caller_agent: str
+    callee: str
+    direction: str
+    ts: str
+    def __init__(self, request_id: _Optional[str] = ..., trace_id: _Optional[str] = ..., span_id: _Optional[str] = ..., parent_span_id: _Optional[str] = ..., kind: _Optional[str] = ..., agent: _Optional[str] = ..., caller: _Optional[str] = ..., caller_agent: _Optional[str] = ..., callee: _Optional[str] = ..., direction: _Optional[str] = ..., ts: _Optional[str] = ...) -> None: ...
 
 class LearningProposal(_message.Message):
     __slots__ = ("dedup_key", "agent", "note", "rationale", "request_id", "trace_id", "auto")
