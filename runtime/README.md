@@ -31,10 +31,16 @@ model call under the harness:
 
 - attempts `1..max_retries+1` with the agent's model, retried only after `RateLimitError`,
   `InternalServerError`, `OverloadedError` (529), `APIConnectionError` / `APITimeoutError`, or an
-  `overloaded_error` the API sent mid-stream; never after any other 4xx;
+  `overloaded_error` the API sent mid-stream; never after any other 4xx. A read timeout or a broken
+  connection while the stream is read (the SDK lets its HTTP library's error through there) counts
+  as `APITimeoutError` / `APIConnectionError`;
 - between attempts it waits what `retry-after-ms` / `retry-after` asks, else 0.5 s × 2ⁿ (at most
   8 s); a wait that would end later than the Execute deadline − 0.5 s is not started;
-- each attempt's SDK timeout is `min(request_timeout_seconds, deadline − 0.5 s)`;
+- each attempt gets `min(request_timeout_seconds, deadline − 0.5 s)`: as the SDK timeout (connect,
+  each wait for the next chunk) and for the whole attempt — a stream still sending when that time is
+  up is closed at its next event and the attempt fails with `APITimeoutError`. The SDK swallows
+  `ping` events, so a stream that sends nothing but pings is only ended by the sidecar giving up on
+  the Execute;
 - after the last retryable failure, one attempt with `harness.fallback_model`, if set (no wait:
   it is another model).
 
@@ -60,11 +66,26 @@ Memory notes open the first user turn as their own text block:
 
 After the Execute response, a run is reflected on when learning is enabled for the agent, the
 caller is `local` (or a peer and `from_peers` is set), the run used a tool other than `load_skill`
-or ended `denied`/`error`, and the sidecar has not answered a `ReportEvent` of the run with
-trailing metadata `x-attache-rule: budget.max_cost_usd_per_day`. The reflection is one model call
-(reported as `model_call` under the invocation span) on a transcript with each entry cut to
-8 KiB; an answer other than `NONE` that fits `max_note_chars` goes to `SidecarTools.ProposeLesson`.
-At most two reflections run at once; a third is dropped.
+or ended `denied`/`error`, and the sidecar has not said the agent's daily cost budget is spent. The
+reflection is one model call (reported as `model_call` under the invocation span) on a transcript
+with each entry cut to 8 KiB; an answer other than `NONE` that fits `max_note_chars` goes to
+`SidecarTools.ProposeLesson`. At most two reflections run at once; a third is dropped.
+
+**The budget signal.** The runtime takes the daily cost budget as spent when the sidecar names
+`x-attache-rule: budget.max_cost_usd_per_day` on its answer to a `ReportEvent` of the run: in the
+response headers (what tonic sends for `Response::metadata`; a successful unary reply cannot carry
+custom trailers), in the trailers, or on an error status (e.g. `RESOURCE_EXHAUSTED`). Neither design
+§6.5 nor CONTRACT.md names this signal yet; it is the runtime's side of a channel still to be agreed
+with the sidecar.
+
+**A sidecar that keeps to design §6.5** accepts `ReportEvent` records only for an Execute still in
+flight, and the reflection's record comes after its Execute has returned (§12). When the sidecar
+refuses a reflection's record (`INVALID_ARGUMENT`, or rule `runtime.report_rejected`), the
+reflection's cost is not in the agent's budgets: the runtime logs it, proposes nothing, and starts
+no further reflection in this process. A run's own model call that the sidecar refuses (one that
+finished after its Execute was cancelled) is logged with its tokens and cost. Both need the sidecar
+to accept these records (e.g. keep a request id registered until its reflection and late calls have
+reported); until then learning does not get past such a sidecar.
 
 ## Mock model
 

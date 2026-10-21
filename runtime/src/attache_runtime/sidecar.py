@@ -9,7 +9,15 @@ from typing import Any
 import grpc
 
 from .pb.attache.v1alpha1 import runtime_pb2, runtime_pb2_grpc
-from .tools import CallContext, LessonOutcome, ToolDenied, ToolFailed, timeout_for
+from .tools import (
+    RULE_REPORT_REJECTED,
+    CallContext,
+    LessonOutcome,
+    ReportOutcome,
+    ToolDenied,
+    ToolFailed,
+    timeout_for,
+)
 
 log = logging.getLogger("attache-runtime")
 
@@ -24,15 +32,34 @@ REPORT_TIMEOUT = 10.0
 
 
 def _named_rule(md: Any) -> str | None:
-    """The `x-attache-rule` the sidecar put in a call's trailing metadata, if any."""
+    """The `x-attache-rule` in one set of a call's metadata, if any."""
     for key, value in md or ():
         if key == "x-attache-rule":
             return value if isinstance(value, str) else value.decode("utf-8", "replace")
     return None
 
 
+def _error_rule(err: grpc.aio.AioRpcError) -> str | None:
+    """The rule of a failed call. tonic sends an error status with its metadata as trailers, or as the
+    headers of a trailers-only response, which grpc-python may hand over as either."""
+    return _named_rule(err.trailing_metadata()) or _named_rule(err.initial_metadata())
+
+
 def _rule_of(err: grpc.aio.AioRpcError) -> str:
-    return _named_rule(err.trailing_metadata()) or "sidecar.error"
+    return _error_rule(err) or "sidecar.error"
+
+
+async def _answer_rule(call: Any) -> str | None:
+    """The rule on a successful call's answer: in its response headers (what tonic sends for
+    `Response::metadata`, since a successful unary reply cannot carry custom trailers), else its trailers."""
+    for read in ("initial_metadata", "trailing_metadata"):
+        try:
+            rule = _named_rule(await getattr(call, read)())
+        except (grpc.aio.AioRpcError, AttributeError, TypeError):
+            continue
+        if rule:
+            return rule
+    return None
 
 
 def _ctx(ctx: CallContext, tool: str) -> runtime_pb2.ToolContext:
@@ -102,19 +129,28 @@ class GrpcSidecar:
         resp = await self._call(self._stub.InvokeHttp(req, timeout=timeout_for(ctx, SERVICE_TIMEOUT)))
         return resp.status, resp.body
 
-    async def report_event(self, record: dict[str, Any]) -> str | None:
-        """Send one record; return the rule the sidecar attached to its answer (trailing metadata
-        `x-attache-rule`), e.g. `budget.max_cost_usd_per_day` once the agent's daily budget is spent."""
+    async def report_event(self, record: dict[str, Any]) -> ReportOutcome:
+        """Send one record. The answer carries the rule the sidecar named in `x-attache-rule` — e.g.
+        `budget.max_cost_usd_per_day` once the agent's daily cost budget is spent — on a successful
+        reply (headers or trailers) or on an error status; and whether the sidecar refused the record
+        (design §6.5: INVALID_ARGUMENT, rule `runtime.report_rejected`). Never raises: the audit sink is
+        the sidecar's job, and the agent does not fail on it."""
         call = self._stub.ReportEvent(runtime_pb2.AuditEvent(json=json.dumps(record)), timeout=REPORT_TIMEOUT)
         try:
             await call
-        except grpc.aio.AioRpcError as e:  # the audit sink is the sidecar's job; never fail the agent on it
-            log.warning("report_event failed: %s %s", e.code().name, e.details())
-            return _named_rule(e.trailing_metadata())
-        try:
-            return _named_rule(await call.trailing_metadata())
-        except (grpc.aio.AioRpcError, AttributeError, TypeError):
-            return None
+        except grpc.aio.AioRpcError as e:
+            rule = _error_rule(e)
+            rejected = e.code() == grpc.StatusCode.INVALID_ARGUMENT or rule == RULE_REPORT_REJECTED
+            log.warning(
+                "report_event %s: %s %s (rule %s, request %s)",
+                "rejected" if rejected else "failed",
+                e.code().name,
+                e.details(),
+                rule,
+                record.get("request_id"),
+            )
+            return ReportOutcome(rule, rejected)
+        return ReportOutcome(await _answer_rule(call))
 
     async def propose_lesson(self, ctx: CallContext, note: str, rationale: str, run_request_id: str) -> LessonOutcome:
         """Hand a lesson to the sidecar, which checks, scrubs, audits and forwards it (design §6.5)."""

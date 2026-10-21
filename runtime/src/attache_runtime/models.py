@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -310,21 +311,60 @@ class AnthropicModel:
         if supports_effort(self.name):
             # Budgets are small by design; keep reasoning short.
             kwargs["output_config"] = {"effort": "low"}
+        # `timeout` is the whole attempt's time (design §12). The SDK's timeout bounds the connect and each
+        # wait for the next chunk; the loop below ends a stream that is still sending when time is up, at
+        # its first event after that (the SDK swallows `ping` events, so pings alone do not end it).
+        ends = None if timeout is None else time.monotonic() + timeout
         if timeout is not None:
-            # Bounds the connect and each wait for the next chunk, not the whole stream.
             kwargs["timeout"] = timeout
         # Streaming, collected into one message: the SDK refuses large non-streaming max_tokens,
         # and a stream never hits the HTTP read timeout on a long turn.
         stream = None
         try:
             with self.client().messages.stream(**kwargs) as stream:
+                for _ in stream:
+                    if ends is not None and time.monotonic() > ends:
+                        raise _timed_out(stream)
                 resp = stream.get_final_message()
         except Exception as e:
-            raise ModelError(e, *_usage_so_far(stream)) from e
+            raise ModelError(_sdk_error(e, stream), *_usage_so_far(stream)) from e
         content = [b.model_dump(exclude_none=True) for b in resp.content]
         return ModelResponse(
             content, resp.stop_reason or "end_turn", resp.usage.input_tokens, resp.usage.output_tokens, raw=resp
         )
+
+
+def _request_of(stream: Any) -> Any:
+    try:
+        return stream.response.request
+    except (AttributeError, RuntimeError):
+        return None
+
+
+def _timed_out(stream: Any) -> Exception:
+    """The SDK's own timeout error for an attempt that ran out of time mid-stream (the harness retries
+    it like any APITimeoutError); the stream is closed on the way out."""
+    import anthropic
+
+    return anthropic.APITimeoutError(request=_request_of(stream))
+
+
+def _sdk_error(err: Exception, stream: Any) -> Exception:
+    """A transport failure while reading the stream (a read timeout, a dropped connection), which the SDK
+    lets through from its HTTP library, as the SDK class it raises for the same failure before the
+    response: APITimeoutError or APIConnectionError. Anything else unchanged."""
+    import anthropic
+
+    names = {c.__name__ for c in type(err).__mro__}
+    if isinstance(err, anthropic.APIError) or "TransportError" not in names:
+        return err
+    request = _request_of(stream)
+    if "TimeoutException" in names:
+        mapped: Exception = anthropic.APITimeoutError(request=request)
+    else:
+        mapped = anthropic.APIConnectionError(message=f"{type(err).__name__}: {err}", request=request)
+    mapped.__cause__ = err
+    return mapped
 
 
 def _usage_so_far(stream: Any) -> tuple[int, int]:

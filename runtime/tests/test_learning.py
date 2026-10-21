@@ -13,13 +13,21 @@ import pytest
 
 from attache_runtime import learning
 from attache_runtime.agent import ExecuteResult, run_agent
-from attache_runtime.learning import Learner, Reflection, parse_note, reflect, should_reflect, transcript
+from attache_runtime.learning import (
+    Learner,
+    Reflection,
+    ReflectionRefused,
+    parse_note,
+    reflect,
+    should_reflect,
+    transcript,
+)
 from attache_runtime.models import MockModel, ModelError, ModelResponse
 from attache_runtime.pb.attache.v1alpha1 import common_pb2, runtime_pb2
 from attache_runtime.prompts import REFLECTION_MARKER
 from attache_runtime.server import RuntimeServicer
 from attache_runtime.sidecar import GrpcSidecar
-from attache_runtime.tools import RULE_COST_BUDGET, CallContext, LessonOutcome
+from attache_runtime.tools import RULE_COST_BUDGET, RULE_REPORT_REJECTED, CallContext, LessonOutcome, ReportOutcome
 
 
 @pytest.fixture
@@ -277,6 +285,63 @@ def test_a_crashing_reflection_does_not_escape(learner_spec, sidecar, ctx, monke
     asyncio.run(go())
 
 
+# --- a sidecar that keeps to design §6.5 -----------------------------------------------------------
+
+
+def finished_run(spec, ctx, sidecar, model=None) -> ExecuteResult:
+    """A run whose records the sidecar took while its Execute was in flight; then the Execute returns."""
+    sidecar.in_flight = {ctx.request_id}
+    res = run(spec, "How many WIDGET-1 in stock?", ctx, sidecar, model)
+    assert res.status == "ok" and sidecar.rejected == [] and len(sidecar.events) == 2
+    sidecar.in_flight = set()  # the Execute has returned: §6.5 refuses its request id from now on
+    return res
+
+
+def test_a_refused_reflection_record_proposes_nothing(learner_spec, sidecar, ctx, caplog):
+    res = finished_run(learner_spec, ctx, sidecar)
+    with pytest.raises(ReflectionRefused) as info:
+        asyncio.run(reflect(job(learner_spec, ctx, sidecar, res)))
+    assert info.value.rule == RULE_REPORT_REJECTED
+    [refused] = sidecar.rejected
+    assert refused["input"]["system"].startswith(REFLECTION_MARKER) and refused["request_id"] == ctx.request_id
+    assert sidecar.lessons == [], "its cost is not in the budgets: the note is not proposed"
+    assert "not counted in the agent's budgets" in caplog.text
+
+
+def test_a_refused_record_of_a_failed_reflection_is_refused_too(learner_spec, sidecar, ctx):
+    model = Answer(ConnectionError("reset"))
+    res = finished_run(learner_spec, ctx, sidecar, model)
+    with pytest.raises(ReflectionRefused):
+        asyncio.run(reflect(job(learner_spec, ctx, sidecar, res, model)))
+    assert [r["error"] for r in sidecar.rejected] == ["reset"] and sidecar.lessons == []
+
+
+def test_after_a_refused_reflection_the_learner_starts_no_more(learner_spec, sidecar, ctx, caplog):
+    res = finished_run(learner_spec, ctx, sidecar)
+
+    async def go() -> list[bool]:
+        learner = Learner()
+        assert learner.after_run(job(learner_spec, ctx, sidecar, res))
+        await learner.drain()
+        assert learner.halted == RULE_REPORT_REJECTED
+        # Every further reflection would be spend outside the budgets and another report_rejected denial.
+        later = [learner.after_run(job(learner_spec, ctx, sidecar, res)) for _ in range(3)]
+        assert learner.active == 0 and learner.dropped == 0
+        return later
+
+    assert asyncio.run(go()) == [False, False, False]
+    assert len(sidecar.rejected) == 1 and sidecar.lessons == []
+    assert "reflections stopped for this process" in caplog.text
+
+
+def test_a_run_record_the_sidecar_refuses_is_logged_with_its_cost(learner_spec, sidecar, ctx, caplog):
+    sidecar.in_flight = set()  # e.g. a model call that finished after its Execute was cancelled
+    res = run(learner_spec, "How many WIDGET-1 in stock?", ctx, sidecar, MockModel("claude-opus-5-5"))
+    assert res.status == "ok" and len(sidecar.rejected) == 2 and sidecar.events == []
+    assert caplog.text.count("not counted in the agent's budgets") == 2
+    assert f"request={ctx.request_id}" in caplog.text
+
+
 # --- the Execute handler ------------------------------------------------------------------------
 
 
@@ -377,10 +442,10 @@ def test_grpc_propose_lesson():
 
 
 class Call:
-    """A grpc.aio unary call: awaitable, with trailing metadata."""
+    """A grpc.aio unary call: awaitable, with the metadata of its answer (headers and trailers)."""
 
-    def __init__(self, md: Any = None, error: Exception | None = None) -> None:
-        self.md, self.error = md, error
+    def __init__(self, trailers: Any = None, error: Exception | None = None, headers: Any = None) -> None:
+        self.trailers, self.error, self.headers = trailers, error, headers
 
     def __await__(self):
         async def done():
@@ -390,21 +455,40 @@ class Call:
 
         return done().__await__()
 
+    async def initial_metadata(self):
+        return self.headers
+
     async def trailing_metadata(self):
-        return self.md
+        return self.trailers
+
+
+def rule_md(rule: str) -> grpc.aio.Metadata:
+    return grpc.aio.Metadata(("x-attache-rule", rule))
 
 
 @pytest.mark.parametrize(
     "call,expected",
     [
-        (Call(grpc.aio.Metadata(("x-attache-rule", RULE_COST_BUDGET))), RULE_COST_BUDGET),
-        (Call(grpc.aio.Metadata()), None),
-        (Call(None), None),
-        (Call(error=rpc_error(grpc.StatusCode.RESOURCE_EXHAUSTED, RULE_COST_BUDGET)), RULE_COST_BUDGET),
-        (Call(error=rpc_error(grpc.StatusCode.INVALID_ARGUMENT, "runtime.report_rejected")), "runtime.report_rejected"),
+        # tonic sends `Response::metadata` as the response headers: a successful unary reply has no custom trailers.
+        (Call(headers=rule_md(RULE_COST_BUDGET)), ReportOutcome(RULE_COST_BUDGET)),
+        (Call(trailers=rule_md(RULE_COST_BUDGET)), ReportOutcome(RULE_COST_BUDGET)),
+        (Call(grpc.aio.Metadata(), headers=grpc.aio.Metadata()), ReportOutcome()),
+        (Call(None), ReportOutcome()),
+        (Call(error=rpc_error(grpc.StatusCode.RESOURCE_EXHAUSTED, RULE_COST_BUDGET)), ReportOutcome(RULE_COST_BUDGET)),
+        (Call(error=rpc_error(grpc.StatusCode.UNAVAILABLE)), ReportOutcome()),
+        # Design §6.5: a record the sidecar will not take.
+        (
+            Call(error=rpc_error(grpc.StatusCode.INVALID_ARGUMENT, RULE_REPORT_REJECTED)),
+            ReportOutcome(RULE_REPORT_REJECTED, rejected=True),
+        ),
+        (Call(error=rpc_error(grpc.StatusCode.INVALID_ARGUMENT)), ReportOutcome(None, rejected=True)),
+        (
+            Call(error=grpc.aio.AioRpcError(grpc.StatusCode.INVALID_ARGUMENT, rule_md(RULE_REPORT_REJECTED), None)),
+            ReportOutcome(RULE_REPORT_REJECTED, rejected=True),
+        ),
     ],
 )
-def test_grpc_report_event_returns_the_sidecars_rule(call, expected):
+def test_grpc_report_event_returns_the_sidecars_answer(call, expected):
     sent = {}
 
     class Stub:

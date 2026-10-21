@@ -5,6 +5,12 @@ ended `denied`/`error` gets one reflection model call, if the agent has learning
 answer is `NONE` or one note; a note goes to the sidecar with `SidecarTools.ProposeLesson`, which
 checks, scrubs, audits and forwards it — the runtime never writes memory itself. Reflections run in
 the background, at most two at a time per process; a run that finds both slots busy is not reflected on.
+
+The reflection's `model_call` record is what counts its cost in the agent's budgets. It carries the
+run's request id but reaches the sidecar after that Execute has returned, and design §6.5 has the
+sidecar accept ReportEvent records only for an Execute still in flight. A sidecar that refuses the
+record has not counted the cost, so the note is not proposed and this process reflects no more:
+every further reflection would be spend outside the budgets (and a `runtime.report_rejected` denial).
 """
 
 from __future__ import annotations
@@ -17,11 +23,11 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from .agent import ExecuteResult, model_call_record
+from .agent import ExecuteResult, model_call_record, warn_unreported
 from .models import Model, ModelError
 from .prompts import NONE, TRANSCRIPT_CLOSE, TRANSCRIPT_OPEN, reflection_system
 from .spec import LOAD_SKILL_TOOL, AgentSpec
-from .tools import CallContext, SidecarClient
+from .tools import RULE_REPORT_REJECTED, CallContext, ReportOutcome, SidecarClient
 
 log = logging.getLogger("attache-runtime")
 
@@ -138,6 +144,14 @@ def _ms(started: float) -> int:
     return int((time.monotonic() - started) * 1000)
 
 
+class ReflectionRefused(Exception):
+    """The sidecar refused the reflection's `model_call` record, so its cost is not in the budgets."""
+
+    def __init__(self, rule: str | None) -> None:
+        super().__init__(f"the sidecar refused the reflection's model_call record (rule {rule})")
+        self.rule = rule
+
+
 async def _report(
     job: Reflection,
     system: str,
@@ -149,7 +163,8 @@ async def _report(
     latency_ms: int,
     error: str | None = None,
 ) -> None:
-    """The reflection's `model_call` record: the run's request and trace, parent = the invocation span."""
+    """Report the reflection's `model_call` record: the run's request and trace, parent = the
+    invocation span. Raises ReflectionRefused when the sidecar refuses it."""
     record = model_call_record(
         job.spec,
         job.ctx,
@@ -166,12 +181,16 @@ async def _report(
         latency_ms,
         error=error,
     )
-    await job.sidecar.report_event(record)
+    outcome = await job.sidecar.report_event(record)
+    if isinstance(outcome, ReportOutcome) and outcome.rejected:
+        warn_unreported(record, outcome)
+        raise ReflectionRefused(outcome.rule)
 
 
 async def reflect(job: Reflection) -> str | None:
     """One reflection: the model call (reported as a `model_call` under the invocation span, so it
-    counts toward the budgets) and, for a note, ProposeLesson. Returns the note proposed, if any."""
+    counts toward the budgets) and, for a note, ProposeLesson. Returns the note proposed, if any.
+    Raises ReflectionRefused, before any ProposeLesson, when the sidecar refuses the model_call record."""
     spec, ctx = job.spec, job.ctx
     system = reflection_system(spec.learning.max_note_chars)
     messages = [{"role": "user", "content": transcript(spec, job.result, job.caller)}]
@@ -211,6 +230,8 @@ class Learner:
     def __init__(self, max_concurrent: int = MAX_CONCURRENT) -> None:
         self.max_concurrent = max_concurrent
         self.dropped = 0
+        # Set once the sidecar refuses a reflection's model_call record; no reflection starts after that.
+        self.halted: str | None = None
         self._tasks: set[asyncio.Task[Any]] = set()
 
     @property
@@ -218,8 +239,9 @@ class Learner:
         return len(self._tasks)
 
     def after_run(self, job: Reflection) -> bool:
-        """Start the reflection on a finished run if it qualifies and a slot is free. Never waits."""
-        if not should_reflect(job.spec, job.result, job.caller):
+        """Start the reflection on a finished run if it qualifies, the sidecar has not refused a
+        reflection's record, and a slot is free. Never waits."""
+        if self.halted is not None or not should_reflect(job.spec, job.result, job.caller):
             return False
         return self.submit(job)
 
@@ -241,6 +263,18 @@ class Learner:
     async def _run(self, job: Reflection) -> None:
         try:
             await reflect(job)
+        except ReflectionRefused as e:
+            if self.halted is None:
+                log.error(
+                    "reflections stopped for this process: %s for agent=%s request=%s, so its cost is not "
+                    "counted in the budgets and its note was not proposed. The sidecar accepts ReportEvent "
+                    "records only while their Execute is in flight (design §6.5), and a reflection runs "
+                    "after it has returned (§12).",
+                    e,
+                    job.spec.name,
+                    job.ctx.request_id,
+                )
+            self.halted = e.rule or RULE_REPORT_REJECTED
         except Exception:  # a reflection never takes the runtime down
             log.exception("reflection crashed agent=%s request=%s", job.spec.name, job.ctx.request_id)
 

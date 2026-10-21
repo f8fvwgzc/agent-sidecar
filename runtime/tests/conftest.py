@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 from attache_runtime.spec import AgentSpec
-from attache_runtime.tools import CallContext, LessonOutcome, ToolDenied
+from attache_runtime.tools import RULE_REPORT_REJECTED, CallContext, LessonOutcome, ReportOutcome, ToolDenied
 
 STOCK = {"sku": "WIDGET-1", "on_hand": 42, "reorder_point": 50, "warehouse_contact": "ops-lead@example.com"}
 
@@ -20,6 +20,9 @@ class FakeSidecar:
         self.contexts: list[CallContext] = []  # the ToolContext of every tool call
         self.lessons: list[tuple[CallContext, str, str, str]] = []
         self.report_rule: str | None = None  # what ReportEvent answers with (x-attache-rule)
+        # Set: ReportEvent keeps to design §6.5 and refuses records of an Execute not in this set.
+        self.in_flight: set[str] | None = None
+        self.rejected: list[dict[str, Any]] = []
         self.lesson_outcome = LessonOutcome("allow", "learning.proposed", "")
 
     async def invoke_service(self, ctx: CallContext, tool: str, service: str, method: str, path: str, headers, body):
@@ -45,9 +48,12 @@ class FakeSidecar:
         self.calls.append(("http", (tool, method, url, body)))
         return 200, b'{"ok": true}'
 
-    async def report_event(self, record: dict[str, Any]) -> str | None:
+    async def report_event(self, record: dict[str, Any]) -> ReportOutcome:
+        if self.in_flight is not None and record.get("request_id") not in self.in_flight:
+            self.rejected.append(record)
+            return ReportOutcome(RULE_REPORT_REJECTED, rejected=True)
         self.events.append(record)
-        return self.report_rule
+        return ReportOutcome(self.report_rule)
 
     async def propose_lesson(self, ctx: CallContext, note: str, rationale: str, run_request_id: str) -> LessonOutcome:
         self.lessons.append((ctx, note, rationale, run_request_id))

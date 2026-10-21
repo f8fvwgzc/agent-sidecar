@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -20,7 +21,9 @@ from .harness import RETRY_AFTER_CAP_NO_DEADLINE, is_retryable, retry_delay
 from .models import Model, ModelError, ModelResponse
 from .prompts import load_skill_tool, notes_block, system_prompt
 from .spec import LOAD_SKILL_TOOL, AgentSpec
-from .tools import HOP_MARGIN, RULE_COST_BUDGET, CallContext, SidecarClient, run_tool, timeout_for
+from .tools import HOP_MARGIN, RULE_COST_BUDGET, CallContext, ReportOutcome, SidecarClient, run_tool, timeout_for
+
+log = logging.getLogger("attache-runtime")
 
 # The `error` of a model_call whose Execute was cancelled while it ran (cf. audit.rs CANCELLED).
 CANCELLED = "cancelled: the caller went away or its deadline passed before this output was used"
@@ -201,26 +204,43 @@ async def _model_turn(
         turn = _Turn(resp, None, resp.input_tokens, resp.output_tokens, _ms(started))
         content, stop_reason = resp.content, resp.stop_reason
         error = CANCELLED if abandoned.is_set() else None
-    rule = await sidecar.report_event(
-        model_call_record(
-            spec,
-            ctx,
-            caller,
-            caller_agent,
-            model,
-            system,
-            messages,
-            tools,
-            content,
-            stop_reason,
-            turn.input_tokens,
-            turn.output_tokens,
-            turn.latency_ms,
-            error=error,
-        )
+    record = model_call_record(
+        spec,
+        ctx,
+        caller,
+        caller_agent,
+        model,
+        system,
+        messages,
+        tools,
+        content,
+        stop_reason,
+        turn.input_tokens,
+        turn.output_tokens,
+        turn.latency_ms,
+        error=error,
     )
-    turn.sidecar_rule = rule if isinstance(rule, str) else None
+    outcome = await sidecar.report_event(record)
+    turn.sidecar_rule = outcome.rule if isinstance(outcome, ReportOutcome) else None
+    if isinstance(outcome, ReportOutcome) and outcome.rejected:
+        warn_unreported(record, outcome)
     return turn
+
+
+def warn_unreported(record: dict[str, Any], outcome: ReportOutcome) -> None:
+    """Log a model call the sidecar refused to record: the provider bills it, but the agent's budgets
+    never see it. A sidecar that keeps to design §6.5 refuses records of an Execute no longer in flight,
+    e.g. a call that finished after its Execute was cancelled."""
+    log.warning(
+        "the sidecar refused the model_call record of agent=%s request=%s (rule %s): %s input and %s output "
+        "tokens, $%s, are not counted in the agent's budgets",
+        record.get("agent"),
+        record.get("request_id"),
+        outcome.rule,
+        (record.get("tokens") or {}).get("input"),
+        (record.get("tokens") or {}).get("output"),
+        record.get("cost_usd"),
+    )
 
 
 def _ms(started: float) -> int:

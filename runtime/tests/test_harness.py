@@ -343,6 +343,65 @@ def test_a_400_from_the_wire_is_final(ops_assistant, sidecar, ctx, waits):
     assert res.status == "error" and res.reason.startswith("BadRequestError") and len(sidecar.events) == 1
 
 
+def slow_sse(events: list[tuple[str, Any]], then: list[tuple[str, Any]], gap: float, fail: Exception | None = None):
+    """An SSE response that sends `events` at once, then each of `then` after `gap` seconds; and
+    then raises `fail`, if given, the way the HTTP library does when the connection breaks."""
+
+    def body():
+        for name, data in events:
+            yield f"event: {name}\ndata: {json.dumps(data)}\n\n".encode()
+        for name, data in then:
+            time.sleep(gap)
+            yield f"event: {name}\ndata: {json.dumps(data)}\n\n".encode()
+        if fail is not None:
+            raise fail
+
+    return httpx2.Response(200, headers={"content-type": "text/event-stream"}, content=body())
+
+
+DELTA = STREAM[2]
+
+
+def test_an_attempt_that_keeps_streaming_ends_when_its_time_is_up():
+    """The per-attempt timeout caps the whole attempt, not only each wait for the next chunk."""
+    model = AnthropicModel("claude-opus-5-5", client=sdk_client([slow_sse(STREAM[:2], [DELTA] * 100, 0.02)]))
+    started = time.monotonic()
+    with pytest.raises(ModelError) as info:
+        model.complete("sys", [{"role": "user", "content": "x"}], [], 64, timeout=0.3)
+    took = time.monotonic() - started
+    assert isinstance(info.value.cause, anthropic.APITimeoutError) and harness.is_retryable(info.value)
+    assert 0.3 <= took < 1.0, "cut at its first event after 0.3 s, not after the 2 s the stream would take"
+    assert (info.value.input_tokens, info.value.output_tokens) == (11, 1), "billed from message_start on"
+
+
+def test_no_attempt_runs_past_the_deadline_while_the_stream_keeps_coming(ops_assistant, sidecar, ctx, waits):
+    ctx.deadline = time.monotonic() + 1.2  # 0.7 s for the attempt, no room for a retry after it
+    model = AnthropicModel("claude-opus-5-5", client=sdk_client([slow_sse(STREAM[:2], [DELTA] * 200, 0.02)]))
+    res = asyncio.run(run_agent(ops_assistant, "hi", "", ctx, model, sidecar))
+    assert time.monotonic() < ctx.deadline - HOP_MARGIN + 0.3, "not the 4 s the stream would take"
+    assert res.status == "error" and res.reason.startswith("APITimeoutError") and waits == []
+    assert [s.summary for s in res.steps] == ["attempt 1/3: error APITimeoutError"]
+
+
+@pytest.mark.parametrize(
+    "broken,expected",
+    [
+        (httpx2.ReadTimeout("read timed out", request=REQ), anthropic.APITimeoutError),
+        (httpx2.RemoteProtocolError("peer closed connection", request=REQ), anthropic.APIConnectionError),
+    ],
+)
+def test_a_stream_broken_by_the_network_is_retried(ops_assistant, sidecar, ctx, waits, broken, expected):
+    """The SDK raises its connection and timeout errors only before the response; mid-stream the HTTP
+    library's own errors come through, and the model call reports them as the SDK classes."""
+    client = sdk_client([slow_sse(STREAM[:3], [], 0, fail=broken), sse(STREAM)])
+    res = asyncio.run(
+        run_agent(ops_assistant, "hi", "", ctx, AnthropicModel("claude-opus-5-5", client=client), sidecar)
+    )
+    assert res.status == "ok" and res.output == "hi" and waits == [0.5]
+    assert [s.summary for s in res.steps] == [f"attempt 1/3: error {expected.__name__}", "attempt 2/3: stop=end_turn"]
+    assert sidecar.events[0]["tokens"] == {"input": 11, "output": 1}
+
+
 # --- one client per process ---------------------------------------------------------------------
 
 
@@ -369,6 +428,9 @@ def test_the_process_wide_client_can_be_injected():
 
         def __exit__(self, *a):
             return False
+
+        def __iter__(self):
+            return iter(())
 
         def get_final_message(self):
             raise status_error(anthropic.RateLimitError, 429)
