@@ -1,17 +1,45 @@
 //! `embassy serve` (design §8.1): the flags, their validation, and the wiring of the components.
 //!
-//! [`run`] is the entry point. Today it validates the flags, loads and validates the
-//! `ControlPlaneConfig`, and stops with a "not implemented yet" error: the components are wired
-//! here by the control-plane units (B3a: `controlplane`, `api`, `ui`; B3b: `ca`, `webhook`).
+//! [`run`] is the entry point: it validates the flags and the `ControlPlaneConfig`, builds the
+//! [`ServeContext`], starts the `ca` and `webhook` components through
+//! [`crate::ca_components::spawn`], and the `controlplane` (`Connect` on `--grpc-addr`), `api`
+//! and `ui` (on `--http-addr`) components here, then runs until a signal or a failing component.
+//!
+//! - `--config` is reloaded when the file changes (polled every [`CONFIG_POLL`]); a changed file
+//!   that does not validate is logged and the running config stays.
+//! - `--dev` writes a one-time admin token (`dev-admin`) to a 0600 file (`<store dir>/.dev-admin-token`
+//!   with the file store) and honours `auth.anonymous: viewer`.
+//! - `--http-tls` serves `--http-addr` with the serving certificate; session cookies are then
+//!   `Secure`.
+//! - When `ca` and `controlplane` both run they share `--grpc-addr`: `Connect` is served with
+//!   optional client certificates there (it still refuses a stream without a verified one), and
+//!   [`crate::controlplane::serve`] takes the `IssueCertificate` routes as `extra`.
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, bail};
+use arc_swap::ArcSwap;
 use clap::Args;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::ControlPlaneConfig;
+use crate::context::ServeContext;
+use crate::cp_audit::CpAudit;
+use crate::hub::{Hub, HubOptions};
 use crate::names::{ObjectRef, is_dns_label, is_dns_subdomain};
+use crate::servingcert::{ClientAuth, ServingCertSource};
+use crate::store::Store;
+
+pub mod tls;
+
+/// How often `--config` is looked at.
+pub const CONFIG_POLL: Duration = Duration::from_secs(2);
+/// How long running components get to stop.
+pub const STOP_GRACE: Duration = Duration::from_secs(10);
 
 /// One component of `embassy serve --components` (design §2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -312,7 +340,7 @@ impl ServeArgs {
     }
 }
 
-/// Run `embassy serve`.
+/// Run `embassy serve` until SIGINT/SIGTERM or a component fails.
 pub async fn run(args: ServeArgs) -> anyhow::Result<()> {
     if let Err(errs) = args.validate() {
         bail!("embassy serve: invalid flags:\n  {}", errs.join("\n  "));
@@ -324,11 +352,392 @@ pub async fn run(args: ServeArgs) -> anyhow::Result<()> {
         join_tokens = config.issuance.join_tokens.len(),
         "configuration is valid"
     );
-    bail!(
-        "embassy serve is not implemented yet: the flags and the ControlPlaneConfig are valid, \
-         but no component ({}) can be started in this build",
-        args.components
-    )
+    let shutdown = CancellationToken::new();
+    tokio::spawn(on_signal(shutdown.clone()));
+    start(args, config, shutdown).await?.wait().await
+}
+
+async fn on_signal(shutdown: CancellationToken) {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "cannot listen for SIGTERM");
+                let _ = tokio::signal::ctrl_c().await;
+                shutdown.cancel();
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+    tracing::info!("shutting down");
+    shutdown.cancel();
+}
+
+/// What [`start`] started.
+pub struct Started {
+    pub ctx: Arc<ServeContext>,
+    /// The shared state of `controlplane`, `api` and `ui`, when one of them runs.
+    pub hub: Option<Arc<Hub>>,
+    /// The bound `--http-addr` (`api`/`ui`).
+    pub http_addr: Option<SocketAddr>,
+    /// The bound `--grpc-addr` of `Connect` (`controlplane`).
+    pub grpc_addr: Option<SocketAddr>,
+    /// `--dev`: where the one-time admin token is.
+    pub dev_token_file: Option<PathBuf>,
+    tasks: Vec<JoinHandle<anyhow::Result<()>>>,
+    background: Vec<JoinHandle<()>>,
+}
+
+impl std::fmt::Debug for Started {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Started")
+            .field("http_addr", &self.http_addr)
+            .field("grpc_addr", &self.grpc_addr)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Started {
+    /// Run until shutdown or until a component stops; then stop the others (at most
+    /// [`STOP_GRACE`]). The first component error is returned.
+    pub async fn wait(mut self) -> anyhow::Result<()> {
+        let shutdown = self.ctx.shutdown.clone();
+        let mut first: Option<anyhow::Error> = None;
+        if !self.tasks.is_empty() {
+            // the first component to stop (or the shutdown) stops the others
+            let done = tokio::select! {
+                (r, i, _) = futures::future::select_all(self.tasks.iter_mut()) => Some((r, i)),
+                () = shutdown.cancelled() => None,
+            };
+            if let Some((r, i)) = done {
+                self.tasks.remove(i);
+                match r {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => first = Some(e),
+                    Err(e) => first = Some(anyhow::anyhow!("a component panicked: {e}")),
+                }
+            }
+        } else {
+            shutdown.cancelled().await;
+        }
+        shutdown.cancel();
+        let all = futures::future::join_all(self.tasks.iter_mut());
+        match tokio::time::timeout(STOP_GRACE, all).await {
+            Ok(results) => {
+                for r in results {
+                    match r {
+                        Ok(Err(e)) if first.is_none() => first = Some(e),
+                        Err(e) if first.is_none() => {
+                            first = Some(anyhow::anyhow!("a component panicked: {e}"))
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Err(_) => {
+                tracing::warn!("components did not stop within {STOP_GRACE:?}; stopping them");
+                for t in &self.tasks {
+                    t.abort();
+                }
+            }
+        }
+        for b in self.background.drain(..) {
+            b.abort();
+        }
+        match first {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    /// Stop everything (tests).
+    pub async fn stop(self) -> anyhow::Result<()> {
+        self.ctx.shutdown.cancel();
+        self.wait().await
+    }
+}
+
+/// The external-edit check of the file store: the charter validator and the write policy.
+fn file_store_validator(
+    config: Arc<ArcSwap<ControlPlaneConfig>>,
+) -> Arc<crate::store::file::ExternalValidator> {
+    Arc::new(move |key: &crate::store::ServiceKey, yaml: &str| {
+        let json = crate::store::file::default_validator(key, yaml)?;
+        let charter = attache_charter::Charter::from_yaml(yaml).map_err(|e| vec![e.to_string()])?;
+        let policy = crate::api::write::policy_problems(config.load().policy.as_ref(), &charter);
+        if policy.is_empty() {
+            Ok(json)
+        } else {
+            Err(policy)
+        }
+    })
+}
+
+async fn open_store(
+    args: &ServeArgs,
+    config: &Arc<ArcSwap<ControlPlaneConfig>>,
+) -> anyhow::Result<Option<Arc<dyn Store>>> {
+    Ok(match &args.store {
+        None => None,
+        Some(StoreSpec::File(dir)) => {
+            let fs = crate::store::file::FileStore::open(dir.clone())
+                .await
+                .with_context(|| format!("--store file:{}", dir.display()))?;
+            fs.set_validator(file_store_validator(config.clone()));
+            Some(fs)
+        }
+        Some(StoreSpec::Kubernetes) => Some(crate::k8s::open_store(args).await?),
+    })
+}
+
+/// Where `--dev` writes its admin token.
+pub fn dev_token_path(args: &ServeArgs) -> PathBuf {
+    match &args.store {
+        Some(StoreSpec::File(dir)) => dir.join(".dev-admin-token"),
+        _ => std::env::temp_dir().join("embassy-dev-admin-token"),
+    }
+}
+
+/// Reload `--config` when the file changes; a file that does not validate is logged and the
+/// running config stays.
+async fn reload_config(
+    path: PathBuf,
+    cp_namespace: String,
+    config: Arc<ArcSwap<ControlPlaneConfig>>,
+    hub: Option<Arc<Hub>>,
+    every: Duration,
+    shutdown: CancellationToken,
+) {
+    let read = |p: &PathBuf| std::fs::read(p).ok();
+    // compared with the running config, so a change made before this task started counts
+    let mut seen: Option<Option<Vec<u8>>> = None;
+    loop {
+        tokio::select! {
+            () = tokio::time::sleep(every) => {}
+            () = shutdown.cancelled() => return,
+        }
+        let now = read(&path);
+        if seen.as_ref() == Some(&now) {
+            continue;
+        }
+        seen = Some(now);
+        match ControlPlaneConfig::load(&path, &cp_namespace) {
+            Ok(next) if next == **config.load() => {}
+            Ok(next) => {
+                if let Some(hub) = &hub
+                    && let Err(e) = hub.auth.reload_key(&next)
+                {
+                    tracing::error!(
+                        error = format!("{e:#}"),
+                        "the changed --config was not applied"
+                    );
+                    continue;
+                }
+                config.store(Arc::new(next));
+                tracing::info!(path = %path.display(), "reloaded the ControlPlaneConfig");
+            }
+            Err(e) => {
+                tracing::error!(path = %path.display(), error = %e, "the changed --config is invalid; the running config stays");
+            }
+        }
+    }
+}
+
+/// Start every component of `args` (validated) with `config`; `shutdown` stops them.
+pub async fn start(
+    args: ServeArgs,
+    config: ControlPlaneConfig,
+    shutdown: CancellationToken,
+) -> anyhow::Result<Started> {
+    use Component::*;
+    let config = Arc::new(ArcSwap::from_pointee(config));
+    let store = open_store(&args, &config).await?;
+    let ca = if args.has(Ca) {
+        match (&args.ca_dir, &args.ca_secret) {
+            (Some(dir), _) => Some(Arc::new(crate::ca::CaMaterial::load_dir(dir)?)),
+            (None, Some(s)) => Some(Arc::new(
+                crate::k8s::load_ca_secret(&s.namespace, &s.name).await?,
+            )),
+            (None, None) => bail!("the ca component needs --ca-dir or --ca-secret"),
+        }
+    } else {
+        None
+    };
+    let needs_serving =
+        args.has(Ca) || args.has(Controlplane) || args.has(Webhook) || args.http_tls;
+    let serving = if !needs_serving {
+        None
+    } else if let Some(ca) = &ca {
+        Some(Arc::new(ServingCertSource::in_memory(
+            ca.clone(),
+            args.dns_names.clone(),
+        )?))
+    } else if let Some(dir) = &args.tls_dir {
+        Some(Arc::new(
+            ServingCertSource::from_dir(dir)
+                .with_context(|| format!("--tls-dir {}", dir.display()))?,
+        ))
+    } else {
+        bail!("the serving certificate needs the ca component or --tls-dir")
+    };
+    let cp_audit = Arc::new(CpAudit::new(store.clone()));
+    let ctx = Arc::new(ServeContext {
+        args: args.clone(),
+        config: config.clone(),
+        store: store.clone(),
+        ca,
+        serving: serving.clone(),
+        cp_audit: cp_audit.clone(),
+        shutdown: shutdown.clone(),
+    });
+    let mut tasks = crate::ca_components::spawn(ctx.clone()).await?;
+    let mut background = Vec::new();
+
+    let mut hub = None;
+    let mut dev_token_file = None;
+    if args.has(Controlplane) || args.has(Api) || args.has(Ui) {
+        let mut auth = crate::auth::Auth::new(config.clone(), args.dev, args.http_tls)?;
+        if args.dev {
+            let token = crate::token::generate()?;
+            let path = dev_token_path(&args);
+            crate::auth::write_dev_token(&path, &token)?;
+            tracing::warn!(
+                path = %path.display(),
+                "--dev: wrote a one-time admin token (dev-admin) for this process"
+            );
+            auth = auth.with_dev_token(&token);
+            dev_token_file = Some(path);
+        }
+        let h = Hub::new(
+            store
+                .clone()
+                .unwrap_or_else(|| Arc::new(crate::hub::NoStore::default())),
+            config.clone(),
+            cp_audit.clone(),
+            auth,
+            HubOptions {
+                dns_names: args.dns_names.clone(),
+                auto_adopt: args.auto_adopt,
+                ..Default::default()
+            },
+            shutdown.clone(),
+        );
+        if store.is_some() {
+            h.ready.set("store", true);
+        }
+        for c in [Ca, Webhook] {
+            if args.has(c) {
+                h.ready.set(c.as_str(), true);
+            }
+        }
+        background.extend(h.start(shutdown.clone()));
+        hub = Some(h);
+    }
+
+    let mut grpc_addr = None;
+    if args.has(Controlplane)
+        && let (Some(h), Some(serving)) = (&hub, &serving)
+    {
+        // sharing --grpc-addr with IssueCertificate: client certificates are optional on the
+        // listener, and Connect refuses a stream without a verified one
+        let auth = if args.has(Ca) {
+            ClientAuth::Optional
+        } else {
+            ClientAuth::Required
+        };
+        let (bound, task) = crate::controlplane::bind_and_serve(
+            h.clone(),
+            args.grpc_addr,
+            serving,
+            auth,
+            None,
+            shutdown.clone(),
+        )
+        .await?;
+        tracing::info!(addr = %bound, "Connect is listening");
+        grpc_addr = Some(bound);
+        tasks.push(task);
+    }
+
+    let mut http_addr = None;
+    if (args.has(Api) || args.has(Ui))
+        && let Some(h) = &hub
+    {
+        let ui = args.has(Ui).then(|| match &args.ui_dir {
+            Some(d) => crate::ui_assets::UiFiles::Dir(d.clone()),
+            None => crate::ui_assets::UiFiles::Embedded,
+        });
+        let app = crate::api::router(h.clone(), args.has(Api), ui);
+        let listener = tokio::net::TcpListener::bind(args.http_addr)
+            .await
+            .with_context(|| format!("bind --http-addr {}", args.http_addr))?;
+        let bound = listener.local_addr()?;
+        let stop = shutdown.clone();
+        let task = if args.http_tls {
+            let Some(serving) = &serving else {
+                bail!("--http-tls needs the serving certificate");
+            };
+            let tls = tls::TlsListener::new(
+                listener,
+                serving.rustls_server_config(ClientAuth::None),
+                shutdown.clone(),
+            )?;
+            let svc = app.into_make_service_with_connect_info::<crate::api::ClientAddr>();
+            tokio::spawn(async move {
+                axum::serve(tls, svc)
+                    .with_graceful_shutdown(stop.cancelled_owned())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("the HTTP server failed: {e}"))
+            })
+        } else {
+            let svc = app.into_make_service_with_connect_info::<crate::api::ClientAddr>();
+            tokio::spawn(async move {
+                axum::serve(listener, svc)
+                    .with_graceful_shutdown(stop.cancelled_owned())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("the HTTP server failed: {e}"))
+            })
+        };
+        for c in [Api, Ui] {
+            if args.has(c) {
+                h.ready.set(c.as_str(), true);
+            }
+        }
+        tracing::info!(addr = %bound, tls = args.http_tls, "the API/UI is listening");
+        http_addr = Some(bound);
+        tasks.push(task);
+    }
+
+    if let Some(path) = args.config.clone() {
+        background.push(tokio::spawn(reload_config(
+            path,
+            args.cp_namespace.clone(),
+            config.clone(),
+            hub.clone(),
+            CONFIG_POLL,
+            shutdown.clone(),
+        )));
+    }
+
+    Ok(Started {
+        ctx,
+        hub,
+        http_addr,
+        grpc_addr,
+        dev_token_file,
+        tasks,
+        background,
+    })
 }
 
 #[cfg(test)]
@@ -608,7 +1017,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_validates_then_reports_not_implemented() {
+    async fn run_validates_the_flags_and_the_config() {
         let bad = parse(&["--components", "ca"]).unwrap();
         let e = run(bad).await.unwrap_err().to_string();
         assert!(e.contains("invalid flags"), "{e}");
@@ -628,23 +1037,103 @@ mod tests {
         .unwrap();
         let e = format!("{:#}", run(a).await.unwrap_err());
         assert!(e.contains("kind must be ControlPlaneConfig"), "{e}");
+    }
 
-        std::fs::write(
-            &cfg,
-            "apiVersion: attache.io/v1alpha1\nkind: ControlPlaneConfig\n",
-        )
-        .unwrap();
+    #[tokio::test]
+    async fn the_api_and_ui_start_and_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = format!("file:{}", dir.path().join("store").display());
         let a = parse(&[
             "--components",
-            "api",
+            "api,ui",
             "--store",
             &store,
-            "--config",
-            cfg.to_str().unwrap(),
+            "--http-addr",
+            "127.0.0.1:0",
+            "--dev",
         ])
         .unwrap();
-        let e = run(a).await.unwrap_err().to_string();
-        assert!(e.contains("not implemented yet"), "{e}");
-        assert!(e.contains("(api)"), "{e}");
+        a.validate().unwrap();
+        let started = start(a, ControlPlaneConfig::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        let addr = started.http_addr.unwrap();
+        assert!(started.grpc_addr.is_none());
+        let token_file = started.dev_token_file.clone().unwrap();
+        assert!(token_file.starts_with(dir.path()));
+        let token = std::fs::read_to_string(&token_file).unwrap();
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/api/v1/whoami"))
+            .bearer_auth(token.trim())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["name"], "dev-admin");
+        let ready = reqwest::get(format!("http://{addr}/readyz")).await.unwrap();
+        assert_eq!(ready.status(), 200);
+        started.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_ui_alone_needs_no_store_and_mounts_no_api() {
+        let a = parse(&["--components", "ui", "--http-addr", "127.0.0.1:0"]).unwrap();
+        a.validate().unwrap();
+        let started = start(a, ControlPlaneConfig::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        let addr = started.http_addr.unwrap();
+        let index = reqwest::get(format!("http://{addr}/")).await.unwrap();
+        assert_eq!(index.status(), 200);
+        assert_eq!(index.headers()["content-type"], "text/html; charset=utf-8");
+        let api = reqwest::get(format!("http://{addr}/api/v1/whoami"))
+            .await
+            .unwrap();
+        assert_eq!(api.status(), 404);
+        let ready: serde_json::Value = reqwest::get(format!("http://{addr}/readyz"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(ready["components"], serde_json::json!({"ui": true}));
+        started.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_config_is_reloaded_when_it_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let base = "apiVersion: attache.io/v1alpha1\nkind: ControlPlaneConfig\n";
+        std::fs::write(&path, base).unwrap();
+        let config = Arc::new(ArcSwap::from_pointee(
+            ControlPlaneConfig::load(&path, "attache-system").unwrap(),
+        ));
+        let stop = CancellationToken::new();
+        let task = tokio::spawn(reload_config(
+            path.clone(),
+            "attache-system".into(),
+            config.clone(),
+            None,
+            Duration::from_millis(20),
+            stop.clone(),
+        ));
+        std::fs::write(&path, format!("{base}events:\n  retain_bytes: 2097152\n")).unwrap();
+        let mut ok = false;
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            if config.load().events.retain_bytes == 2_097_152 {
+                ok = true;
+                break;
+            }
+        }
+        assert!(ok, "the change was not picked up");
+        // an invalid file is ignored
+        std::fs::write(&path, format!("{base}events:\n  retain_bytes: 1\n")).unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(config.load().events.retain_bytes, 2_097_152);
+        stop.cancel();
+        task.await.unwrap();
     }
 }

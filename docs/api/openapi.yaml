@@ -111,6 +111,7 @@ tags:
   - name: memory
   - name: proposals
   - name: events
+  - name: traces
   - name: health
 
 paths:
@@ -1097,6 +1098,10 @@ paths:
         them (see `/events/recent` for the order of equal timestamps). Their `edge_id` and
         `animate` follow the record → edge mapping in `Edge`.
 
+        **Span starts** (`span_start`) announce an invocation or a tool call that began
+        (sidecars send `SpanStart` on Connect); the `audit` event whose record carries the same
+        `span_id` closes the span. They are the live input of the agent timeline (`/traces`).
+
         **Keep-alive.** A comment line (`: keepalive`) every 15 s.
 
         Event types and their `data` schemas are listed in `x-sse-events` below and in the
@@ -1115,6 +1120,8 @@ paths:
           $ref: "#/components/schemas/AckEvent"
         proposal:
           $ref: "#/components/schemas/Proposal"
+        span_start:
+          $ref: "#/components/schemas/SpanStartEvent"
         cp_audit:
           $ref: "#/components/schemas/CpAuditRecord"
         lagged:
@@ -1163,6 +1170,91 @@ paths:
           $ref: "#/components/responses/Invalid"
         "401":
           $ref: "#/components/responses/Unauthenticated"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+
+  /traces:
+    get:
+      tags: [traces]
+      operationId: listTraces
+      summary: Recent runs (one per trace) for the agent timeline, newest first.
+      description: |
+        Design §10.1.1. Built from the span starts sidecars sent (`SpanStart`) and the audit
+        records the control plane holds in its ring (see `/events/recent`). Spans outside the
+        caller's namespaces are left out (a run with no visible span is not listed, and the
+        summary counts only visible spans); `title` is the root invocation's input only for
+        callers that see payloads. `namespace` and `service` keep runs with a span there;
+        `agent` (an agent name or agent node id) runs with a span of that agent; `status` the
+        runs in that state. A run is `running` while its root invocation has a start and no end;
+        a span that has run for 15 minutes without an end is shown as `error` with
+        `rule: span.timeout`.
+      x-required-role: viewer
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+        - name: namespace
+          in: query
+          schema:
+            $ref: "#/components/schemas/DnsLabel"
+        - name: service
+          in: query
+          schema:
+            $ref: "#/components/schemas/DnsLabel"
+        - name: agent
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/SpanStatus"
+      responses:
+        "200":
+          description: The runs.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TraceSummary"
+        "400":
+          $ref: "#/components/responses/Invalid"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+
+  /traces/{trace_id}:
+    parameters:
+      - name: trace_id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [traces]
+      operationId: getTrace
+      summary: The spans of one run, by start.
+      description: |
+        Design §10.1.1. 404 when the control plane holds nothing of the trace that the caller
+        may see.
+      x-required-role: viewer
+      responses:
+        "200":
+          description: The run.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TraceDoc"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          $ref: "#/components/responses/NotFound"
         "421":
           $ref: "#/components/responses/MisdirectedRequest"
 
@@ -2628,6 +2720,7 @@ components:
         - $ref: "#/components/schemas/ConfigEvent"
         - $ref: "#/components/schemas/AckEvent"
         - $ref: "#/components/schemas/Proposal"
+        - $ref: "#/components/schemas/SpanStartEvent"
         - $ref: "#/components/schemas/CpAuditRecord"
         - $ref: "#/components/schemas/LaggedEvent"
         - $ref: "#/components/schemas/ResetEvent"
@@ -2729,3 +2822,240 @@ components:
       type: object
       additionalProperties: false
       description: "`event: reset` — `Last-Event-ID` could not be replayed; refetch `/graph` and `/services`. The data is `{}`."
+    SpanStartEvent:
+      type: object
+      additionalProperties: false
+      required: [namespace, service, request_id, trace_id, span_id, parent_span_id, kind, agent, agent_node, caller, caller_agent, callee, callee_node, ts, call_index]
+      description: |
+        `event: span_start` — an invocation or a tool call started (a sidecar's `SpanStart`,
+        design §6.4 and §10.2); the `audit` event whose record has the same `span_id` closes it.
+        `namespace`/`service` are the identity of the Connect stream it arrived on.
+      properties:
+        namespace:
+          $ref: "#/components/schemas/DnsLabel"
+        service:
+          $ref: "#/components/schemas/DnsLabel"
+        request_id:
+          type: string
+        trace_id:
+          type: string
+        span_id:
+          type: string
+          description: The span id the closing audit record will carry.
+        parent_span_id:
+          oneOf:
+            - type: string
+            - type: "null"
+        kind:
+          type: string
+          description: "`agent_invocation`, `agent_call`, `service_call` or `http_call` (or a later kind)."
+        agent:
+          oneOf:
+            - type: string
+            - type: "null"
+        agent_node:
+          description: "`agent:<ns>/<svc>/<agent>`, null without an agent."
+          oneOf:
+            - $ref: "#/components/schemas/NodeId"
+            - type: "null"
+        caller:
+          type: string
+        caller_agent:
+          oneOf:
+            - type: string
+            - type: "null"
+        callee:
+          type: string
+        callee_node:
+          description: The node the call reaches (see `Span.callee_node`).
+          oneOf:
+            - $ref: "#/components/schemas/NodeId"
+            - type: "null"
+        ts:
+          $ref: "#/components/schemas/Timestamp"
+        call_index:
+          type: integer
+          minimum: 1
+          description: Repeated calls from the same caller agent to the same callee within the trace, counted when the start arrives (1, 2, 3, ...).
+
+    # ---- traces (design §10.1.1) -----------------------------------------------------------------
+    SpanStatus:
+      type: string
+      description: "`running`: started, not ended; `denied`: decision `deny`; `error`: `error` set (or `span.timeout`); else `ok`."
+      enum: [running, ok, denied, error]
+    Segment:
+      type: string
+      description: "How the timeline draws a span (design §11.1): `thinking` = `model_call`; `tool` = `service_call`, `http_call`, `tool_call`; `waiting` = `agent_call`; `invocation` = `agent_invocation`."
+      enum: [thinking, tool, waiting, invocation]
+    TraceSummary:
+      type: object
+      additionalProperties: false
+      required: [trace_id, title, root_agent, root_request_id, started_at, ended_at, duration_ms, status, agents, invocations, model_calls, tool_calls, tokens_in, tokens_out, cost_usd]
+      description: |
+        One run. The root is the earliest `agent_invocation` span whose parent is not a span of
+        the trace (else the earliest span). `status` and `ended_at` are the root's.
+      properties:
+        trace_id:
+          type: string
+        title:
+          type: string
+          description: The root invocation's input, first 120 characters, for callers that see payloads; otherwise `<root agent> · <first 8 characters of the trace id>`.
+        root_agent:
+          $ref: "#/components/schemas/NodeId"
+        root_request_id:
+          type: string
+        started_at:
+          $ref: "#/components/schemas/Timestamp"
+        ended_at:
+          oneOf:
+            - $ref: "#/components/schemas/Timestamp"
+            - type: "null"
+        duration_ms:
+          oneOf:
+            - type: integer
+              minimum: 0
+            - type: "null"
+        status:
+          $ref: "#/components/schemas/SpanStatus"
+        agents:
+          type: integer
+          minimum: 0
+          description: Distinct agents that took part.
+        invocations:
+          type: integer
+          minimum: 0
+        model_calls:
+          type: integer
+          minimum: 0
+        tool_calls:
+          type: integer
+          minimum: 0
+          description: "`tool_call` spans."
+        tokens_in:
+          type: integer
+          minimum: 0
+          description: Over the `model_call` spans.
+        tokens_out:
+          type: integer
+          minimum: 0
+        cost_usd:
+          type: number
+          minimum: 0
+    SpanEvent:
+      type: object
+      additionalProperties: false
+      required: [kind, rule, decision, ts]
+      description: A record of another kind (`guardrail`, `budget`, `authz`, `config`, `learning`, ...) attached to the span whose `span_id` it carries.
+      properties:
+        kind:
+          type: string
+        rule:
+          oneOf:
+            - type: string
+            - type: "null"
+        decision:
+          type: string
+        ts:
+          $ref: "#/components/schemas/Timestamp"
+    Span:
+      type: object
+      additionalProperties: false
+      required: [span_id, parent_span_id, kind, agent, namespace, service, callee, callee_node, start, end, latency_ms, status, decision, rule, request_id, caller, caller_agent, tokens_in, tokens_out, cost_usd, call_index, segment, attempt, fallback, events]
+      description: |
+        One span: a record of kind `agent_invocation`, `agent_call`, `service_call`,
+        `http_call`, `model_call` or `tool_call` (by its `span_id`), or a `SpanStart` whose record
+        has not arrived (running). `start` comes from the `SpanStart` if one arrived, else
+        `ts − latency_ms`; `end` is the record's `ts`. A span with a start and no end after 15
+        minutes is closed with `status: error`, `rule: span.timeout`.
+      properties:
+        span_id:
+          type: string
+        parent_span_id:
+          oneOf:
+            - type: string
+            - type: "null"
+        kind:
+          type: string
+        agent:
+          description: The agent node id; null when the record names no agent.
+          oneOf:
+            - $ref: "#/components/schemas/NodeId"
+            - type: "null"
+        namespace:
+          type: string
+        service:
+          type: string
+        callee:
+          type: string
+        callee_node:
+          description: "The node the call reaches: the agent itself (`agent_invocation`), the target agent (`agent_call`), the app (`service_call`; the own app when inbound), the external origin (`http_call`), the model provider (`model_call`); null for `tool_call`."
+          oneOf:
+            - $ref: "#/components/schemas/NodeId"
+            - type: "null"
+        start:
+          $ref: "#/components/schemas/Timestamp"
+        end:
+          oneOf:
+            - $ref: "#/components/schemas/Timestamp"
+            - type: "null"
+        latency_ms:
+          oneOf:
+            - type: integer
+              minimum: 0
+            - type: "null"
+        status:
+          $ref: "#/components/schemas/SpanStatus"
+        decision:
+          oneOf:
+            - type: string
+            - type: "null"
+        rule:
+          oneOf:
+            - type: string
+            - type: "null"
+        request_id:
+          type: string
+        caller:
+          type: string
+        caller_agent:
+          oneOf:
+            - type: string
+            - type: "null"
+        tokens_in:
+          type: integer
+          minimum: 0
+        tokens_out:
+          type: integer
+          minimum: 0
+        cost_usd:
+          type: number
+          minimum: 0
+        call_index:
+          type: integer
+          minimum: 1
+          description: Repeated calls from the same caller agent to the same callee within the trace, by start (1, 2, 3, ...).
+        segment:
+          $ref: "#/components/schemas/Segment"
+        attempt:
+          type: integer
+          minimum: 1
+          description: "`model_call`: `input.attempt` (1-based); 1 otherwise."
+        fallback:
+          type: boolean
+          description: "`model_call`: `input.fallback`."
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/SpanEvent"
+    TraceDoc:
+      type: object
+      additionalProperties: false
+      required: [trace_id, spans]
+      properties:
+        trace_id:
+          type: string
+        spans:
+          type: array
+          description: By start, then span id.
+          items:
+            $ref: "#/components/schemas/Span"

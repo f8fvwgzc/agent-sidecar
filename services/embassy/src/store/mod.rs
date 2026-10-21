@@ -7,6 +7,11 @@
 //! enforces the optimistic-concurrency precondition and assigns versions: decimal strings of a
 //! `u64` counter, monotonic per service and never reused, plus an `epoch` (a UUID; a new one when
 //! a service's charter is deleted and recreated). Memory has its own version counter per service.
+//!
+//! Memory exists only for agents with learning enabled (design §3): a charter write that turns an
+//! agent's learning off, or removes the agent, drops that agent's notes in the same change
+//! ([`prune_memory`]; the store does it inside the critical section of the charter write and
+//! emits [`StoreEvent::MemoryChanged`]).
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
@@ -15,6 +20,38 @@ use tokio::sync::broadcast;
 
 use crate::api::types::CpAuditRecord;
 use crate::config::Role;
+
+pub mod file;
+
+/// The plain charter document inside a stored charter: `spec` for the custom-resource form
+/// (`metadata` + `spec`), the document itself otherwise.
+pub fn charter_doc(charter_json: &serde_json::Value) -> &serde_json::Value {
+    match charter_json.get("spec") {
+        Some(spec) if charter_json.get("metadata").is_some() => spec,
+        _ => charter_json,
+    }
+}
+
+/// The memory after a charter write: the notes of agents that the charter does not have, or
+/// whose learning is off, removed (design §3). `None` when nothing changes; otherwise the new
+/// document with the next memory version.
+pub fn prune_memory(memory: &MemoryDoc, charter_json: &serde_json::Value) -> Option<MemoryDoc> {
+    let keep =
+        |agent: &str| AgentLearning::from_charter(charter_json, agent).is_some_and(|l| l.enabled);
+    if memory.agents.keys().all(|a| keep(a)) {
+        return None;
+    }
+    let next = memory.version.parse::<u64>().ok()?.checked_add(1)?;
+    Some(MemoryDoc {
+        version: next.to_string(),
+        agents: memory
+            .agents
+            .iter()
+            .filter(|(a, _)| keep(a))
+            .map(|(a, n)| (a.clone(), n.clone()))
+            .collect(),
+    })
+}
 
 /// A service: `(namespace, service)`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -440,7 +477,11 @@ pub trait Store: Send + Sync {
     async fn get_charter(&self, key: &ServiceKey) -> Result<StoredCharter, StoreError>;
 
     /// Store a new version if `precondition` holds; returns what is now stored (new version,
-    /// and a new epoch when the service had no charter). Records the version in the history.
+    /// and a new epoch when the service had no charter). Records the version in the history,
+    /// removes a pending adoption of the service, and, in the same critical section, drops the
+    /// notes of agents the new charter does not let learn ([`prune_memory`]).
+    ///
+    /// `Precondition::Version` on a service without a charter is [`StoreError::NotFound`].
     async fn put_charter(
         &self,
         key: &ServiceKey,

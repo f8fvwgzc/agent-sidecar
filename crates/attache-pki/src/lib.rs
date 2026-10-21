@@ -9,6 +9,13 @@ use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use time::{Duration, OffsetDateTime};
 
+mod signing;
+pub use signing::{
+    BACKDATE, CaKeyPair, IssuedCert, IssuedKeyPair, VerifiedPublicKey, certs_from_pem,
+    certs_to_pem, issue_server_leaf, issue_workload_leaf, not_after_of, pem_block,
+    sole_spiffe_id_of, uri_sans_of, verify_csr_der_p256, verify_csr_p256,
+};
+
 pub const CA_COMMON_NAME: &str = "attache embassy CA";
 pub const CA_TTL_DAYS: i64 = 3650;
 pub const LEAF_TTL_DAYS: i64 = 365;
@@ -23,6 +30,14 @@ pub enum PkiError {
     Pem(#[from] rustls_pki_types::pem::Error),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    /// A certificate signing request that is malformed, not ECDSA P-256, or whose
+    /// self-signature does not verify.
+    #[error("certificate request refused: {0}")]
+    Csr(String),
+    /// Unusable input or material: a name that is not a DNS label, a zero lifetime, an expired
+    /// CA, a key that matches no CA certificate.
+    #[error("{0}")]
+    Invalid(String),
 }
 
 #[derive(Debug, Clone)]
