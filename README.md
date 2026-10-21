@@ -66,7 +66,9 @@ another pod. Many agents can live in one service.
 Needs `cargo`, `protoc`, `uv`, `go`, `python3` and `curl` (see
 [Prerequisites](#prerequisites)). This starts both demo apps
 and two sidecars with real mTLS certificates and the real Python runtime. It
-then makes the calls below and prints the audit trail.
+then makes the calls below and prints the audit trail. It fails if the allowed
+call does not cross the mesh, the admin call is not denied, or the guardrail
+lets a secret through.
 
 ```bash
 make local-demo
@@ -245,9 +247,9 @@ make proto       # regenerate the committed Python gRPC stubs from proto/
 ```
 
 CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs all of these on
-Linux for every push and pull request, plus `cargo fmt --check` and
-`ruff format --check`. It fails when `make schema` or `make proto` changes a
-committed file.
+Linux for every push and pull request, plus `cargo fmt --check`,
+`ruff format --check` and `make local-demo`. It fails when `make schema` or
+`make proto` changes a committed file.
 
 The Rust suite includes an in-process mesh test. It starts two sidecars with
 embassy-issued certificates on localhost and proves that:

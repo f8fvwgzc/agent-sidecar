@@ -100,6 +100,56 @@ jobs:
             exit 1
           fi
 
+  # CONTRACT.md §10's one-machine gate: both demo apps, two sidecars with embassy certificates over mTLS,
+  # and the real runtime on the mock model. The script fails when the stock question does not cross
+  # the mesh, the admin reset is not denied by inventory's charter, or the guardrail lets a secret in.
+  local-demo:
+    name: Local demo (two sidecars over mTLS, mock model)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      UV_LOCKED: "1"
+      # The runtime calls the Anthropic API when this is set; the gate runs the deterministic mock.
+      ANTHROPIC_API_KEY: ""
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends protobuf-compiler
+          protoc --version
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # examples/orders uses only the standard library: nothing to cache.
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: examples/orders/go.mod
+          cache: false
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: runtime/uv.lock
+          cache-python: true
+          cache-suffix: local-demo
+
+      - name: make local-demo
+        run: make local-demo
+
+      - name: Demo logs
+        if: failure()
+        run: |
+          shopt -s nullglob
+          for f in .local/logs/*; do
+            echo "::group::$f"
+            cat "$f"
+            echo "::endgroup::"
+          done
+
   # Advisory: a new advisory against a pinned dependency should be visible, not block unrelated changes.
   audit:
     name: Dependency audit (advisory)
