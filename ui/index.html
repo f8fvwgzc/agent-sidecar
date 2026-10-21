@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta name="referrer" content="no-referrer">
+    <title>attache console</title>
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="styles.css">
+    <script src="vendor/d3.v7.9.0.min.js"></script>
+    <script type="module" src="js/main.js"></script>
+  </head>
+  <body>
+    <div id="boot" class="boot" aria-live="polite">
+      <div class="boot-card">
+        <div class="boot-spinner" aria-hidden="true"></div>
+        <div class="muted">Loading the console…</div>
+      </div>
+    </div>
+
+    <section id="signin" class="signin" hidden>
+      <form id="signin-form" class="signin-card" novalidate>
+        <div class="signin-brand">
+          <svg class="logo" viewBox="0 0 32 32" width="34" height="34" aria-hidden="true">
+            <rect x="1" y="1" width="30" height="30" rx="9" class="logo-bg"/>
+            <circle cx="10" cy="11" r="3.2" class="logo-node"/>
+            <circle cx="22" cy="21" r="3.2" class="logo-node alt"/>
+            <path d="M13 11 C 18 11, 14 21, 19 21" class="logo-edge"/>
+          </svg>
+          <div>
+            <div class="signin-title">attache console</div>
+            <div class="muted small">agent-sidecar control plane</div>
+          </div>
+        </div>
+        <p id="signin-note" class="notice notice-info" hidden></p>
+        <label class="field-label" for="token">Access token</label>
+        <input id="token" name="token" class="input mono" type="password" autocomplete="off" spellcheck="false" placeholder="att_…" required>
+        <div id="signin-error" class="field-error" role="alert" hidden></div>
+        <button id="signin-submit" type="submit" class="btn btn-primary btn-block">Sign in</button>
+        <p class="field-hint">The token is exchanged once for a session cookie and is not kept by this page. An admin creates tokens with <code>embassy token create</code>.</p>
+      </form>
+    </section>
+
+    <div id="app" class="app" hidden>
+      <header class="toolbar">
+        <div class="brand">
+          <svg class="logo" viewBox="0 0 32 32" width="24" height="24" aria-hidden="true">
+            <rect x="1" y="1" width="30" height="30" rx="9" class="logo-bg"/>
+            <circle cx="10" cy="11" r="3.2" class="logo-node"/>
+            <circle cx="22" cy="21" r="3.2" class="logo-node alt"/>
+            <path d="M13 11 C 18 11, 14 21, 19 21" class="logo-edge"/>
+          </svg>
+          <span class="brand-name">attache</span>
+          <span id="fixtures-badge" class="pill pill-fixtures" title="Demo data from ui/fixtures; changes stay in this tab" hidden>fixtures</span>
+        </div>
+
+        <div class="tb-group" role="group" aria-label="View">
+          <button id="btn-fit" type="button" class="tb-btn" title="Fit the graph to the window (F)">
+            <svg viewBox="0 0 24 24" width="16" height="16" class="icon" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+            <span class="tb-label">Fit</span>
+          </button>
+          <button id="btn-layout" type="button" class="tb-btn" title="Auto-layout: forget saved positions">
+            <svg viewBox="0 0 24 24" width="16" height="16" class="icon" aria-hidden="true"><path d="M4 5h6v5H4zM14 14h6v5h-6zM14 5h6v5h-6zM10 7.5h4M17 10v4"/></svg>
+            <span class="tb-label">Auto-layout</span>
+          </button>
+        </div>
+
+        <span class="tb-break" aria-hidden="true"></span>
+
+        <div id="filters" class="tb-group filters" role="group" aria-label="Filter">
+          <label class="sr-only" for="f-ns">Namespace</label>
+          <select id="f-ns" class="tb-select"></select>
+          <label class="sr-only" for="f-svc">Service</label>
+          <select id="f-svc" class="tb-select"></select>
+        </div>
+
+        <button id="btn-add" type="button" class="tb-btn tb-primary" title="Add an agent to a service" hidden>
+          <svg viewBox="0 0 24 24" width="16" height="16" class="icon" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+          <span class="tb-label">Agent</span>
+        </button>
+
+        <span class="tb-spacer"></span>
+
+        <button id="btn-live" type="button" class="live-toggle" aria-pressed="true">
+          <span class="switch" aria-hidden="true"><span class="knob"></span></span>
+          <span class="tb-label">Live</span>
+        </button>
+        <span id="conn" class="conn" data-state="connecting" role="status">
+          <span class="conn-dot" aria-hidden="true"></span>
+          <span id="conn-text">connecting</span>
+        </span>
+        <div id="user" class="user">
+          <span id="user-name" class="user-name"></span>
+          <span id="user-role" class="pill"></span>
+          <button id="btn-signout" type="button" class="tb-btn tb-ghost" title="Sign out">
+            <svg viewBox="0 0 24 24" width="16" height="16" class="icon" aria-hidden="true"><path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/></svg>
+            <span class="sr-only">Sign out</span>
+          </button>
+        </div>
+      </header>
+
+      <div id="banner" class="banner" role="region" aria-label="Pending adoptions" hidden></div>
+
+      <main id="stage" class="stage">
+        <div id="canvas-host" class="canvas-host"></div>
+        <div id="empty" class="empty" hidden></div>
+        <details class="legend">
+          <summary>Legend</summary>
+          <ul>
+            <li><span class="lg-port pt-agent"></span>agent tool / invoke</li>
+            <li><span class="lg-port pt-service"></span>service tool</li>
+            <li><span class="lg-port pt-http"></span>http tool</li>
+            <li><span class="lg-port pt-model"></span>model</li>
+            <li><span class="lg-line"></span>declared edge</li>
+            <li><span class="lg-line dashed"></span>undeclared (seen in traffic)</li>
+            <li><span class="lg-line red"></span>denied only</li>
+            <li><span class="lg-dot ok"></span>allow <span class="lg-dot deny"></span>deny <span class="lg-dot err"></span>error</li>
+          </ul>
+        </details>
+        <aside id="inspector" class="inspector" aria-label="Inspector" hidden></aside>
+      </main>
+    </div>
+
+    <div id="toasts" class="toasts" aria-live="polite"></div>
+    <div id="tooltip" class="tooltip" role="tooltip" hidden></div>
+    <dialog id="dialog" class="dialog"></dialog>
+  </body>
+</html>
