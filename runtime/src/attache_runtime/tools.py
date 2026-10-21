@@ -58,7 +58,38 @@ class SidecarClient(Protocol):
         self, ctx: CallContext, tool: str, method: str, url: str, headers: dict[str, str], body: bytes
     ) -> tuple[int, bytes]: ...
 
-    async def report_event(self, record: dict[str, Any]) -> None: ...
+    # The sidecar's answer: the rule it named (gRPC `x-attache-rule`), if any — `budget.max_cost_usd_per_day`
+    # once a reported cost exhausts the agent's daily budget — and whether it refused the record (§6.5).
+    async def report_event(self, record: dict[str, Any]) -> ReportOutcome: ...
+
+    async def propose_lesson(
+        self, ctx: CallContext, note: str, rationale: str, run_request_id: str
+    ) -> LessonOutcome: ...
+
+
+# The rule a sidecar names when an agent's daily cost budget is used up.
+RULE_COST_BUDGET = "budget.max_cost_usd_per_day"
+# The rule of a ReportEvent record the sidecar refuses (design §6.5: INVALID_ARGUMENT).
+RULE_REPORT_REJECTED = "runtime.report_rejected"
+
+
+@dataclass(frozen=True)
+class ReportOutcome:
+    """The sidecar's answer to ReportEvent."""
+
+    rule: str | None = None  # the rule it named in `x-attache-rule`, if any
+    # It refused the record (INVALID_ARGUMENT, or rule `runtime.report_rejected`): the record was not
+    # written, and a model call's cost was not counted in the agent's budgets.
+    rejected: bool = False
+
+
+@dataclass
+class LessonOutcome:
+    """The sidecar's answer to ProposeLesson; decision `error` when the call itself failed."""
+
+    decision: str
+    rule: str
+    reason: str
 
 
 class ToolDenied(Exception):

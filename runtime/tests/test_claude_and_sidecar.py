@@ -26,6 +26,9 @@ class FakeStream:
     def __exit__(self, *a):
         return False
 
+    def __iter__(self):
+        return iter(())
+
     def get_final_message(self):
         block = SimpleNamespace(model_dump=lambda exclude_none=True: {"type": "text", "text": "hi"})
         return SimpleNamespace(
