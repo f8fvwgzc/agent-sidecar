@@ -2,16 +2,17 @@
 //!
 //! The runtime is in the pod but it is driven by a model, so nothing it sends is taken on trust:
 //! the call must match a tool the agent declared and may use, the path is canonicalised before
-//! authz, and every outcome — allowed, denied or failed — leaves exactly one `tool_call` record
-//! plus, once something was actually attempted, one `service_call` / `agent_call` / `http_call`.
+//! authz, and every outcome — allowed, denied, failed or cancelled — leaves exactly one `tool_call`
+//! record plus, once something was actually attempted, one `service_call` / `agent_call` / `http_call`.
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
 use attache_charter::{AgentSpec, ToolSpec, ToolType};
-use attache_common::audit::{AuditRecord, Direction, Kind, Tokens};
+use attache_common::audit::{AuditRecord, Direction, Kind, OnCancel, Tokens};
 use attache_common::authz::{self, Verdict};
+use attache_common::guardrails::INPUT_DENY;
 use attache_common::trace::TraceContext;
 use attache_proto::sidecar_tools_server::{SidecarTools, SidecarToolsServer};
 use attache_proto::{
@@ -22,6 +23,7 @@ use serde_json::{Value, json};
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::{Code, Request, Response, Status};
 
+use crate::deadline;
 use crate::pipeline::{self, Invocation};
 use crate::state::AppState;
 
@@ -159,9 +161,13 @@ struct Call<'a> {
     c: ToolContext,
     trace: TraceContext,
     started: Instant,
+    /// The runtime's deadline for this call (its `grpc-timeout`); the next hop gets what is left.
+    deadline: Option<Instant>,
+    /// Set when the callee's content guardrail denied the input: records keep its hash, not its text.
+    withhold: Option<String>,
 }
 
-impl Call<'_> {
+impl<'a> Call<'a> {
     fn record(
         &self,
         kind: Kind,
@@ -171,7 +177,7 @@ impl Call<'_> {
         input: &Value,
         output: Value,
     ) -> AuditRecord {
-        AuditRecord::new(
+        let rec = AuditRecord::new(
             kind,
             dir,
             &self.c.request_id,
@@ -183,7 +189,11 @@ impl Call<'_> {
             input.clone(),
             output,
         )
-        .latency(self.started)
+        .latency(self.started);
+        match &self.withhold {
+            Some(rule) => rec.withhold_input(rule),
+            None => rec,
+        }
     }
 
     /// The `tool_call` record. `error` set ⇒ decision allow (policy let it through, it failed).
@@ -225,6 +235,36 @@ impl Call<'_> {
             rec.cost_usd = Some(cost);
         }
         self.svc.state.audit.write(rec);
+    }
+
+    /// The `tool_call` and attempt records owed while the call is awaited: if the runtime drops
+    /// it (gone, or its deadline passed) they are written as cancelled — the target may have acted.
+    fn pending(
+        &self,
+        kind: Kind,
+        dir: Direction,
+        child: &TraceContext,
+        callee: &str,
+        input: &Value,
+        v: &Verdict,
+    ) -> OnCancel<'a> {
+        let tool = self
+            .record(
+                Kind::ToolCall,
+                Direction::Internal,
+                &self.trace,
+                &self.c.tool,
+                input,
+                Value::Null,
+            )
+            .verdict(v);
+        let attempt = self
+            .record(kind, dir, child, callee, input, Value::Null)
+            .verdict(v);
+        self.svc
+            .state
+            .audit
+            .on_cancel(vec![tool, attempt], self.started)
     }
 
     /// Deny before anything was attempted: one `tool_call` record, then the status for the runtime.
@@ -296,10 +336,12 @@ impl ToolsService {
         ]
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn call_local_app(
         &self,
         c: &ToolContext,
         child: &TraceContext,
+        deadline: Option<Instant>,
         method: &str,
         path: &str,
         headers: &HashMap<String, String>,
@@ -307,7 +349,11 @@ impl ToolsService {
     ) -> Result<ServiceResponse, String> {
         let url = format!("{}{}", self.state.app_base_url(), path);
         let m = reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| e.to_string())?;
-        let mut req = self.state.http.request(m, &url);
+        let mut req = self
+            .state
+            .http
+            .request(m, &url)
+            .timeout(deadline::budget(deadline, deadline::HTTP_TIMEOUT));
         for (k, v) in headers {
             if !is_reserved_header(k) {
                 req = req.header(k, v);
@@ -326,8 +372,15 @@ impl ToolsService {
         Ok(to_service_response(resp).await)
     }
 
-    fn mesh_request<T>(&self, c: &ToolContext, child: &TraceContext, msg: T) -> Request<T> {
+    fn mesh_request<T>(
+        &self,
+        c: &ToolContext,
+        child: &TraceContext,
+        deadline: Option<Instant>,
+        msg: T,
+    ) -> Request<T> {
         let mut req = Request::new(msg);
+        req.set_timeout(deadline::budget(deadline, deadline::RUN_TIMEOUT));
         let md = req.metadata_mut();
         if let Ok(v) = child.traceparent().parse() {
             md.insert("traceparent", v);
@@ -348,6 +401,7 @@ impl SidecarTools for ToolsService {
         &self,
         request: Request<ToolServiceRequest>,
     ) -> Result<Response<ServiceResponse>, Status> {
+        let deadline = deadline::from_metadata(request.metadata());
         let req = request.into_inner();
         let (c, trace) = ctx_of(&req.ctx)?;
         let call = Call {
@@ -355,6 +409,8 @@ impl SidecarTools for ToolsService {
             c,
             trace,
             started: Instant::now(),
+            deadline,
+            withhold: None,
         };
         let mut input = json!({ "service": req.service, "method": req.method, "path": req.path, "body": body_value(&req.body) });
 
@@ -421,10 +477,19 @@ impl SidecarTools for ToolsService {
         } else {
             Direction::Outbound
         };
+        let pending = call.pending(Kind::ServiceCall, dir, &child, &callee, &input, &v);
         let result: Result<ServiceResponse, Status> = if is_self {
-            self.call_local_app(&call.c, &child, &req.method, &path, &req.headers, &req.body)
-                .await
-                .map_err(|e| status_with_rule(Code::Unavailable, RULE_APP_UNAVAILABLE, &e))
+            self.call_local_app(
+                &call.c,
+                &child,
+                call.deadline,
+                &req.method,
+                &path,
+                &req.headers,
+                &req.body,
+            )
+            .await
+            .map_err(|e| status_with_rule(Code::Unavailable, RULE_APP_UNAVAILABLE, &e))
         } else {
             match self.state.mesh_client(&target) {
                 Err(e) => Err(status_with_rule(
@@ -449,12 +514,13 @@ impl SidecarTools for ToolsService {
                         agent: call.c.agent.clone(),
                     };
                     client
-                        .invoke_service(self.mesh_request(&call.c, &child, msg))
+                        .invoke_service(self.mesh_request(&call.c, &child, call.deadline, msg))
                         .await
                         .map(|r| r.into_inner())
                 }
             }
         };
+        pending.disarm();
 
         match result {
             Ok(resp) => {
@@ -517,13 +583,16 @@ impl SidecarTools for ToolsService {
         &self,
         request: Request<ToolAgentRequest>,
     ) -> Result<Response<InvokeAgentResponse>, Status> {
+        let deadline = deadline::from_metadata(request.metadata());
         let req = request.into_inner();
         let (c, trace) = ctx_of(&req.ctx)?;
-        let call = Call {
+        let mut call = Call {
             svc: self,
             c,
             trace,
             started: Instant::now(),
+            deadline,
+            withhold: None,
         };
         let input = Value::String(req.input.clone());
 
@@ -563,6 +632,12 @@ impl SidecarTools for ToolsService {
             req.target_agent.clone()
         };
         let child = call.trace.child();
+        let dir = if remote {
+            Direction::Outbound
+        } else {
+            Direction::Internal
+        };
+        let pending = call.pending(Kind::AgentCall, dir, &child, &callee, &input, &v);
         let resp = if remote {
             match self.state.mesh_client(&req.target_service) {
                 Err(e) => envelope(
@@ -584,7 +659,7 @@ impl SidecarTools for ToolsService {
                         depth: call.c.depth + 1,
                     };
                     match client
-                        .invoke_agent(self.mesh_request(&call.c, &child, msg))
+                        .invoke_agent(self.mesh_request(&call.c, &child, call.deadline, msg))
                         .await
                     {
                         Ok(r) => r.into_inner(),
@@ -623,16 +698,12 @@ impl SidecarTools for ToolsService {
                     caller: authz::LOCAL.into(),
                     caller_agent: Some(call.c.agent.clone()),
                     depth: call.c.depth + 1,
+                    deadline: call.deadline,
                 },
             )
             .await
         };
-
-        let dir = if remote {
-            Direction::Outbound
-        } else {
-            Direction::Internal
-        };
+        pending.disarm();
         let tokens = resp.usage.as_ref().map(|u| {
             (
                 Tokens {
@@ -661,6 +732,14 @@ impl SidecarTools for ToolsService {
             }
             "denied" => {
                 let dv = Verdict::deny(resp.rule.clone(), resp.reason.clone());
+                // The callee's content rule matched this input (CONTRACT.md §6): keep it out of our
+                // records too, and out of the calling agent's next prompt, which quotes it.
+                if dv.rule.starts_with(INPUT_DENY) {
+                    self.state
+                        .audit
+                        .withhold(&call.c.request_id, [req.input.clone()]);
+                    call.withhold = Some(dv.rule.clone());
+                }
                 call.tool(&input, Value::Null, &dv, None);
                 call.attempt(
                     Kind::AgentCall,
@@ -703,6 +782,7 @@ impl SidecarTools for ToolsService {
         &self,
         request: Request<ToolHttpRequest>,
     ) -> Result<Response<ServiceResponse>, Status> {
+        let deadline = deadline::from_metadata(request.metadata());
         let req = request.into_inner();
         let (c, trace) = ctx_of(&req.ctx)?;
         let call = Call {
@@ -710,6 +790,8 @@ impl SidecarTools for ToolsService {
             c,
             trace,
             started: Instant::now(),
+            deadline,
+            withhold: None,
         };
         let input = json!({ "method": req.method, "url": req.url, "body": body_value(&req.body) });
 
@@ -753,7 +835,11 @@ impl SidecarTools for ToolsService {
             Err(e) => return Err(call.deny(&input, Verdict::deny(RULE_TOOL_SPEC, e.to_string()))),
         };
         let child = call.trace.child();
-        let mut hreq = self.state.http.request(m, url.clone());
+        let mut hreq = self
+            .state
+            .egress
+            .request(m, url.clone())
+            .timeout(deadline::budget(call.deadline, deadline::HTTP_TIMEOUT));
         for (k, val) in &req.headers {
             if !is_reserved_header(k) {
                 hreq = hreq.header(k, val);
@@ -766,9 +852,21 @@ impl SidecarTools for ToolsService {
             hreq = hreq.body(req.body.clone());
         }
         let callee = format!("{} {}", req.method, url);
-        match hreq.send().await {
-            Ok(resp) => {
-                let sr = to_service_response(resp).await;
+        let pending = call.pending(
+            Kind::HttpCall,
+            Direction::Outbound,
+            &child,
+            &callee,
+            &input,
+            &v,
+        );
+        let sent = match hreq.send().await {
+            Ok(resp) => Ok(to_service_response(resp).await),
+            Err(e) => Err(e),
+        };
+        pending.disarm();
+        match sent {
+            Ok(sr) => {
                 let out = json!({ "status": sr.status, "body": body_value(&sr.body) });
                 call.tool(&input, out.clone(), &v, None);
                 call.attempt(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 
 import grpc
 from pydantic import ValidationError
@@ -32,7 +33,10 @@ class RuntimeServicer(runtime_pb2_grpc.RuntimeServicer):
             spec = AgentSpec.model_validate_json(request.agent_spec_json)
         except ValidationError as e:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"agent_spec_json: {e}")
-        ctx = CallContext(request.request_id, request.trace_id, request.span_id, spec.name, request.depth)
+        # The sidecar sends what is left of its caller's deadline; every tool call fits inside it.
+        remaining = context.time_remaining()
+        deadline = time.monotonic() + remaining if remaining is not None else None
+        ctx = CallContext(request.request_id, request.trace_id, request.span_id, spec.name, request.depth, deadline)
         model = model_for(spec.model)
         log.info(
             "execute agent=%s model=%s provider=%s request=%s",

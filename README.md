@@ -112,7 +112,8 @@ kubectl --context minikube -n attache-demo logs -l attache.io/service=inventory 
    Service exposes only the mesh port, so there is no way around the sidecar.
 3. **An input guardrail.** A question containing `api_key = …` is refused
    with HTTP 403 before any model call, under rule
-   `guardrail.input_deny.no-secrets`.
+   `guardrail.input_deny.no-secrets`. The audit log keeps the question's hash,
+   not the key.
 
 The audit trail of call 1, from `attache logs`, spans both pods under one trace:
 

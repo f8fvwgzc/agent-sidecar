@@ -47,6 +47,7 @@ impl AppApi for AppApiService {
             .get("traceparent")
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
+        let deadline = crate::deadline::from_metadata(request.metadata());
         let req = request.into_inner();
         let trace = match tp
             .as_deref()
@@ -64,6 +65,7 @@ impl AppApi for AppApiService {
             caller: "local".into(),
             caller_agent: None,
             depth: 0,
+            deadline,
         };
         let resp = pipeline::invoke(&self.state, inv).await;
         match pipeline::grpc_status(&resp) {

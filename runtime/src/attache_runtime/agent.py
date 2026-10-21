@@ -206,7 +206,7 @@ async def run_agent(
                     Step("tool_call", use["name"], "deny", "guardrail.allowed_tools", 0, "not declared")
                 )
             else:
-                call_ctx = CallContext(ctx.request_id, ctx.trace_id, new_span_id(), spec.name, ctx.depth)
+                call_ctx = CallContext(ctx.request_id, ctx.trace_id, new_span_id(), spec.name, ctx.depth, ctx.deadline)
                 outcome = await run_tool(tool, args, call_ctx, sidecar)
                 content, is_error = outcome.content, outcome.is_error
                 result.steps.append(

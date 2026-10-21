@@ -75,6 +75,7 @@ async fn invoke(
         caller: "local".into(),
         caller_agent: None,
         depth: 0,
+        deadline: None,
     };
     let resp = pipeline::invoke(&state, inv).await;
     let status = StatusCode::from_u16(pipeline::http_status(&resp))

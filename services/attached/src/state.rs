@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use anyhow::Context;
 use attache_charter::{AuditSink, Charter};
@@ -14,6 +13,7 @@ use attache_proto::runtime_client::RuntimeClient;
 use tonic::transport::Channel;
 
 use crate::config::Config;
+use crate::deadline::HTTP_TIMEOUT;
 
 pub const MAX_DEPTH: u32 = 4;
 
@@ -24,7 +24,10 @@ pub struct AppState {
     pub audit: AuditWriter,
     pub tls: Option<TlsMaterial>,
     pub self_identity: String,
+    /// Toward this pod's app on loopback: no proxy, no redirects.
     pub http: reqwest::Client,
+    /// Http tools: no redirects (the charter pins the origin), the environment's proxy if any.
+    pub egress: reqwest::Client,
     pub runtime: RuntimeClient<Channel>,
     pub runtime_ready: AtomicBool,
     pub runtime_provider: Mutex<String>,
@@ -78,8 +81,16 @@ impl AppState {
             budgets: Budgets::new(),
             audit,
             tls,
+            // A followed redirect would reach what authz and the origin check never saw (another
+            // host, the metadata IP, this sidecar's own API); a 3xx goes back to the caller as is.
             http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
+                .timeout(HTTP_TIMEOUT)
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
+                .build()?,
+            egress: reqwest::Client::builder()
+                .timeout(HTTP_TIMEOUT)
+                .redirect(reqwest::redirect::Policy::none())
                 .build()?,
             runtime,
             runtime_ready: AtomicBool::new(false),

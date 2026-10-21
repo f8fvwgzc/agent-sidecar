@@ -1,6 +1,7 @@
 """The real-API path without the network, and the sidecar error mapping (CONTRACT.md §4.3, §9)."""
 
 import asyncio
+import time
 from types import SimpleNamespace
 
 import grpc
@@ -9,8 +10,9 @@ import pytest
 from attache_runtime import models
 from attache_runtime.agent import _now, run_agent
 from attache_runtime.models import MockModel, ModelResponse, supports_effort
-from attache_runtime.sidecar import GrpcSidecar
-from attache_runtime.tools import ToolDenied, ToolFailed
+from attache_runtime.pb.attache.v1alpha1 import common_pb2
+from attache_runtime.sidecar import AGENT_TIMEOUT, HOP_MARGIN, SERVICE_TIMEOUT, GrpcSidecar, timeout_for
+from attache_runtime.tools import CallContext, ToolDenied, ToolFailed
 
 
 class FakeStream:
@@ -101,3 +103,43 @@ def test_sidecar_status_mapping(code, rule, expected):
         asyncio.run(sc._call(fail()))
     if expected is ToolDenied:
         assert info.value.rule == rule
+
+
+def test_tool_calls_fit_inside_the_execute_deadline(ops_assistant, sidecar, ctx):
+    """A tool call never outlives the Execute it belongs to (CONTRACT.md §4.3)."""
+    seen = {}
+
+    class Stub:
+        def InvokeAgent(self, req, timeout):
+            seen["timeout"] = timeout
+
+            async def ok():
+                return common_pb2.InvokeAgentResponse(status="ok", output="fine")
+
+            return ok()
+
+    sc = GrpcSidecar.__new__(GrpcSidecar)
+    sc._stub = Stub()
+    call = CallContext("r", "t", "s", "ops-assistant", 0)
+    assert asyncio.run(sc.invoke_agent(call, "stock_analyst", "inventory", "stock-analyst", "hi")) == "fine"
+    assert seen["timeout"] == AGENT_TIMEOUT, "no deadline: the static bound"
+    call.deadline = time.monotonic() + 10
+    asyncio.run(sc.invoke_agent(call, "stock_analyst", "inventory", "stock-analyst", "hi"))
+    assert 9 < seen["timeout"] <= 10 - HOP_MARGIN
+    call.deadline = time.monotonic() - 1
+    assert timeout_for(call, SERVICE_TIMEOUT) == 0.0
+
+    # the agent loop hands the deadline to every tool call it makes
+    deadlines = []
+    invoke_agent = sidecar.invoke_agent
+
+    async def spy(c, *args):
+        deadlines.append(c.deadline)
+        return await invoke_agent(c, *args)
+
+    sidecar.invoke_agent = spy
+    ctx.deadline = time.monotonic() + 60
+    res = asyncio.run(
+        run_agent(ops_assistant, "WIDGET-1 stock levels and reorder advice?", "", ctx, MockModel(), sidecar)
+    )
+    assert res.status == "ok" and deadlines == [ctx.deadline]

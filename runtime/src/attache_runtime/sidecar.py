@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 import grpc
@@ -12,6 +13,18 @@ from .tools import CallContext, ToolDenied, ToolFailed
 
 # Tool responses up to this size reach the agent (it truncates what it shows the model).
 MAX_MESSAGE = 32 * 1024 * 1024
+# Upper bounds per tool RPC, in seconds. An agent call may take as long as a whole run (the sidecar's
+# RUN_TIMEOUT); every call is further held inside the Execute deadline (CONTRACT.md §4.3).
+SERVICE_TIMEOUT = 120.0
+AGENT_TIMEOUT = 300.0
+# Left of the Execute deadline after a tool call gives up, so this run can still answer.
+HOP_MARGIN = 0.5
+
+
+def timeout_for(ctx: CallContext, cap: float) -> float:
+    if ctx.deadline is None:
+        return cap
+    return max(0.0, min(cap, ctx.deadline - time.monotonic() - HOP_MARGIN))
 
 
 def _rule_of(err: grpc.aio.AioRpcError) -> str:
@@ -66,7 +79,7 @@ class GrpcSidecar:
         req = runtime_pb2.ToolServiceRequest(
             ctx=_ctx(ctx, tool), service=service, method=method, path=path, headers=headers, body=body
         )
-        resp = await self._call(self._stub.InvokeService(req, timeout=120))
+        resp = await self._call(self._stub.InvokeService(req, timeout=timeout_for(ctx, SERVICE_TIMEOUT)))
         return resp.status, resp.body
 
     async def invoke_agent(
@@ -75,7 +88,7 @@ class GrpcSidecar:
         req = runtime_pb2.ToolAgentRequest(
             ctx=_ctx(ctx, tool), target_service=target_service, target_agent=target_agent, input=input
         )
-        resp = await self._call(self._stub.InvokeAgent(req, timeout=300))
+        resp = await self._call(self._stub.InvokeAgent(req, timeout=timeout_for(ctx, AGENT_TIMEOUT)))
         if resp.status == "denied":  # older sidecars answered with an envelope
             raise ToolDenied(resp.rule or "agent.denied", resp.reason or f"agent {target_agent} denied the call")
         if resp.status != "ok":
@@ -86,7 +99,7 @@ class GrpcSidecar:
         self, ctx: CallContext, tool: str, method: str, url: str, headers: dict[str, str], body: bytes
     ) -> tuple[int, bytes]:
         req = runtime_pb2.ToolHttpRequest(ctx=_ctx(ctx, tool), method=method, url=url, headers=headers, body=body)
-        resp = await self._call(self._stub.InvokeHttp(req, timeout=120))
+        resp = await self._call(self._stub.InvokeHttp(req, timeout=timeout_for(ctx, SERVICE_TIMEOUT)))
         return resp.status, resp.body
 
     async def report_event(self, record: dict[str, Any]) -> None:

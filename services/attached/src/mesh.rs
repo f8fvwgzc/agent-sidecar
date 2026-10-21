@@ -11,6 +11,7 @@ use attache_proto::{InvokeAgentRequest, InvokeAgentResponse, ServiceRequest, Ser
 use serde_json::{Value, json};
 use tonic::{Request, Response, Status};
 
+use crate::deadline;
 use crate::pipeline::{self, Invocation};
 use crate::state::AppState;
 use crate::tools::is_reserved_header;
@@ -73,6 +74,7 @@ struct Inbound {
     agent: Option<String>,
     trace: TraceContext,
     request_id: String,
+    deadline: Option<Instant>,
 }
 
 fn inbound<T>(
@@ -110,6 +112,7 @@ fn inbound<T>(
         request_id: meta(req, "x-attache-request-id")
             .or_else(|| (!body_request_id.is_empty()).then(|| body_request_id.to_string()))
             .unwrap_or_else(attache_common::trace::new_request_id),
+        deadline: deadline::from_metadata(req.metadata()),
     }
 }
 
@@ -167,6 +170,7 @@ impl Mesh for MeshService {
             caller,
             caller_agent: inb.agent.clone(),
             depth: req.depth,
+            deadline: inb.deadline,
         };
         let resp = pipeline::invoke(&self.state, inv).await;
         match pipeline::grpc_status(&resp) {
@@ -254,7 +258,11 @@ impl Mesh for MeshService {
                 return Err(deny_status(&v));
             }
         };
-        let mut hreq = self.state.http.request(method, &url);
+        let mut hreq = self
+            .state
+            .http
+            .request(method, &url)
+            .timeout(deadline::budget(inb.deadline, deadline::HTTP_TIMEOUT));
         // Identity and trace headers come from this sidecar only; a peer's copies are dropped.
         for (k, val) in &req.headers {
             if !is_reserved_header(k) {
@@ -269,9 +277,18 @@ impl Mesh for MeshService {
         if !req.body.is_empty() {
             hreq = hreq.body(req.body.clone());
         }
-        match hreq.send().await {
-            Ok(resp) => {
-                let sr = crate::tools::to_service_response(resp).await;
+        // The app may act on the request before the peer gives up; its record is owed either way.
+        let pending = self.state.audit.on_cancel(
+            vec![record(&callee, &input, Value::Null).verdict(&v)],
+            started,
+        );
+        let sent = match hreq.send().await {
+            Ok(resp) => Ok(crate::tools::to_service_response(resp).await),
+            Err(e) => Err(e),
+        };
+        pending.disarm();
+        match sent {
+            Ok(sr) => {
                 let out = json!({ "status": sr.status, "body": body_value(&sr.body) });
                 self.state
                     .audit

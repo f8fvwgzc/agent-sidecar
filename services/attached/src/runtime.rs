@@ -19,7 +19,7 @@ use crate::state::AppState;
 pub fn client(socket: &Path) -> anyhow::Result<RuntimeClient<Channel>> {
     let path = socket.to_path_buf();
     let channel = Endpoint::try_from("http://runtime.attache.local")?
-        .timeout(Duration::from_secs(300))
+        .timeout(crate::deadline::RUN_TIMEOUT)
         .connect_with_connector_lazy(service_fn(move |_: Uri| {
             let path = path.clone();
             async move { Ok::<_, std::io::Error>(TokioIo::new(UnixStream::connect(path).await?)) }

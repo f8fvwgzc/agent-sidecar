@@ -19,6 +19,8 @@ class CallContext:
     span_id: str
     agent: str
     depth: int = 0
+    # time.monotonic() at which the sidecar stops waiting for this Execute (None: no deadline).
+    deadline: float | None = None
 
 
 @dataclass
