@@ -16,6 +16,7 @@ attache-proto = { path = "crates/attache-proto" }
 attache-charter = { path = "crates/attache-charter" }
 attache-common = { path = "crates/attache-common" }
 attache-pki = { path = "crates/attache-pki" }
+attache-otel = { path = "crates/attache-otel" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
