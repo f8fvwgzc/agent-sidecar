@@ -223,5 +223,3 @@ jobs:
             cat "$f"
             echo "::endgroup::"
           done
-
-  # Advisory: a new advisory against a pinned dependency should be visible, not block unrelated changes.
