@@ -56,7 +56,7 @@ services:
     environment:
       RUST_LOG: ${RUST_LOG:-info}
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:${AGENTSC_CONSOLE_PORT:-8080}:8080"
     expose:
       - "15012"
     volumes:
@@ -95,7 +95,7 @@ services:
     secrets:
       - orders-join-token
     ports:
-      - "127.0.0.1:8081:8080"
+      - "127.0.0.1:${AGENTSC_ORDERS_PORT:-8081}:8080"
     expose:
       - "8080"
       - "50002"
@@ -183,7 +183,7 @@ services:
   jaeger:
     image: jaegertracing/jaeger:2.21.0
     ports:
-      - "127.0.0.1:16686:16686"
+      - "127.0.0.1:${AGENTSC_JAEGER_PORT:-16686}:16686"
     expose:
       - "4317"
     restart: unless-stopped

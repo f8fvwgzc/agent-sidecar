@@ -140,7 +140,7 @@ compose-up:
 	docker build -f docker/Dockerfile --target embassy -t agentsc/embassy:dev .
 	EMBASSY="docker run --rm agentsc/embassy:dev" ./deploy/compose/gen-env.sh $(COMPOSE_ENV)
 	$(COMPOSE) up -d --build
-	@echo "console http://localhost:8080 (AGENTSC_ADMIN_TOKEN in $(COMPOSE_ENV)), orders http://localhost:8081, jaeger http://localhost:16686"
+	@echo "console http://localhost:$${AGENTSC_CONSOLE_PORT:-8080} (AGENTSC_ADMIN_TOKEN in $(COMPOSE_ENV)), orders http://localhost:$${AGENTSC_ORDERS_PORT:-8081}, jaeger http://localhost:$${AGENTSC_JAEGER_PORT:-16686}"
 
 # Volumes (CA, store, sidecar state) and .env are kept; `docker compose -p agentsc down -v` and
 # deleting $(COMPOSE_ENV) start over.
