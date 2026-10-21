@@ -1,0 +1,673 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "orders"
+            }
+          },
+          {
+            "key": "service.namespace",
+            "value": {
+              "stringValue": "shop"
+            }
+          },
+          {
+            "key": "service.version",
+            "value": {
+              "stringValue": "0.2.0"
+            }
+          },
+          {
+            "key": "attache.identity",
+            "value": {
+              "stringValue": "spiffe://attache/ns/shop/svc/orders"
+            }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "attache-otel",
+            "version": "<version>"
+          },
+          "spans": [
+            {
+              "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "spanId": "00f067aa0ba902b7",
+              "parentSpanId": "b7ad6b7169203331",
+              "name": "agent_invocation ops-assistant",
+              "kind": 2,
+              "startTimeUnixNano": "1792576800000000000",
+              "endTimeUnixNano": "1792576801180000000",
+              "attributes": [
+                {
+                  "key": "attache.kind",
+                  "value": {
+                    "stringValue": "agent_invocation"
+                  }
+                },
+                {
+                  "key": "attache.decision",
+                  "value": {
+                    "stringValue": "allow"
+                  }
+                },
+                {
+                  "key": "attache.caller",
+                  "value": {
+                    "stringValue": "local"
+                  }
+                },
+                {
+                  "key": "attache.agent",
+                  "value": {
+                    "stringValue": "ops-assistant"
+                  }
+                },
+                {
+                  "key": "attache.request_id",
+                  "value": {
+                    "stringValue": "0c4a3f8e-6b1d-4f7e-9c11-2a5d3e4f5a6b"
+                  }
+                },
+                {
+                  "key": "attache.input",
+                  "value": {
+                    "stringValue": "{\"message\":\"How many WIDGET-1 are left?\"}"
+                  }
+                },
+                {
+                  "key": "attache.output",
+                  "value": {
+                    "stringValue": "12 in stock."
+                  }
+                }
+              ]
+            },
+            {
+              "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "spanId": "1111111111111111",
+              "parentSpanId": "00f067aa0ba902b7",
+              "name": "model_call claude-opus-5-5",
+              "kind": 3,
+              "startTimeUnixNano": "1792576800050000000",
+              "endTimeUnixNano": "1792576800950000000",
+              "attributes": [
+                {
+                  "key": "attache.kind",
+                  "value": {
+                    "stringValue": "model_call"
+                  }
+                },
+                {
+                  "key": "attache.decision",
+                  "value": {
+                    "stringValue": "allow"
+                  }
+                },
+                {
+                  "key": "attache.caller",
+                  "value": {
+                    "stringValue": "local"
+                  }
+                },
+                {
+                  "key": "attache.agent",
+                  "value": {
+                    "stringValue": "ops-assistant"
+                  }
+                },
+                {
+                  "key": "attache.request_id",
+                  "value": {
+                    "stringValue": "0c4a3f8e-6b1d-4f7e-9c11-2a5d3e4f5a6b"
+                  }
+                },
+                {
+                  "key": "gen_ai.system",
+                  "value": {
+                    "stringValue": "anthropic"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "claude-opus-5-5"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "812"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "96"
+                  }
+                },
+                {
+                  "key": "attache.input",
+                  "value": {
+                    "stringValue": "{\"messages\":[{\"role\":\"user\",\"content\":\"How many WIDGET-1 are left?\"}]}"
+                  }
+                },
+                {
+                  "key": "attache.output",
+                  "value": {
+                    "stringValue": "{\"content\":\"12 in stock.\"}"
+                  }
+                }
+              ]
+            },
+            {
+              "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "spanId": "2222222222222222",
+              "parentSpanId": "00f067aa0ba902b7",
+              "name": "tool_call ops-assistant.load_skill",
+              "kind": 1,
+              "startTimeUnixNano": "1792576800397000000",
+              "endTimeUnixNano": "1792576800400000000",
+              "attributes": [
+                {
+                  "key": "attache.kind",
+                  "value": {
+                    "stringValue": "tool_call"
+                  }
+                },
+                {
+                  "key": "attache.decision",
+                  "value": {
+                    "stringValue": "allow"
+                  }
+                },
+                {
+                  "key": "attache.caller",
+                  "value": {
+                    "stringValue": "local"
+                  }
+                },
+                {
+                  "key": "attache.agent",
+                  "value": {
+                    "stringValue": "ops-assistant"
+                  }
+                },
+                {
+                  "key": "attache.request_id",
+                  "value": {
+                    "stringValue": "0c4a3f8e-6b1d-4f7e-9c11-2a5d3e4f5a6b"
+                  }
+                },
+                {
+                  "key": "attache.input",
+                  "value": {
+                    "stringValue": "{\"name\":\"refund-policy\"}"
+                  }
+                },
+                {
+                  "key": "attache.output",
+                  "value": {
+                    "stringValue": "Look up the order first."
+                  }
+                }
+              ]
+            },
+            {
+              "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "spanId": "3333333333333333",
+              "parentSpanId": "00f067aa0ba902b7",
+              "name": "agent_call ops-assistant",
+              "kind": 3,
+              "startTimeUnixNano": "1792576800420000000",
+              "endTimeUnixNano": "1792576800800000000",
+              "attributes": [
+                {
+                  "key": "attache.kind",
+                  "value": {
+                    "stringValue": "agent_call"
+                  }
+                },
+                {
+                  "key": "attache.decision",
+                  "value": {
+                    "stringValue": "allow"
+                  }
+                },
+                {
+                  "key": "attache.caller",
+                  "value": {
+                    "stringValue": "local"
+                  }
+                },
+                {
+                  "key": "attache.agent",
+                  "value": {
+                    "stringValue": "ops-assistant"
+                  }
+                },
+                {
+                  "key": "attache.request_id",
+                  "value": {
+                    "stringValue": "0c4a3f8e-6b1d-4f7e-9c11-2a5d3e4f5a6b"
+                  }
+                },
+                {
+                  "key": "attache.input",
+                  "value": {
+                    "stringValue": "{\"message\":\"stock for WIDGET-1\"}"
+                  }
+                },
+                {
+                  "key": "attache.output",
+                  "value": {
+                    "stringValue": "12"
+                  }
+                }
+              ]
+            },
+            {
+              "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "spanId": "4444444444444444",
+              "parentSpanId": "3333333333333333",
+              "name": "service_call orders POST",
+              "kind": 2,
+              "startTimeUnixNano": "1792576800499000000",
+              "endTimeUnixNano": "1792576800500000000",
+              "attributes": [
+                {
+                  "key": "attache.kind",
+                  "value": {
+                    "stringValue": "service_call"
+                  }
+                },
+                {
+                  "key": "attache.decision",
+                  "value": {
+                    "stringValue": "deny"
+                  }
+                },
+                {
+                  "key": "attache.rule",
+                  "value": {
+                    "stringValue": "authz.services.deny-admin"
+                  }
+                },
+                {
+                  "key": "attache.caller",
+                  "value": {
+                    "stringValue": "spiffe://attache/ns/shop/svc/inventory"
+                  }
+                },
+                {
+                  "key": "attache.caller_agent",
+                  "value": {
+                    "stringValue": "stock-analyst"
+                  }
+                },
+                {
+                  "key": "attache.agent",
+                  "value": {
+                    "stringValue": "stock-analyst"
+                  }
+                },
+                {
+                  "key": "attache.request_id",
+                  "value": {
+                    "stringValue": "0c4a3f8e-6b1d-4f7e-9c11-2a5d3e4f5a6b"
+                  }
+                },
+                {
+                  "key": "url.path",
+                  "value": {
+                    "stringValue": "/admin/reset"
+                  }
+                },
+                {
+                  "key": "attache.input",
+                  "value": {
+                    "stringValue": "{\"confirm\":true}"
+                  }
+                }
+              ],
+              "status": {
+                "message": "POST /admin/reset is denied for inventory",
+                "code": 2
+              }
+            },
+            {
+              "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "spanId": "5555555555555555",
+              "parentSpanId": "00f067aa0ba902b7",
+              "name": "http_call api.partner.example",
+              "kind": 3,
+              "startTimeUnixNano": "1792576790700000000",
+              "endTimeUnixNano": "1792576800700000000",
+              "attributes": [
+                {
+                  "key": "attache.kind",
+                  "value": {
+                    "stringValue": "http_call"
+                  }
+                },
+                {
+                  "key": "attache.decision",
+                  "value": {
+                    "stringValue": "allow"
+                  }
+                },
+                {
+                  "key": "attache.caller",
+                  "value": {
+                    "stringValue": "local"
+                  }
+                },
+                {
+                  "key": "attache.agent",
+                  "value": {
+                    "stringValue": "ops-assistant"
+                  }
+                },
+                {
+                  "key": "attache.request_id",
+                  "value": {
+                    "stringValue": "0c4a3f8e-6b1d-4f7e-9c11-2a5d3e4f5a6b"
+                  }
+                },
+                {
+                  "key": "url.full",
+                  "value": {
+                    "stringValue": "https://api.partner.example/v1/rates?ccy=EUR"
+                  }
+                },
+                {
+                  "key": "url.path",
+                  "value": {
+                    "stringValue": "/v1/rates"
+                  }
+                },
+                {
+                  "key": "attache.input",
+                  "value": {
+                    "stringValue": "{\"ccy\":\"EUR\"}"
+                  }
+                }
+              ],
+              "status": {
+                "message": "timed out after 10s",
+                "code": 2
+              }
+            },
+            {
+              "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "spanId": "877f61d10e8c201a",
+              "parentSpanId": "6666666666666666",
+              "name": "authz",
+              "kind": 2,
+              "startTimeUnixNano": "1792576800010000000",
+              "endTimeUnixNano": "1792576800010000000",
+              "attributes": [
+                {
+                  "key": "attache.kind",
+                  "value": {
+                    "stringValue": "authz"
+                  }
+                },
+                {
+                  "key": "attache.decision",
+                  "value": {
+                    "stringValue": "deny"
+                  }
+                },
+                {
+                  "key": "attache.rule",
+                  "value": {
+                    "stringValue": "authz.identity.invalid"
+                  }
+                },
+                {
+                  "key": "attache.caller",
+                  "value": {
+                    "stringValue": "unknown"
+                  }
+                },
+                {
+                  "key": "attache.request_id",
+                  "value": {
+                    "stringValue": "0c4a3f8e-6b1d-4f7e-9c11-2a5d3e4f5a6b"
+                  }
+                }
+              ],
+              "status": {
+                "message": "client certificate has no SPIFFE id",
+                "code": 2
+              }
+            },
+            {
+              "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "spanId": "5927e48e7b526145",
+              "parentSpanId": "00f067aa0ba902b7",
+              "name": "guardrail ops-assistant",
+              "kind": 1,
+              "startTimeUnixNano": "1792576801170000000",
+              "endTimeUnixNano": "1792576801170000000",
+              "attributes": [
+                {
+                  "key": "attache.kind",
+                  "value": {
+                    "stringValue": "guardrail"
+                  }
+                },
+                {
+                  "key": "attache.decision",
+                  "value": {
+                    "stringValue": "allow"
+                  }
+                },
+                {
+                  "key": "attache.rule",
+                  "value": {
+                    "stringValue": "guardrail.pii_redact"
+                  }
+                },
+                {
+                  "key": "attache.caller",
+                  "value": {
+                    "stringValue": "local"
+                  }
+                },
+                {
+                  "key": "attache.agent",
+                  "value": {
+                    "stringValue": "ops-assistant"
+                  }
+                },
+                {
+                  "key": "attache.request_id",
+                  "value": {
+                    "stringValue": "0c4a3f8e-6b1d-4f7e-9c11-2a5d3e4f5a6b"
+                  }
+                },
+                {
+                  "key": "attache.output",
+                  "value": {
+                    "stringValue": "[redacted:email]"
+                  }
+                }
+              ]
+            },
+            {
+              "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "spanId": "29e5ae148ea04282",
+              "parentSpanId": "00f067aa0ba902b7",
+              "name": "budget ops-assistant",
+              "kind": 1,
+              "startTimeUnixNano": "1792576800020000000",
+              "endTimeUnixNano": "1792576800020000000",
+              "attributes": [
+                {
+                  "key": "attache.kind",
+                  "value": {
+                    "stringValue": "budget"
+                  }
+                },
+                {
+                  "key": "attache.decision",
+                  "value": {
+                    "stringValue": "deny"
+                  }
+                },
+                {
+                  "key": "attache.rule",
+                  "value": {
+                    "stringValue": "budget.max_calls_per_minute"
+                  }
+                },
+                {
+                  "key": "attache.caller",
+                  "value": {
+                    "stringValue": "local"
+                  }
+                },
+                {
+                  "key": "attache.agent",
+                  "value": {
+                    "stringValue": "ops-assistant"
+                  }
+                },
+                {
+                  "key": "attache.request_id",
+                  "value": {
+                    "stringValue": "0c4a3f8e-6b1d-4f7e-9c11-2a5d3e4f5a6b"
+                  }
+                }
+              ],
+              "status": {
+                "message": "60 calls in the last minute",
+                "code": 2
+              }
+            },
+            {
+              "traceId": "9a8b7c6d5e4f30211203f4e5d6c7b8a9",
+              "spanId": "829d6032b8c3958d",
+              "parentSpanId": "8888888888888888",
+              "name": "config",
+              "kind": 1,
+              "startTimeUnixNano": "1792576739988000000",
+              "endTimeUnixNano": "1792576740000000000",
+              "attributes": [
+                {
+                  "key": "attache.kind",
+                  "value": {
+                    "stringValue": "config"
+                  }
+                },
+                {
+                  "key": "attache.decision",
+                  "value": {
+                    "stringValue": "allow"
+                  }
+                },
+                {
+                  "key": "attache.rule",
+                  "value": {
+                    "stringValue": "config.applied"
+                  }
+                },
+                {
+                  "key": "attache.caller",
+                  "value": {
+                    "stringValue": "control-plane"
+                  }
+                },
+                {
+                  "key": "attache.request_id",
+                  "value": {
+                    "stringValue": "5f0e1d2c-3b4a-4596-8877-665544332211"
+                  }
+                },
+                {
+                  "key": "attache.input",
+                  "value": {
+                    "stringValue": "{\"source\":\"control-plane\",\"epoch\":\"e1\",\"version\":\"7\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"weakened\":[]}"
+                  }
+                }
+              ]
+            },
+            {
+              "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "spanId": "812db6295a3a2566",
+              "parentSpanId": "9999999999999999",
+              "name": "learning ops-assistant",
+              "kind": 1,
+              "startTimeUnixNano": "1792576805000000000",
+              "endTimeUnixNano": "1792576805000000000",
+              "attributes": [
+                {
+                  "key": "attache.kind",
+                  "value": {
+                    "stringValue": "learning"
+                  }
+                },
+                {
+                  "key": "attache.decision",
+                  "value": {
+                    "stringValue": "allow"
+                  }
+                },
+                {
+                  "key": "attache.rule",
+                  "value": {
+                    "stringValue": "learning.proposed"
+                  }
+                },
+                {
+                  "key": "attache.caller",
+                  "value": {
+                    "stringValue": "local"
+                  }
+                },
+                {
+                  "key": "attache.agent",
+                  "value": {
+                    "stringValue": "ops-assistant"
+                  }
+                },
+                {
+                  "key": "attache.request_id",
+                  "value": {
+                    "stringValue": "0c4a3f8e-6b1d-4f7e-9c11-2a5d3e4f5a6b"
+                  }
+                },
+                {
+                  "key": "attache.input",
+                  "value": {
+                    "stringValue": "{\"request_id_of_run\":\"0c4a3f8e-6b1d-4f7e-9c11-2a5d3e4f5a6b\"}"
+                  }
+                },
+                {
+                  "key": "attache.output",
+                  "value": {
+                    "stringValue": "{\"note\":\"Check stock before promising dates.\",\"rationale\":\"Asked twice.\"}"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

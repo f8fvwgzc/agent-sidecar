@@ -177,6 +177,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "attache-otel"
+version = "0.1.0"
+dependencies = [
+ "attache-charter",
+ "attache-common",
+ "axum",
+ "chrono",
+ "hex",
+ "http",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "attache-pki"
 version = "0.1.0"
 dependencies = [

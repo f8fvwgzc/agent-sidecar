@@ -1,0 +1,89 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "orders"
+            }
+          },
+          {
+            "key": "service.namespace",
+            "value": {
+              "stringValue": "shop"
+            }
+          },
+          {
+            "key": "service.version",
+            "value": {
+              "stringValue": "0.2.0"
+            }
+          },
+          {
+            "key": "attache.identity",
+            "value": {
+              "stringValue": "spiffe://attache/ns/shop/svc/orders"
+            }
+          }
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {
+            "name": "attache-otel",
+            "version": "<version>"
+          },
+          "spans": [
+            {
+              "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "spanId": "877f61d10e8c201a",
+              "parentSpanId": "6666666666666666",
+              "name": "authz",
+              "kind": 2,
+              "startTimeUnixNano": "1792576800010000000",
+              "endTimeUnixNano": "1792576800010000000",
+              "attributes": [
+                {
+                  "key": "attache.kind",
+                  "value": {
+                    "stringValue": "authz"
+                  }
+                },
+                {
+                  "key": "attache.decision",
+                  "value": {
+                    "stringValue": "deny"
+                  }
+                },
+                {
+                  "key": "attache.rule",
+                  "value": {
+                    "stringValue": "authz.identity.invalid"
+                  }
+                },
+                {
+                  "key": "attache.caller",
+                  "value": {
+                    "stringValue": "unknown"
+                  }
+                },
+                {
+                  "key": "attache.request_id",
+                  "value": {
+                    "stringValue": "0c4a3f8e-6b1d-4f7e-9c11-2a5d3e4f5a6b"
+                  }
+                }
+              ],
+              "status": {
+                "message": "authz.identity.invalid",
+                "code": 2
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
