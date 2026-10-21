@@ -36,9 +36,11 @@ impl Verdict {
 /// Escaped unreserved characters are decoded first (`/%61dmin` is `/admin`, `%2e%2e` is `..`) and
 /// other escapes get uppercase hex; then the path is resolved with the same WHATWG URL parser
 /// reqwest uses to send the request, so `.` and `..` are removed *before* matching instead of
-/// after. Refused outright: an encoded `/`, `\` or NUL in the path (not in the query, where they
-/// are only data), an empty segment (`//`), and backslashes, fragments, whitespace and control
-/// characters anywhere.
+/// after. Refused outright: a literal `;` in the path (Tomcat, Spring and Jetty cut `;…` path
+/// parameters off a segment before routing, so `/admin;x/reset` would reach `/admin/reset`; an
+/// escaped `%3B` is data to them and stays), an encoded `/`, `\` or NUL in the path (not in the
+/// query, where they are only data), an empty segment (`//`), and backslashes, fragments,
+/// whitespace and control characters anywhere.
 pub fn canonical_path(raw: &str) -> Result<String, String> {
     if !raw.starts_with('/') {
         return Err(format!("path {raw:?} must start with /"));
@@ -55,6 +57,11 @@ pub fn canonical_path(raw: &str) -> Result<String, String> {
         Some((p, q)) => (p, Some(q)),
         None => (raw, None),
     };
+    if path.contains(';') {
+        return Err(format!(
+            "path {raw:?} has a ';' path parameter (a ; that is data is sent as %3B)"
+        ));
+    }
     let path = attache_charter::normalize_percent_escapes(path)
         .map_err(|e| format!("path {raw:?} {e}"))?;
     let url = match query {
@@ -276,7 +283,16 @@ mod tests {
             "/x?since=2026%2F10%2F21&u=http%3A%2F%2Fh%2Fy&b=%5c"
         );
         assert_eq!(canonical_path("/x?a=1?b").unwrap(), "/x?a=1?b");
+        // `;` is data only when escaped: %3B stays (with uppercase hex), and the query may carry `;`
+        assert_eq!(canonical_path("/stock/A%3bx=1").unwrap(), "/stock/A%3Bx=1");
+        assert_eq!(canonical_path("/x?a=1;b=2").unwrap(), "/x?a=1;b=2");
         for bad in [
+            "/admin;x",
+            "/admin;x/reset",
+            "/%61dmin;x",
+            "/admin;",
+            "/stock/..;/admin/reset",
+            "/admin;x/../reset",
             "stock",
             "http://evil/x",
             "/stock/..%2fadmin",
@@ -369,6 +385,26 @@ mod tests {
                 "{raw} never reaches the matcher"
             );
         }
+        // Tomcat, Spring and Jetty cut `;…` off each segment before routing (`/admin;x/reset` is
+        // their `/admin/reset`, `/stock/..;/admin` their `/admin`), so a literal `;` in the path
+        // never reaches the matcher either.
+        for raw in [
+            "/admin;x",
+            "/admin;x/reset",
+            "/%61dmin;x",
+            "/ADMIN;jsessionid=1/reset",
+            "/stock/..;/admin/reset",
+        ] {
+            let err = canonical_path(raw).unwrap_err();
+            assert!(err.contains("';' path parameter"), "{raw}: {err}");
+        }
+        // Those routers split on the raw `;` before decoding, so %3B is data: the segment below is
+        // `admin;x`, not `admin`, and goes on (the deny rule is about /admin, not this path).
+        assert_eq!(
+            canonical_path("/admin%3Bx/reset").unwrap(),
+            "/admin%3Bx/reset"
+        );
+        assert!(check("POST", "/admin%3Bx/reset").allow);
     }
 
     #[test]
@@ -386,6 +422,9 @@ mod tests {
         };
         assert!(check("HEAD", "/stock/WIDGET-1").allow);
         assert!(check("GET", "/stock/").allow, "/stock/ is /stock");
+        // a value holding `;` arrives as %3B (the runtime encodes it) and is an ordinary segment
+        let semi = canonical_path("/stock/WIDGET%3b1").unwrap();
+        assert!(check("GET", &semi).allow, "{semi}");
         let upper = check("GET", "/STOCK/WIDGET-1");
         assert!(!upper.allow, "{upper:?}");
         assert_eq!(upper.rule, "authz.default.deny");

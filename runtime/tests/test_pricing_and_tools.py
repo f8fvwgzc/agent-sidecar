@@ -77,6 +77,8 @@ def test_fill_path_encodes_values_so_they_cannot_add_segments():
     assert fill_path("/stock/{sku}", {"sku": "../admin/reset"}) == ("/stock/..%2Fadmin%2Freset", {})
     assert fill_path("/stock/{sku}", {"sku": "%2e%2e"}) == ("/stock/%252e%252e", {})
     assert fill_path("/q/{term}", {"term": "a b?c#d"}) == ("/q/a%20b%3Fc%23d", {})
+    # a literal `;` would be a path parameter, which the sidecar refuses (CONTRACT.md §5.1)
+    assert fill_path("/stock/{sku}", {"sku": "W;x=1"}) == ("/stock/W%3Bx%3D1", {})
 
 
 def test_haiku_long_prompt_tier():

@@ -173,8 +173,8 @@ audit:
 Only `type: orchestrator` agents may declare `agent` tools. An `agent` tool
 whose `service` is this charter's own service is a local agent tool.
 
-`{param}` values are percent-encoded by the runtime (`/` becomes `%2F`), so a
-path value is exactly one segment: it can never add segments, and since a
+`{param}` values are percent-encoded by the runtime (`/` becomes `%2F`, `;`
+becomes `%3B`), so a path value is exactly one segment: it can never add segments, and since a
 missing or empty value, or one made only of dots (`.`, `..`), is refused
 before anything is sent (`is_error` tool result `denied by
 guardrail.tool_spec: …`), it can never drop or climb one either
@@ -196,7 +196,7 @@ literal segments, and one segment of one or more characters for each
 - Agent names unique; tool names unique per agent.
 - `agent` tools only on orchestrators; a local `agent` tool (no `service`, or this service) must name an agent in this charter; an agent may not call itself.
 - `http` tool `url` is `http(s)://host[:port]/…` with no `{param}` and no userinfo before the path.
-- A `service` tool `path` and the path of an `http` tool `url` are templates: they start with `/`; have no empty (`//`), `.` or `..` segments; their literal text is RFC 3986 path characters (`A–Z a–z 0–9 -._~!$&'()*+,;=:@`, plus `%XX` escapes other than `%2F`, `%5C`, `%00`); `{name}` has `name` matching `^[a-zA-Z0-9_]+$`; `{name?}` is only the whole last segment.
+- A `service` tool `path` and the path of an `http` tool `url` are templates: they start with `/`; have no empty (`//`), `.` or `..` segments; their literal text is RFC 3986 path characters except `;` (`A–Z a–z 0–9 -._~!$&'()*+,=:@`, plus `%XX` escapes other than `%2F`, `%5C`, `%00`; a `;` is written `%3B`); `{name}` has `name` matching `^[a-zA-Z0-9_]+$`; `{name?}` is only the whole last segment.
 - `budgets.max_tokens_per_call` ≤ 128000.
 - `service` tools need `service`, `method`, `path`; `http` tools need `method`, `url`; `agent` tools need `agent`.
 - `guardrails.allowed_tools` / `allowed_services` keys must be agent names and the values must be declared tools / referenced services.
@@ -420,7 +420,14 @@ request, so `.`/`..` and percent-encoded dot segments (`%2e%2e`) are removed —
 Denied with `guardrail.path`: a path that does not start with `/`; whitespace,
 a control character, `\` or `#` anywhere; in the path component (not the
 query, where they are only data) an encoded `/`, `\` or NUL (`%2f`, `%5c`,
-`%00`) or a `%` that does not start an escape; and an empty segment (`//`).
+`%00`), a `%` that does not start an escape, and a literal `;`; and an empty
+segment (`//`). The `;` rule is for path parameters (RFC 3986 §3.3): Tomcat,
+Spring and Jetty cut `;…` off each segment before routing, so `/admin;x/reset`
+would reach their `/admin/reset` and `/stock/..;/admin` their `/admin`, while
+Go and Starlette route the segment as written. Rather than guess which router
+the app runs, the sidecar refuses the spelling. Those routers split on the raw
+`;` before decoding, so an escaped `%3B` is data to all of them and is kept
+(the runtime sends a `;` in a value that way); a `;` in the query is data too.
 The canonical method and path are what is authorized, audited and sent.
 
 `identity: local` in `authz.services` matches calls made by this pod's own

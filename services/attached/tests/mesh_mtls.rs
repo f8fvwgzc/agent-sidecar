@@ -360,6 +360,7 @@ async fn mesh_mtls_end_to_end() {
         ("/stock/W-1/x", "guardrail.tool_spec"),
         ("/stock/..%2Fadmin%2Freset", "guardrail.path"),
         ("/stock//W-1", "guardrail.path"),
+        ("/stock/W-1;x", "guardrail.path"),
     ] {
         let err = tools.invoke_service(traversal(path)).await.expect_err(path);
         assert_eq!(err.code(), tonic::Code::PermissionDenied, "{path}: {err:?}");
@@ -390,7 +391,8 @@ async fn mesh_mtls_end_to_end() {
     );
 
     // 5d. other spellings of /admin from a peer meet the deny pattern too (a router would decode
-    //     `%61`, ignore the trailing slash or the case); an empty segment is refused outright.
+    //     `%61`, ignore the trailing slash or the case); an empty segment is refused outright, and
+    //     so is a `;` path parameter, which Tomcat, Spring and Jetty cut off before routing.
     let inbound = |method: &str, path: &str| {
         let mut req = tonic::Request::new(attache_proto::ServiceRequest {
             method: method.into(),
@@ -412,6 +414,10 @@ async fn mesh_mtls_end_to_end() {
         ("post", "/ADMIN/reset", "authz.services.deny-admin"),
         ("POST", "//admin/reset", "guardrail.path"),
         ("POST", "/admin%2Freset", "guardrail.path"),
+        ("POST", "/admin;x", "guardrail.path"),
+        ("POST", "/admin;x/reset", "guardrail.path"),
+        ("POST", "/%61dmin;x/reset", "guardrail.path"),
+        ("GET", "/stock/..;/admin/reset", "guardrail.path"),
         ("FETCH", "/stock/WIDGET-1", "guardrail.path"),
     ] {
         let err = mesh
@@ -431,6 +437,14 @@ async fn mesh_mtls_end_to_end() {
         .expect("HEAD falls under GET /stock/*")
         .into_inner();
     assert_eq!(head.status, 200);
+    // a `;` that is data comes escaped, as the runtime sends it, and reaches the app as part of the value
+    let resp = mesh
+        .invoke_service(inbound("GET", "/stock/WIDGET%3b1"))
+        .await
+        .expect("%3B is data")
+        .into_inner();
+    let body: serde_json::Value = serde_json::from_slice(&resp.body).unwrap();
+    assert_eq!(body["sku"], "WIDGET;1");
 
     // 5e. an encoded slash in the query is data, not a path: a leftover argument such as a date
     //     reaches the app unchanged; a lowercase method is the declared GET.
@@ -470,6 +484,7 @@ async fn mesh_mtls_end_to_end() {
         ("/admin/reset", "guardrail.tool_spec"),
         ("/stock/a%2Fb", "guardrail.path"),
         ("//stock/x", "guardrail.path"),
+        ("/stock/..;/admin/reset", "guardrail.path"),
     ] {
         let err = tools
             .invoke_http(fetch(format!("{base}{path}")))

@@ -620,9 +620,11 @@ pub fn is_method(m: &str) -> bool {
     )
 }
 
-/// RFC 3986 `pchar` without `%`: what a canonical path segment is written in.
+/// RFC 3986 `pchar` without `%` and `;`: what a canonical path segment is written in. A
+/// canonical path has no literal `;` (path parameters are refused, CONTRACT.md §5.1), so a
+/// pattern or template that needs one could never match.
 fn is_path_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || "-._~!$&'()*+,;=:@".contains(c)
+    c.is_ascii_alphanumeric() || "-._~!$&'()*+,=:@".contains(c)
 }
 
 /// The percent-escapes of a URL path made canonical (RFC 3986 §6.2.2): an escaped unreserved
@@ -1058,7 +1060,10 @@ mod tests {
             PathPattern::parse("* /%61dmin/%3a*").unwrap().prefix,
             "/admin/%3A"
         );
+        assert_eq!(PathPattern::parse("* /a%3bb").unwrap().prefix, "/a%3Bb");
         for bad in [
+            "* /admin;x",
+            "* /admin;*",
             "* /a b",
             "* /a?x=1",
             "* /a#b",
@@ -1122,9 +1127,14 @@ mod tests {
             "/stock/sku}",
             "/a b/{x}",
             "/a%2Fb/{x}",
+            "/items;v=2/{x}",
+            "/items/{x};v=2",
         ] {
             assert!(PathTemplate::parse(bad).is_err(), "{bad}");
         }
+        // a `;` as data is %3B, in a literal or a value; the query is not a path
+        let semi = PathTemplate::parse("/a%3bb/{x}?q=1;2").unwrap();
+        assert!(semi.matches("/a%3Bb/c%3Bd"));
         assert_eq!(
             http_url_path("https://h:8443/v1/{id}?q=1#f"),
             "/v1/{id}?q=1"
