@@ -1,0 +1,8 @@
+{
+  "name": "carol",
+  "role": "viewer",
+  "namespaces": [
+    "attache-demo"
+  ],
+  "payloads": false
+}

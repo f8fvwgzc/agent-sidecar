@@ -256,6 +256,15 @@ impl ServeArgs {
                     .into(),
             );
         }
+        if self.has(Ca) && self.store.is_none() {
+            // IssueCertificate admits a pod's service account only if it is the service's name
+            // or listed in the stored charter's service.service_accounts (design §7).
+            errs.push(
+                "the ca component needs --store file:<dir> or --store kubernetes \
+                 (IssueCertificate checks service.service_accounts in the stored charter)"
+                    .into(),
+            );
+        }
         if self.auto_adopt {
             if !matches!(self.store, Some(StoreSpec::File(_))) {
                 errs.push("--auto-adopt works only with --store file:<dir>".into());
@@ -556,6 +565,27 @@ mod tests {
 
         let e = errors(&["--components", "ca", "--ca-dir", "/ca", "--dev"]);
         assert!(e.contains("--dev needs the api or ui component"), "{e}");
+
+        // IssueCertificate reads service.service_accounts from the stored charter
+        for components in ["ca", "ca,webhook"] {
+            let e = errors(&["--components", components, "--ca-dir", "/ca"]);
+            assert!(
+                e.contains("the ca component needs --store file:<dir> or --store kubernetes"),
+                "{components}: {e}"
+            );
+            assert!(e.contains("service.service_accounts"), "{e}");
+        }
+        for store in ["kubernetes", "file:/data/store"] {
+            parse(&["--components", "ca", "--ca-dir", "/ca", "--store", store])
+                .unwrap()
+                .validate()
+                .unwrap();
+        }
+        // the webhook alone needs no store (validator and policy only)
+        parse(&["--components", "webhook", "--tls-dir", "/tls"])
+            .unwrap()
+            .validate()
+            .unwrap();
 
         let e = errors(&[
             "--components",

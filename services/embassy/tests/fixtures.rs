@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 
 use embassy::api::ids;
 use embassy::api::types::{
-    AgentView, AuditRecord, CharterDoc, Edge, EdgeKind, Graph, HistoryEntry, MemoryDoc, Node,
-    Proposal, ProposalStatus, ServiceSummary, SseEvent, WhoAmI,
+    AgentView, AuditRecord, CharterDoc, Edge, EdgeKind, Graph, HistoryEntry, LinkResult, MemoryDoc,
+    Node, NoteSource, Proposal, ProposalStatus, Role, ServiceStatus, ServiceSummary, SseEvent,
+    ValidateResult, WhoAmI,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -90,11 +91,13 @@ fn every_fixture_round_trips_through_its_api_type() {
             .into_string()
             .expect("utf-8 name");
         match name.as_str() {
-            "whoami.json" => round_trip::<WhoAmI>(&name),
+            "whoami.json" | "whoami-viewer.json" => round_trip::<WhoAmI>(&name),
             "graph.json" => round_trip::<Graph>(&name),
             "services.json" => round_trip::<Vec<ServiceSummary>>(&name),
-            "charter-orders.json" | "charter-inventory.json" => round_trip::<CharterDoc>(&name),
-            "agent-view.json" => round_trip::<AgentView>(&name),
+            "charter-validate.json" => round_trip::<ValidateResult>(&name),
+            n if n.starts_with("charter-") => round_trip::<CharterDoc>(&name),
+            "agent-view.json" | "agent-view-support.json" => round_trip::<AgentView>(&name),
+            "links-result.json" => round_trip::<LinkResult>(&name),
             "memory.json" => round_trip::<MemoryDoc>(&name),
             "proposals.json" => round_trip::<Vec<Proposal>>(&name),
             "events-recent.json" => round_trip::<Vec<AuditRecord>>(&name),
@@ -120,11 +123,17 @@ fn every_fixture_round_trips_through_its_api_type() {
     }
     for want in [
         "whoami.json",
+        "whoami-viewer.json",
         "graph.json",
         "services.json",
         "charter-orders.json",
         "charter-inventory.json",
+        "charter-support.json",
+        "charter-reports.json",
+        "charter-validate.json",
         "agent-view.json",
+        "agent-view-support.json",
+        "links-result.json",
         "memory.json",
         "proposals.json",
         "events-recent.json",
@@ -197,9 +206,25 @@ fn graph_follows_the_design_rules() {
                 assert!(m.id == ids::MODEL_ANTHROPIC || m.id == ids::MODEL_MOCK)
             }
             Node::External(e) => assert!(e.id.starts_with("external:http"), "{}", e.id),
-            Node::Placeholder(_) => {}
+            Node::Placeholder(p) => {
+                // a peer no charter and no instance names: its service is a placeholder too
+                if let Some(parent) = &p.parent {
+                    assert!(
+                        matches!(nodes.get(parent), Some(Node::Placeholder(_))),
+                        "{} parent {parent}",
+                        p.id
+                    );
+                }
+            }
         }
     }
+    assert!(
+        graph
+            .nodes
+            .iter()
+            .any(|n| matches!(n, Node::Placeholder(_))),
+        "a placeholder for an unknown peer"
+    );
     // edges: id format, endpoints and ports exist (undeclared edges may leave the source port)
     let mut edge_ids = BTreeSet::new();
     for e in &graph.edges {
@@ -255,7 +280,22 @@ fn fixtures_agree_with_each_other() {
     let view: AgentView = typed("agent-view.json");
 
     for svc in &services {
-        let doc: CharterDoc = typed(&format!("charter-{}.json", svc.service));
+        let file = format!("charter-{}.json", svc.service);
+        if svc.charter_version.is_none() {
+            // no stored charter: no charter document, a pending adoption, no agents in the graph
+            assert_eq!(svc.status, ServiceStatus::NoCharter, "{}", svc.service);
+            assert!(svc.pending_adoption.is_some() && !svc.instances.is_empty());
+            assert!(!fixtures().join(&file).exists(), "{file}");
+            let frame = ids::service(&svc.namespace, &svc.service);
+            assert!(
+                !graph
+                    .nodes
+                    .iter()
+                    .any(|n| matches!(n, Node::Agent(a) if a.parent == frame))
+            );
+            continue;
+        }
+        let doc: CharterDoc = typed(&file);
         assert_eq!(svc.epoch.as_deref(), Some(doc.epoch.as_str()));
         assert_eq!(svc.charter_version.as_deref(), Some(doc.version.as_str()));
         let node = graph
@@ -292,13 +332,13 @@ fn fixtures_agree_with_each_other() {
         }
     }
 
-    // orders: memory, proposals, history, agent view
-    let orders = services
+    // orders: history and agent view; support: memory and proposals
+    let support = services
         .iter()
-        .find(|s| s.service == "orders")
-        .expect("orders");
+        .find(|s| s.service == "support")
+        .expect("support");
     assert_eq!(
-        orders.memory_version.as_deref(),
+        support.memory_version.as_deref(),
         Some(memory.version.as_str())
     );
     let doc: CharterDoc = typed("charter-orders.json");
@@ -314,41 +354,77 @@ fn fixtures_agree_with_each_other() {
         .find(|a| a["name"] == "ops-assistant")
         .expect("ops-assistant");
     assert_eq!(&view.agent, ops);
-    let learning = graph
-        .nodes
-        .iter()
-        .find_map(|n| match n {
-            Node::Agent(a) if a.id == ids::agent("attache-demo", "orders", "ops-assistant") => {
-                Some(a.learning.clone())
-            }
-            _ => None,
-        })
-        .expect("ops-assistant node");
+    let support_view: AgentView = typed("agent-view-support.json");
+    let support_doc: CharterDoc = typed("charter-support.json");
+    assert_eq!(support_view.agent, support_doc.charter["agents"][0]);
+    let learning = |id: String| {
+        graph
+            .nodes
+            .iter()
+            .find_map(|n| match n {
+                Node::Agent(a) if a.id == id => Some(a.learning.clone()),
+                _ => None,
+            })
+            .expect("agent node")
+    };
+    // memory exists only for agents with learning enabled (design §3)
+    let ops_learning = learning(ids::agent("attache-demo", "orders", "ops-assistant"));
+    assert!(!ops_learning.enabled && ops_learning.notes == 0);
+    let sa = learning(ids::agent("attache-demo", "support", "support-agent"));
+    assert!(sa.enabled);
     let pending = proposals
         .iter()
-        .filter(|p| p.status == ProposalStatus::Pending && p.agent == "ops-assistant")
+        .filter(|p| p.status == ProposalStatus::Pending && p.agent == "support-agent")
         .count();
-    assert_eq!(learning.pending as usize, pending);
+    assert_eq!(sa.pending as usize, pending);
+    assert!(pending > 0);
+    assert_eq!(sa.notes as usize, memory.agents["support-agent"].len());
     assert_eq!(
-        learning.notes as usize,
-        memory.agents["ops-assistant"].len()
+        memory.agents.keys().collect::<Vec<_>>(),
+        ["support-agent"],
+        "only agents with learning enabled have notes"
     );
-    for note in &memory.agents["ops-assistant"] {
-        assert!(
-            proposals
-                .iter()
-                .any(|p| p.status == ProposalStatus::Approved && p.note == note.text),
-            "note {} comes from an approved proposal",
-            note.id
-        );
+    for note in &memory.agents["support-agent"] {
+        match note.source {
+            NoteSource::Review => assert!(
+                proposals
+                    .iter()
+                    .any(|p| p.status == ProposalStatus::Approved && p.note == note.text),
+                "note {} comes from an approved proposal",
+                note.id
+            ),
+            NoteSource::Manual => {
+                assert!(note.request_id.is_none() && note.approved_by.is_some())
+            }
+            NoteSource::Auto => assert!(note.expires_at.is_some()),
+        }
     }
+    let viewer: WhoAmI = typed("whoami-viewer.json");
+    assert!(viewer.role == Role::Viewer && !viewer.payloads);
 
-    // recent events: newest first, from known services
+    // recent events: strictly newest first, equal timestamps in reverse write order (a pod
+    // writes a tool_call before its call record, and an agent_invocation after the other
+    // records of its span), from known services
     let recent: Vec<AuditRecord> = typed("events-recent.json");
-    assert!(
-        recent.windows(2).all(|w| w[0].ts >= w[1].ts),
-        "newest first"
-    );
+    let rank = |r: &AuditRecord| match r.kind.as_str() {
+        "tool_call" => 0,
+        "agent_call" | "service_call" | "http_call" => 1,
+        "agent_invocation" => 3,
+        _ => 2,
+    };
+    for w in recent.windows(2) {
+        assert!(w[0].ts >= w[1].ts, "newest first: {} {}", w[0].ts, w[1].ts);
+        if w[0].ts == w[1].ts {
+            assert_eq!(w[0].service, w[1].service, "ties within one pod");
+            assert!(
+                rank(&w[0]) > rank(&w[1]),
+                "{} {} before {}: not reverse write order",
+                w[0].ts,
+                w[0].kind,
+                w[1].kind
+            );
+        }
+    }
     assert!(
         recent
             .iter()
@@ -393,22 +469,40 @@ fn sse_transcript_follows_the_design_rules() {
             _ => {}
         }
     }
-    for want in ["registry", "audit", "graph", "proposal", "ack"] {
+    for want in SseEvent::NAMES {
         assert!(kinds.contains(want), "events.sse has no {want} event");
     }
     assert_eq!(
-        audit_traces.len(),
-        1,
-        "the audit events are one cross-pod call"
+        frames[0].event, "reset",
+        "the client reconnected with a stale Last-Event-ID"
     );
-    let audit_services: BTreeSet<String> = frames
+    let acks: Vec<bool> = frames
         .iter()
         .filter_map(|f| match SseEvent::parse(&f.event, &f.data) {
-            Ok(SseEvent::Audit(a)) => Some(a.record.service),
+            Ok(SseEvent::Ack(a)) => Some(a.applied),
             _ => None,
         })
         .collect();
-    assert_eq!(audit_services.len(), 2, "the call crosses pods");
+    assert!(
+        acks.contains(&true) && acks.contains(&false),
+        "an applied and a failed ack"
+    );
+    // the request audit events are one call across two pods; config records have their own
+    let request_records: Vec<AuditRecord> = frames
+        .iter()
+        .filter_map(|f| match SseEvent::parse(&f.event, &f.data) {
+            Ok(SseEvent::Audit(a)) if a.record.kind != "config" => Some(a.record),
+            _ => None,
+        })
+        .collect();
+    let traces: BTreeSet<&str> = request_records
+        .iter()
+        .map(|r| r.trace_id.as_str())
+        .collect();
+    assert_eq!(traces.len(), 1, "one call: {traces:?}");
+    let pods: BTreeSet<&str> = request_records.iter().map(|r| r.service.as_str()).collect();
+    assert_eq!(pods.len(), 2, "the call crosses pods");
+    assert!(audit_traces.len() > traces.len(), "a config record too");
 }
 
 /// Every `$ref` of the OpenAPI document resolves, every SSE event is documented, and every
@@ -464,6 +558,8 @@ fn openapi_document_is_consistent() {
         "AuditRecord",
         "HistoryEntry",
         "Note",
+        "NoteInput",
+        "MemoryPut",
         "ValidateResult",
         "LinkRequest",
         "LinkResult",

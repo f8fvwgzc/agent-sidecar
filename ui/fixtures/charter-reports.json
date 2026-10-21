@@ -1,0 +1,47 @@
+{
+  "epoch": "ead6e519-361a-44a9-b982-18982a00114e",
+  "version": "2",
+  "yaml": "# charter.yaml for the `reports` service (golden API data, ui/fixtures).\napiVersion: attache.io/v1alpha1\nkind: Charter\nservice:\n  name: reports\n  namespace: attache-demo\n  app_port: 8095\nagents:\n  - name: digest\n    type: agent\n    model: claude-haiku-5-5\n    system: |\n      Summarise yesterday's orders and stock movements for the morning digest in\n      five bullet points.\n    budgets:\n      max_tokens_per_call: 1024\n      max_calls_per_minute: 4\n      max_cost_usd_per_day: 1.0\n      max_steps: 2\nguardrails:\n  max_input_bytes: 16384\n  pii_redact: true\nauthz:\n  default: deny\n  callers:\n    - identity: local\n      agents: [digest]\naudit:\n  sink: stdout\n  redact: []\n",
+  "charter": {
+    "apiVersion": "attache.io/v1alpha1",
+    "kind": "Charter",
+    "service": {
+      "name": "reports",
+      "namespace": "attache-demo",
+      "app_port": 8095
+    },
+    "agents": [
+      {
+        "name": "digest",
+        "type": "agent",
+        "model": "claude-haiku-5-5",
+        "system": "Summarise yesterday's orders and stock movements for the morning digest in\nfive bullet points.\n",
+        "budgets": {
+          "max_tokens_per_call": 1024,
+          "max_calls_per_minute": 4,
+          "max_cost_usd_per_day": 1.0,
+          "max_steps": 2
+        }
+      }
+    ],
+    "guardrails": {
+      "max_input_bytes": 16384,
+      "pii_redact": true
+    },
+    "authz": {
+      "default": "deny",
+      "callers": [
+        {
+          "identity": "local",
+          "agents": [
+            "digest"
+          ]
+        }
+      ]
+    },
+    "audit": {
+      "sink": "stdout",
+      "redact": []
+    }
+  }
+}

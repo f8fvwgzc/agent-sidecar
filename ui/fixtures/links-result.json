@@ -1,0 +1,17 @@
+{
+  "applied": [
+    {
+      "service": "attache-demo/inventory",
+      "version": "2"
+    }
+  ],
+  "failed": {
+    "attache-demo/support": {
+      "error": "version_conflict",
+      "details": [
+        "If-Match \"3\" does not match the current version 4"
+      ],
+      "current_version": "4"
+    }
+  }
+}

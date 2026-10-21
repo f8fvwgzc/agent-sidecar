@@ -208,8 +208,80 @@ pub struct PendingAdoption {
     pub yaml: String,
 }
 
+/// A decision on a pending proposal ([`Store::approve_proposal`], [`Store::reject_proposal`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProposalVerdict {
+    Approve,
+    Reject,
+}
+
+/// Decide a pending proposal against the service's memory: the pure part of
+/// [`Store::approve_proposal`] and [`Store::reject_proposal`], which a store runs inside the one
+/// critical section (file store: its lock; Kubernetes store: one `status` replace with the read
+/// `resourceVersion`, since memory and proposals live in the same Charter status) that also
+/// writes the result.
+///
+/// Refused with [`StoreError::Conflict`] (current = the memory version) when `if_match_memory` is
+/// not the memory version or the proposal is no longer pending, so of an approve and a reject
+/// racing for the same proposal exactly one wins. Approving appends the note (`source: review`,
+/// `approved_by` = the actor, id `note_id`, `ts`) to the agent's notes and bumps the memory
+/// version; rejecting leaves the memory as it is. Returns the new memory and the decided
+/// proposal.
+pub fn decide_proposal(
+    memory: &MemoryDoc,
+    proposal: &Proposal,
+    verdict: ProposalVerdict,
+    if_match_memory: &str,
+    actor: &Actor,
+    ts: &str,
+    note_id: String,
+) -> Result<(MemoryDoc, Proposal), StoreError> {
+    let conflict = || StoreError::Conflict {
+        current: memory.version.clone(),
+    };
+    if if_match_memory != memory.version || proposal.status != ProposalStatus::Pending {
+        return Err(conflict());
+    }
+    let mut decided = proposal.clone();
+    let mut memory = memory.clone();
+    match verdict {
+        ProposalVerdict::Reject => decided.status = ProposalStatus::Rejected,
+        ProposalVerdict::Approve => {
+            decided.status = ProposalStatus::Approved;
+            let next = memory
+                .version
+                .parse::<u64>()
+                .ok()
+                .and_then(|v| v.checked_add(1))
+                .ok_or_else(|| {
+                    StoreError::Io(format!(
+                        "memory version {:?} is not a decimal u64 below u64::MAX",
+                        memory.version
+                    ))
+                })?;
+            memory.version = next.to_string();
+            let non_empty = |s: &str| (!s.is_empty()).then(|| s.to_string());
+            memory
+                .agents
+                .entry(proposal.agent.clone())
+                .or_default()
+                .push(Note {
+                    id: note_id,
+                    text: proposal.note.clone(),
+                    source: NoteSource::Review,
+                    request_id: non_empty(&proposal.request_id),
+                    trace_id: non_empty(&proposal.trace_id),
+                    approved_by: Some(actor.name.clone()),
+                    ts: ts.to_string(),
+                    expires_at: None,
+                });
+        }
+    }
+    Ok((memory, decided))
+}
+
 /// A change, broadcast to subscribers (the Connect streams push charters and memory from these;
-/// the API turns them into SSE `config` and `proposal` events).
+/// the API turns them into SSE `config`, `proposal` and `cp_audit` events).
 #[derive(Debug, Clone, PartialEq)]
 pub enum StoreEvent {
     CharterChanged {
@@ -235,6 +307,12 @@ pub enum StoreEvent {
         key: ServiceKey,
         sha256: String,
     },
+    /// A control-plane audit record the store produced itself — `cr_external_edit` (an external
+    /// edit of a file-store charter, or a Charter CR changed with kubectl, actor
+    /// `k8s:<manager>`) — after [`Store::append_cp_audit`] persisted it. The API sends it to
+    /// admins as SSE `cp_audit`, like the records the API writes. Boxed: it is the largest
+    /// event.
+    CpAudit(Box<CpAuditRecord>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -300,12 +378,40 @@ pub trait Store: Send + Sync {
     async fn get_proposal(&self, id: &str) -> Result<Proposal, StoreError>;
 
     /// Insert a new proposal (with the sidecar's `dedup_key`) or, with `dedup_key: None`,
-    /// replace the stored proposal with the same `id` (a status change).
+    /// replace the stored proposal with the same `id`. Decisions on pending proposals never use
+    /// this: they go through [`Store::approve_proposal`] / [`Store::reject_proposal`].
     async fn put_proposal(
         &self,
         proposal: &Proposal,
         dedup_key: Option<&str>,
     ) -> Result<ProposalPut, StoreError>;
+
+    /// Approve the pending proposal `id` of `key` atomically: in one critical section, check
+    /// that it is still pending and that the memory version is `if_match_memory`, add its note
+    /// to the agent's memory (new memory version) and mark it approved ([`decide_proposal`]).
+    /// An approve and a reject of the same proposal can therefore never both succeed. Errors:
+    /// [`StoreError::NotFound`] (no such proposal for this service), [`StoreError::Conflict`]
+    /// (stale memory version, or the proposal is no longer pending). Emits
+    /// [`StoreEvent::MemoryChanged`] and [`StoreEvent::ProposalChanged`]. The caller has checked
+    /// the stored charter first (learning still enabled for the agent, design §7).
+    async fn approve_proposal(
+        &self,
+        key: &ServiceKey,
+        id: &str,
+        if_match_memory: &str,
+        actor: &Actor,
+    ) -> Result<(MemoryDoc, Proposal), StoreError>;
+
+    /// Reject the pending proposal `id` of `key` atomically (same checks and errors as
+    /// [`Store::approve_proposal`]); the memory is returned unchanged. Emits
+    /// [`StoreEvent::ProposalChanged`].
+    async fn reject_proposal(
+        &self,
+        key: &ServiceKey,
+        id: &str,
+        if_match_memory: &str,
+        actor: &Actor,
+    ) -> Result<(MemoryDoc, Proposal), StoreError>;
 
     async fn list_pending_adoptions(&self) -> Result<Vec<PendingAdoption>, StoreError>;
 
@@ -320,7 +426,8 @@ pub trait Store: Send + Sync {
     ) -> Result<PendingAdoption, StoreError>;
 
     /// Persist one control-plane audit record (the file store appends `.audit.jsonl`; stores
-    /// without an audit file keep the default, which writes nothing).
+    /// without an audit file keep the default, which writes nothing). Records the store
+    /// produces itself are also broadcast as [`StoreEvent::CpAudit`].
     async fn append_cp_audit(&self, _record: &CpAuditRecord) -> Result<(), StoreError> {
         Ok(())
     }
@@ -334,9 +441,70 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    /// The smallest store: nothing stored, nothing accepted. Proves the trait is implementable
-    /// and usable as `Arc<dyn Store>`.
-    struct Empty(broadcast::Sender<StoreEvent>);
+    /// The smallest store: no charters; memory and proposals in one mutex, decided with
+    /// [`decide_proposal`] the way a real store does. Proves the trait is implementable and
+    /// usable as `Arc<dyn Store>`.
+    struct Empty {
+        tx: broadcast::Sender<StoreEvent>,
+        learning: std::sync::Mutex<(MemoryDoc, Vec<Proposal>)>,
+    }
+
+    impl Empty {
+        fn new(tx: broadcast::Sender<StoreEvent>, proposals: Vec<Proposal>) -> Self {
+            Self {
+                tx,
+                learning: std::sync::Mutex::new((
+                    MemoryDoc {
+                        version: "0".into(),
+                        agents: BTreeMap::new(),
+                    },
+                    proposals,
+                )),
+            }
+        }
+
+        fn decide(
+            &self,
+            key: &ServiceKey,
+            id: &str,
+            verdict: ProposalVerdict,
+            if_match: &str,
+            actor: &Actor,
+        ) -> Result<(MemoryDoc, Proposal), StoreError> {
+            let mut guard = self
+                .learning
+                .lock()
+                .map_err(|_| StoreError::Io("poisoned".into()))?;
+            let (memory, proposals) = &mut *guard;
+            let slot = proposals
+                .iter_mut()
+                .find(|p| p.id == id && p.namespace == key.namespace && p.service == key.service)
+                .ok_or(StoreError::NotFound)?;
+            let (new_memory, decided) = decide_proposal(
+                memory,
+                slot,
+                verdict,
+                if_match,
+                actor,
+                "2026-10-21T10:00:00.000Z",
+                format!("note-for-{id}"),
+            )?;
+            let memory_changed = new_memory.version != memory.version;
+            *memory = new_memory.clone();
+            *slot = decided.clone();
+            if memory_changed {
+                let _ = self.tx.send(StoreEvent::MemoryChanged {
+                    key: key.clone(),
+                    version: new_memory.version.clone(),
+                });
+            }
+            let _ = self.tx.send(StoreEvent::ProposalChanged {
+                key: key.clone(),
+                id: id.to_string(),
+            });
+            Ok((new_memory, decided))
+        }
+    }
 
     #[async_trait]
     impl Store for Empty {
@@ -372,10 +540,11 @@ mod tests {
             Err(StoreError::NotFound)
         }
         async fn get_memory(&self, _: &ServiceKey) -> Result<MemoryDoc, StoreError> {
-            Ok(MemoryDoc {
-                version: "0".into(),
-                agents: BTreeMap::new(),
-            })
+            let guard = self
+                .learning
+                .lock()
+                .map_err(|_| StoreError::Io("poisoned".into()))?;
+            Ok(guard.0.clone())
         }
         async fn put_memory(
             &self,
@@ -392,11 +561,24 @@ mod tests {
                 })
             }
         }
-        async fn list_proposals(&self, _: &ProposalFilter) -> Result<Vec<Proposal>, StoreError> {
-            Ok(vec![])
+        async fn list_proposals(&self, f: &ProposalFilter) -> Result<Vec<Proposal>, StoreError> {
+            let guard = self
+                .learning
+                .lock()
+                .map_err(|_| StoreError::Io("poisoned".into()))?;
+            Ok(guard.1.iter().filter(|p| f.matches(p)).cloned().collect())
         }
-        async fn get_proposal(&self, _: &str) -> Result<Proposal, StoreError> {
-            Err(StoreError::NotFound)
+        async fn get_proposal(&self, id: &str) -> Result<Proposal, StoreError> {
+            let guard = self
+                .learning
+                .lock()
+                .map_err(|_| StoreError::Io("poisoned".into()))?;
+            guard
+                .1
+                .iter()
+                .find(|p| p.id == id)
+                .cloned()
+                .ok_or(StoreError::NotFound)
         }
         async fn put_proposal(
             &self,
@@ -404,6 +586,24 @@ mod tests {
             _: Option<&str>,
         ) -> Result<ProposalPut, StoreError> {
             Err(StoreError::Io("read-only".into()))
+        }
+        async fn approve_proposal(
+            &self,
+            key: &ServiceKey,
+            id: &str,
+            if_match_memory: &str,
+            actor: &Actor,
+        ) -> Result<(MemoryDoc, Proposal), StoreError> {
+            self.decide(key, id, ProposalVerdict::Approve, if_match_memory, actor)
+        }
+        async fn reject_proposal(
+            &self,
+            key: &ServiceKey,
+            id: &str,
+            if_match_memory: &str,
+            actor: &Actor,
+        ) -> Result<(MemoryDoc, Proposal), StoreError> {
+            self.decide(key, id, ProposalVerdict::Reject, if_match_memory, actor)
         }
         async fn list_pending_adoptions(&self) -> Result<Vec<PendingAdoption>, StoreError> {
             Ok(vec![])
@@ -419,14 +619,14 @@ mod tests {
             Err(StoreError::NotFound)
         }
         fn subscribe(&self) -> broadcast::Receiver<StoreEvent> {
-            self.0.subscribe()
+            self.tx.subscribe()
         }
     }
 
     #[tokio::test]
     async fn the_trait_is_object_safe_and_usable() {
         let (tx, _) = broadcast::channel(4);
-        let store: Arc<dyn Store> = Arc::new(Empty(tx.clone()));
+        let store: Arc<dyn Store> = Arc::new(Empty::new(tx.clone(), vec![]));
         let key = ServiceKey::new("attache-demo", "orders");
         assert_eq!(key.to_string(), "attache-demo/orders");
         assert_eq!(store.get_charter(&key).await, Err(StoreError::NotFound));
@@ -468,6 +668,199 @@ mod tests {
                 key,
                 version: "1".into()
             }
+        );
+        // store-produced control-plane audit reaches subscribers
+        let mut edit = rec.clone();
+        edit.action = crate::api::types::CpAction::CrExternalEdit;
+        edit.actor = "k8s:kubectl-edit".into();
+        edit.actor_kind = ActorKind::K8s;
+        edit.role = None;
+        tx.send(StoreEvent::CpAudit(Box::new(edit.clone())))
+            .unwrap();
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            StoreEvent::CpAudit(Box::new(edit))
+        );
+    }
+
+    fn proposal(id: &str, status: ProposalStatus) -> Proposal {
+        Proposal {
+            id: id.into(),
+            namespace: "attache-demo".into(),
+            service: "support".into(),
+            agent: "support-agent".into(),
+            note: format!("note of {id}"),
+            rationale: "r".into(),
+            request_id: "q".into(),
+            trace_id: String::new(),
+            ts: "2026-10-21T09:59:38.130Z".into(),
+            status,
+            auto: false,
+        }
+    }
+
+    fn alice() -> Actor {
+        Actor {
+            name: "alice".into(),
+            kind: ActorKind::Session,
+            role: Some(Role::Editor),
+        }
+    }
+
+    #[test]
+    fn deciding_a_proposal() {
+        let memory = MemoryDoc {
+            version: "4".into(),
+            agents: BTreeMap::new(),
+        };
+        let p = proposal("p1", ProposalStatus::Pending);
+        let ts = "2026-10-21T10:00:00.000Z";
+
+        let (m, d) = decide_proposal(
+            &memory,
+            &p,
+            ProposalVerdict::Approve,
+            "4",
+            &alice(),
+            ts,
+            "n1".into(),
+        )
+        .unwrap();
+        assert_eq!(d.status, ProposalStatus::Approved);
+        assert_eq!(m.version, "5");
+        assert_eq!(
+            m.agents["support-agent"],
+            [Note {
+                id: "n1".into(),
+                text: "note of p1".into(),
+                source: NoteSource::Review,
+                request_id: Some("q".into()),
+                trace_id: None,
+                approved_by: Some("alice".into()),
+                ts: ts.into(),
+                expires_at: None,
+            }]
+        );
+
+        let (m, d) = decide_proposal(
+            &memory,
+            &p,
+            ProposalVerdict::Reject,
+            "4",
+            &alice(),
+            ts,
+            "unused".into(),
+        )
+        .unwrap();
+        assert_eq!(d.status, ProposalStatus::Rejected);
+        assert_eq!(m, memory, "rejecting leaves the memory alone");
+
+        // stale memory version, or no longer pending: conflict naming the memory version
+        for (p, if_match) in [
+            (p.clone(), "3"),
+            (proposal("p1", ProposalStatus::Rejected), "4"),
+            (proposal("p1", ProposalStatus::Approved), "4"),
+        ] {
+            for verdict in [ProposalVerdict::Approve, ProposalVerdict::Reject] {
+                assert_eq!(
+                    decide_proposal(&memory, &p, verdict, if_match, &alice(), ts, "n".into()),
+                    Err(StoreError::Conflict {
+                        current: "4".into()
+                    })
+                );
+            }
+        }
+        let broken = MemoryDoc {
+            version: u64::MAX.to_string(),
+            agents: BTreeMap::new(),
+        };
+        let v = broken.version.clone();
+        assert!(matches!(
+            decide_proposal(
+                &broken,
+                &p,
+                ProposalVerdict::Approve,
+                &v,
+                &alice(),
+                ts,
+                "n".into()
+            ),
+            Err(StoreError::Io(_))
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn approve_and_reject_never_both_win() {
+        let key = ServiceKey::new("attache-demo", "support");
+        for round in 0..50 {
+            let (tx, _) = broadcast::channel(16);
+            let store: Arc<dyn Store> = Arc::new(Empty::new(
+                tx,
+                vec![proposal("p1", ProposalStatus::Pending)],
+            ));
+            let mut rx = store.subscribe();
+            let (a, b) = (store.clone(), store.clone());
+            let (k1, k2) = (key.clone(), key.clone());
+            let approve =
+                tokio::spawn(async move { a.approve_proposal(&k1, "p1", "0", &alice()).await });
+            let reject =
+                tokio::spawn(async move { b.reject_proposal(&k2, "p1", "0", &alice()).await });
+            let (approve, reject) = (approve.await.unwrap(), reject.await.unwrap());
+            assert!(
+                approve.is_ok() != reject.is_ok(),
+                "round {round}: exactly one decision wins: {approve:?} / {reject:?}"
+            );
+            let stored = store.get_proposal("p1").await.unwrap();
+            let memory = store.get_memory(&key).await.unwrap();
+            match (approve, reject) {
+                (Ok((m, d)), Err(e)) => {
+                    assert_eq!(stored.status, ProposalStatus::Approved);
+                    assert_eq!((m.version.as_str(), &d), ("1", &stored));
+                    assert_eq!(memory.agents["support-agent"].len(), 1);
+                    // the loser was told the memory version that is current now
+                    assert_eq!(
+                        e,
+                        StoreError::Conflict {
+                            current: "1".into()
+                        }
+                    );
+                    assert!(matches!(
+                        rx.recv().await.unwrap(),
+                        StoreEvent::MemoryChanged { .. }
+                    ));
+                }
+                (Err(e), Ok((m, d))) => {
+                    assert_eq!(stored.status, ProposalStatus::Rejected);
+                    assert_eq!((m.version.as_str(), &d), ("0", &stored));
+                    assert!(memory.agents.is_empty());
+                    assert_eq!(
+                        e,
+                        StoreError::Conflict {
+                            current: "0".into()
+                        }
+                    );
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                rx.recv().await.unwrap(),
+                StoreEvent::ProposalChanged {
+                    key: key.clone(),
+                    id: "p1".into()
+                }
+            );
+        }
+        // an unknown proposal, or one of another service
+        let (tx, _) = broadcast::channel(4);
+        let store = Empty::new(tx, vec![proposal("p1", ProposalStatus::Pending)]);
+        let other = ServiceKey::new("attache-demo", "orders");
+        assert_eq!(
+            store.approve_proposal(&key, "p2", "0", &alice()).await,
+            Err(StoreError::NotFound)
+        );
+        assert_eq!(
+            store.reject_proposal(&other, "p1", "0", &alice()).await,
+            Err(StoreError::NotFound)
         );
     }
 

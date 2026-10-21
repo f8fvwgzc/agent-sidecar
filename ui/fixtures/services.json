@@ -28,7 +28,7 @@
     "status": "connected",
     "epoch": "c0cca7fc-c070-413e-a239-8544313185b0",
     "charter_version": "3",
-    "memory_version": "1",
+    "memory_version": "0",
     "pending_adoption": null,
     "instances": [
       {
@@ -53,6 +53,78 @@
         "acked_version": "3",
         "ack_error": null,
         "cert_expires_in_s": 83011,
+        "audit_dropped": 0
+      }
+    ]
+  },
+  {
+    "namespace": "attache-demo",
+    "service": "reports",
+    "status": "disconnected",
+    "epoch": "ead6e519-361a-44a9-b982-18982a00114e",
+    "charter_version": "2",
+    "memory_version": "0",
+    "pending_adoption": null,
+    "instances": []
+  },
+  {
+    "namespace": "attache-demo",
+    "service": "shipping",
+    "status": "no_charter",
+    "epoch": null,
+    "charter_version": null,
+    "memory_version": null,
+    "pending_adoption": {
+      "sha256": "aa762e567d1e05aadd7063c4fec2737d71f5c45d6bd8b0fadac47af86365d172",
+      "pod": "shipping-7c4d9b8f6-x2v7n",
+      "ts": "2026-10-21T09:52:17.405Z"
+    },
+    "instances": [
+      {
+        "instance_id": "30088edb-9fdf-4cad-a590-2acd90c1240d",
+        "pod": "shipping-7c4d9b8f6-x2v7n",
+        "sidecar_version": "0.2.0",
+        "connected_at": "2026-10-21T09:52:17.398Z",
+        "last_heartbeat": "2026-10-21T09:59:57.441Z",
+        "runtime_ready": true,
+        "acked_version": null,
+        "ack_error": null,
+        "cert_expires_in_s": 85338,
+        "audit_dropped": 0
+      }
+    ]
+  },
+  {
+    "namespace": "attache-demo",
+    "service": "support",
+    "status": "connected",
+    "epoch": "230841f8-0603-4845-aa9b-b8c2f6c3ee10",
+    "charter_version": "4",
+    "memory_version": "2",
+    "pending_adoption": null,
+    "instances": [
+      {
+        "instance_id": "06c97ef8-87d1-419d-a881-7ee333f4d3bb",
+        "pod": "support-6b9f8d7c5-h4k8r",
+        "sidecar_version": "0.2.0",
+        "connected_at": "2026-10-21T09:31:44.205Z",
+        "last_heartbeat": "2026-10-21T09:59:54.012Z",
+        "runtime_ready": true,
+        "acked_version": "4",
+        "ack_error": null,
+        "cert_expires_in_s": 79012,
+        "audit_dropped": 0
+      },
+      {
+        "instance_id": "e830f4b5-c574-4dfb-bac4-a0abfd68c711",
+        "pod": "support-6b9f8d7c5-r9t2z",
+        "sidecar_version": "0.2.0",
+        "connected_at": "2026-10-21T09:33:02.671Z",
+        "last_heartbeat": "2026-10-21T09:59:56.388Z",
+        "runtime_ready": true,
+        "acked_version": "4",
+        "ack_error": null,
+        "cert_expires_in_s": 80310,
         "audit_dropped": 0
       }
     ]

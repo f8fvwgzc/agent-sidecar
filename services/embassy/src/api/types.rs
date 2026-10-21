@@ -2,12 +2,14 @@
 //! golden data in `ui/fixtures/` deserializes into these types and serializes back to equal
 //! JSON (`tests/fixtures.rs`).
 //!
-//! Structs refuse unknown fields, except [`AuditRecord`]: records come from sidecars, which may
-//! be one minor version newer or older than the control plane (design §7, version skew), so a
-//! record keeps working when a sidecar adds a field, and `kind` is an open string (design §5).
+//! Structs refuse unknown fields, except [`AuditRecord`] and its [`Tokens`]: records come from
+//! sidecars, which may be one minor version newer or older than the control plane (design §7,
+//! version skew), so they are read with the lenient view of design §5 — `kind`, `direction` and
+//! `decision` are open strings, `tokens` ignores fields it does not know, and unknown top-level
+//! fields are kept and served again unchanged.
 //! Charter objects (`CharterDoc::charter`, `AgentView::agent`) are plain JSON values: their
 //! schema is the charter's (`schemas/charter.schema.json`).
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -648,11 +650,136 @@ pub struct LinkApplied {
 
 // ---- memory and proposals ------------------------------------------------------------------------
 
-/// `PUT .../memory`.
+/// `PUT .../memory`: the service's notes after the write, per agent (a full replacement: agents
+/// and stored notes left out are removed).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryPut {
-    pub agents: BTreeMap<String, Vec<Note>>,
+    pub agents: BTreeMap<String, Vec<NoteEntry>>,
+}
+
+/// One entry of [`MemoryPut`]: a stored note to keep, or a new note.
+///
+/// - A full [`Note`], exactly as `GET .../memory` returned it, keeps that stored note.
+/// - A [`NoteInput`] with an `id` keeps the stored note with that id (short form; its `text`
+///   must be the stored text).
+/// - A [`NoteInput`] without an `id` is a new note: the server assigns the id (UUIDv4),
+///   `source: manual`, `ts` (now) and `approved_by` (the caller).
+///
+/// Provenance always comes from the store, never from the client: a kept note whose fields
+/// differ from the stored one is refused (notes are not edited in place; remove and add).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum NoteEntry {
+    Note(Note),
+    Input(NoteInput),
+}
+
+impl<'de> Deserialize<'de> for NoteEntry {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        // An object with any key besides `id` and `text` is a full note; parsing it as one gives
+        // a precise error ("missing field `ts`", "unknown field `colour`") instead of serde's
+        // "did not match any variant".
+        let v = Value::deserialize(d)?;
+        let short = v
+            .as_object()
+            .is_some_and(|m| m.keys().all(|k| k == "id" || k == "text"));
+        if short {
+            serde_json::from_value(v)
+                .map(NoteEntry::Input)
+                .map_err(D::Error::custom)
+        } else {
+            serde_json::from_value(v)
+                .map(NoteEntry::Note)
+                .map_err(D::Error::custom)
+        }
+    }
+}
+
+/// A note written with `PUT .../memory` (see [`NoteEntry`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NoteInput {
+    /// The id of a stored note to keep; absent for a new note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub text: String,
+}
+
+impl MemoryPut {
+    /// The notes to store: the kept notes as stored (in stored order, so the oldest stay first),
+    /// then the new notes in the order given, stamped with `author` and `ts` and an id from
+    /// `new_id`. Agents left with no notes are left out. Every problem is reported, as
+    /// `agents.<agent>[<index>]: ...`.
+    ///
+    /// This checks the entries against `stored` only. The caller checks them against the stored
+    /// charter (agents exist and have learning enabled, at most `learning.max_notes` notes of at
+    /// most `learning.max_note_chars` characters each, design §3) and the If-Match version.
+    pub fn resolve(
+        &self,
+        stored: &MemoryDoc,
+        author: &str,
+        ts: &str,
+        mut new_id: impl FnMut() -> String,
+    ) -> Result<BTreeMap<String, Vec<Note>>, Vec<String>> {
+        let mut errs = Vec::new();
+        let mut out = BTreeMap::new();
+        for (agent, entries) in &self.agents {
+            let current: &[Note] = stored.agents.get(agent).map_or(&[], Vec::as_slice);
+            let mut keep = BTreeSet::new();
+            let mut added = Vec::new();
+            for (i, entry) in entries.iter().enumerate() {
+                let at = format!("agents.{agent}[{i}]");
+                let (id, text) = match entry {
+                    NoteEntry::Note(n) => (Some(n.id.as_str()), n.text.as_str()),
+                    NoteEntry::Input(n) => (n.id.as_deref(), n.text.as_str()),
+                };
+                if text.trim().is_empty() {
+                    errs.push(format!("{at}: text is empty"));
+                    continue;
+                }
+                let Some(id) = id else {
+                    added.push(Note {
+                        id: new_id(),
+                        text: text.to_string(),
+                        source: NoteSource::Manual,
+                        request_id: None,
+                        trace_id: None,
+                        approved_by: Some(author.to_string()),
+                        ts: ts.to_string(),
+                        expires_at: None,
+                    });
+                    continue;
+                };
+                let Some(stored_note) = current.iter().find(|n| n.id == id) else {
+                    errs.push(format!("{at}: {agent} has no stored note {id}"));
+                    continue;
+                };
+                let same = match entry {
+                    NoteEntry::Note(n) => n == stored_note,
+                    NoteEntry::Input(n) => n.text == stored_note.text,
+                };
+                if !same {
+                    errs.push(format!(
+                        "{at}: note {id} differs from the stored note (notes are not edited in place; remove it and add a new one)"
+                    ));
+                }
+                if !keep.insert(id) {
+                    errs.push(format!("{at}: note {id} is listed twice"));
+                }
+            }
+            let mut notes: Vec<Note> = current
+                .iter()
+                .filter(|n| keep.contains(n.id.as_str()))
+                .cloned()
+                .collect();
+            notes.append(&mut added);
+            if !notes.is_empty() {
+                out.insert(agent.clone(), notes);
+            }
+        }
+        if errs.is_empty() { Ok(out) } else { Err(errs) }
+    }
 }
 
 /// `POST /proposals/{id}/approve|reject`.
@@ -665,6 +792,7 @@ pub struct ProposalDecision {
 
 // ---- audit ---------------------------------------------------------------------------------------
 
+/// The `direction` values this build knows (an [`AuditRecord`] keeps any string).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {
@@ -673,6 +801,18 @@ pub enum Direction {
     Internal,
 }
 
+impl Direction {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "inbound" => Some(Self::Inbound),
+            "outbound" => Some(Self::Outbound),
+            "internal" => Some(Self::Internal),
+            _ => None,
+        }
+    }
+}
+
+/// The `decision` values this build knows (an [`AuditRecord`] keeps any string).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Decision {
@@ -680,8 +820,21 @@ pub enum Decision {
     Deny,
 }
 
-/// A sidecar audit record (CONTRACT.md §6) as the API serves it. Not `deny_unknown_fields`, and
-/// `kind` is any string (see the module docs).
+impl Decision {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "allow" => Some(Self::Allow),
+            "deny" => Some(Self::Deny),
+            _ => None,
+        }
+    }
+}
+
+/// A sidecar audit record (CONTRACT.md §6) as the API serves it: the lenient view of design §5
+/// (the shape of `attache_common::audit::AuditRecordView`). `kind`, `direction` and `decision`
+/// are any string, [`Tokens`] ignores fields it does not know, and top-level fields this build
+/// does not know are kept in [`AuditRecord::extra`] and serialized again unchanged, so a record
+/// from a newer sidecar is served exactly as it arrived.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AuditRecord {
     pub ts: String,
@@ -696,7 +849,8 @@ pub struct AuditRecord {
     pub caller: String,
     pub caller_agent: Option<String>,
     pub callee: String,
-    pub direction: Direction,
+    /// `inbound`, `outbound`, `internal`, or a later value ([`Direction::parse`]).
+    pub direction: String,
     pub input: Value,
     pub output: Value,
     pub input_sha256: Option<String>,
@@ -704,10 +858,14 @@ pub struct AuditRecord {
     pub tokens: Option<Tokens>,
     pub cost_usd: Option<f64>,
     pub latency_ms: u64,
-    pub decision: Decision,
+    /// `allow`, `deny`, or a later value ([`Decision::parse`]).
+    pub decision: String,
     pub rule: Option<String>,
     pub reason: Option<String>,
     pub error: Option<String>,
+    /// Top-level fields added by later sidecar versions, kept as they arrived.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 impl AuditRecord {
@@ -717,10 +875,21 @@ impl AuditRecord {
         self.output = Value::Null;
         self
     }
+
+    /// The direction, when it is one this build knows.
+    pub fn known_direction(&self) -> Option<Direction> {
+        Direction::parse(&self.direction)
+    }
+
+    /// The decision, when it is one this build knows.
+    pub fn known_decision(&self) -> Option<Decision> {
+        Decision::parse(&self.decision)
+    }
 }
 
+/// Token usage of a record. Not `deny_unknown_fields`: a later sidecar may count more kinds of
+/// tokens; those fields are ignored here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Tokens {
     pub input: u64,
     pub output: u64,
@@ -998,21 +1167,229 @@ mod tests {
         assert!(serde_json::from_value::<Node>(json!({"id": "x", "type": "planet"})).is_err());
     }
 
-    #[test]
-    fn audit_records_keep_unknown_kinds_and_fields() {
-        let rec = json!({
-            "ts": "2026-10-21T10:00:00.000Z", "kind": "telepathy", "request_id": "r", "trace_id": "t",
+    fn record() -> Value {
+        json!({
+            "ts": "2026-10-21T10:00:00.000Z", "kind": "config", "request_id": "r", "trace_id": "t",
             "span_id": "s", "parent_span_id": null, "service": "orders", "namespace": "attache-demo",
             "agent": null, "caller": "control-plane", "caller_agent": null, "callee": "charter",
             "direction": "internal", "input": {"version": "3"}, "output": null, "input_sha256": null,
             "output_sha256": null, "tokens": null, "cost_usd": null, "latency_ms": 0,
-            "decision": "allow", "rule": "config.applied", "reason": null, "error": null,
-            "added_in_v0_3": 1
-        });
-        let r: AuditRecord = serde_json::from_value(rec).unwrap();
-        assert_eq!(r.kind, "telepathy");
+            "decision": "allow", "rule": "config.applied", "reason": null, "error": null
+        })
+    }
+
+    #[test]
+    fn audit_records_read_known_values() {
+        let r: AuditRecord = serde_json::from_value(record()).unwrap();
+        assert_eq!(r.known_direction(), Some(Direction::Internal));
+        assert_eq!(r.known_decision(), Some(Decision::Allow));
+        assert!(r.extra.is_empty());
+        assert_eq!(serde_json::to_value(&r).unwrap(), record());
         let r = r.without_payloads();
         assert!(r.input.is_null() && r.output.is_null());
+    }
+
+    #[test]
+    fn audit_records_are_lenient_and_keep_unknown_fields() {
+        // a record from a later sidecar: new kind, direction and decision values, a new token
+        // counter and new top-level fields
+        let mut rec = record();
+        rec["kind"] = json!("telepathy");
+        rec["direction"] = json!("sideways");
+        rec["decision"] = json!("shadow");
+        rec["tokens"] = json!({"input": 10, "output": 2, "cache_read": 7});
+        rec["added_in_v0_3"] = json!({"nested": [1, 2]});
+        rec["also_new"] = json!(null);
+        let r: AuditRecord = serde_json::from_value(rec.clone()).unwrap();
+        assert_eq!(r.kind, "telepathy");
+        assert_eq!(r.direction, "sideways");
+        assert_eq!(r.known_direction(), None);
+        assert_eq!(r.known_decision(), None);
+        assert_eq!(
+            r.tokens,
+            Some(Tokens {
+                input: 10,
+                output: 2
+            })
+        );
+        assert_eq!(r.extra.len(), 2);
+        // re-served unchanged, except the token counter this build does not know
+        let mut want = rec;
+        want["tokens"] = json!({"input": 10, "output": 2});
+        assert_eq!(serde_json::to_value(&r).unwrap(), want);
+        // inside an SSE audit event too
+        let e = AuditEvent {
+            record: r,
+            edge_id: None,
+            animate: false,
+        };
+        let back: AuditEvent = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        assert_eq!(back, e);
+        assert_eq!(
+            back.record.extra["added_in_v0_3"],
+            json!({"nested": [1, 2]})
+        );
+        // the known fields are still required
+        let mut missing = record();
+        missing.as_object_mut().unwrap().remove("callee");
+        assert!(serde_json::from_value::<AuditRecord>(missing).is_err());
+    }
+
+    fn note(id: &str, text: &str) -> Note {
+        Note {
+            id: id.into(),
+            text: text.into(),
+            source: NoteSource::Review,
+            request_id: Some("q".into()),
+            trace_id: Some("t".into()),
+            approved_by: Some("bob".into()),
+            ts: "2026-10-20T17:02:31.118Z".into(),
+            expires_at: None,
+        }
+    }
+
+    #[test]
+    fn memory_put_takes_full_notes_and_note_inputs() {
+        let n1 = note("n1", "first");
+        let put: MemoryPut = serde_json::from_value(json!({"agents": {"support-agent": [
+            serde_json::to_value(&n1).unwrap(),
+            {"id": "n2", "text": "second"},
+            {"text": "a new one"}
+        ]}}))
+        .unwrap();
+        let entries = &put.agents["support-agent"];
+        assert_eq!(entries[0], NoteEntry::Note(n1.clone()));
+        assert_eq!(
+            entries[1],
+            NoteEntry::Input(NoteInput {
+                id: Some("n2".into()),
+                text: "second".into()
+            })
+        );
+        assert_eq!(
+            entries[2],
+            NoteEntry::Input(NoteInput {
+                id: None,
+                text: "a new one".into()
+            })
+        );
+        // serializes back to what was sent
+        assert_eq!(
+            serde_json::to_value(&put).unwrap()["agents"]["support-agent"][2],
+            json!({"text": "a new one"})
+        );
+        // precise errors
+        for (bad, want) in [
+            (json!({"id": "n1"}), "text"),
+            (json!({"text": "x", "colour": "red"}), "colour"),
+            (json!({"id": "n1", "text": "x", "source": "manual"}), "ts"),
+            (json!({"text": "x", "source": "telepathy"}), "telepathy"),
+        ] {
+            let err = serde_json::from_value::<MemoryPut>(json!({"agents": {"a": [bad]}}))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(want), "{err}");
+        }
+    }
+
+    #[test]
+    fn memory_put_resolves_against_the_stored_notes() {
+        let stored = MemoryDoc {
+            version: "4".into(),
+            agents: BTreeMap::from([
+                (
+                    "support-agent".to_string(),
+                    vec![note("n1", "first"), note("n2", "second")],
+                ),
+                ("faq".to_string(), vec![note("n3", "third")]),
+            ]),
+        };
+        // keep n2 (short form) and n1 (full, listed out of order), add one; faq is dropped
+        let put: MemoryPut = serde_json::from_value(json!({"agents": {
+            "support-agent": [{"text": "new"}, {"id": "n2", "text": "second"}, note_json("n1", "first")],
+            "faq": []
+        }}))
+        .unwrap();
+        let mut ids = 0;
+        let out = put
+            .resolve(&stored, "alice", "2026-10-21T10:00:00.000Z", || {
+                ids += 1;
+                format!("new-{ids}")
+            })
+            .unwrap();
+        assert_eq!(out.keys().collect::<Vec<_>>(), ["support-agent"]);
+        let notes = &out["support-agent"];
+        assert_eq!(
+            notes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
+            ["n1", "n2", "new-1"],
+            "stored order, then the new notes"
+        );
+        assert_eq!(notes[0], stored.agents["support-agent"][0]);
+        assert_eq!(
+            notes[2],
+            Note {
+                id: "new-1".into(),
+                text: "new".into(),
+                source: NoteSource::Manual,
+                request_id: None,
+                trace_id: None,
+                approved_by: Some("alice".into()),
+                ts: "2026-10-21T10:00:00.000Z".into(),
+                expires_at: None,
+            }
+        );
+
+        // every problem is reported
+        let mut forged = note("n1", "first");
+        forged.approved_by = Some("mallory".into());
+        let put = MemoryPut {
+            agents: BTreeMap::from([
+                (
+                    "support-agent".to_string(),
+                    vec![
+                        NoteEntry::Note(forged),
+                        NoteEntry::Input(NoteInput {
+                            id: Some("n2".into()),
+                            text: "edited".into(),
+                        }),
+                        NoteEntry::Input(NoteInput {
+                            id: Some("n3".into()),
+                            text: "third".into(),
+                        }),
+                        NoteEntry::Input(NoteInput {
+                            id: None,
+                            text: "  ".into(),
+                        }),
+                        NoteEntry::Input(NoteInput {
+                            id: Some("n2".into()),
+                            text: "second".into(),
+                        }),
+                    ],
+                ),
+                ("ghost".to_string(), vec![NoteEntry::Note(note("n9", "x"))]),
+            ]),
+        };
+        let errs = put
+            .resolve(&stored, "alice", "2026-10-21T10:00:00.000Z", || {
+                "never".to_string()
+            })
+            .unwrap_err();
+        let all = errs.join("\n");
+        for want in [
+            "agents.support-agent[0]: note n1 differs from the stored note",
+            "agents.support-agent[1]: note n2 differs from the stored note",
+            "agents.support-agent[2]: support-agent has no stored note n3",
+            "agents.support-agent[3]: text is empty",
+            "agents.support-agent[4]: note n2 is listed twice",
+            "agents.ghost[0]: ghost has no stored note n9",
+        ] {
+            assert!(all.contains(want), "missing {want:?} in\n{all}");
+        }
+        assert_eq!(errs.len(), 6, "{all}");
+    }
+
+    fn note_json(id: &str, text: &str) -> Value {
+        serde_json::to_value(note(id, text)).unwrap()
     }
 
     #[test]

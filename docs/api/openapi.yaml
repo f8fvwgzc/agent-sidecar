@@ -9,7 +9,9 @@ info:
     The REST, SSE and session API that `embassy serve` exposes with the `api` component
     (design: docs/design/agent-platform.md §8 and §10). Golden example data for every
     response lives in `ui/fixtures/`; the Rust types are `services/embassy/src/api/types.rs`,
-    and a test keeps the fixtures and those types in step.
+    and a test keeps the fixtures and those types in step. `docs/api/check_fixtures.py` checks
+    the fixtures against the schemas below (each operation names its fixtures in `x-fixture`),
+    against each other and against the design.
 
     ## Transport and Host check
 
@@ -80,8 +82,12 @@ info:
     precondition is 400 `invalid`; a stale one is 409
     `{"error":"version_conflict","details":[...],"current_version":"<v>"}`.
 
-    Every write passes, in this order: charter validator → `policy` → role on diff →
+    Every charter write passes, in this order: charter validator → `policy` → role on diff →
     version-skew check (the lowest `charter_schema_level` among connected instances) → store.
+    The one exception is adoption (`POST /services/{ns}/{svc}/adopt`): there is no stored
+    charter to diff against, so it passes the validator, the policy and the skew check, and needs
+    `editor` (design §8.3). Creating a service's first charter with `PUT .../charter`
+    (`If-None-Match: *`) needs `admin`.
 
     ## Errors
 
@@ -159,6 +165,8 @@ paths:
           headers:
             Set-Cookie:
               $ref: "#/components/headers/SetSessionCookie"
+        "400":
+          $ref: "#/components/responses/Invalid"
         "401":
           $ref: "#/components/responses/Unauthenticated"
         "403":
@@ -172,7 +180,7 @@ paths:
       operationId: whoami
       summary: The identity of the caller.
       x-required-role: viewer
-      x-fixture: ui/fixtures/whoami.json
+      x-fixture: [ui/fixtures/whoami.json, ui/fixtures/whoami-viewer.json]
       responses:
         "200":
           description: The caller.
@@ -269,7 +277,11 @@ paths:
       operationId: getCharter
       summary: The stored charter.
       x-required-role: viewer
-      x-fixture: [ui/fixtures/charter-orders.json, ui/fixtures/charter-inventory.json]
+      x-fixture:
+        - ui/fixtures/charter-orders.json
+        - ui/fixtures/charter-inventory.json
+        - ui/fixtures/charter-support.json
+        - ui/fixtures/charter-reports.json
       responses:
         "200":
           description: The charter, as YAML text and as JSON.
@@ -295,6 +307,10 @@ paths:
         as given. Audited as `charter_put`. 400 `config.restart_required` when the write changes
         a restart-only field while instances are connected; 400 `version_skew` when a connected
         instance's `charter_schema_level` cannot load it (`details` name the fields and pods).
+
+        The role is checked on the diff against the stored charter (design §8.3). Creating the
+        service's first charter (`If-None-Match: *`, no stored charter) needs `admin`; a
+        sidecar's start-up charter is adopted with `POST .../adopt` instead, which needs `editor`.
       x-required-role: editor
       x-role-on-diff: true
       parameters:
@@ -342,6 +358,7 @@ paths:
         Runs the validator, the policy and the skew check, and reports the role the write
         would need against the stored charter and the changes that weaken protection.
       x-required-role: editor
+      x-fixture: ui/fixtures/charter-validate.json
       parameters:
         - $ref: "#/components/parameters/Csrf"
       requestBody:
@@ -471,10 +488,14 @@ paths:
       summary: Store a sidecar's start-up charter as the service's first charter.
       description: |
         Only for a service with a pending adoption (`GET /services`) and no stored charter;
-        `sha256` must equal the pending adoption's. The charter passes the full write chain.
-        Audited as `adopt_approve`. 409 `version_conflict` when the service has a charter by now,
-        404 when no pending adoption has that hash.
+        `sha256` must equal the pending adoption's. Creating a service's first stored charter
+        by adoption needs `editor` (design §8.3). The charter passes the charter validator, the
+        `policy` and the version-skew check, but no role-on-diff check: there is no previous
+        charter to diff against. Audited as `adopt_approve`; the SSE `config` event has
+        `source: adopt`. 409 `version_conflict` when the service has a charter by now, 404 when
+        no pending adoption has that hash.
       x-required-role: editor
+      x-role-on-diff: false
       parameters:
         - $ref: "#/components/parameters/Csrf"
       requestBody:
@@ -561,7 +582,7 @@ paths:
       operationId: getAgent
       summary: One agent with the policy around it.
       x-required-role: viewer
-      x-fixture: ui/fixtures/agent-view.json
+      x-fixture: [ui/fixtures/agent-view.json, ui/fixtures/agent-view-support.json]
       responses:
         "200":
           description: The agent view. The ETag is the charter version.
@@ -625,7 +646,9 @@ paths:
       description: |
         Removes the agent's `guardrails.allowed_*` keys and its name from every
         `authz.callers[].agents` (dropping rules left empty). 409 `in_use` while a local
-        orchestrator's `agent` tool still targets it. Audited as `agent_delete`.
+        orchestrator's `agent` tool still targets it. Deleting agents needs `editor`; the
+        resulting charter is checked like any write, with the role on the diff (design §8.3).
+        Audited as `agent_delete`.
       x-required-role: editor
       x-role-on-diff: true
       parameters:
@@ -701,7 +724,10 @@ paths:
       tags: [agents]
       operationId: deleteSkill
       summary: Remove one top-level skill.
-      description: 409 `in_use` while an agent still lists it in `skills`. Audited as `skill_delete`.
+      description: |
+        409 `in_use` while an agent still lists it in `skills`. Needs `editor`; the resulting
+        charter is checked like any write, with the role on the diff (design §8.3). Audited as
+        `skill_delete`.
       x-required-role: editor
       x-role-on-diff: true
       parameters:
@@ -743,6 +769,7 @@ paths:
         write is reported in `failed` without undoing `applied`. Audited as `link_post`.
       x-required-role: editor
       x-role-on-diff: true
+      x-fixture: ui/fixtures/links-result.json
       parameters:
         - $ref: "#/components/parameters/Csrf"
       requestBody:
@@ -800,9 +827,24 @@ paths:
       operationId: putMemory
       summary: Replace the service's notes (full replacement, pushed to every instance).
       description: |
-        If-Match is the memory version. Agents must exist in the stored charter; per agent at
-        most `learning.max_notes` notes of at most `learning.max_note_chars` characters; at most
-        256 KiB in total. New notes written here get `source: manual`. Audited as `memory_put`.
+        If-Match is the memory version. The body lists, per agent, every note the agent keeps
+        and every note to add; agents and stored notes left out are removed (`MemoryPut`).
+        Each entry is either:
+
+        - a full `Note`, exactly as `GET` returned it: keeps that stored note;
+        - a `NoteInput` with an `id`: keeps the stored note with that id (its `text` must be the
+          stored text);
+        - a `NoteInput` without an `id`: a new note. The server assigns its `id` (UUIDv4),
+          `source: manual`, `ts` (now) and `approved_by` (the caller); `request_id`, `trace_id`
+          and `expires_at` are null.
+
+        Provenance always comes from the store: a kept note whose fields differ from the stored
+        note, an `id` the agent does not have, an `id` listed twice or an empty `text` is 400
+        `invalid` (notes are not edited in place: remove one and add another). Kept notes stay
+        in stored order, new notes follow in the order given. Every agent must exist in the
+        stored charter with learning enabled (memory exists only for those, design §3); per
+        agent at most `learning.max_notes` notes of at most `learning.max_note_chars`
+        characters; at most 262144 characters per service. Audited as `memory_put`.
       x-required-role: editor
       parameters:
         - $ref: "#/components/parameters/Csrf"
@@ -882,8 +924,13 @@ paths:
       summary: Approve a pending proposal; its note joins the agent's memory.
       description: |
         If-Match is the service's memory version. The note gets `source: review` and
-        `approved_by` = the caller. 409 `version_conflict` when the proposal is no longer
-        pending. Audited as `proposal_approve`.
+        `approved_by` = the caller. The decision is atomic in the store: the proposal's status,
+        the memory version and both writes are checked and made together, so an approve and a
+        reject of the same proposal never both succeed. 409 `version_conflict`
+        (`current_version` = the memory version) when the memory version is stale or the
+        proposal is no longer pending; 400 `invalid` when the stored charter no longer enables
+        learning for the agent (memory exists only for agents with learning enabled, design
+        §3). Audited as `proposal_approve`.
       x-required-role: editor
       parameters:
         - $ref: "#/components/parameters/Csrf"
@@ -918,7 +965,10 @@ paths:
       tags: [proposals]
       operationId: rejectProposal
       summary: Reject a pending proposal (memory is unchanged).
-      description: If-Match is the service's memory version. Audited as `proposal_reject`.
+      description: |
+        If-Match is the service's memory version. Atomic like approve: 409 `version_conflict`
+        (`current_version` = the memory version) when the memory version is stale or the
+        proposal is no longer pending. Audited as `proposal_reject`.
       x-required-role: editor
       parameters:
         - $ref: "#/components/parameters/Csrf"
@@ -955,6 +1005,16 @@ paths:
         The ring holds at most `events.retain_bytes` of records. Filters combine with AND;
         `agent` matches the record's `agent` or `caller_agent`; `trace_id` and `request_id`
         match exactly. Payloads per the token (see Roles, scopes and payloads).
+
+        **Order.** Strictly newest first by `ts`; records with the same `ts` come in reverse
+        arrival order. The control plane receives a pod's records in the order its sidecar wrote
+        them (the order `/events` sends them as `audit` events), so for one pod, equal-`ts`
+        records are in reverse write order: an `agent_invocation` before the records of its own
+        span written just before it (a `guardrail`, for example), and a `service_call` /
+        `agent_call` / `http_call` before the `tool_call` that made it.
+
+        The ring holds the records the control plane kept: see `AuditRecord` for the ones it
+        drops.
       x-required-role: viewer
       x-fixture: ui/fixtures/events-recent.json
       parameters:
@@ -1027,7 +1087,12 @@ paths:
 
         **Back-pressure.** Each client has a queue of 1024 events. When it overflows, the queued
         events are dropped and a `lagged` event `{dropped}` is sent; the client refetches like
-        after `reset`.
+        after `reset`. The `lagged` event's `id` is the `seq` of the last dropped event, so it is
+        at least `dropped` above the id of the event before it.
+
+        **Audit events** come in arrival order: a pod's records in the order its sidecar wrote
+        them (see `/events/recent` for the order of equal timestamps). Their `edge_id` and
+        `animate` follow the record → edge mapping in `Edge`.
 
         **Keep-alive.** A comment line (`: keepalive`) every 15 s.
 
@@ -1537,7 +1602,7 @@ components:
         label:
           type: string
         port:
-          description: "`service.app_port`; null when unknown."
+          description: "`service.app_port` of the stored charter, else the `app_port` the instances sent in `Hello`; null when neither is known."
           oneOf:
             - type: integer
               minimum: 1
@@ -1743,12 +1808,27 @@ components:
         evicted); its `source_port` may name a tool the source node no longer declares, and the
         UI then draws it from the node's border.
 
-        Record → edge mapping (one animating record per hop): `agent_invocation` with caller
-        `local` and no `caller_agent` → the `invoke` edge; `agent_call` (caller side) → the
-        agent tool edge; `service_call` outbound or internal (caller side) → the service tool
-        edge; `http_call` → the http tool edge; `model_call` → the `model` edge (provider from
-        the callee: `mock` → `model:mock`, else `model:anthropic`). Everything else animates
-        nothing.
+        **Record → edge mapping** (server side; one animating record per hop):
+
+        | Record | Animates | Stats |
+        | --- | --- | --- |
+        | `agent_invocation`, caller `local`, no `caller_agent` | `invoke` edge app→agent | agent node + edge |
+        | `agent_invocation`, caller `local`, with `caller_agent` (local orchestrator) | nothing (the caller's `agent_call` animates) | agent node |
+        | `agent_invocation`, caller a peer | nothing (the caller side animates) | agent node |
+        | `agent_call` (caller side) | tool edge agent→agent `#<tool>` | edge |
+        | `service_call` outbound or internal (caller side) | tool edge agent→app `#<tool>` | edge |
+        | `service_call` inbound (callee side) | nothing | callee app node |
+        | `http_call` | tool edge agent→external `#<tool>` | edge |
+        | `model_call` | `model` edge agent→provider (by `agent`, provider from callee prefix `mock`/other) | edge |
+        | `tool_call`, `guardrail`, `budget`, `authz`, `config`, `learning`, `load_skill` | nothing | node counters only |
+
+        A record that maps to an edge not in the graph creates an undeclared edge (`declared: false`) and triggers `event: graph`.
+
+        On `/events`, a record that animates an edge is sent with that `edge_id` and
+        `animate: true`; every other record with `edge_id: null` and `animate: false`. The
+        `#<tool>` of an `agent_call`, `service_call` or `http_call` is the `callee` of the
+        `tool_call` whose `span_id` is the record's `parent_span_id` (the sidecar writes that
+        `tool_call` first).
       properties:
         id:
           type: string
@@ -2202,16 +2282,37 @@ components:
       type: object
       additionalProperties: false
       required: [agents]
+      description: |
+        The service's notes after the write (a full replacement). Per agent, each entry is a
+        stored note to keep (a full `Note`, or a `NoteInput` with its `id`) or a new note (a
+        `NoteInput` without `id`); see `PUT .../memory`.
       properties:
         agents:
           type: object
           additionalProperties:
             type: array
             items:
-              $ref: "#/components/schemas/Note"
+              oneOf:
+                - $ref: "#/components/schemas/Note"
+                - $ref: "#/components/schemas/NoteInput"
+    NoteInput:
+      type: object
+      additionalProperties: false
+      required: [text]
+      description: |
+        A note written with `PUT .../memory`. Without `id`: a new note (the server assigns
+        `id`, `source: manual`, `ts` and `approved_by`). With `id`: the stored note with that id,
+        kept unchanged (`text` must be its stored text).
+      properties:
+        id:
+          type: string
+          format: uuid
+        text:
+          type: string
+          minLength: 1
     NoteSource:
       type: string
-      description: "`review` (an approved proposal), `auto` (stored at once, expires), `manual` (written with `PUT /memory`)."
+      description: "`review` (an approved proposal), `auto` (stored at once, expires), `manual` (written with `PUT /memory`; `approved_by` is its author)."
       enum: [review, auto, manual]
     Note:
       type: object
@@ -2235,7 +2336,7 @@ components:
             - type: string
             - type: "null"
         approved_by:
-          description: Who approved it; null for `auto` notes.
+          description: Who approved it (`review`), or who wrote it (`manual`); null for `auto` notes.
           oneOf:
             - type: string
             - type: "null"
@@ -2292,10 +2393,19 @@ components:
     # ---- audit -----------------------------------------------------------------------------------
     AuditRecord:
       type: object
+      additionalProperties: true
       description: |
         CONTRACT.md §6, with the v0.2 kinds `config` and `learning` (design §5). A consumer keeps
         records of kinds it does not know and shows the kind as-is. `service`/`namespace` are the
         identity of the Connect stream the record arrived on.
+
+        **Lenient view** (design §5, `attache_common::audit::AuditRecordView`): records come
+        from sidecars one minor version older or newer than the control plane, so `kind`,
+        `direction` and `decision` are any string (the values listed are the ones v0.2 writes),
+        `tokens` accepts fields it does not know, and top-level fields this document does not
+        list are kept and served again unchanged.
+
+        **What the control plane keeps** (design §7): Every received audit record: the control plane overwrites `service`/`namespace` with the stream's identity; drops records > 64 KiB, and records whose `agent` is non-null and not in the stored charter **unless** `direction` is `inbound` (inbound records carry the calling peer's agent); caps undeclared nodes and edges at 200 per service (oldest evicted).
       required:
         - ts
         - kind
@@ -2357,7 +2467,8 @@ components:
           type: string
         direction:
           type: string
-          enum: [inbound, outbound, internal]
+          description: "`inbound`, `outbound`, `internal`, or a later value (kept as written)."
+          examples: [inbound, outbound, internal]
         input:
           description: Redacted and truncated payload (any JSON); null when hidden by the token or `payloads=false`.
         output:
@@ -2384,7 +2495,8 @@ components:
           minimum: 0
         decision:
           type: string
-          enum: [allow, deny]
+          description: "`allow`, `deny`, or a later value (kept as written)."
+          examples: [allow, deny]
         rule:
           oneOf:
             - type: string
@@ -2399,7 +2511,8 @@ components:
             - type: "null"
     Tokens:
       type: object
-      additionalProperties: false
+      additionalProperties: true
+      description: Token usage. Fields a later sidecar adds are accepted (and not served back).
       required: [input, output]
       properties:
         input:

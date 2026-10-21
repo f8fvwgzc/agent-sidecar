@@ -1,15 +1,25 @@
 {
-  "version": "1",
+  "version": "2",
   "agents": {
-    "ops-assistant": [
+    "support-agent": [
       {
-        "id": "d9ab350b-fa45-49c8-a371-b821ca97ec94",
-        "text": "Order ids are plain numbers such as 1001; pass them to lookup_order without a '#' or other prefix.",
+        "id": "03e17b7d-ae64-47c2-bc52-bdfd3236bdb4",
+        "text": "Ticket ids look like T-2291; pass them to lookup_ticket with the T- prefix.",
         "source": "review",
-        "request_id": "91b151f2-5708-42d7-935e-881dad02a07c",
-        "trace_id": "44b966b4ec060651a950e61d52a5e5f8",
+        "request_id": "4ef2f859-6de9-44cd-bb31-3fe4ccceedcc",
+        "trace_id": "e689fd1c38671d7c0c422e1f0d1be678",
         "approved_by": "bob",
-        "ts": "2026-10-20T17:02:31.118Z",
+        "ts": "2026-10-20T15:12:09.331Z",
+        "expires_at": null
+      },
+      {
+        "id": "f0edaf2f-0eda-4372-8be2-70604ae573bc",
+        "text": "Customers in the EU have 30 days to return an order, everyone else 14 days.",
+        "source": "manual",
+        "request_id": null,
+        "trace_id": null,
+        "approved_by": "alice",
+        "ts": "2026-10-21T08:41:55.902Z",
         "expires_at": null
       }
     ]
