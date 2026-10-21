@@ -36,12 +36,30 @@ pub async fn serve(
     Ok((bound, task))
 }
 
+impl AppApiService {
+    /// The app API token (design §6.6): `UNAUTHENTICATED` and an `authz` record without it.
+    fn authenticate<T>(&self, request: &Request<T>, callee: &str) -> Result<(), Status> {
+        let md = request.metadata();
+        let get = |k: &str| md.get(k).and_then(|v| v.to_str().ok());
+        crate::app_auth::check(
+            &self.state,
+            get("authorization"),
+            get("traceparent"),
+            callee,
+        )
+        .map_err(|v| {
+            crate::tools::status_with_rule(tonic::Code::Unauthenticated, &v.rule, &v.reason)
+        })
+    }
+}
+
 #[tonic::async_trait]
 impl AppApi for AppApiService {
     async fn invoke_agent(
         &self,
         request: Request<InvokeAgentRequest>,
     ) -> Result<Response<InvokeAgentResponse>, Status> {
+        self.authenticate(&request, "AppApi/InvokeAgent")?;
         let tp = request
             .metadata()
             .get("traceparent")
@@ -76,10 +94,17 @@ impl AppApi for AppApiService {
 
     async fn list_agents(
         &self,
-        _request: Request<Empty>,
+        request: Request<Empty>,
     ) -> Result<Response<ListAgentsResponse>, Status> {
-        let agents = self
-            .state
+        self.authenticate(&request, "AppApi/ListAgents")?;
+        let snap = self.state.loaded().ok_or_else(|| {
+            crate::tools::status_with_rule(
+                tonic::Code::Unavailable,
+                crate::tools::RULE_NO_CHARTER,
+                "no charter is loaded yet",
+            )
+        })?;
+        let agents = snap
             .charter
             .agents
             .iter()
@@ -87,7 +112,7 @@ impl AppApi for AppApiService {
                 name: a.name.clone(),
                 r#type: format!("{:?}", a.agent_type).to_lowercase(),
                 model: a.model.clone(),
-                tools: self.state.charter.allowed_tools(a),
+                tools: snap.charter.allowed_tools(a),
             })
             .collect();
         Ok(Response::new(ListAgentsResponse { agents }))

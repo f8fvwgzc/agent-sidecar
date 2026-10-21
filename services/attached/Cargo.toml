@@ -21,6 +21,7 @@ attache-proto.workspace = true
 attache-charter.workspace = true
 attache-common.workspace = true
 attache-pki.workspace = true
+attache-otel.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tonic.workspace = true
@@ -39,8 +40,22 @@ tracing-subscriber.workspace = true
 shell-words.workspace = true
 futures.workspace = true
 rustls.workspace = true
+rustls-pki-types.workspace = true
 url.workspace = true
+rcgen.workspace = true
+x509-parser.workspace = true
+sha2.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+rand.workspace = true
+# Hot reload (design §6.2): the loaded charter and the workload certificate are swapped whole.
+arc-swap = "1"
+# The mesh and the control-plane connections run rustls themselves, so the certificate can be
+# swapped after a renewal (design §6.3); tonic links the same tokio-rustls.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 
 [dev-dependencies]
 tempfile.workspace = true
 serde_yaml_ng.workspace = true
+rcgen.workspace = true
+time = "0.3"

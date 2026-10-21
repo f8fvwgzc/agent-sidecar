@@ -4,26 +4,31 @@
 //! the call must match a tool the agent declared and may use, the path is canonicalised before
 //! authz, and every outcome — allowed, denied, failed or cancelled — leaves exactly one `tool_call`
 //! record plus, once something was actually attempted, one `service_call` / `agent_call` / `http_call`.
+//! `ReportEvent` takes only what design §6.5 allows, for runs this sidecar knows.
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use attache_charter::{AgentSpec, ToolSpec, ToolType};
-use attache_common::audit::{AuditRecord, Direction, Kind, OnCancel, Tokens};
+use attache_charter::{AgentSpec, LOAD_SKILL_TOOL, ToolSpec, ToolType};
+use attache_common::audit::{AuditRecord, AuditRecordView, Direction, Kind, OnCancel, Tokens};
 use attache_common::authz::{self, Verdict};
 use attache_common::guardrails::INPUT_DENY;
 use attache_common::trace::TraceContext;
 use attache_proto::sidecar_tools_server::{SidecarTools, SidecarToolsServer};
 use attache_proto::{
-    AuditEvent, Empty, InvokeAgentRequest, InvokeAgentResponse, ServiceRequest, ServiceResponse,
-    ToolAgentRequest, ToolContext, ToolHttpRequest, ToolServiceRequest,
+    AuditEvent, Empty, InvokeAgentRequest, InvokeAgentResponse, LessonRequest, LessonResponse,
+    ServiceRequest, ServiceResponse, ToolAgentRequest, ToolContext, ToolHttpRequest,
+    ToolServiceRequest,
 };
 use serde_json::{Value, json};
 use tokio_stream::wrappers::UnixListenerStream;
+use tonic::metadata::MetadataValue;
 use tonic::{Code, Request, Response, Status};
 
 use crate::deadline;
+use crate::loaded::Loaded;
+use crate::outbox;
 use crate::pipeline::{self, Invocation};
 use crate::state::AppState;
 
@@ -31,6 +36,12 @@ pub const RULE_TOOL_SPEC: &str = "guardrail.tool_spec";
 pub const RULE_MESH_UNAVAILABLE: &str = "mesh.unavailable";
 pub const RULE_APP_UNAVAILABLE: &str = "app.unavailable";
 pub const RULE_HTTP_ERROR: &str = "http.error";
+/// A record or lesson the runtime may not send (design §6.5).
+pub const RULE_REPORT_REJECTED: &str = "runtime.report_rejected";
+/// On every `ReportEvent` answer once the agent's daily cost budget is spent (design §6.5).
+pub const RULE_COST_BUDGET: &str = "budget.max_cost_usd_per_day";
+/// No charter is loaded yet (managed mode, before the control plane sent one).
+pub const RULE_NO_CHARTER: &str = "config.no_charter";
 /// Upper bound for a message the runtime sends us (tool bodies are small; prompts never come here).
 const MAX_DECODE: usize = 16 * 1024 * 1024;
 
@@ -57,6 +68,10 @@ pub async fn serve(
     }))
 }
 
+fn valid_trace_id(trace_id: &str) -> bool {
+    TraceContext::parse(&format!("00-{trace_id}-00f067aa0ba902b7-01")).is_some()
+}
+
 fn ctx_of(ctx: &Option<ToolContext>) -> Result<(ToolContext, TraceContext), Status> {
     let c = ctx
         .clone()
@@ -66,12 +81,11 @@ fn ctx_of(ctx: &Option<ToolContext>) -> Result<(ToolContext, TraceContext), Stat
             "ctx.agent and ctx.tool are required",
         ));
     }
-    let trace_id =
-        if TraceContext::parse(&format!("00-{}-00f067aa0ba902b7-01", c.trace_id)).is_some() {
-            c.trace_id.clone()
-        } else {
-            TraceContext::new_root().trace_id
-        };
+    let trace_id = if valid_trace_id(&c.trace_id) {
+        c.trace_id.clone()
+    } else {
+        TraceContext::new_root().trace_id
+    };
     let trace = TraceContext {
         trace_id,
         span_id: TraceContext::new_root().span_id,
@@ -163,6 +177,53 @@ fn fits_template(template: Option<&str>, path: &str) -> bool {
         .is_some_and(|t| t.matches(path))
 }
 
+fn no_charter() -> Status {
+    status_with_rule(
+        Code::Unavailable,
+        RULE_NO_CHARTER,
+        "no charter is loaded yet",
+    )
+}
+
+/// Refuse what the runtime reported (design §6.5): an `authz` record with rule
+/// `runtime.report_rejected`, then `INVALID_ARGUMENT`. `input` summarizes what was refused (the
+/// refused record itself is not written: the runtime may not author records).
+pub(crate) fn reject_report(
+    state: &AppState,
+    request_id: &str,
+    trace_id: &str,
+    agent: Option<&str>,
+    input: Value,
+    reason: String,
+) -> Status {
+    let trace = if valid_trace_id(trace_id) {
+        TraceContext {
+            trace_id: trace_id.to_string(),
+            span_id: TraceContext::new_root().span_id,
+            parent_span_id: None,
+        }
+    } else {
+        TraceContext::new_root()
+    };
+    let v = Verdict::deny(RULE_REPORT_REJECTED, reason.clone());
+    let rec = AuditRecord::new(
+        Kind::Authz,
+        Direction::Internal,
+        request_id,
+        &trace,
+        agent,
+        attache_charter::LOCAL_IDENTITY,
+        None,
+        "runtime",
+        input,
+        Value::Null,
+    )
+    .verdict(&v);
+    state.audit.write(rec);
+    tracing::warn!(%reason, request_id, "runtime report rejected");
+    status_with_rule(Code::InvalidArgument, RULE_REPORT_REJECTED, &reason)
+}
+
 /// One tool call in flight: its context, its span and the records it owes the audit log.
 struct Call<'a> {
     svc: &'a ToolsService,
@@ -245,9 +306,11 @@ impl<'a> Call<'a> {
         self.svc.state.audit.write(rec);
     }
 
-    /// The `tool_call` and attempt records owed while the call is awaited: if the runtime drops
-    /// it (gone, or its deadline passed) they are written as cancelled — the target may have acted.
-    fn pending(
+    /// The attempt begins: a span start for the timeline (design §6.4, its span = the attempt
+    /// record's), then the `tool_call` and attempt records owed while the call is awaited — if the
+    /// runtime drops it (gone, or its deadline passed) they are written as cancelled; the target
+    /// may have acted.
+    fn begin(
         &self,
         kind: Kind,
         dir: Direction,
@@ -256,6 +319,16 @@ impl<'a> Call<'a> {
         input: &Value,
         v: &Verdict,
     ) -> OnCancel<'a> {
+        self.svc.state.outbox.span_start(outbox::span(
+            kind.as_str(),
+            &self.c.request_id,
+            child,
+            &self.c.agent,
+            "local",
+            Some(&self.c.agent),
+            callee,
+            dir,
+        ));
         let tool = self
             .record(
                 Kind::ToolCall,
@@ -284,8 +357,13 @@ impl<'a> Call<'a> {
 
 impl ToolsService {
     /// The declared tool, if this agent may use it (guardrails.allowed_tools).
-    fn tool_spec(&self, agent: &str, tool: &str) -> Result<(&AgentSpec, &ToolSpec), Verdict> {
-        let charter = &self.state.charter;
+    fn tool_spec<'l>(
+        &self,
+        snap: &'l Loaded,
+        agent: &str,
+        tool: &str,
+    ) -> Result<(&'l AgentSpec, &'l ToolSpec), Verdict> {
+        let charter = &snap.charter;
         let Some(spec) = charter.agent(agent) else {
             return Err(Verdict::deny(
                 pipeline::RULE_UNKNOWN_AGENT,
@@ -307,9 +385,8 @@ impl ToolsService {
         }
     }
 
-    fn check_service(&self, spec: &AgentSpec, service: &str) -> Verdict {
-        if self
-            .state
+    fn check_service(&self, snap: &Loaded, spec: &AgentSpec, service: &str) -> Verdict {
+        if snap
             .charter
             .allowed_services(spec)
             .iter()
@@ -327,7 +404,7 @@ impl ToolsService {
     fn is_self(&self, service: Option<&str>) -> bool {
         match service {
             None => true,
-            Some(s) => s.is_empty() || s == self.state.charter.service.name,
+            Some(s) => s.is_empty() || s == self.state.service,
         }
     }
 
@@ -347,6 +424,7 @@ impl ToolsService {
     #[allow(clippy::too_many_arguments)]
     async fn call_local_app(
         &self,
+        snap: &Loaded,
         c: &ToolContext,
         child: &TraceContext,
         deadline: Option<Instant>,
@@ -355,7 +433,7 @@ impl ToolsService {
         headers: &HashMap<String, String>,
         body: &[u8],
     ) -> Result<ServiceResponse, String> {
-        let url = format!("{}{}", self.state.app_base_url(), path);
+        let url = format!("{}{}", self.state.app_base_url(snap), path);
         let m = reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| e.to_string())?;
         let mut req = self
             .state
@@ -412,6 +490,7 @@ impl SidecarTools for ToolsService {
         let deadline = deadline::from_metadata(request.metadata());
         let req = request.into_inner();
         let (c, trace) = ctx_of(&req.ctx)?;
+        let snap = self.state.loaded().ok_or_else(no_charter)?;
         let call = Call {
             svc: self,
             c,
@@ -423,7 +502,7 @@ impl SidecarTools for ToolsService {
         let mut input = json!({ "service": req.service, "method": req.method, "path": req.path, "body": body_value(&req.body) });
 
         // 1. the call must be a tool this agent declared and may use, with the declared target
-        let (spec, tool) = match self.tool_spec(&call.c.agent, &call.c.tool) {
+        let (spec, tool) = match self.tool_spec(&snap, &call.c.agent, &call.c.tool) {
             Ok(x) => x,
             Err(v) => return Err(call.deny(&input, v)),
         };
@@ -449,7 +528,7 @@ impl SidecarTools for ToolsService {
             return Err(call.deny(&input, mismatch(&req.path)));
         }
         let target = req.service.clone();
-        let v = self.check_service(spec, &target);
+        let v = self.check_service(&snap, spec, &target);
         if !v.allow {
             return Err(call.deny(&input, v));
         }
@@ -464,7 +543,7 @@ impl SidecarTools for ToolsService {
             return Err(call.deny(&input, mismatch(&path)));
         }
         let v = authz::authorize_service_call(
-            &self.state.charter,
+            &snap.charter,
             Some(authz::LOCAL),
             Some(&call.c.agent),
             &target,
@@ -484,9 +563,10 @@ impl SidecarTools for ToolsService {
         } else {
             Direction::Outbound
         };
-        let pending = call.pending(Kind::ServiceCall, dir, &child, &callee, &input, &v);
+        let pending = call.begin(Kind::ServiceCall, dir, &child, &callee, &input, &v);
         let result: Result<ServiceResponse, Status> = if is_self {
             self.call_local_app(
+                &snap,
                 &call.c,
                 &child,
                 call.deadline,
@@ -498,7 +578,7 @@ impl SidecarTools for ToolsService {
             .await
             .map_err(|e| status_with_rule(Code::Unavailable, RULE_APP_UNAVAILABLE, &e))
         } else {
-            match self.state.mesh_client(&target) {
+            match self.state.mesh_client(&snap, &target) {
                 Err(e) => Err(status_with_rule(
                     Code::Unavailable,
                     RULE_MESH_UNAVAILABLE,
@@ -593,6 +673,7 @@ impl SidecarTools for ToolsService {
         let deadline = deadline::from_metadata(request.metadata());
         let req = request.into_inner();
         let (c, trace) = ctx_of(&req.ctx)?;
+        let snap = self.state.loaded().ok_or_else(no_charter)?;
         let mut call = Call {
             svc: self,
             c,
@@ -603,7 +684,7 @@ impl SidecarTools for ToolsService {
         };
         let input = Value::String(req.input.clone());
 
-        let (spec, tool) = match self.tool_spec(&call.c.agent, &call.c.tool) {
+        let (spec, tool) = match self.tool_spec(&snap, &call.c.agent, &call.c.tool) {
             Ok(x) => x,
             Err(v) => return Err(call.deny(&input, v)),
         };
@@ -625,7 +706,7 @@ impl SidecarTools for ToolsService {
             ));
         }
         let v = if remote {
-            self.check_service(spec, &req.target_service)
+            self.check_service(&snap, spec, &req.target_service)
         } else {
             Verdict::allow("guardrail.allowed_tools")
         };
@@ -644,9 +725,9 @@ impl SidecarTools for ToolsService {
         } else {
             Direction::Internal
         };
-        let pending = call.pending(Kind::AgentCall, dir, &child, &callee, &input, &v);
+        let pending = call.begin(Kind::AgentCall, dir, &child, &callee, &input, &v);
         let resp = if remote {
-            match self.state.mesh_client(&req.target_service) {
+            match self.state.mesh_client(&snap, &req.target_service) {
                 Err(e) => envelope(
                     &call.c,
                     &child,
@@ -694,6 +775,7 @@ impl SidecarTools for ToolsService {
                 }
             }
         } else {
+            // The nested invocation is its own span, a child of this agent_call's (design §6.4).
             pipeline::invoke(
                 &self.state,
                 Invocation {
@@ -701,7 +783,7 @@ impl SidecarTools for ToolsService {
                     input: req.input.clone(),
                     context_json: String::new(),
                     request_id: call.c.request_id.clone(),
-                    trace: child.clone(),
+                    trace: child.child(),
                     caller: authz::LOCAL.into(),
                     caller_agent: Some(call.c.agent.clone()),
                     depth: call.c.depth + 1,
@@ -792,6 +874,7 @@ impl SidecarTools for ToolsService {
         let deadline = deadline::from_metadata(request.metadata());
         let req = request.into_inner();
         let (c, trace) = ctx_of(&req.ctx)?;
+        let snap = self.state.loaded().ok_or_else(no_charter)?;
         let call = Call {
             svc: self,
             c,
@@ -803,7 +886,7 @@ impl SidecarTools for ToolsService {
         let mut input =
             json!({ "method": req.method, "url": req.url, "body": body_value(&req.body) });
 
-        let (_spec, tool) = match self.tool_spec(&call.c.agent, &call.c.tool) {
+        let (_spec, tool) = match self.tool_spec(&snap, &call.c.agent, &call.c.tool) {
             Ok(x) => x,
             Err(v) => return Err(call.deny(&input, v)),
         };
@@ -886,7 +969,7 @@ impl SidecarTools for ToolsService {
             hreq = hreq.body(req.body.clone());
         }
         let callee = format!("{method} {url}");
-        let pending = call.pending(
+        let pending = call.begin(
             Kind::HttpCall,
             Direction::Outbound,
             &child,
@@ -938,31 +1021,120 @@ impl SidecarTools for ToolsService {
         }
     }
 
+    /// Design §6.5: only `model_call` records, and — while the Execute runs — `tool_call` records
+    /// for `load_skill:<skill>` of that agent's skills, for an (agent, request id) whose Execute is
+    /// in flight or returned less than the run window ago. Anything else is refused with
+    /// `INVALID_ARGUMENT` and an `authz` record `runtime.report_rejected`. Once the agent's daily
+    /// cost budget is spent, every answer carries `x-attache-rule: budget.max_cost_usd_per_day`.
     async fn report_event(&self, request: Request<AuditEvent>) -> Result<Response<Empty>, Status> {
+        let state = &self.state;
         let ev = request.into_inner();
-        let mut rec: AuditRecord = serde_json::from_str(&ev.json)
-            .map_err(|e| Status::invalid_argument(format!("audit record: {e}")))?;
+        let mut rec: AuditRecord = match serde_json::from_str(&ev.json) {
+            Ok(r) => r,
+            Err(e) => {
+                // what can be told about it, for the refusal record
+                let view = AuditRecordView::from_json(&ev.json).ok();
+                let (request_id, trace_id, agent, kind) = match &view {
+                    Some(v) => (
+                        v.request_id.clone(),
+                        v.trace_id.clone(),
+                        v.agent.clone(),
+                        Value::String(v.kind.clone()),
+                    ),
+                    None => (String::new(), String::new(), None, Value::Null),
+                };
+                return Err(reject_report(
+                    state,
+                    &request_id,
+                    &trace_id,
+                    agent.as_deref(),
+                    json!({ "kind": kind }),
+                    format!("not an audit record this sidecar accepts: {e}"),
+                ));
+            }
+        };
+        let summary = json!({ "kind": rec.kind.as_str(), "callee": rec.callee });
+        let reject = |reason: String| {
+            reject_report(
+                state,
+                &rec.request_id,
+                &rec.trace_id,
+                rec.agent.as_deref(),
+                summary.clone(),
+                reason,
+            )
+        };
+        let Some(agent) = rec.agent.clone().filter(|a| !a.is_empty()) else {
+            return Err(reject("the record names no agent".into()));
+        };
+        let Some(run) = state.runs.lookup(&rec.request_id, &agent) else {
+            return Err(reject(format!(
+                "no Execute of {agent} for request {:?} in flight or finished in the last {}s",
+                rec.request_id,
+                state.runs.window().as_secs()
+            )));
+        };
+        let snap = state.loaded().ok_or_else(no_charter)?;
+        match rec.kind {
+            Kind::ModelCall => {}
+            Kind::ToolCall if !run.in_flight => {
+                return Err(reject(
+                    "after its Execute returned a run reports only model_call records".into(),
+                ));
+            }
+            Kind::ToolCall => {
+                let skill = rec
+                    .callee
+                    .strip_prefix(LOAD_SKILL_TOOL)
+                    .and_then(|r| r.strip_prefix(':'));
+                let known = skill.is_some_and(|s| {
+                    snap.charter
+                        .agent(&agent)
+                        .is_some_and(|a| a.skills.iter().any(|x| x == s))
+                });
+                if !known {
+                    return Err(reject(format!(
+                        "tool_call records are accepted only for {LOAD_SKILL_TOOL}:<skill> of {agent}'s skills, not {:?}",
+                        rec.callee
+                    )));
+                }
+            }
+            other => {
+                return Err(reject(format!(
+                    "{other} records are not accepted from the runtime"
+                )));
+            }
+        }
         if rec.ts.is_empty() {
             rec.ts = attache_common::audit::now_rfc3339();
         }
         if rec.kind == Kind::ModelCall
-            && let (Some(agent), Some(cost)) = (&rec.agent, rec.cost_usd)
+            && let Some(cost) = rec.cost_usd
             && cost > 0.0
         {
-            self.state.budgets.add_cost(agent, cost);
+            state.budgets.add_cost(&agent, cost);
         }
-        self.state.audit.write(rec);
-        Ok(Response::new(Empty {}))
+        state.audit.write(rec);
+        let mut resp = Response::new(Empty {});
+        if let Some(spec) = snap.charter.agent(&agent)
+            && !state
+                .budgets
+                .check_cost(&agent, spec.budgets.max_cost_usd_per_day)
+                .allow
+        {
+            resp.metadata_mut().insert(
+                "x-attache-rule",
+                MetadataValue::from_static(RULE_COST_BUDGET),
+            );
+        }
+        Ok(resp)
     }
 
-    // Placeholder until the sidecar implements learning (design §6.5): the RPC exists in the proto.
     async fn propose_lesson(
         &self,
-        _request: Request<attache_proto::LessonRequest>,
-    ) -> Result<Response<attache_proto::LessonResponse>, Status> {
-        Err(Status::unimplemented(
-            "ProposeLesson is not implemented by this sidecar yet",
-        ))
+        request: Request<LessonRequest>,
+    ) -> Result<Response<LessonResponse>, Status> {
+        crate::learning::propose(&self.state, request.into_inner()).map(Response::new)
     }
 }
 

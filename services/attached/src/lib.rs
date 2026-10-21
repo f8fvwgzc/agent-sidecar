@@ -1,10 +1,22 @@
-//! `attached` — the sidecar. See CONTRACT.md; module names follow its sections.
+//! `attached` — the sidecar. See CONTRACT.md and docs/design/agent-platform.md §6; module names
+//! follow their sections.
+pub mod app_auth;
+pub mod audit;
 pub mod config;
+pub mod control;
 pub mod deadline;
 pub mod grpc_app;
 pub mod http_api;
+pub mod identity;
+pub mod learning;
+pub mod loaded;
 pub mod mesh;
+pub mod otel;
+pub mod outbox;
+pub mod persist;
 pub mod pipeline;
+pub mod reload;
+pub mod runs;
 pub mod runtime;
 pub mod state;
 pub mod tls;
@@ -35,21 +47,84 @@ impl Sidecar {
     }
 
     /// Abort every task and wait for them to unwind, so the supervised runtime child is killed
-    /// (kill_on_drop) before the process exits.
+    /// (kill_on_drop) before the process exits; then flush the OpenTelemetry exporter.
     pub async fn shutdown(self) {
         self.abort();
         for t in self.tasks {
             let _ = tokio::time::timeout(std::time::Duration::from_secs(5), t).await;
         }
+        otel::shutdown(&self.state).await;
     }
 }
 
-/// Load the charter and TLS material, bind every listener, start the runtime supervisor.
+/// Load the charter and TLS material, bind every listener, start the runtime supervisor and, in
+/// managed mode, the certificate and control-plane tasks.
 pub async fn start(config: Config) -> anyhow::Result<Sidecar> {
     // tonic (ring) and reqwest (aws-lc-rs) both link a rustls provider; pick one process-wide.
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let state = Arc::new(AppState::load(&config).await?);
+    let (state, startup, file_error) = AppState::build(config.clone()).await?;
+    let state = Arc::new(state);
     let mut tasks = Vec::new();
+
+    // Managed mode exports every record from the start, also while the stream is down (subscribed
+    // before the start-up charter applies, so the export sees its `config.applied` record).
+    if state.managed {
+        let rx = state.audit.subscribe();
+        let s = state.clone();
+        tasks.push(tokio::spawn(outbox::pump_audit(
+            state.outbox.clone(),
+            rx,
+            move || {
+                s.loaded()
+                    .map(|l| l.charter.telemetry_or_default().control_plane_payloads)
+            },
+        )));
+    }
+
+    // The start-up charter goes through the reload path, so it is audited like any other.
+    if let Some(e) = file_error {
+        reload::config_record(
+            &state,
+            "file",
+            "charter",
+            loaded::Source::File.as_str(),
+            "",
+            "",
+            "",
+            &[],
+            &attache_common::authz::Verdict::deny(reload::RULE_INVALID, e),
+        );
+    }
+    let mut last_file_hash = None;
+    if let Some(s) = startup {
+        if s.source == loaded::Source::File {
+            last_file_hash = Some(attache_common::audit::sha256_hex(s.text.as_bytes()));
+        }
+        let applied = reload::apply_charter(
+            &state,
+            reload::CharterCandidate {
+                text: s.text,
+                epoch: s.epoch,
+                version: s.version,
+                source: s.source,
+            },
+        );
+        if let Err(reason) = applied {
+            if !state.managed {
+                anyhow::bail!("start-up charter refused: {reason}");
+            }
+            tracing::warn!(%reason, "start-up charter refused; waiting for the control plane");
+        }
+    }
+    if last_file_hash.is_none()
+        && let Ok(text) = std::fs::read_to_string(&config.charter)
+    {
+        last_file_hash = Some(attache_common::audit::sha256_hex(text.as_bytes()));
+    }
+    tasks.push(tokio::spawn(reload::watch_file(
+        state.clone(),
+        last_file_hash,
+    )));
 
     // Runtime-facing tools server on a unix socket, then the runtime process itself.
     std::fs::create_dir_all(&config.socket_dir)
@@ -69,9 +144,13 @@ pub async fn start(config: Config) -> anyhow::Result<Sidecar> {
     let (grpc_addr, grpc_task) = grpc_app::serve(state.clone(), config.grpc_addr).await?;
     tasks.push(grpc_task);
 
-    // Mesh over mTLS, only when we have an identity.
-    let mesh_addr = if state.tls.is_some() {
+    // Mesh over mTLS: standalone only with an identity from --tls-dir; managed always (the
+    // certificate arrives through the resolver once issued).
+    let mesh_addr = if state.managed || state.tls().is_some() {
         let (addr, task) = mesh::serve(state.clone(), config.mesh_addr).await?;
+        state
+            .mesh_port
+            .store(addr.port(), std::sync::atomic::Ordering::Relaxed);
         tasks.push(task);
         Some(addr)
     } else {
@@ -82,12 +161,18 @@ pub async fn start(config: Config) -> anyhow::Result<Sidecar> {
         None
     };
 
+    if state.managed {
+        tasks.push(tokio::spawn(identity::run(state.clone())));
+        tasks.push(tokio::spawn(control::run(state.clone())));
+    }
+
     tracing::info!(
-        service = %state.charter.service.name,
-        namespace = %state.charter.service.namespace,
+        service = %state.service,
+        namespace = %state.namespace,
         identity = %state.self_identity,
+        managed = state.managed,
         %http_addr, %grpc_addr, ?mesh_addr,
-        agents = state.charter.agents.len(),
+        agents = state.loaded().map(|l| l.charter.agents.len()).unwrap_or(0),
         "attached is up"
     );
     Ok(Sidecar {

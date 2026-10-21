@@ -247,9 +247,9 @@ async fn mesh_mtls_end_to_end() {
 
     // 5. the orders identity passes authz only for the calling agent its rule names (caller_agents);
     //    with ops-assistant it gets through, and without a runtime fails later, as UNAVAILABLE.
-    let orders_tls = orders.state.tls.as_ref().unwrap();
+    let orders_tls = orders.state.tls().unwrap();
     let channel = attached::tls::client_channel(
-        orders_tls,
+        &orders_tls.material,
         &inv_mesh.to_string(),
         "inventory.attache-demo.svc.cluster.local",
     )

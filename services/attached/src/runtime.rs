@@ -48,8 +48,8 @@ pub fn supervise(state: Arc<AppState>, config: Config) -> tokio::task::JoinHandl
                 .arg(format!("unix:{}", runtime_sock.display()))
                 .arg("--sidecar")
                 .arg(format!("unix:{}", sidecar_sock.display()))
-                .env("ATTACHE_SERVICE", &state.charter.service.name)
-                .env("ATTACHE_NAMESPACE", &state.charter.service.namespace)
+                .env("ATTACHE_SERVICE", &state.service)
+                .env("ATTACHE_NAMESPACE", &state.namespace)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
@@ -100,7 +100,7 @@ pub async fn health_loop(state: Arc<AppState>) {
         let ok = match tokio::time::timeout(Duration::from_secs(3), client.health(Empty {})).await {
             Ok(Ok(resp)) => {
                 let h = resp.into_inner();
-                *state.runtime_provider.lock().unwrap() = h.model_provider.clone();
+                *crate::state::lock(&state.runtime_provider) = h.model_provider.clone();
                 if !backoff_reset {
                     tracing::info!(provider = %h.model_provider, version = %h.version, "agent runtime is ready");
                     backoff_reset = true;

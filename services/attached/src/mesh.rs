@@ -17,28 +17,57 @@ use crate::state::AppState;
 use crate::tools::is_reserved_header;
 
 pub const RULE_IDENTITY: &str = "authz.identity.invalid";
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 pub struct MeshService {
     state: Arc<AppState>,
 }
 
+/// Serve the mesh over mTLS with the current workload certificate (design §6.3.2): the TLS
+/// handshake runs here with rustls, so a renewed certificate is used by the next connection.
+/// Handshakes run concurrently; a client that fails one never reaches the service.
 pub async fn serve(
     state: Arc<AppState>,
     addr: SocketAddr,
 ) -> anyhow::Result<(SocketAddr, tokio::task::JoinHandle<()>)> {
-    let tls = state
-        .tls
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("mesh needs TLS material"))?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
-    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+    let acceptor = tokio_rustls::TlsAcceptor::from(crate::tls::mesh_server_config(&state.tls)?);
+    let (tx, rx) = tokio::sync::mpsc::channel::<
+        Result<tokio_rustls::server::TlsStream<tokio::net::TcpStream>, std::io::Error>,
+    >(64);
+    let accept = async move {
+        loop {
+            let (tcp, peer) = match listener.accept().await {
+                Ok(x) => x,
+                Err(e) => {
+                    tracing::warn!(error = %e, "mesh accept failed");
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    continue;
+                }
+            };
+            let acceptor = acceptor.clone();
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await {
+                    Ok(Ok(tls)) => {
+                        let _ = tx.send(Ok(tls)).await;
+                    }
+                    Ok(Err(e)) => tracing::debug!(%peer, error = %e, "mesh TLS handshake failed"),
+                    Err(_) => tracing::debug!(%peer, "mesh TLS handshake timed out"),
+                }
+            });
+        }
+    };
     let server = tonic::transport::Server::builder()
-        .tls_config(crate::tls::server_config(tls))?
-        .add_service(MeshServer::new(MeshService { state }));
+        .add_service(MeshServer::new(MeshService { state }))
+        .serve_with_incoming(tokio_stream::wrappers::ReceiverStream::new(rx));
     let task = tokio::spawn(async move {
-        if let Err(e) = server.serve_with_incoming(incoming).await {
-            tracing::error!(error = %e, "mesh server stopped");
+        tokio::select! {
+            r = server => if let Err(e) = r {
+                tracing::error!(error = %e, "mesh server stopped");
+            },
+            _ = accept => {}
         }
     });
     Ok((bound, task))
@@ -189,7 +218,7 @@ impl Mesh for MeshService {
             inbound(&request, &body.traceparent, &body.request_id, &body.agent)
         };
         let req = request.into_inner();
-        let me = self.state.charter.service.name.clone();
+        let me = self.state.service.clone();
         let raw_callee = format!("{me} {} {}", req.method, req.path);
         let caller = match &inb.caller {
             Ok(c) => c.clone(),
@@ -232,8 +261,19 @@ impl Mesh for MeshService {
         input["method"] = json!(method);
         input["path"] = json!(path);
         let callee = format!("{me} {method} {path}");
+        let Some(snap) = self.state.loaded() else {
+            let mut rec = record(&callee, &input, Value::Null);
+            rec.error = Some("no charter is loaded yet".into());
+            rec.rule = Some(crate::tools::RULE_NO_CHARTER.into());
+            self.state.audit.write(rec);
+            return Err(crate::tools::status_with_rule(
+                tonic::Code::Unavailable,
+                crate::tools::RULE_NO_CHARTER,
+                "no charter is loaded yet",
+            ));
+        };
         let v = authz::authorize_service_call(
-            &self.state.charter,
+            &snap.charter,
             Some(&caller),
             inb.agent.as_deref(),
             &me,
@@ -247,7 +287,7 @@ impl Mesh for MeshService {
             return Err(deny_status(&v));
         }
 
-        let url = format!("{}{}", self.state.app_base_url(), path);
+        let url = format!("{}{}", self.state.app_base_url(&snap), path);
         let method = match reqwest::Method::from_bytes(method.as_bytes()) {
             Ok(m) => m,
             Err(e) => {

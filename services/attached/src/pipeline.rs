@@ -10,6 +10,7 @@ use attache_proto::{ExecuteRequest, InvokeAgentResponse, Step, Usage};
 use serde_json::{Value, json};
 
 use crate::deadline;
+use crate::outbox;
 use crate::state::{AppState, MAX_DEPTH};
 
 /// One inbound request to run an agent, from the app, a peer sidecar or a local agent tool.
@@ -29,6 +30,7 @@ pub struct Invocation {
 
 pub const RULE_UNKNOWN_AGENT: &str = "agent.unknown";
 pub const RULE_RUNTIME: &str = "runtime.unavailable";
+pub const RULE_NO_CHARTER: &str = crate::tools::RULE_NO_CHARTER;
 
 fn denied(inv: &Invocation, v: &Verdict, steps: Vec<Step>) -> InvokeAgentResponse {
     InvokeAgentResponse {
@@ -161,12 +163,34 @@ pub async fn invoke(state: &Arc<AppState>, inv: Invocation) -> InvokeAgentRespon
         )
     };
 
+    // The timeline draws the invocation from now on (design §6.4): before any check, so a denial
+    // closes a red bar. The span is the one the agent_invocation record carries.
+    state.outbox.span_start(outbox::span(
+        Kind::AgentInvocation.as_str(),
+        &inv.request_id,
+        &inv.trace,
+        &inv.agent,
+        &inv.caller,
+        inv.caller_agent.as_deref(),
+        &inv.agent,
+        Direction::Inbound,
+    ));
+    // One snapshot of the charter, its guardrails and memory for the whole request (design §6.2).
+    let Some(snap) = state.loaded() else {
+        let reason = "no charter is loaded yet".to_string();
+        let mut rec = record(Value::Null).latency(started);
+        rec.error = Some(reason.clone());
+        rec.rule = Some(RULE_NO_CHARTER.into());
+        state.audit.write(rec);
+        return errored(&inv, RULE_NO_CHARTER, reason, vec![]);
+    };
+
     // Values at audit.redact paths of the input must not reappear in this request's later records.
     state.audit.remember(&inv.request_id, "input", &input_value);
 
     // 1. authz.callers — before the agent lookup, so an unauthorized peer cannot probe agent names
     let v = authz::authorize_caller(
-        &state.charter,
+        &snap.charter,
         &inv.caller,
         inv.caller_agent.as_deref(),
         &inv.agent,
@@ -177,7 +201,7 @@ pub async fn invoke(state: &Arc<AppState>, inv: Invocation) -> InvokeAgentRespon
             .write(record(Value::Null).verdict(&v).latency(started));
         return denied(&inv, &v, vec![step("authz", &inv.agent, &v, 0, "")]);
     }
-    let Some(agent) = state.charter.agent(&inv.agent) else {
+    let Some(agent) = snap.charter.agent(&inv.agent) else {
         let v = Verdict::deny(
             RULE_UNKNOWN_AGENT,
             format!("agent {:?} is not declared in the charter", inv.agent),
@@ -231,7 +255,7 @@ pub async fn invoke(state: &Arc<AppState>, inv: Invocation) -> InvokeAgentRespon
     }
 
     // 3. input guardrails
-    let v = state
+    let v = snap
         .guardrails
         .check_input_with_context(&inv.input, &inv.context_json);
     if !v.allow {
@@ -265,7 +289,7 @@ pub async fn invoke(state: &Arc<AppState>, inv: Invocation) -> InvokeAgentRespon
     }
 
     // 4. run
-    let spec = state.charter.agent_for_runtime(agent);
+    let spec = snap.runtime_spec(&agent.name);
     let req = ExecuteRequest {
         request_id: inv.request_id.clone(),
         trace_id: inv.trace.trace_id.clone(),
@@ -283,7 +307,15 @@ pub async fn invoke(state: &Arc<AppState>, inv: Invocation) -> InvokeAgentRespon
     // From here the runtime acts (model calls, tools). If the caller drops this future — client
     // gone, deadline passed — the record is still written, as cancelled.
     let pending = state.audit.on_cancel(vec![record(Value::Null)], started);
+    // ReportEvent and ProposeLesson are taken for this run while it runs and for a while after.
+    let run = state.runs.start(
+        &inv.request_id,
+        &inv.agent,
+        &inv.caller,
+        &inv.trace.trace_id,
+    );
     let exec = client.execute(req).await;
+    drop(run);
     pending.disarm();
     let exec = match exec {
         Ok(r) => r.into_inner(),
@@ -324,7 +356,7 @@ pub async fn invoke(state: &Arc<AppState>, inv: Invocation) -> InvokeAgentRespon
     }
 
     // 5. output guardrails
-    let v = state.guardrails.check_output(&exec.output);
+    let v = snap.guardrails.check_output(&exec.output);
     if !v.allow {
         let rec = AuditRecord::new(
             Kind::Guardrail,
@@ -350,7 +382,7 @@ pub async fn invoke(state: &Arc<AppState>, inv: Invocation) -> InvokeAgentRespon
         r.usage = Some(usage);
         return r;
     }
-    let (output, redactions) = state.guardrails.redact_pii(&exec.output);
+    let (output, redactions) = snap.guardrails.redact_pii(&exec.output);
     if redactions > 0 {
         let v = Verdict::allow("guardrail.pii_redact");
         let mut rec = AuditRecord::new(
