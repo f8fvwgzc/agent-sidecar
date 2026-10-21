@@ -3,9 +3,10 @@
 //! mTLS with the workload certificate; the server must chain to the trust roots and carry the URI
 //! SAN `spiffe://attache/control-plane`. The first message is `Hello`, then heartbeats every 10 s,
 //! audit batches, span starts and learning proposals. `CharterUpdate` and `MemoryUpdate` are
-//! applied (charter: when the epoch differs or the version is greater) and acknowledged; unknown
-//! message variants are ignored (logged once). A lost stream is reconnected with full-jitter
-//! backoff from 1 s to 60 s and never changes the running charter or memory.
+//! applied (charter: when the epoch differs or the version is greater) and acknowledged; a stale
+//! one is not applied and is acknowledged with the version in force, so the control plane shows
+//! what runs. Unknown message variants are ignored (logged once). A lost stream is reconnected
+//! with full-jitter backoff from 1 s to 60 s and never changes the running charter or memory.
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -127,9 +128,11 @@ pub fn apply_charter_update(state: &AppState, u: &CharterUpdate) -> SidecarMessa
                 &u.version,
                 "",
                 &[],
-                &Verdict::deny(RULE_STALE, reason.clone()),
+                &Verdict::deny(RULE_STALE, reason),
             );
-            return reply(Err(reason));
+            // not applied (design §3); the ack names what runs, so the instance never shows the
+            // stale version with an error while it runs a newer one
+            return ack(&cur.epoch, &cur.version, "charter", Ok(()));
         }
     }
     let result = reload::apply_charter(
@@ -174,6 +177,7 @@ pub fn apply_memory_update(state: &AppState, u: &MemoryUpdate) -> SidecarMessage
             let reason = format!(
                 "stale: memory version {version} is older than the applied version {current}"
             );
+            tracing::info!(%reason, "memory update ignored");
             reload::config_record(
                 state,
                 "control-plane",
@@ -183,9 +187,9 @@ pub fn apply_memory_update(state: &AppState, u: &MemoryUpdate) -> SidecarMessage
                 &u.version,
                 "",
                 &[],
-                &Verdict::deny(RULE_STALE, reason.clone()),
+                &Verdict::deny(RULE_STALE, reason),
             );
-            return reply(Err(reason));
+            return ack(&epoch, &current_version, "memory", Ok(()));
         }
     }
     reload::apply_memory(state, Memory::from_update(u), Source::ControlPlane);
@@ -273,9 +277,11 @@ async fn session(state: &Arc<AppState>, addr: &str) -> (bool, anyhow::Result<()>
                 .map_err(|_| anyhow::anyhow!("the Connect stream closed"))
         }
     };
+    // No `biased`: each ready branch gets its turn, so a steady flow of span starts cannot
+    // starve the audit batches (whose queue would then overflow while the stream is up). Every
+    // branch is cancel-safe: the outbox hands out its entries only when the future completes.
     loop {
         let out = tokio::select! {
-            biased;
             msg = inbound.message() => match msg {
                 Ok(Some(m)) => match handle(state, m) {
                     Some(reply) => send(reply).await,
@@ -304,7 +310,17 @@ async fn session(state: &Arc<AppState>, addr: &str) -> (bool, anyhow::Result<()>
                 r
             },
             batch = state.outbox.next_audit_batch(timing.audit_flush) => {
-                send(SidecarMessage { msg: Some(sidecar_message::Msg::Audit(AuditBatch { records_json: batch })) }).await
+                // span starts queued so far go first: a start always precedes the record that
+                // closes its span (it was queued before that record was written)
+                let mut r = Ok(());
+                for s in state.outbox.take_spans() {
+                    r = send(SidecarMessage { msg: Some(sidecar_message::Msg::SpanStart(s)) }).await;
+                    if r.is_err() { break; }
+                }
+                if r.is_ok() {
+                    r = send(SidecarMessage { msg: Some(sidecar_message::Msg::Audit(AuditBatch { records_json: batch })) }).await;
+                }
+                r
             },
         };
         if let Err(e) = out {

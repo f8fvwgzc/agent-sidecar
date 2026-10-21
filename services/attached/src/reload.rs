@@ -2,6 +2,13 @@
 //! refused, and the new [`Loaded`] replaces the old one whole. Budgets live outside `Loaded`, so
 //! they survive; a removed agent simply is not found (404). Every attempt — applied or refused —
 //! writes a `config` record (design §5).
+//!
+//! The first control-plane charter after start-up is not checked for restart-only changes
+//! against the start-up charter (the `--charter` file, or the one persisted in the state dir): it
+//! takes that charter's place as a restart would, sink and OpenTelemetry endpoint included. The
+//! control plane accepts restart-only changes while no instance is connected (design §4), so the
+//! charter persisted before a restart may differ from the stored one in exactly those fields; a
+//! restart is how such a change is applied, and must not lock the instance out of it (§6.3.5).
 use std::sync::Arc;
 
 use attache_charter::{Charter, diff};
@@ -109,10 +116,16 @@ pub fn apply_charter(state: &AppState, cand: CharterCandidate) -> Result<Arc<Loa
     let _serial = lock(&state.apply_lock);
     let sha = sha256_hex(cand.text.as_bytes());
     let current = state.loaded();
+    let replaces_startup = cand.source == Source::ControlPlane
+        && current
+            .as_ref()
+            .is_some_and(|c| c.source != Source::ControlPlane);
     let checked = (|| {
         let charter = Charter::from_yaml(&cand.text).map_err(|e| e.to_string())?;
         check_identity(state, &charter)?;
-        if let Some(cur) = &current {
+        if let Some(cur) = &current
+            && !replaces_startup
+        {
             let fields = diff::restart_required(&cur.charter, &charter);
             if !fields.is_empty() {
                 return Err(format!(
@@ -164,9 +177,11 @@ pub fn apply_charter(state: &AppState, cand: CharterCandidate) -> Result<Arc<Loa
         }
     }
     let first = current.is_none();
-    let peers_changed = current
-        .as_ref()
-        .is_some_and(|c| c.charter.mesh.peers != charter.mesh.peers);
+    // `mesh.port` fills `{port}` of the peer address template (it changes only here, when the
+    // start-up charter is replaced)
+    let peers_changed = current.as_ref().is_some_and(|c| {
+        c.charter.mesh.peers != charter.mesh.peers || c.charter.mesh.port != charter.mesh.port
+    });
     let loaded = Arc::new(Loaded {
         charter,
         guardrails: Arc::new(guardrails),
@@ -181,13 +196,15 @@ pub fn apply_charter(state: &AppState, cand: CharterCandidate) -> Result<Arc<Loa
         loaded.charter.audit.redact.clone(),
         loaded.charter.guardrails.pii_redact,
     );
-    if first && let Err(e) = state.audit.set_sink(SinkTarget::of(&loaded.charter.audit)) {
+    if (first || replaces_startup)
+        && let Err(e) = state.audit.set_sink(SinkTarget::of(&loaded.charter.audit))
+    {
         tracing::error!(error = %e, "cannot open the charter's audit sink; keeping the current one");
     }
     if peers_changed {
         state.clear_mesh_clients();
     }
-    crate::otel::on_charter(state, &loaded.charter);
+    crate::otel::on_charter(state, &loaded.charter, replaces_startup);
     match cand.source {
         Source::File => *lock(&state.file_yaml) = Some(cand.text.clone()),
         Source::ControlPlane => {
@@ -206,6 +223,7 @@ pub fn apply_charter(state: &AppState, cand: CharterCandidate) -> Result<Arc<Loa
         epoch = %cand.epoch,
         version = %cand.version,
         agents = loaded.charter.agents.len(),
+        replaces_startup,
         ?weakened,
         "charter applied"
     );

@@ -8,10 +8,13 @@
 //!   (design §6.5).
 //! - Its sink can be pointed somewhere else once, when the first charter arrives in managed
 //!   mode (the writer, and so its subscribers, stay the same).
+//! - A change of the redaction settings waits for the writes in progress, so every record
+//!   published after [`Audit::set_redaction`] returns was redacted with the new settings (the
+//!   control-plane export relies on it to tell records written before the first charter).
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 use attache_charter::{AuditSink, AuditSpec};
@@ -96,6 +99,8 @@ pub struct Audit {
     target: Mutex<SinkTarget>,
     /// request_id → values scrubbed from that request's later records.
     secrets: Mutex<HashMap<String, (Instant, Vec<String>)>>,
+    /// Held shared by every write and exclusively by [`Audit::set_redaction`].
+    gate: RwLock<()>,
 }
 
 impl Audit {
@@ -119,6 +124,7 @@ impl Audit {
             sink,
             target: Mutex::new(target),
             secrets: Mutex::new(HashMap::new()),
+            gate: RwLock::new(()),
         })
     }
 
@@ -153,6 +159,7 @@ impl Audit {
 
     pub fn write(&self, record: AuditRecord) {
         self.remember_record(&record);
+        let _gate = self.gate.read().unwrap_or_else(PoisonError::into_inner);
         self.writer.write(record);
     }
 
@@ -191,7 +198,9 @@ impl Audit {
         self.writer.subscribe()
     }
 
+    /// See [`AuditWriter::set_redaction`]; returns once every write in progress is published.
     pub fn set_redaction(&self, paths: Vec<String>, pii_redact: bool) {
+        let _gate = self.gate.write().unwrap_or_else(PoisonError::into_inner);
         self.writer.set_redaction(paths, pii_redact);
     }
 

@@ -1,11 +1,12 @@
 //! `SidecarTools.ProposeLesson` (design §6.5): a lesson the runtime drew from a finished run.
 //!
-//! Accepted only within the run window after the run's Execute returned (or while it runs). The
-//! sidecar checks that learning is enabled for the agent, that the run's caller was `local`
-//! unless `from_peers`, the hourly rate limit and the note's length; it scrubs the note (every
-//! value remembered for the run by `audit.redact`, every withheld guardrail-denied input, then
-//! PII), runs `guardrails.input_deny` on it, and writes a `learning` record. Managed, the note
-//! goes to the control plane (the only writer of memory) as a `LearningProposal`; unmanaged with
+//! Accepted only within the run window after the run's Execute returned, not while it runs: the
+//! note is scrubbed of what the whole run remembered and withheld. The sidecar checks that
+//! learning is enabled for the agent, that the run's caller was `local` unless `from_peers`,
+//! the hourly rate limit and the note's length; it scrubs the note (every value remembered for
+//! the run by `audit.redact`, every withheld guardrail-denied input, then PII), runs
+//! `guardrails.input_deny` on it, and writes a `learning` record. Managed, the note goes to the
+//! control plane (the only writer of memory) as a `LearningProposal`; unmanaged with
 //! `mode: auto` it becomes a local note (persisted in the state dir); unmanaged with
 //! `mode: review` it is only audited.
 use std::collections::VecDeque;
@@ -71,18 +72,28 @@ pub fn propose(state: &AppState, req: LessonRequest) -> Result<LessonResponse, S
         req.run_request_id.clone()
     };
     let agent = ctx.agent.clone();
-    let Some(run) = state.runs.lookup(&run_request_id, &agent) else {
-        return Err(crate::tools::reject_report(
-            state,
-            &run_request_id,
-            &ctx.trace_id,
-            Some(&agent),
-            json!({"kind": "learning", "run_request_id": run_request_id}),
-            format!(
-                "no Execute of {agent} for request {run_request_id:?} in flight or finished in the last {}s",
-                state.runs.window().as_secs()
-            ),
-        ));
+    let run = match state.runs.lookup(&run_request_id, &agent) {
+        Some(run) if !run.in_flight => run,
+        found => {
+            let reason = if found.is_some() {
+                format!(
+                    "the Execute of {agent} for request {run_request_id:?} is still running; a lesson is proposed after it returned"
+                )
+            } else {
+                format!(
+                    "no Execute of {agent} for request {run_request_id:?} finished in the last {}s",
+                    state.runs.window().as_secs()
+                )
+            };
+            return Err(crate::tools::reject_report(
+                state,
+                &run_request_id,
+                &ctx.trace_id,
+                Some(&agent),
+                json!({"kind": "learning", "run_request_id": run_request_id}),
+                reason,
+            ));
+        }
     };
     let snap = state
         .loaded()

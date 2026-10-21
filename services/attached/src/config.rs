@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -86,13 +87,9 @@ pub struct Config {
     /// Require `Authorization: Bearer <token>` on the app HTTP and gRPC APIs (token in this file).
     #[arg(long)]
     pub app_token_file: Option<PathBuf>,
-    /// The same as token text (env `ATTACHE_APP_TOKEN`).
-    #[arg(
-        long = "app-token",
-        env = "ATTACHE_APP_TOKEN",
-        hide = true,
-        hide_env_values = true
-    )]
+    /// The same as token text, from env `ATTACHE_APP_TOKEN` only: a secret never goes on the
+    /// command line, where process listings show it (design §6.1 defines no such flag).
+    #[arg(skip = std::env::var(APP_TOKEN_ENV).ok())]
     pub app_token: Option<String>,
     /// Mesh address of a peer that `mesh.peers` does not list.
     #[arg(
@@ -108,7 +105,15 @@ pub struct Config {
     /// Intervals and windows of design §6; tests shorten them.
     #[arg(skip)]
     pub timing: Timing,
+    /// The environment the OpenTelemetry settings (`OTEL_EXPORTER_OTLP_*`,
+    /// `OTEL_RESOURCE_ATTRIBUTES`) are read from: `None` is the process environment; tests pin
+    /// it so the ambient environment never changes what they see.
+    #[arg(skip)]
+    pub otel_env: Option<BTreeMap<String, String>>,
 }
+
+/// The env variable that carries the app API token as text (design §6.1).
+pub const APP_TOKEN_ENV: &str = "ATTACHE_APP_TOKEN";
 
 /// The intervals and windows design §6 fixes. [`Default`] is the design's values.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,7 +156,8 @@ fn non_empty(v: &Option<String>) -> Option<&str> {
 }
 
 impl Config {
-    /// A config for tests and local runs: everything on ephemeral localhost ports.
+    /// A config for tests and local runs: everything on ephemeral localhost ports, and an empty
+    /// OpenTelemetry environment (see [`Config::otel_env`]).
     pub fn for_test(charter: PathBuf, tls_dir: PathBuf, socket_dir: PathBuf) -> Self {
         Self {
             charter,
@@ -178,6 +184,15 @@ impl Config {
             peer_address_template: DEFAULT_PEER_ADDRESS_TEMPLATE.into(),
             otlp_endpoint_allow: Vec::new(),
             timing: Timing::default(),
+            otel_env: Some(BTreeMap::new()),
+        }
+    }
+
+    /// Look up an OpenTelemetry environment variable (see [`Config::otel_env`]).
+    pub fn otel_env_var(&self, name: &str) -> Option<String> {
+        match &self.otel_env {
+            Some(env) => env.get(name).cloned(),
+            None => attache_otel::process_env(name),
         }
     }
 
@@ -349,5 +364,17 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(e.ca_addr(), Some("ca:15012"));
+    }
+
+    #[test]
+    fn the_app_token_is_never_a_command_line_flag() {
+        let err = Config::try_parse_from(["attached", "--app-token", "s3cret"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+        let c = Config::try_parse_from(["attached", "--app-token-file", "/token"]).unwrap();
+        assert_eq!(c.app_token_file, Some(PathBuf::from("/token")));
+        let help = <Config as clap::CommandFactory>::command()
+            .render_long_help()
+            .to_string();
+        assert!(!help.contains("--app-token "), "{help}");
     }
 }

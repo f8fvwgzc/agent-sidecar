@@ -25,6 +25,8 @@ use tonic::transport::{Certificate, Identity, ServerTlsConfig};
 use tonic::{Request, Response, Status, Streaming};
 
 pub const JOIN_TOKEN: &str = "join-token-for-orders";
+/// The projected service-account token the fake's "TokenReview" accepts.
+pub const K8S_TOKEN: &str = "projected-k8s-token-for-orders";
 
 fn issuer(ca: &PemBundle) -> Issuer<'static, KeyPair> {
     let key = KeyPair::from_pem(&ca.key_pem).unwrap();
@@ -111,7 +113,17 @@ impl CertificateAuthority for Fake {
         if self.shared.refuse_issue.load(Ordering::SeqCst) {
             return Err(Status::unavailable("the CA is refusing for this test"));
         }
-        if req.join_token != JOIN_TOKEN {
+        let token_ok = if req.join_token.is_empty() {
+            if req.kubernetes_token != K8S_TOKEN {
+                return Err(Status::permission_denied(
+                    "the TokenReview did not authenticate the Kubernetes token",
+                ));
+            }
+            true
+        } else {
+            req.kubernetes_token.is_empty() && req.join_token == JOIN_TOKEN
+        };
+        if !token_ok {
             return Err(Status::permission_denied("unknown join token"));
         }
         let csr = CertificateSigningRequestParams::from_pem(&req.csr_pem)
@@ -168,9 +180,15 @@ impl FakeCp {
     }
 
     pub async fn start_on(addr: &str, ca: PemBundle) -> FakeCp {
+        Self::start_with(addr, ca, attached::tls::CONTROL_PLANE_URI).await
+    }
+
+    /// Serve with a certificate whose only URI SAN is `uri` (an impostor when it is not the
+    /// control plane's).
+    pub async fn start_with(addr: &str, ca: PemBundle, uri: &str) -> FakeCp {
         // tonic's TLS takes the process-wide provider; the sidecar picks ring the same way
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let serving = serving_cert(&ca, attached::tls::CONTROL_PLANE_URI);
+        let serving = serving_cert(&ca, uri);
         let shared = Arc::new(Shared {
             ttl: Mutex::new(Duration::from_secs(3600)),
             ..Default::default()

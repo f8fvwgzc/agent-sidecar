@@ -4,7 +4,9 @@
 //! unexpired matching one persisted in `<state-dir>`; else a new ECDSA P-256 key and a CSR sent to
 //! `IssueCertificate` with the Kubernetes or join token, re-read from its file for every request.
 //! Renewal starts at two thirds of the lifetime and is retried every 60 s ± 20 % with a fresh
-//! token; a new certificate reaches the mesh through the rustls resolvers without a restart.
+//! token until expiry; a new certificate reaches the mesh through the rustls resolvers without a
+//! restart. An expired certificate is dropped (the sidecar is not ready without one, §6.3.4) and
+//! a new one is obtained as at start-up.
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -24,6 +26,7 @@ use crate::tls::WorkloadTls;
 pub const RULE_ISSUED: &str = "cert.issued";
 pub const RULE_RENEW_FAILED: &str = "cert.renew_failed";
 pub const RULE_ISSUE_FAILED: &str = "cert.issue_failed";
+pub const RULE_EXPIRED: &str = "cert.expired";
 /// `IssueCertificate` answers are small (design §3: 64 KiB).
 const MAX_ISSUE_MESSAGE: usize = 64 * 1024;
 
@@ -175,9 +178,37 @@ pub fn install(state: &AppState, tls: WorkloadTls) {
         expires_in_s = tls.expires_in_s(),
         "workload certificate installed"
     );
+    state
+        .cert_not_after
+        .store(tls.not_after, std::sync::atomic::Ordering::Relaxed);
     state.tls.store(Some(Arc::new(tls)));
     state.clear_mesh_clients();
     state.tls_generation.send_modify(|g| *g += 1);
+}
+
+/// Renewal failed until the certificate expired: drop it, so the sidecar is not ready and
+/// presents no expired certificate, and record why.
+fn drop_expired(state: &AppState, expired: &WorkloadTls) {
+    let current = state.tls();
+    if current
+        .as_ref()
+        .is_some_and(|t| t.cert_sha256 == expired.cert_sha256)
+    {
+        state.tls.store(None);
+        state.clear_mesh_clients();
+        state.tls_generation.send_modify(|g| *g += 1);
+    }
+    cert_record(
+        state,
+        Some(expired),
+        &Verdict::allow(RULE_EXPIRED),
+        Some("renewal failed until the certificate expired; obtaining a new one".into()),
+    );
+}
+
+/// How long until `tls` expires (zero once it has).
+fn until_expiry(tls: &WorkloadTls) -> Duration {
+    Duration::from_secs(tls.expires_in_s().max(0) as u64)
 }
 
 /// `base` ± 20 %.
@@ -236,7 +267,13 @@ pub async fn run(state: Arc<AppState>) {
             continue;
         };
         sleep_until(current.renew_at()).await;
+        // retried with a fresh token until expiry (design §6.3.2), then obtained anew
         loop {
+            if current.expired() {
+                drop_expired(&state, &current);
+                attempt = 0;
+                break;
+            }
             match issue(&state).await {
                 Ok(t) => {
                     install(&state, t);
@@ -249,7 +286,8 @@ pub async fn run(state: Arc<AppState>) {
                         &Verdict::allow(RULE_RENEW_FAILED),
                         Some(format!("{e:#}")),
                     );
-                    tokio::time::sleep(jittered(timing.renew_retry)).await;
+                    let pause = jittered(timing.renew_retry).min(until_expiry(&current));
+                    tokio::time::sleep(pause).await;
                 }
             }
         }

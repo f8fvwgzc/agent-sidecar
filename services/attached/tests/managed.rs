@@ -1,9 +1,12 @@
 //! Managed mode against in-process fakes of embassy's `ControlPlane` and `CertificateAuthority`
 //! (design §6.3, §6.4, §7): issuance with a join token, `Hello`, heartbeats, `CharterUpdate` and
 //! `MemoryUpdate` applied and acknowledged (stale versions ignored), reconnects that keep the
-//! configuration, persisted state reused after a restart, a renewal that swaps the mesh
-//! certificate without a restart, span starts with their parentage, audit batches with payloads
-//! nulled, and learning proposals.
+//! configuration, persisted state reused after a restart (and replaced by the control plane's
+//! charter, restart-only fields included), a renewal that swaps the mesh certificate without a
+//! restart, an expired certificate dropped and obtained anew, the Kubernetes token path, the
+//! control plane's URI SAN, span starts with their parentage, audit batches with payloads
+//! nulled (also before the first charter), dropped records in heartbeats, and learning
+//! proposals.
 mod common;
 
 use std::collections::HashMap;
@@ -21,7 +24,7 @@ use attache_proto::{
 };
 use attached::loaded::Source;
 use attached::{Config, Sidecar};
-use common::cp::{FakeCp, JOIN_TOKEN};
+use common::cp::{FakeCp, JOIN_TOKEN, K8S_TOKEN};
 use common::*;
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName};
@@ -298,19 +301,27 @@ async fn issuance_hello_heartbeats_and_updates() {
     })
     .await;
 
-    // 6. stale and duplicate versions of the same epoch are not applied
+    // 6. stale and duplicate versions of the same epoch are not applied; the ack of a stale one
+    //    names the version in force, so the instance never shows the stale one with an error
     let mut v2 = charter(&audit);
     v2.agents[0].system = "version two".into();
+    let before = cp.acks().len();
     cp.push(charter_update("e1", "2", &v2)).await;
-    let a = ack(&cp, "charter", "2").await;
-    assert!(!a.applied && a.error.contains("stale"), "{a:?}");
+    eventually("the stale update's ack", || cp.acks().len() > before).await;
+    let a = cp.acks().last().unwrap().clone();
+    assert_eq!(
+        (a.kind.as_str(), a.epoch.as_str(), a.version.as_str()),
+        ("charter", "e1", "3")
+    );
+    assert!(a.applied && a.error.is_empty(), "{a:?}");
+    assert!(!cp.acks().iter().any(|a| a.version == "2"));
     cp.push(charter_update("e1", "3", &v2)).await;
     eventually("duplicate ack", || {
         cp.acks()
             .iter()
             .filter(|a| a.kind == "charter" && a.version == "3")
             .count()
-            == 2
+            == 3
     })
     .await;
     assert_eq!(
@@ -348,9 +359,13 @@ async fn issuance_hello_heartbeats_and_updates() {
         m.runtime.last_spec("ops-assistant")["memory"],
         json!([{"id": "n1", "text": "Look up the order first."}])
     );
+    let before = cp.acks().len();
     cp.push(memory_update("0", &[])).await;
-    let a = ack(&cp, "memory", "0").await;
-    assert!(!a.applied && a.error.contains("stale"), "{a:?}");
+    eventually("the stale memory ack", || cp.acks().len() > before).await;
+    let a = cp.acks().last().unwrap().clone();
+    assert_eq!((a.kind.as_str(), a.version.as_str()), ("memory", "1"));
+    assert!(a.applied && a.error.is_empty(), "{a:?}");
+    assert_eq!(m.state().memory_version(), "1");
     assert_eq!(cp.connections(), 1, "one stream all along");
 
     // 10. the --charter file no longer counts once a control-plane charter is in force
@@ -492,6 +507,31 @@ async fn reconnects_keep_the_configuration_and_a_restart_reuses_persisted_state(
             .await
             .is_empty()
     );
+    // written before any charter, so without its redaction: exported without payloads (hashes
+    // stay); config records keep their metadata
+    eventually("the early records exported", || {
+        let r = cp.audit_records();
+        r.iter().any(|(_, v)| v["rule"] == "config.no_charter")
+            && r.iter().any(|(_, v)| v["input"]["version"] == "5")
+    })
+    .await;
+    let exported = cp.audit_records();
+    let early = &exported
+        .iter()
+        .find(|(_, v)| v["rule"] == "config.no_charter")
+        .unwrap()
+        .1;
+    assert!(
+        early["input"].is_null() && early["output"].is_null(),
+        "{early}"
+    );
+    assert!(early["input_sha256"].is_string());
+    let applied = &exported
+        .iter()
+        .find(|(_, v)| v["input"]["version"] == "5")
+        .unwrap()
+        .1;
+    assert_eq!(applied["input"]["epoch"], "e1");
 
     // the control plane drops the stream: the sidecar reconnects and keeps its configuration
     cp.drop_streams();
@@ -510,6 +550,13 @@ async fn reconnects_keep_the_configuration_and_a_restart_reuses_persisted_state(
         m.state().is_ready(),
         "readiness never depends on the stream"
     );
+    // under a charter (control_plane_payloads by default) records keep their payloads
+    eventually("a record with its payload", || {
+        cp.audit_records()
+            .iter()
+            .any(|(_, v)| v["input"] == "while reconnecting")
+    })
+    .await;
 
     // restart: the control plane is gone; the persisted certificate, charter and memory serve
     let cert_before = m.state().tls().unwrap().cert_sha256.clone();
@@ -930,5 +977,324 @@ async fn span_starts_audit_batches_and_learning_proposals() {
     assert_eq!(p.trace_id, TRACE_ID);
     assert!(p.auto, "mode: auto");
     assert!(m.state().loaded().unwrap().memory.agents.is_empty());
+    m.sidecar.abort();
+}
+
+/// The OpenTelemetry endpoint the running exporter was started with.
+fn otel_endpoint(m: &Managed) -> Option<String> {
+    m.state()
+        .otel
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|r| r.config.endpoint.clone())
+}
+
+fn with_endpoint(mut c: Charter, endpoint: &str) -> Charter {
+    c.telemetry = Some(TelemetrySpec {
+        otlp_endpoint: Some(endpoint.into()),
+        ..Default::default()
+    });
+    c
+}
+
+#[tokio::test]
+async fn the_control_planes_charter_replaces_the_start_up_charter_restart_only_fields_included() {
+    let ca = attache_pki::ca_init().unwrap();
+    let cp = FakeCp::start(ca.clone()).await;
+    let state_dir = tempfile::tempdir().unwrap();
+    let audit_dir = tempfile::tempdir().unwrap();
+    let audit = audit_dir.path().join("audit.jsonl");
+    let moved = audit_dir.path().join("moved/audit.jsonl");
+    let allow = |cfg: &mut Config| cfg.otlp_endpoint_allow = vec!["http://127.0.0.1:*".into()];
+    // the --charter file (Compose mounts one) differs from the stored charter in restart-only
+    // fields: the stored charter still applies, as at a restart
+    let file = with_endpoint(charter(&audit), "http://127.0.0.1:9");
+    let m = start_managed(
+        cp.addr,
+        &ca,
+        state_dir.path(),
+        Some(&file),
+        |_| FakeRuntime::answering("done"),
+        allow,
+    )
+    .await;
+    assert_eq!(otel_endpoint(&m).as_deref(), Some("http://127.0.0.1:9"));
+    eventually("hello", || !cp.hellos().is_empty()).await;
+    let mut v1 = with_endpoint(charter(&audit), "http://127.0.0.1:10");
+    v1.mesh.port = 50111;
+    cp.push(charter_update("e1", "1", &v1)).await;
+    let a = ack(&cp, "charter", "1").await;
+    assert!(a.applied, "{}", a.error);
+    let l = m.state().loaded().unwrap();
+    assert_eq!(
+        (l.source, l.charter.mesh.port),
+        (Source::ControlPlane, 50111)
+    );
+    assert_eq!(
+        otel_endpoint(&m).as_deref(),
+        Some("http://127.0.0.1:10"),
+        "the exporter follows the endpoint"
+    );
+    // from now on the baseline is the control plane's charter: a restart-only change made while
+    // this instance is connected is refused
+    let mut v2 = v1.clone();
+    v2.mesh.port = 50112;
+    cp.push(charter_update("e1", "2", &v2)).await;
+    let a = ack(&cp, "charter", "2").await;
+    assert!(!a.applied && a.error.contains("mesh.port"), "{a:?}");
+
+    // the sidecar stops; with no instance connected the control plane accepts restart-only
+    // changes (design §4): another audit file and mesh port
+    let Managed { sidecar, .. } = m;
+    sidecar.shutdown().await;
+    let mut v3 = v1.clone();
+    v3.mesh.port = 50113;
+    v3.audit.file = Some(moved.to_string_lossy().into_owned());
+    v3.agents[0].system = "after the restart".into();
+
+    // the restart starts from the persisted charter ...
+    let m = start_managed(
+        cp.addr,
+        &ca,
+        state_dir.path(),
+        Some(&file),
+        |_| FakeRuntime::answering("done"),
+        allow,
+    )
+    .await;
+    let l = m.state().loaded().unwrap();
+    assert_eq!((l.source, l.version.as_str()), (Source::State, "1"));
+    eventually("a second hello", || cp.hellos().len() >= 2).await;
+    let h = cp.hellos()[1].clone();
+    assert_eq!(
+        (h.charter_epoch.as_str(), h.charter_version.as_str()),
+        ("e1", "1")
+    );
+    // ... and the stored charter replaces it, the restart-only changes too
+    cp.push(charter_update("e1", "3", &v3)).await;
+    let a = ack(&cp, "charter", "3").await;
+    assert!(a.applied, "{}", a.error);
+    let l = m.state().loaded().unwrap();
+    assert_eq!(
+        (
+            l.source,
+            l.charter.mesh.port,
+            l.charter.agents[0].system.as_str()
+        ),
+        (Source::ControlPlane, 50113, "after the restart")
+    );
+    let rec = wait_audit(&moved, 1, |v| {
+        v["rule"] == "config.applied" && v["input"]["version"] == "3"
+    })
+    .await;
+    assert_eq!(rec.len(), 1, "records go to the new audit file");
+    let meta: Value =
+        serde_json::from_slice(&std::fs::read(state_dir.path().join("charter.meta.json")).unwrap())
+            .unwrap();
+    assert_eq!(meta["version"], "3");
+    // and is the baseline from then on
+    let mut v4 = v3.clone();
+    v4.audit.file = Some(audit.to_string_lossy().into_owned());
+    cp.push(charter_update("e1", "4", &v4)).await;
+    let a = ack(&cp, "charter", "4").await;
+    assert!(!a.applied && a.error.contains("audit.file"), "{a:?}");
+    let Managed { sidecar, .. } = m;
+    sidecar.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_expired_certificate_is_dropped_and_obtained_anew() {
+    let ca = attache_pki::ca_init().unwrap();
+    let cp = FakeCp::start(ca.clone()).await;
+    *cp.shared.ttl.lock().unwrap() = Duration::from_secs(3);
+    let state_dir = tempfile::tempdir().unwrap();
+    let audit_dir = tempfile::tempdir().unwrap();
+    let audit = audit_dir.path().join("audit.jsonl");
+    let m = start_managed(
+        cp.addr,
+        &ca,
+        state_dir.path(),
+        Some(&charter(&audit)),
+        |_| FakeRuntime::answering("done"),
+        |_| {},
+    )
+    .await;
+    eventually("a certificate", || m.state().tls().is_some()).await;
+    // every renewal fails, until the certificate expires
+    std::fs::write(&m.token_file, "not-the-token").unwrap();
+    let expired = wait_audit(&audit, 1, |v| v["rule"] == "cert.expired").await;
+    assert_eq!(expired.len(), 1, "the certificate expired");
+    assert_eq!(expired[0]["kind"], "config");
+    assert_eq!(expired[0]["decision"], "allow");
+    assert!(expired[0]["error"].is_string());
+    let gone = expired[0]["input"]["sha256"].as_str().unwrap().to_string();
+    assert!(
+        !wait_audit(&audit, 1, |v| v["rule"] == "cert.renew_failed")
+            .await
+            .is_empty()
+    );
+    // without a valid certificate the sidecar is not ready, and says why
+    assert!(m.state().tls().is_none_or(|t| t.cert_sha256 != gone));
+    assert!(!m.state().is_ready());
+    let (status, body) = m.readyz().await;
+    assert_eq!(status, 503, "{body}");
+    assert_eq!(body["mesh"], false);
+    assert!(body["cert_expires_in_s"].as_i64().unwrap() <= 0, "{body}");
+    // it obtains a new one as at start-up
+    let failed = wait_audit(&audit, 1, |v| {
+        v["rule"] == "cert.issue_failed" && v["input"]["sha256"].is_null()
+    })
+    .await;
+    assert!(!failed.is_empty(), "issuance after expiry");
+    std::fs::write(&m.token_file, JOIN_TOKEN).unwrap();
+    eventually("a new certificate", || m.state().tls().is_some()).await;
+    assert_ne!(m.state().tls().unwrap().cert_sha256, gone);
+    eventually("ready again", || m.state().is_ready()).await;
+    m.sidecar.abort();
+}
+
+#[tokio::test]
+async fn the_kubernetes_token_is_read_for_every_issuance() {
+    let ca = attache_pki::ca_init().unwrap();
+    let cp = FakeCp::start(ca.clone()).await;
+    let state_dir = tempfile::tempdir().unwrap();
+    let audit_dir = tempfile::tempdir().unwrap();
+    let audit = audit_dir.path().join("audit.jsonl");
+    // the projected token in its file, not yet one the TokenReview accepts
+    let token = audit_dir.path().join("projected/token");
+    std::fs::create_dir_all(token.parent().unwrap()).unwrap();
+    std::fs::write(&token, "a-stale-projected-token\n").unwrap();
+    let path = token.clone();
+    let m = start_managed(
+        cp.addr,
+        &ca,
+        state_dir.path(),
+        Some(&charter(&audit)),
+        |_| FakeRuntime::answering("done"),
+        move |cfg| {
+            cfg.join_token_file = None;
+            cfg.k8s_token_file = path;
+        },
+    )
+    .await;
+    let failed = wait_audit(&audit, 1, |v| v["rule"] == "cert.issue_failed").await;
+    assert!(
+        failed[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("Kubernetes token"),
+        "{}",
+        failed[0]
+    );
+    assert!(m.state().tls().is_none());
+    // the kubelet rotates the token: the next attempt reads the new one
+    std::fs::write(&token, format!("{K8S_TOKEN}\n")).unwrap();
+    eventually("a certificate", || m.state().tls().is_some()).await;
+    assert_eq!(m.state().tls().unwrap().material.identity.uri(), ORDERS_ID);
+    let issued = cp.shared.issued.lock().unwrap().clone();
+    assert!(issued.len() >= 2);
+    assert!(issued.iter().all(|r| r.join_token.is_empty()));
+    assert_eq!(issued[0].kubernetes_token, "a-stale-projected-token");
+    assert_eq!(issued.last().unwrap().kubernetes_token, K8S_TOKEN);
+    m.sidecar.abort();
+}
+
+fn flood_record(i: usize) -> attache_common::audit::AuditRecord {
+    attache_common::audit::AuditRecord::new(
+        attache_common::audit::Kind::ToolCall,
+        attache_common::audit::Direction::Internal,
+        &format!("flood-{i}"),
+        &attache_common::trace::TraceContext::new_root(),
+        Some("ops-assistant"),
+        "local",
+        None,
+        "lookup_order",
+        json!("x"),
+        Value::Null,
+    )
+}
+
+#[tokio::test]
+async fn the_control_plane_and_its_ca_must_carry_the_control_plane_uri_san() {
+    let ca = attache_pki::ca_init().unwrap();
+    // a server of the same CA, but a workload's certificate: not the control plane
+    let impostor_uri = "spiffe://attache/ns/attache-demo/svc/inventory";
+
+    // 1. IssueCertificate: the CSR never reaches a CA without the URI SAN
+    let impostor = FakeCp::start_with("127.0.0.1:0", ca.clone(), impostor_uri).await;
+    let audit_dir = tempfile::tempdir().unwrap();
+    let audit = audit_dir.path().join("audit.jsonl");
+    let state_dir = tempfile::tempdir().unwrap();
+    let m = start_managed(
+        impostor.addr,
+        &ca,
+        state_dir.path(),
+        Some(&charter(&audit)),
+        |_| FakeRuntime::answering("done"),
+        |_| {},
+    )
+    .await;
+    let failed = wait_audit(&audit, 2, |v| v["rule"] == "cert.issue_failed").await;
+    assert!(failed.len() >= 2, "retried");
+    assert!(
+        impostor.shared.issued.lock().unwrap().is_empty(),
+        "refused in the handshake, before any request"
+    );
+    assert!(m.state().tls().is_none());
+    m.sidecar.abort();
+
+    // 2. Connect: with a certificate from the real CA, no stream is opened to the impostor
+    let real_ca = FakeCp::start(ca.clone()).await;
+    let audit2 = audit_dir.path().join("audit2.jsonl");
+    let state_dir = tempfile::tempdir().unwrap();
+    let ca_addr = real_ca.addr.to_string();
+    let m = start_managed(
+        impostor.addr,
+        &ca,
+        state_dir.path(),
+        Some(&charter(&audit2)),
+        |_| FakeRuntime::answering("done"),
+        move |cfg| cfg.ca_address = Some(ca_addr),
+    )
+    .await;
+    eventually("a certificate", || m.state().tls().is_some()).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(impostor.connections(), 0);
+    assert!(impostor.received().is_empty());
+    eventually("ready without the control plane", || m.state().is_ready()).await;
+
+    // 3. meanwhile the audit queue fills: at most 4096 records, the oldest dropped and counted
+    for i in 0..(4096 + 200) {
+        m.state().audit.write(flood_record(i));
+    }
+    // the real control plane answers on that address: the first heartbeat reports the drops
+    let addr = impostor.addr;
+    impostor.stop();
+    drop(impostor);
+    let cp = FakeCp::start_on(&addr.to_string(), ca.clone()).await;
+    eventually("a heartbeat", || !cp.heartbeats().is_empty()).await;
+    let hb = cp.heartbeats()[0].clone();
+    assert!(hb.audit_dropped >= 200, "{hb:?}");
+    // the newest records were kept and arrive
+    eventually("the last record", || {
+        cp.audit_records()
+            .iter()
+            .any(|(_, v)| v["request_id"] == "flood-4295")
+    })
+    .await;
+    let dropped = m.state().outbox.audit_dropped();
+    eventually("a heartbeat with every drop", || {
+        cp.heartbeats()
+            .last()
+            .is_some_and(|b| b.audit_dropped == dropped)
+    })
+    .await;
+    assert!(
+        !cp.audit_records()
+            .iter()
+            .any(|(_, v)| v["request_id"] == "flood-0"),
+        "the oldest were dropped"
+    );
     m.sidecar.abort();
 }

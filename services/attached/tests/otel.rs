@@ -1,7 +1,8 @@
 //! OpenTelemetry wiring (design §9): an allow-listed charter endpoint gets the sidecar's spans; an
 //! endpoint the allow list does not name gets nothing; the exporter starts on the first reload
-//! that turns traces or metrics on, takes the flags of later reloads, and flushes on shutdown.
-//! (Tests assume `OTEL_EXPORTER_OTLP_ENDPOINT` is unset.)
+//! that turns traces or metrics on, takes the flags of later reloads, and flushes on shutdown;
+//! `OTEL_EXPORTER_OTLP_ENDPOINT` wins over the charter, with its headers. The environment the
+//! sidecar reads `OTEL_*` from is pinned per test (`Config::otel_env`), never the ambient one.
 mod common;
 
 use std::sync::{Arc, Mutex};
@@ -16,6 +17,8 @@ use serde_json::Value;
 #[derive(Clone, Default)]
 struct Received {
     traces: Arc<Mutex<Vec<Value>>>,
+    /// The `x-collector-auth` header of each trace request.
+    auth: Arc<Mutex<Vec<Option<String>>>>,
 }
 
 async fn receiver() -> (std::net::SocketAddr, Received) {
@@ -24,16 +27,24 @@ async fn receiver() -> (std::net::SocketAddr, Received) {
     let app = Router::new()
         .route(
             "/v1/traces",
-            post(move |body: axum::body::Bytes| {
-                let g = g.clone();
-                async move {
-                    g.traces
-                        .lock()
-                        .unwrap()
-                        .push(serde_json::from_slice(&body).unwrap_or(Value::Null));
-                    "{}"
-                }
-            }),
+            post(
+                move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+                    let g = g.clone();
+                    async move {
+                        g.auth.lock().unwrap().push(
+                            headers
+                                .get("x-collector-auth")
+                                .and_then(|v| v.to_str().ok())
+                                .map(str::to_string),
+                        );
+                        g.traces
+                            .lock()
+                            .unwrap()
+                            .push(serde_json::from_slice(&body).unwrap_or(Value::Null));
+                        "{}"
+                    }
+                },
+            ),
         )
         .route("/v1/metrics", post(|| async { "{}" }));
     (serve_app(app).await, got)
@@ -170,6 +181,7 @@ async fn the_exporter_starts_on_the_reload_that_turns_it_on_and_follows_later_fl
         .unwrap()
         .as_ref()
         .unwrap()
+        .handle
         .flags();
     assert!(flags.traces && !flags.metrics && flags.export_payloads);
 
@@ -179,4 +191,64 @@ async fn the_exporter_starts_on_the_reload_that_turns_it_on_and_follows_later_fl
     let Rig { sidecar, .. } = rig;
     sidecar.shutdown().await;
     assert!(spans(&got).len() > before, "flushed on shutdown");
+}
+
+#[tokio::test]
+async fn the_environment_endpoint_wins_with_its_headers() {
+    let (addr, got) = receiver().await;
+    let env = std::collections::BTreeMap::from([
+        (
+            "OTEL_EXPORTER_OTLP_ENDPOINT".to_string(),
+            format!("http://{addr}"),
+        ),
+        (
+            "OTEL_EXPORTER_OTLP_HEADERS".to_string(),
+            "x-collector-auth=t0ken".to_string(),
+        ),
+        (
+            "OTEL_RESOURCE_ATTRIBUTES".to_string(),
+            "deployment.environment=test".to_string(),
+        ),
+    ]);
+    // the charter names another endpoint, and no allow list is given: the environment decides
+    let rig = rig(
+        FakeRuntime::answering("done"),
+        |c| c.telemetry = Some(telemetry("http://otel-collector:4318", true)),
+        move |cfg| cfg.otel_env = Some(env),
+    )
+    .await;
+    assert_eq!(
+        rig.sidecar
+            .state
+            .otel
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|r| r.config.endpoint.clone()),
+        Some(format!("http://{addr}"))
+    );
+    rig.invoke("ops-assistant", "hello").await;
+    eventually("the invocation span", || {
+        spans(&got)
+            .iter()
+            .any(|(_, name)| name == "agent_invocation ops-assistant")
+    })
+    .await;
+    assert!(
+        got.auth
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|a| a.as_deref() == Some("t0ken"))
+    );
+    let resource = got.traces.lock().unwrap()[0]["resourceSpans"][0]["resource"].clone();
+    assert!(
+        resource["attributes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["key"] == "deployment.environment"),
+        "{resource}"
+    );
+    rig.sidecar.shutdown().await;
 }

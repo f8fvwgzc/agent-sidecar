@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use attache_common::audit::{AuditRecord, Direction, now_rfc3339};
+use attache_common::audit::{AuditRecord, Direction, Kind, now_rfc3339};
 use attache_common::trace::TraceContext;
 use attache_proto::{LearningProposal, SpanStart};
 use tokio::sync::{Notify, broadcast};
@@ -185,12 +185,17 @@ impl Outbox {
     /// Every queued span start, waiting for one if none is queued.
     pub async fn next_spans(&self) -> Vec<SpanStart> {
         loop {
-            let taken: Vec<SpanStart> = lock(&self.spans).drain(..).collect();
+            let taken = self.take_spans();
             if !taken.is_empty() {
                 return taken;
             }
             self.span_notify.notified().await;
         }
+    }
+
+    /// Every queued span start, now (maybe none).
+    pub fn take_spans(&self) -> Vec<SpanStart> {
+        lock(&self.spans).drain(..).collect()
     }
 
     pub fn propose(&self, p: LearningProposal) {
@@ -257,17 +262,43 @@ pub fn export_json(rec: &AuditRecord, payloads: bool) -> String {
     r.to_json_line()
 }
 
-/// Feed the audit queue from the writer for the life of the sidecar. `payloads` says, per
-/// record, whether the current charter keeps payloads for the control plane.
+/// The `config` record of an applied charter.
+fn charter_applied(rec: &AuditRecord) -> bool {
+    rec.kind == Kind::Config
+        && rec.callee == "charter"
+        && rec.rule.as_deref() == Some(crate::reload::RULE_APPLIED)
+}
+
+/// Feed the audit queue from the writer for the life of the sidecar. `payloads` is the current
+/// charter's `telemetry.control_plane_payloads`, `None` while no charter is loaded.
+///
+/// Records the writer published before the first charter's `config.applied` record were
+/// redacted without any charter's `audit.redact` paths or `pii_redact` (the writer publishes in
+/// order, and [`crate::audit::Audit::set_redaction`] waits for writes in progress): they leave
+/// without payloads (design §15, rule 6), except `config` records, whose input is the
+/// sidecar's own metadata.
 pub async fn pump_audit(
     outbox: Arc<Outbox>,
     mut rx: broadcast::Receiver<Arc<AuditRecord>>,
-    payloads: impl Fn() -> bool,
+    payloads: impl Fn() -> Option<bool>,
 ) {
+    let mut configured = false;
     loop {
         match rx.recv().await {
-            Ok(rec) => outbox.push_audit(export_json(&rec, payloads())),
-            Err(broadcast::error::RecvError::Lagged(n)) => outbox.count_audit_dropped(n),
+            Ok(rec) => {
+                configured = configured || charter_applied(&rec);
+                let keep = if configured {
+                    payloads().unwrap_or(false)
+                } else {
+                    rec.kind == Kind::Config
+                };
+                outbox.push_audit(export_json(&rec, keep));
+            }
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                outbox.count_audit_dropped(n);
+                // where the stream stands is unknown now; a charter in force decides
+                configured = configured || payloads().is_some();
+            }
             Err(broadcast::error::RecvError::Closed) => return,
         }
     }
@@ -331,6 +362,59 @@ mod tests {
         assert_eq!(got.len(), SPAN_QUEUE);
         assert_eq!(got[0].span_id, "5");
         assert_eq!(o.spans_dropped(), 5);
+    }
+
+    fn rec(kind: attache_common::audit::Kind, callee: &str, rule: Option<&str>) -> AuditRecord {
+        let mut r = AuditRecord::new(
+            kind,
+            Direction::Internal,
+            "r",
+            &TraceContext::new_root(),
+            None,
+            "local",
+            None,
+            callee,
+            serde_json::json!({"q": callee}),
+            serde_json::Value::Null,
+        );
+        r.rule = rule.map(str::to_string);
+        r
+    }
+
+    #[tokio::test]
+    async fn records_from_before_the_first_charter_leave_without_payloads() {
+        use attache_common::audit::Kind;
+        let outbox = Arc::new(Outbox::new(true));
+        let (tx, rx) = broadcast::channel(16);
+        // a charter keeping payloads is in force by the time the pump sees these records
+        let pump = tokio::spawn(pump_audit(outbox.clone(), rx, || Some(true)));
+        for r in [
+            rec(Kind::AgentInvocation, "early", Some("config.no_charter")),
+            rec(Kind::Config, "certificate", Some("cert.issued")),
+            rec(Kind::Config, "charter", Some("config.invalid")),
+            rec(Kind::Config, "charter", Some("config.applied")),
+            rec(Kind::AgentInvocation, "late", None),
+        ] {
+            tx.send(Arc::new(r)).unwrap();
+        }
+        drop(tx);
+        pump.await.unwrap();
+        let out: Vec<serde_json::Value> = outbox
+            .next_audit_batch(Duration::ZERO)
+            .await
+            .iter()
+            .map(|j| serde_json::from_str(j).unwrap())
+            .collect();
+        let inputs: Vec<&serde_json::Value> = out.iter().map(|v| &v["input"]).collect();
+        assert!(inputs[0].is_null(), "no payload before the first charter");
+        assert!(out[0]["input_sha256"].is_string(), "the hash stays");
+        assert_eq!(
+            inputs[1]["q"], "certificate",
+            "config records keep their metadata"
+        );
+        assert_eq!(inputs[2]["q"], "charter");
+        assert_eq!(inputs[3]["q"], "charter");
+        assert_eq!(inputs[4]["q"], "late", "under the charter: its setting");
     }
 
     #[test]

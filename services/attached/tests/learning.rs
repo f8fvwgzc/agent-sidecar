@@ -1,13 +1,15 @@
 //! `SidecarTools.ProposeLesson` unmanaged (design §6.5): review mode audits a scrubbed lesson,
-//! auto mode makes it a local note (persisted, given to the runtime), and every refusal —
-//! learning off, a peer's run, the hourly limit, the length, `input_deny`, a run outside the
-//! window — is answered and audited. The managed path is in `managed.rs`.
+//! auto mode makes it a local note (persisted, given to the runtime, reloaded after a restart),
+//! and every refusal — learning off, a peer's run, the hourly limit, the length, `input_deny`,
+//! a run outside the window or still running — is answered and audited. The managed path is in
+//! `managed.rs`.
 mod common;
 
 use attache_charter::{CallerRule, LearningMode, LearningSpec};
 use attache_common::trace::TraceContext;
 use attache_proto::sidecar_tools_client::SidecarToolsClient;
 use attache_proto::{LessonRequest, LessonResponse, ToolAgentRequest};
+use attached::Config;
 use attached::pipeline::Invocation;
 use common::*;
 use serde_json::{Value, json};
@@ -330,4 +332,102 @@ async fn a_peers_run_teaches_only_with_from_peers() {
         .unwrap();
     assert_eq!(r.rule, "learning.proposed");
     rig.sidecar.abort();
+}
+
+#[tokio::test]
+async fn a_lesson_is_proposed_only_after_the_run_returned() {
+    let (runtime, mut pending) = FakeRuntime::gated();
+    let rig = rig(
+        runtime,
+        |c| c.agents[0].learning = Some(learning(LearningMode::Review, 10, false)),
+        |_| {},
+    )
+    .await;
+    let url = rig.invoke_url("ops-assistant");
+    let call = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(url)
+            .json(&json!({"input": "hi"}))
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()
+    });
+    let (req, done) = pending.recv().await.unwrap();
+    let run = req.request_id.clone();
+    let mut tools = tools(&rig.sock).await;
+    // while the Execute runs: refused, as ReportEvent refuses a tool_call after it returned
+    let err = propose(&mut tools, "ops-assistant", &run, "too early")
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert!(err.message().contains("still running"), "{}", err.message());
+    let authz = rig.records(|v| v["kind"] == "authz" && v["request_id"] == run.as_str());
+    assert_eq!(authz.len(), 1);
+    assert_eq!(authz[0]["rule"], "runtime.report_rejected");
+    assert!(learning_records(&rig).is_empty());
+
+    done.send(ok("done")).unwrap();
+    let body = call.await.unwrap();
+    assert_eq!(body["request_id"], run.as_str());
+    let r = propose(&mut tools, "ops-assistant", &run, "now")
+        .await
+        .unwrap();
+    assert_eq!(r.rule, "learning.proposed", "{}", r.reason);
+    assert_eq!(learning_records(&rig).len(), 1);
+    rig.sidecar.abort();
+}
+
+#[tokio::test]
+async fn local_notes_are_reloaded_after_a_restart() {
+    let rig = learning_rig(learning(LearningMode::Auto, 10, false)).await;
+    let mut client = tools(&rig.sock).await;
+    let (_, body) = rig.invoke("ops-assistant", "hi").await;
+    let run = body["request_id"].as_str().unwrap().to_string();
+    let r = propose(
+        &mut client,
+        "ops-assistant",
+        &run,
+        "Look up the order first.",
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.rule, "learning.applied", "{}", r.reason);
+    rig.sidecar.abort();
+
+    // the same charter and socket dir, so the same state dir
+    let runtime = FakeRuntime::answering("again");
+    serve_runtime(&rig.sock, runtime.clone());
+    let mut cfg = Config::for_test(
+        rig.charter_path.clone(),
+        rig.tmp.path().join("no-tls"),
+        rig.sock.clone(),
+    );
+    cfg.timing = fast_timing();
+    let again = attached::start(cfg)
+        .await
+        .expect("the sidecar starts again");
+    let memory = again.state.loaded().unwrap().memory.clone();
+    assert_eq!(memory.version, "1");
+    let notes = &memory.agents["ops-assistant"];
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].text, "Look up the order first.");
+    assert_eq!(notes[0].request_id, run);
+    let r = reqwest::Client::new()
+        .post(format!(
+            "http://{}/v1/agents/ops-assistant/invoke",
+            again.http_addr
+        ))
+        .json(&json!({"input": "after the restart"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(
+        runtime.last_spec("ops-assistant")["memory"],
+        json!([{"id": notes[0].id, "text": "Look up the order first."}])
+    );
+    again.abort();
 }

@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
@@ -51,6 +51,10 @@ pub struct AppState {
     /// The text of the last charter loaded from the `--charter` file (`Hello.charter_yaml`).
     pub(crate) file_yaml: Mutex<Option<String>>,
     pub tls: TlsCell,
+    /// `not_after` (Unix seconds) of the last workload certificate installed, kept when an
+    /// expired one is dropped, so `cert_expires_in_s` turns negative instead of vanishing;
+    /// `i64::MIN` before any.
+    pub(crate) cert_not_after: AtomicI64,
     /// Bumped whenever a new workload certificate is installed.
     pub tls_generation: tokio::sync::watch::Sender<u64>,
     /// Trust roots for the control plane and its CA (managed mode).
@@ -70,7 +74,7 @@ pub struct AppState {
     pub outbox: Arc<Outbox>,
     /// Accepted lesson proposals per agent in the last hour (`max_proposals_per_hour`).
     pub lessons: Mutex<HashMap<String, VecDeque<Instant>>>,
-    pub otel: Mutex<Option<attache_otel::ExporterHandle>>,
+    pub otel: Mutex<Option<crate::otel::RunningExporter>>,
     /// SHA-256 of the app API token (design §6.6).
     pub app_token: Option<[u8; 32]>,
     pub state_dir: StateDir,
@@ -106,7 +110,9 @@ impl AppState {
         let mut file_error = None;
 
         // The start-up charter. Standalone: the `--charter` file, required. Managed: what the
-        // control plane sent last (persisted), else the `--charter` file if there is one.
+        // control plane sent last (persisted), else the `--charter` file if there is one; the
+        // first control-plane charter then takes its place, restart-only fields included
+        // (`reload::apply_charter`), so it serves only while the control plane is unreachable.
         let file = if managed {
             match read_charter(&config.charter) {
                 Ok(f) => f,
@@ -237,6 +243,7 @@ impl AppState {
         let app_token = config.app_token()?.map(|t| crate::app_auth::digest(&t));
         let runtime = crate::runtime::client(&config.socket_dir.join("runtime.sock"))?;
         let pending_memory = state_dir.load_memory();
+        let cert_not_after = AtomicI64::new(tls.as_ref().map_or(i64::MIN, |t| t.not_after));
         let state = Self {
             managed,
             pod: config.pod(),
@@ -248,6 +255,7 @@ impl AppState {
             pending_memory: Mutex::new(pending_memory),
             file_yaml: Mutex::new(file_text),
             tls: Arc::new(ArcSwapOption::from(tls.map(Arc::new))),
+            cert_not_after,
             tls_generation: tokio::sync::watch::channel(0).0,
             trust_roots,
             trust_pem,
@@ -294,11 +302,12 @@ impl AppState {
         self.tls.load_full()
     }
 
-    /// Ready = a charter is loaded, a TLS identity is loaded and the runtime is healthy. In
-    /// managed mode it never depends on the control-plane connection (design §6.3.4).
+    /// Ready = a charter is loaded, an unexpired TLS identity is loaded and the runtime is
+    /// healthy. In managed mode it never depends on the control-plane connection (design
+    /// §6.3.4); an expired certificate is no certificate.
     pub fn is_ready(&self) -> bool {
         self.loaded.load().is_some()
-            && self.tls.load().is_some()
+            && self.tls.load().as_ref().is_some_and(|t| !t.expired())
             && self.runtime_ready.load(Ordering::Relaxed)
     }
 
@@ -372,7 +381,15 @@ impl AppState {
         }
     }
 
+    /// Seconds until the workload certificate expires: negative once it has (also after the
+    /// expired certificate was dropped); `None` before the first one.
     pub fn cert_expires_in_s(&self) -> Option<i64> {
-        self.tls.load().as_ref().map(|t| t.expires_in_s())
+        if let Some(t) = self.tls.load().as_ref() {
+            return Some(t.expires_in_s());
+        }
+        match self.cert_not_after.load(Ordering::Relaxed) {
+            i64::MIN => None,
+            not_after => Some(not_after - crate::tls::now_unix()),
+        }
     }
 }

@@ -66,7 +66,8 @@ pub async fn start(config: Config) -> anyhow::Result<Sidecar> {
     let state = Arc::new(state);
     let mut tasks = Vec::new();
 
-    // Managed mode exports every record from the start, also while the stream is down.
+    // Managed mode exports every record from the start, also while the stream is down (subscribed
+    // before the start-up charter applies, so the export sees its `config.applied` record).
     if state.managed {
         let rx = state.audit.subscribe();
         let s = state.clone();
@@ -76,7 +77,6 @@ pub async fn start(config: Config) -> anyhow::Result<Sidecar> {
             move || {
                 s.loaded()
                     .map(|l| l.charter.telemetry_or_default().control_plane_payloads)
-                    .unwrap_or(true)
             },
         )));
     }
