@@ -1,5 +1,6 @@
 # agent-sidecar
 
+[![CI](https://github.com/f8fvwgzc/agent-sidecar/actions/workflows/ci.yml/badge.svg)](https://github.com/f8fvwgzc/agent-sidecar/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-website-0f172a.svg)](https://f8fvwgzc.github.io/agent-sidecar/)
 ![Rust](https://img.shields.io/badge/sidecar-Rust-orange.svg)
@@ -114,7 +115,7 @@ This is a `v1alpha1` MVP. It is **not production-ready**. The most important lim
 - The runtime runs as a child process in the same container as the sidecar.
 - The runtime calls the model API directly. These calls are audited, not proxied. `pii_redact` only rewrites the agent's final output and the audit records. It does not change prompts sent to the model.
 - The charter is loaded once at startup. A ConfigMap change needs a pod restart.
-- There is no NetworkPolicy, no UI and no CI config in the repo yet.
+- There is no NetworkPolicy and no UI yet.
 
 More detail is in [docs/operations.md](docs/operations.md) and [CONTRACT.md §11](CONTRACT.md#11-known-gaps-mvp).
 
