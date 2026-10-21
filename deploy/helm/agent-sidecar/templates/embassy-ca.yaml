@@ -1,0 +1,165 @@
+{{- $component := "embassy-ca" }}
+{{- $ns := .Release.Namespace }}
+{{- $dnsNames := concat (include "agent-sidecar.serviceDNSNames" (dict "root" $ "service" "embassy-ca") | fromJsonArray) (include "agent-sidecar.serviceDNSNames" (dict "root" $ "service" "embassy") | fromJsonArray) .Values.embassyCa.dnsNames .Values.embassy.dnsNames | uniq }}
+# embassy-ca: IssueCertificate (:15012) and the admission webhooks (:9443), from the one image that
+# also runs embassy. It creates the CA (unless ca.existingSecret), creates and renews the serving
+# certificate in Secret embassy-tls (DNS SANs: both Services and the extra names; embassy serves
+# Connect and, with httpTLS, the API with the same certificate), and keeps the webhook
+# configurations' caBundle current.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: embassy-ca
+  namespace: {{ $ns }}
+  labels:
+    {{- include "agent-sidecar.componentLabels" (dict "root" $ "component" $component) | nindent 4 }}
+spec:
+  replicas: {{ .Values.embassyCa.replicas }}
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      {{- include "agent-sidecar.selectorLabels" (dict "root" $ "component" $component) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "agent-sidecar.componentLabels" (dict "root" $ "component" $component) | nindent 8 }}
+      {{- with .Values.embassyCa.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: embassy-ca
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      affinity:
+        podAntiAffinity:
+          {{- if eq .Values.embassyCa.antiAffinity "hard" }}
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  {{- include "agent-sidecar.selectorLabels" (dict "root" $ "component" $component) | nindent 18 }}
+          {{- else }}
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "agent-sidecar.selectorLabels" (dict "root" $ "component" $component) | nindent 20 }}
+          {{- end }}
+      {{- with .Values.embassyCa.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.embassyCa.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: embassy
+          image: {{ include "agent-sidecar.image" (dict "image" .Values.images.embassy "root" $) }}
+          imagePullPolicy: {{ .Values.images.embassy.pullPolicy }}
+          args:
+            - serve
+            - --components=ca,webhook
+            - --grpc-addr=0.0.0.0:15012
+            - --webhook-addr=0.0.0.0:9443
+            - --ca-secret={{ include "agent-sidecar.caSecretRef" . }}
+            - --tls-secret={{ $ns }}/{{ include "agent-sidecar.tlsSecretName" . }}
+            - --store=kubernetes
+            - --config=/etc/attache/config/config.yaml
+            {{- range $dnsNames }}
+            - --dns-name={{ . }}
+            {{- end }}
+            - --webhook-config-name={{ include "agent-sidecar.injectorName" . }}
+            - --validating-webhook-name={{ include "agent-sidecar.validatorName" . }}
+            - --injector-image={{ include "agent-sidecar.image" (dict "image" .Values.images.attached "root" $) }}
+            - --cp-namespace={{ $ns }}
+          env:
+            - name: RUST_LOG
+              value: {{ .Values.embassyCa.logLevel | quote }}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # Injection defaults from the chart values (design §13: resources, securityContext and
+            # telemetry of the injected attached container come from Helm values).
+            - name: ATTACHE_INJECT_CONTROL_PLANE
+              value: {{ include "agent-sidecar.grpcAddress" (dict "root" $ "name" "embassy") | quote }}
+            - name: ATTACHE_INJECT_CA_ADDRESS
+              value: {{ include "agent-sidecar.grpcAddress" (dict "root" $ "name" "embassy-ca") | quote }}
+            - name: ATTACHE_INJECT_IMAGE_PULL_POLICY
+              value: {{ .Values.images.attached.pullPolicy | quote }}
+            - name: ATTACHE_INJECT_RESOURCES
+              value: {{ .Values.injection.resources | toJson | quote }}
+            - name: ATTACHE_INJECT_SECURITY_CONTEXT
+              value: {{ .Values.injection.securityContext | toJson | quote }}
+            {{- with .Values.otlp.endpoint }}
+            - name: ATTACHE_INJECT_OTLP_ENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.otlp.endpointAllow }}
+            - name: ATTACHE_INJECT_OTLP_ENDPOINT_ALLOW
+              value: {{ join "," . | quote }}
+            {{- end }}
+          ports:
+            - name: grpc
+              containerPort: 15012
+              protocol: TCP
+            - name: webhook
+              containerPort: 9443
+              protocol: TCP
+          # This process serves no HTTP API (only gRPC and the TLS webhook endpoints), so the probes
+          # check that both listeners accept connections.
+          readinessProbe:
+            tcpSocket:
+              port: webhook
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.embassyCa.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/attache/config
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          secret:
+            secretName: {{ include "agent-sidecar.configSecretName" . }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi
+{{- if gt (int .Values.embassyCa.replicas) 1 }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: embassy-ca
+  namespace: {{ $ns }}
+  labels:
+    {{- include "agent-sidecar.componentLabels" (dict "root" $ "component" $component) | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.embassyCa.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "agent-sidecar.selectorLabels" (dict "root" $ "component" $component) | nindent 6 }}
+{{- end }}

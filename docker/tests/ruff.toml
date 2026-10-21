@@ -1,0 +1,2 @@
+# Lint and format like the runtime package (make packaging-test).
+extend = "../../runtime/pyproject.toml"

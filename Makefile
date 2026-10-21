@@ -1,4 +1,7 @@
-# attache developer entry points. The minikube path is: make minikube-up build deploy demo
+# attache developer entry points.
+#   v0.1 minikube path (explicit sidecars):  make minikube-up build deploy demo
+#   v0.2 minikube path (Helm, injection):    make demo-helm
+#   v0.2 one machine (Docker Compose):       make compose-up / make compose-down
 SHELL := /bin/bash
 NS ?= attache-demo
 PROFILE ?= minikube
@@ -6,8 +9,18 @@ PROFILE ?= minikube
 KUBE_CONTEXT ?= $(PROFILE)
 KUBECTL := kubectl --context $(KUBE_CONTEXT)
 ATTACHE := ./target/debug/attache
+EMBASSY := ./target/debug/embassy
+# The control-plane namespace and Helm release of the v0.2 chart.
+CP_NS ?= attache-system
+HELM_RELEASE ?= agent-sidecar
+CHART := deploy/helm/agent-sidecar
+COMPOSE := docker compose -f deploy/compose/docker-compose.yml
+COMPOSE_ENV := deploy/compose/.env
+# Tests of the chart, the Compose stack, the Dockerfile and the release workflow (throwaway uv env).
+PACKAGING_PYTEST := uv run --no-project --with pytest==8.4.2 --with pyyaml==6.0.2 python -m pytest -q
 .PHONY: local-demo all build-host test test-rust test-python fmt lint proto schema validate \
-        minikube-up minikube-down build deploy charters undeploy demo logs logs-denied secret-anthropic clean dev-certs
+        minikube-up minikube-down build deploy charters undeploy demo logs logs-denied secret-anthropic clean dev-certs \
+        compose-up compose-down helm-crd helm-lint helm-template demo-helm packaging-test
 
 all: build-host test
 
@@ -38,7 +51,8 @@ proto:
 	cd runtime && uv run python -m grpc_tools.protoc -I ../proto \
 	  --python_out=src/attache_runtime/pb --grpc_python_out=src/attache_runtime/pb --pyi_out=src/attache_runtime/pb \
 	  ../proto/attache/v1alpha1/common.proto ../proto/attache/v1alpha1/app.proto \
-	  ../proto/attache/v1alpha1/mesh.proto ../proto/attache/v1alpha1/runtime.proto
+	  ../proto/attache/v1alpha1/mesh.proto ../proto/attache/v1alpha1/runtime.proto \
+	  ../proto/attache/v1alpha1/controlplane.proto
 	sed -i.bak -E 's/^from attache\.v1alpha1 import/from attache_runtime.pb.attache.v1alpha1 import/' $(PB_DIR)/*_pb2*.py
 	rm -f $(PB_DIR)/*.bak
 
@@ -100,6 +114,50 @@ secret-anthropic:
 	kubectl -n $(NS) create secret generic attache-anthropic --from-literal=ANTHROPIC_API_KEY="$$ANTHROPIC_API_KEY" --dry-run=client -o yaml | $(KUBECTL) apply -f -
 	$(KUBECTL) -n $(NS) rollout restart deployment/orders deployment/inventory
 
+# ---- v0.2: Helm chart (docs/design/agent-platform.md §13) ------------------------------------
+# Helm cannot read files outside the chart, so the chart carries a copy of the CRD; the packaging
+# tests fail when it drifts from deploy/crds/.
+helm-crd:
+	cp deploy/crds/charters.attache.io.yaml $(CHART)/files/crds/charters.attache.io.yaml
+
+helm-lint:
+	helm lint --strict $(CHART)
+	for f in $(CHART)/ci/*-values.yaml; do helm lint --strict $(CHART) -f "$$f" || exit 1; done
+
+# make helm-template [HELM_ARGS='-f my-values.yaml']
+helm-template:
+	helm template $(HELM_RELEASE) $(CHART) --namespace $(CP_NS) $(HELM_ARGS)
+
+# The v0.2 demo on minikube: the four images in minikube's docker, the chart, an injection-enabled
+# namespace, Charter resources made with `attache charter to-cr`, the two apps with the inject label
+# and annotations (no sidecar in their spec), then the demo calls of scripts/demo.sh.
+demo-helm: minikube-up build
+	cargo build -q -p attache-cli -p embassy
+	KUBE_CONTEXT=$(KUBE_CONTEXT) CP_NS=$(CP_NS) RELEASE=$(HELM_RELEASE) ATTACHE=$(ATTACHE) EMBASSY=$(EMBASSY) \
+	  ./deploy/helm/demo.sh
+
+# ---- v0.2: Docker Compose on one machine (docs/design/agent-platform.md §14) ------------------
+# The embassy image is built first: gen-env.sh makes the tokens with `embassy token create`.
+compose-up:
+	docker build -f docker/Dockerfile --target embassy -t attache/embassy:dev .
+	EMBASSY="docker run --rm attache/embassy:dev" ./deploy/compose/gen-env.sh $(COMPOSE_ENV)
+	$(COMPOSE) up -d --build
+	@echo "console http://localhost:8080 (ATTACHE_ADMIN_TOKEN in $(COMPOSE_ENV)), orders http://localhost:8081, jaeger http://localhost:16686"
+
+# Volumes (CA, store, sidecar state) and .env are kept; `docker compose -p attache down -v` and
+# deleting $(COMPOSE_ENV) start over.
+compose-down:
+	if [[ -f $(COMPOSE_ENV) ]]; then $(COMPOSE) down; else docker compose -p attache down; fi
+
+# Chart (lint, render, RBAC, webhooks, CRD sync), Compose (config, flags, gen-env.sh), Dockerfile and
+# release workflow checks. Needs helm and docker for the parts that use them (skipped otherwise).
+PACKAGING_TESTS := docker/tests deploy/helm/tests deploy/compose/tests
+packaging-test:
+	cargo build -q -p embassy
+	cd runtime && uv run ruff check $(addprefix ../,$(PACKAGING_TESTS)) && uv run ruff format --check $(addprefix ../,$(PACKAGING_TESTS))
+	if command -v shellcheck >/dev/null; then shellcheck deploy/helm/demo.sh deploy/compose/gen-env.sh docker/attache-http-ready docker/attache-ready; fi
+	EMBASSY_BIN=$(EMBASSY) $(PACKAGING_PYTEST) $(PACKAGING_TESTS)
+
 # The same demo on this machine without Kubernetes (two sidecars, mTLS, real runtime, both apps).
 local-demo:
 	./scripts/local-demo.sh
@@ -116,6 +174,9 @@ logs-denied: $(ATTACHE)
 
 $(ATTACHE):
 	cargo build -p attache-cli
+
+$(EMBASSY):
+	cargo build -p embassy
 
 clean:
 	cargo clean

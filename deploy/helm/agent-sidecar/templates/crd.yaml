@@ -1,0 +1,15 @@
+{{- /*
+charters.attache.io, from files/crds/charters.attache.io.yaml: a copy of deploy/crds/ that
+`make helm-crd` refreshes and deploy/helm/tests keeps in sync. Kept on uninstall.
+*/ -}}
+{{- if .Values.crds.install }}
+{{- $crd := .Files.Get "files/crds/charters.attache.io.yaml" | fromYaml }}
+{{- if or (not $crd) (hasKey $crd "Error") }}
+{{- fail "files/crds/charters.attache.io.yaml is missing or invalid; run make helm-crd" }}
+{{- end }}
+{{- $annotations := merge (dict "helm.sh/resource-policy" "keep") ($crd.metadata.annotations | default dict) }}
+{{- $labels := merge (include "agent-sidecar.labels" . | fromYaml) ($crd.metadata.labels | default dict) }}
+{{- $_ := set $crd.metadata "annotations" $annotations }}
+{{- $_ := set $crd.metadata "labels" $labels }}
+{{ toYaml $crd }}
+{{- end }}

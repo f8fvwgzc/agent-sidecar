@@ -1,0 +1,258 @@
+# Release on a v* tag: the attached, attache and embassy binaries for Linux (x86_64 and aarch64,
+# glibc 2.28 or newer, cross-built with cargo-zigbuild) and macOS (Apple silicon); multi-arch
+# (linux/amd64, linux/arm64) attached and embassy images on GHCR, assembled from those binaries; and
+# a GitHub release with the archives and their SHA-256 checksums.
+#
+# Every action is pinned to a commit SHA (the tag it was taken from is in the comment). No caches:
+# a release builds from a clean slate.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # Same toolchain as docker/Dockerfile (rust:1.99-bookworm).
+  RUST_TOOLCHAIN: "1.99"
+  ZIG_VERSION: "0.14.1"
+  CARGO_ZIGBUILD_VERSION: "0.23.4"
+  IMAGE_PREFIX: ghcr.io/f8fvwgzc/agent-sidecar
+
+jobs:
+  version:
+    name: Tag matches the crate and chart versions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=${TAG#v}
+          if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::tag $TAG is not v<semver>"
+            exit 1
+          fi
+          crate=$(sed -n '/^\[workspace\.package\]/,/^\[/ s/^version = "\(.*\)"$/\1/p' Cargo.toml)
+          chart=$(sed -n 's/^appVersion: "\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' deploy/helm/agent-sidecar/Chart.yaml)
+          if [[ $crate != "$version" || $chart != "$version" ]]; then
+            echo "::error::tag $TAG, but Cargo.toml workspace version is '$crate' and the chart appVersion is '$chart'"
+            exit 1
+          fi
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+
+  binaries:
+    name: Binaries (${{ matrix.target }})
+    needs: version
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+            zig: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04
+            zig: true
+          - target: aarch64-apple-darwin
+            os: macos-15
+            zig: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target "$TARGET"
+          rustup default "$RUST_TOOLCHAIN"
+          rustc --version
+
+      # attache-proto's build script runs protoc.
+      - name: Install protoc (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends protobuf-compiler
+          protoc --version
+
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install protobuf
+          protoc --version
+
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        if: matrix.zig
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          use-cache: false
+
+      - name: Install cargo-zigbuild
+        if: matrix.zig
+        run: cargo install cargo-zigbuild --locked --version "$CARGO_ZIGBUILD_VERSION"
+
+      - name: Build
+        env:
+          TARGET: ${{ matrix.target }}
+          ZIG: ${{ matrix.zig }}
+        run: |
+          if [[ $ZIG == true ]]; then
+            # The .2.28 suffix links against glibc 2.28, so the binaries run on any newer glibc.
+            cargo zigbuild --release --locked --target "$TARGET.2.28" -p attached -p attache-cli -p embassy
+          else
+            cargo build --release --locked --target "$TARGET" -p attached -p attache-cli -p embassy
+          fi
+
+      - name: Package
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          name="agent-sidecar-$VERSION-$TARGET"
+          mkdir -p "dist/$name"
+          for bin in attached attache embassy; do
+            cp "target/$TARGET/release/$bin" "dist/$name/"
+          done
+          cp LICENSE README.md "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          ls -l dist
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: binaries-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  images:
+    name: Image ${{ matrix.image }}
+    needs: [version, binaries]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        image: [attached, embassy]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: binaries-*-unknown-linux-gnu
+          path: artifacts
+          merge-multiple: true
+
+      # docker/Dockerfile with BINARIES=prebuilt copies dist/linux-<TARGETARCH>/{attached,attache,embassy}.
+      - name: Lay out the Linux binaries per architecture
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          for pair in x86_64:amd64 aarch64:arm64; do
+            arch=${pair%%:*}
+            platform=${pair##*:}
+            mkdir -p "dist/linux-$platform"
+            tar -xzf "artifacts/agent-sidecar-$VERSION-$arch-unknown-linux-gnu.tar.gz" \
+              -C "dist/linux-$platform" --strip-components=1
+          done
+          ls -l dist/linux-*
+
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE_PREFIX }}/${{ matrix.image }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          labels: |
+            org.opencontainers.image.title=${{ matrix.image }}
+            org.opencontainers.image.licenses=MIT
+
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: ${{ matrix.image }}
+          platforms: linux/amd64,linux/arm64
+          build-args: BINARIES=prebuilt
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: mode=max
+          sbom: true
+
+  release:
+    name: GitHub release
+    needs: [version, binaries, images]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: binaries-*
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum -- *.tar.gz >SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          flags=(--verify-tag --title "$TAG" --generate-notes)
+          if [[ $VERSION == *-* ]]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$TAG" --repo "$REPO" "${flags[@]}" dist/*.tar.gz dist/SHA256SUMS

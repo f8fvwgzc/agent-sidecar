@@ -1,0 +1,68 @@
+{{- /*
+No caBundle here, ever: embassy-ca patches both configurations whenever their caBundle differs from
+the serving certificate's CA (every 30 s). Until then the API server cannot reach the webhooks, so
+injection in labelled namespaces and Charter writes wait for embassy-ca (failurePolicy Fail).
+*/ -}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: {{ include "agent-sidecar.injectorName" . }}
+  labels:
+    {{- include "agent-sidecar.labels" . | nindent 4 }}
+webhooks:
+  - name: sidecar-injector.attache.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    timeoutSeconds: 5
+    reinvocationPolicy: Never
+    failurePolicy: {{ .Values.injection.failurePolicy }}
+    matchPolicy: Equivalent
+    clientConfig:
+      service:
+        name: embassy-ca
+        namespace: {{ .Release.Namespace }}
+        path: /mutate
+        port: 443
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+        scope: Namespaced
+    objectSelector:
+      matchLabels:
+        attache.io/inject: "true"
+    namespaceSelector:
+      matchExpressions:
+        - key: attache.io/injection
+          operator: In
+          values: ["enabled"]
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values: ["kube-system", {{ .Release.Namespace | quote }}]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "agent-sidecar.validatorName" . }}
+  labels:
+    {{- include "agent-sidecar.labels" . | nindent 4 }}
+webhooks:
+  - name: charter-validator.attache.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    timeoutSeconds: 10
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    clientConfig:
+      service:
+        name: embassy-ca
+        namespace: {{ .Release.Namespace }}
+        path: /validate-charter
+        port: 443
+    rules:
+      - apiGroups: ["attache.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["charters"]
+        scope: Namespaced

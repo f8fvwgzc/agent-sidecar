@@ -1,0 +1,7 @@
+# CRD managed outside the chart, one embassy-ca replica (no PodDisruptionBudget then).
+crds:
+  install: false
+embassyCa:
+  replicas: 1
+rbac:
+  aggregate: false

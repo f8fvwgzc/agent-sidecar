@@ -1,0 +1,26 @@
+agent-sidecar {{ .Chart.AppVersion }} is installed in namespace {{ .Release.Namespace }}.
+
+1. Wait for the control plane (embassy-ca creates the CA, the serving certificate and the webhooks'
+   caBundle; embassy starts once Secret embassy-tls exists):
+     kubectl -n {{ .Release.Namespace }} rollout status deployment/embassy-ca deployment/embassy
+
+2. Enable injection for a namespace and give each service a Charter:
+     kubectl label namespace <ns> attache.io/injection=enabled
+     attache charter to-cr <service>.charter.yaml | kubectl apply -f -
+   Pods get the attached sidecar when they carry the label attache.io/inject: "true" and the
+   annotations attache.io/service: <service> and attache.io/app-port: "<port>". The pod's service
+   account must be named like the service or be listed in the charter's service.service_accounts.
+
+3. Open the console:
+     kubectl -n {{ .Release.Namespace }} port-forward svc/embassy 8080:8080
+     open http://localhost:8080
+{{- if not .Values.auth.tokens }}
+   No API token is configured yet. Create one and add its entry to auth.tokens (SHA-256 only):
+     embassy token create --name <you> --role admin --payloads
+{{- end }}
+
+Writing Charter resources is equivalent to the attache admin role for that service; grant the
+attache-charter-edit ClusterRole accordingly.
+{{- if .Values.crds.install }}
+The charters.attache.io CRD is kept when the release is uninstalled.
+{{- end }}
