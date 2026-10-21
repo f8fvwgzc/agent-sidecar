@@ -1,0 +1,185 @@
+{
+  "charter": {
+    "apiVersion": "attache.io/v1alpha1",
+    "kind": "Charter",
+    "service": {
+      "name": "support",
+      "namespace": "attache-demo",
+      "app_port": 8090,
+      "service_accounts": [
+        "support",
+        "support-canary"
+      ]
+    },
+    "skills": [
+      {
+        "name": "tone",
+        "description": "House style for every reply to a customer.",
+        "instructions": "Write to the customer in short, plain sentences. Greet them by name when the\nticket has one, say what you found, then what happens next. Never promise a\nrefund, a voucher or a date that a tool did not confirm.\n"
+      },
+      {
+        "name": "refund-policy",
+        "description": "How to decide whether an order can be refunded, and what to tell the customer.",
+        "instructions": "Use this policy for every question about refunds, returns and replacements.\n\n1. Read the ticket first with lookup_ticket. The ticket names the order id, the\n   delivery date, the items and what the customer reports. Never decide from the\n   customer's message alone: dates and amounts come from the ticket.\n2. The return window is 30 days from the delivery date for customers in the EU\n   and 14 days everywhere else. Count calendar days. An order without a delivery\n   date has not been delivered: it is a shipping problem, not a refund; say that\n   the order is still on its way and that support will follow up.\n3. Inside the window, an item that arrived damaged or does not work qualifies for\n   a full refund or a replacement, as the customer prefers. An item the customer\n   simply does not want qualifies for a refund minus the return shipping cost,\n   and only when it is unused and in its original packaging.\n4. Outside the window, nothing qualifies automatically. Explain the window\n   politely, and say that a support manager will look at the case; do not ask\n   billing.\n5. Before you tell the customer a refund will be paid out, ask billing with\n   ask_billing, giving the order id, the amount and the reason in one sentence.\n   Only billing approves payouts. If billing does not answer, or answers with an\n   error, tell the customer that the refund is approved by support and that\n   billing will confirm the payout by email within two working days.\n6. Gift cards, vouchers and shipping fees for orders that were delivered are\n   never refunded. Digital items are refunded only when they could not be\n   downloaded at all.\n7. Never ask for card numbers, bank details or passwords. If the customer sends\n   them, do not repeat them; tell them that support never needs them.\n8. One refund per order. When the ticket shows an earlier refund for the same\n   order, explain that the order was already refunded and give the date.\n9. Record the outcome in one line at the end of your answer, in the form\n   \"Outcome: <refund | replacement | refused | manager review | shipping issue>\".\n\nWhen the policy does not cover a case, say so, and hand the case to a support\nmanager instead of guessing.\n",
+        "tools": [
+          "lookup_ticket"
+        ]
+      }
+    ],
+    "telemetry": {
+      "traces": true,
+      "metrics": true,
+      "export_payloads": false,
+      "control_plane_payloads": true
+    },
+    "agents": [
+      {
+        "name": "support-agent",
+        "type": "orchestrator",
+        "model": "claude-opus-5-5",
+        "system": "You are the support assistant of the shop. Read the customer's ticket with\nlookup_ticket before you answer. Ask billing (ask_billing) before you tell a\ncustomer that a refund will be paid out.\n",
+        "tools": [
+          {
+            "name": "lookup_ticket",
+            "description": "Read a support ticket (customer, order id, delivery date, messages) by id.",
+            "type": "service",
+            "service": "support",
+            "method": "GET",
+            "path": "/tickets/{ticket_id}",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "ticket_id": {
+                  "type": "string",
+                  "description": "Ticket id such as T-2291"
+                }
+              },
+              "required": [
+                "ticket_id"
+              ]
+            }
+          },
+          {
+            "name": "ask_billing",
+            "description": "Ask the billing service's refund approver whether a refund can be paid out.",
+            "type": "agent",
+            "agent": "refund-approver",
+            "service": "billing"
+          },
+          {
+            "name": "issue_refund",
+            "description": "Pay a refund out through the payment provider (not allowed yet; billing approves payouts).",
+            "type": "http",
+            "method": "POST",
+            "url": "https://payments.example/v1/refunds",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "order_id": {
+                  "type": "string"
+                },
+                "amount_eur": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "order_id",
+                "amount_eur"
+              ]
+            }
+          }
+        ],
+        "budgets": {
+          "max_tokens_per_call": 2048,
+          "max_calls_per_minute": 20,
+          "max_cost_usd_per_day": 4.0,
+          "max_steps": 8
+        },
+        "skills": [
+          "tone",
+          "refund-policy"
+        ],
+        "harness": {
+          "max_retries": 2,
+          "request_timeout_seconds": 60,
+          "fallback_model": "claude-haiku-5-5",
+          "tool_result_max_chars": 8000
+        },
+        "learning": {
+          "enabled": true,
+          "mode": "review",
+          "max_notes": 20,
+          "max_note_chars": 400,
+          "note_ttl_days": 7,
+          "from_peers": false,
+          "max_proposals_per_hour": 5
+        }
+      },
+      {
+        "name": "faq",
+        "type": "agent",
+        "model": "mock",
+        "system": "Answer questions about opening hours, shipping times and returns from the FAQ\nin the context. Say that you do not know when the answer is not there.\n",
+        "budgets": {
+          "max_tokens_per_call": 512,
+          "max_calls_per_minute": 60,
+          "max_cost_usd_per_day": 0.5,
+          "max_steps": 1
+        }
+      }
+    ],
+    "guardrails": {
+      "max_input_bytes": 8192,
+      "pii_redact": true,
+      "input_deny": [
+        {
+          "name": "no-secrets",
+          "regex": "(?i)(api[_-]?key|password|secret)\\s*[:=]"
+        }
+      ],
+      "allowed_tools": {
+        "support-agent": [
+          "lookup_ticket",
+          "ask_billing"
+        ]
+      },
+      "allowed_services": {
+        "support-agent": [
+          "support",
+          "billing"
+        ]
+      }
+    },
+    "authz": {
+      "default": "deny",
+      "callers": [
+        {
+          "identity": "local",
+          "agents": [
+            "*"
+          ]
+        }
+      ],
+      "services": [
+        {
+          "name": "self-tickets",
+          "agent": "support-agent",
+          "service": "support",
+          "allow": [
+            "GET /tickets/*"
+          ]
+        }
+      ]
+    },
+    "audit": {
+      "sink": "stdout",
+      "redact": [
+        "body.customer.email"
+      ]
+    }
+  },
+  "needs_role": "admin",
+  "weakened": [
+    "guardrails.input_deny[no-card-numbers]"
+  ]
+}

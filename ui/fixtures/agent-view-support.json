@@ -1,0 +1,98 @@
+{
+  "agent": {
+    "name": "support-agent",
+    "type": "orchestrator",
+    "model": "claude-opus-5-5",
+    "system": "You are the support assistant of the shop. Read the customer's ticket with\nlookup_ticket before you answer. Ask billing (ask_billing) before you tell a\ncustomer that a refund will be paid out.\n",
+    "tools": [
+      {
+        "name": "lookup_ticket",
+        "description": "Read a support ticket (customer, order id, delivery date, messages) by id.",
+        "type": "service",
+        "service": "support",
+        "method": "GET",
+        "path": "/tickets/{ticket_id}",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "ticket_id": {
+              "type": "string",
+              "description": "Ticket id such as T-2291"
+            }
+          },
+          "required": [
+            "ticket_id"
+          ]
+        }
+      },
+      {
+        "name": "ask_billing",
+        "description": "Ask the billing service's refund approver whether a refund can be paid out.",
+        "type": "agent",
+        "agent": "refund-approver",
+        "service": "billing"
+      },
+      {
+        "name": "issue_refund",
+        "description": "Pay a refund out through the payment provider (not allowed yet; billing approves payouts).",
+        "type": "http",
+        "method": "POST",
+        "url": "https://payments.example/v1/refunds",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "order_id": {
+              "type": "string"
+            },
+            "amount_eur": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "order_id",
+            "amount_eur"
+          ]
+        }
+      }
+    ],
+    "budgets": {
+      "max_tokens_per_call": 2048,
+      "max_calls_per_minute": 20,
+      "max_cost_usd_per_day": 4.0,
+      "max_steps": 8
+    },
+    "skills": [
+      "tone",
+      "refund-policy"
+    ],
+    "harness": {
+      "max_retries": 2,
+      "request_timeout_seconds": 60,
+      "fallback_model": "claude-haiku-5-5",
+      "tool_result_max_chars": 8000
+    },
+    "learning": {
+      "enabled": true,
+      "mode": "review",
+      "max_notes": 20,
+      "max_note_chars": 400,
+      "note_ttl_days": 7,
+      "from_peers": false,
+      "max_proposals_per_hour": 5
+    }
+  },
+  "allowed_tools": [
+    "lookup_ticket",
+    "ask_billing"
+  ],
+  "allowed_services": [
+    "support",
+    "billing"
+  ],
+  "callers": [
+    {
+      "identity": "local",
+      "caller_agents": null
+    }
+  ]
+}

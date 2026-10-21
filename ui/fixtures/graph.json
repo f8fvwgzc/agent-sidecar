@@ -83,8 +83,8 @@
       "learning": {
         "enabled": false,
         "mode": "review",
-        "notes": 1,
-        "pending": 1
+        "notes": 0,
+        "pending": 0
       },
       "stats": {
         "invocations": 8,
@@ -207,6 +207,250 @@
       }
     },
     {
+      "id": "svc:attache-demo/support",
+      "type": "service",
+      "label": "support",
+      "namespace": "attache-demo",
+      "service": "support",
+      "status": "degraded",
+      "instances": 2,
+      "charter_version": "4"
+    },
+    {
+      "id": "app:attache-demo/support",
+      "type": "app",
+      "parent": "svc:attache-demo/support",
+      "label": "support app",
+      "port": 8090,
+      "ports": {
+        "in": [
+          "service"
+        ],
+        "out": [
+          "invoke"
+        ]
+      },
+      "stats": {
+        "calls": 0,
+        "denied": 0,
+        "errors": 0,
+        "avg_ms": 0
+      }
+    },
+    {
+      "id": "agent:attache-demo/support/support-agent",
+      "type": "agent",
+      "parent": "svc:attache-demo/support",
+      "label": "support-agent",
+      "agent_type": "orchestrator",
+      "model": "claude-opus-5-5",
+      "skills": [
+        "tone",
+        "refund-policy"
+      ],
+      "status": "errors",
+      "ports": {
+        "in": [
+          "invoke"
+        ],
+        "out": [
+          "lookup_ticket",
+          "ask_billing",
+          "issue_refund",
+          "model"
+        ]
+      },
+      "tools": [
+        {
+          "name": "lookup_ticket",
+          "type": "service",
+          "target": "app:attache-demo/support",
+          "allowed": true
+        },
+        {
+          "name": "ask_billing",
+          "type": "agent",
+          "target": "agent:attache-demo/billing/refund-approver",
+          "allowed": true
+        },
+        {
+          "name": "issue_refund",
+          "type": "http",
+          "target": "external:https://payments.example",
+          "allowed": false
+        }
+      ],
+      "learning": {
+        "enabled": true,
+        "mode": "review",
+        "notes": 2,
+        "pending": 1
+      },
+      "stats": {
+        "invocations": 4,
+        "denied": 0,
+        "errors": 2,
+        "p50_ms": 5120,
+        "p95_ms": 6890,
+        "tokens_in": 23569,
+        "tokens_out": 748,
+        "cost_usd": 0.109236
+      }
+    },
+    {
+      "id": "agent:attache-demo/support/faq",
+      "type": "agent",
+      "parent": "svc:attache-demo/support",
+      "label": "faq",
+      "agent_type": "agent",
+      "model": "mock",
+      "skills": [],
+      "status": "idle",
+      "ports": {
+        "in": [
+          "invoke"
+        ],
+        "out": [
+          "model"
+        ]
+      },
+      "tools": [],
+      "learning": {
+        "enabled": false,
+        "mode": "review",
+        "notes": 0,
+        "pending": 0
+      },
+      "stats": {
+        "invocations": 0,
+        "denied": 0,
+        "errors": 0,
+        "p50_ms": 0,
+        "p95_ms": 0,
+        "tokens_in": 0,
+        "tokens_out": 0,
+        "cost_usd": 0.0
+      }
+    },
+    {
+      "id": "svc:attache-demo/billing",
+      "type": "service",
+      "label": "billing",
+      "placeholder": true,
+      "status": "disconnected",
+      "ports": {
+        "in": [],
+        "out": []
+      }
+    },
+    {
+      "id": "agent:attache-demo/billing/refund-approver",
+      "type": "agent",
+      "parent": "svc:attache-demo/billing",
+      "label": "refund-approver",
+      "placeholder": true,
+      "status": "disconnected",
+      "ports": {
+        "in": [
+          "invoke"
+        ],
+        "out": []
+      }
+    },
+    {
+      "id": "svc:attache-demo/reports",
+      "type": "service",
+      "label": "reports",
+      "namespace": "attache-demo",
+      "service": "reports",
+      "status": "disconnected",
+      "instances": 0,
+      "charter_version": "2"
+    },
+    {
+      "id": "app:attache-demo/reports",
+      "type": "app",
+      "parent": "svc:attache-demo/reports",
+      "label": "reports app",
+      "port": 8095,
+      "ports": {
+        "in": [],
+        "out": [
+          "invoke"
+        ]
+      },
+      "stats": {
+        "calls": 0,
+        "denied": 0,
+        "errors": 0,
+        "avg_ms": 0
+      }
+    },
+    {
+      "id": "agent:attache-demo/reports/digest",
+      "type": "agent",
+      "parent": "svc:attache-demo/reports",
+      "label": "digest",
+      "agent_type": "agent",
+      "model": "claude-haiku-5-5",
+      "skills": [],
+      "status": "idle",
+      "ports": {
+        "in": [
+          "invoke"
+        ],
+        "out": [
+          "model"
+        ]
+      },
+      "tools": [],
+      "learning": {
+        "enabled": false,
+        "mode": "review",
+        "notes": 0,
+        "pending": 0
+      },
+      "stats": {
+        "invocations": 0,
+        "denied": 0,
+        "errors": 0,
+        "p50_ms": 0,
+        "p95_ms": 0,
+        "tokens_in": 0,
+        "tokens_out": 0,
+        "cost_usd": 0.0
+      }
+    },
+    {
+      "id": "svc:attache-demo/shipping",
+      "type": "service",
+      "label": "shipping",
+      "namespace": "attache-demo",
+      "service": "shipping",
+      "status": "no_charter",
+      "instances": 1,
+      "charter_version": null
+    },
+    {
+      "id": "app:attache-demo/shipping",
+      "type": "app",
+      "parent": "svc:attache-demo/shipping",
+      "label": "shipping app",
+      "port": 8070,
+      "ports": {
+        "in": [],
+        "out": [
+          "invoke"
+        ]
+      },
+      "stats": {
+        "calls": 0,
+        "denied": 0,
+        "errors": 0,
+        "avg_ms": 0
+      }
+    },
+    {
       "id": "model:anthropic",
       "type": "model_provider",
       "label": "Anthropic",
@@ -218,9 +462,31 @@
       }
     },
     {
+      "id": "model:mock",
+      "type": "model_provider",
+      "label": "Mock model",
+      "ports": {
+        "in": [
+          "model"
+        ],
+        "out": []
+      }
+    },
+    {
       "id": "external:https://api.partner.example",
       "type": "external",
       "label": "api.partner.example",
+      "ports": {
+        "in": [
+          "http"
+        ],
+        "out": []
+      }
+    },
+    {
+      "id": "external:https://payments.example",
+      "type": "external",
+      "label": "payments.example",
       "ports": {
         "in": [
           "http"
@@ -404,6 +670,150 @@
         "errors": 0,
         "avg_ms": 1225,
         "last_ts": "2026-10-21T09:57:33.802Z"
+      }
+    },
+    {
+      "id": "edge:invoke:app:attache-demo/support->agent:attache-demo/support/support-agent",
+      "kind": "invoke",
+      "source": "app:attache-demo/support",
+      "source_port": "invoke",
+      "target": "agent:attache-demo/support/support-agent",
+      "target_port": "invoke",
+      "declared": true,
+      "stats": {
+        "calls": 4,
+        "denied": 0,
+        "errors": 1,
+        "avg_ms": 5650,
+        "last_ts": "2026-10-21T09:59:35.070Z"
+      }
+    },
+    {
+      "id": "edge:tool:agent:attache-demo/support/support-agent->app:attache-demo/support#lookup_ticket",
+      "kind": "tool",
+      "source": "agent:attache-demo/support/support-agent",
+      "source_port": "lookup_ticket",
+      "target": "app:attache-demo/support",
+      "target_port": "service",
+      "declared": true,
+      "stats": {
+        "calls": 3,
+        "denied": 0,
+        "errors": 0,
+        "avg_ms": 13,
+        "last_ts": "2026-10-21T09:59:33.226Z"
+      }
+    },
+    {
+      "id": "edge:tool:agent:attache-demo/support/support-agent->agent:attache-demo/billing/refund-approver#ask_billing",
+      "kind": "tool",
+      "source": "agent:attache-demo/support/support-agent",
+      "source_port": "ask_billing",
+      "target": "agent:attache-demo/billing/refund-approver",
+      "target_port": "invoke",
+      "declared": true,
+      "stats": {
+        "calls": 1,
+        "denied": 0,
+        "errors": 1,
+        "avg_ms": 21,
+        "last_ts": "2026-10-21T09:53:07.441Z"
+      }
+    },
+    {
+      "id": "edge:tool:agent:attache-demo/support/support-agent->external:https://payments.example#issue_refund",
+      "kind": "tool",
+      "source": "agent:attache-demo/support/support-agent",
+      "source_port": "issue_refund",
+      "target": "external:https://payments.example",
+      "target_port": "http",
+      "declared": true,
+      "stats": {
+        "calls": 0,
+        "denied": 0,
+        "errors": 0,
+        "avg_ms": 0,
+        "last_ts": null
+      }
+    },
+    {
+      "id": "edge:model:agent:attache-demo/support/support-agent->model:anthropic",
+      "kind": "model",
+      "source": "agent:attache-demo/support/support-agent",
+      "source_port": "model",
+      "target": "model:anthropic",
+      "target_port": "model",
+      "declared": true,
+      "stats": {
+        "calls": 15,
+        "denied": 0,
+        "errors": 4,
+        "avg_ms": 1364,
+        "last_ts": "2026-10-21T09:59:37.382Z"
+      }
+    },
+    {
+      "id": "edge:invoke:app:attache-demo/support->agent:attache-demo/support/faq",
+      "kind": "invoke",
+      "source": "app:attache-demo/support",
+      "source_port": "invoke",
+      "target": "agent:attache-demo/support/faq",
+      "target_port": "invoke",
+      "declared": true,
+      "stats": {
+        "calls": 0,
+        "denied": 0,
+        "errors": 0,
+        "avg_ms": 0,
+        "last_ts": null
+      }
+    },
+    {
+      "id": "edge:model:agent:attache-demo/support/faq->model:mock",
+      "kind": "model",
+      "source": "agent:attache-demo/support/faq",
+      "source_port": "model",
+      "target": "model:mock",
+      "target_port": "model",
+      "declared": true,
+      "stats": {
+        "calls": 0,
+        "denied": 0,
+        "errors": 0,
+        "avg_ms": 0,
+        "last_ts": null
+      }
+    },
+    {
+      "id": "edge:invoke:app:attache-demo/reports->agent:attache-demo/reports/digest",
+      "kind": "invoke",
+      "source": "app:attache-demo/reports",
+      "source_port": "invoke",
+      "target": "agent:attache-demo/reports/digest",
+      "target_port": "invoke",
+      "declared": true,
+      "stats": {
+        "calls": 0,
+        "denied": 0,
+        "errors": 0,
+        "avg_ms": 0,
+        "last_ts": "2026-10-20T06:00:03.118Z"
+      }
+    },
+    {
+      "id": "edge:model:agent:attache-demo/reports/digest->model:anthropic",
+      "kind": "model",
+      "source": "agent:attache-demo/reports/digest",
+      "source_port": "model",
+      "target": "model:anthropic",
+      "target_port": "model",
+      "declared": true,
+      "stats": {
+        "calls": 0,
+        "denied": 0,
+        "errors": 0,
+        "avg_ms": 0,
+        "last_ts": "2026-10-20T06:00:02.904Z"
       }
     },
     {

@@ -2,12 +2,15 @@
 //! golden data in `ui/fixtures/` deserializes into these types and serializes back to equal
 //! JSON (`tests/fixtures.rs`).
 //!
-//! Structs refuse unknown fields, except [`AuditRecord`]: records come from sidecars, which may
-//! be one minor version newer or older than the control plane (design §7, version skew), so a
-//! record keeps working when a sidecar adds a field, and `kind` is an open string (design §5).
+//! Structs refuse unknown fields, except [`AuditRecord`] and its [`Tokens`]: records come from
+//! sidecars, which may be one minor version newer or older than the control plane (design §7,
+//! version skew), so they are read with the lenient view of design §5 — `kind`, `direction` and
+//! `decision` are open strings, only the fields that identify a record are required, `tokens`
+//! keeps counters it does not know, and unknown top-level fields are kept and served again
+//! unchanged (except to a caller that does not see payloads, [`AuditRecordExt::without_payloads`]).
 //! Charter objects (`CharterDoc::charter`, `AgentView::agent`) are plain JSON values: their
 //! schema is the charter's (`schemas/charter.schema.json`).
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -39,6 +42,9 @@ pub enum ErrorCode {
     VersionConflict,
     #[serde(rename = "in_use")]
     InUse,
+    /// A decision on a proposal that is no longer pending (`details` name its status).
+    #[serde(rename = "not_pending")]
+    NotPending,
     #[serde(rename = "misdirected_request")]
     MisdirectedRequest,
     #[serde(rename = "rate_limited")]
@@ -54,7 +60,7 @@ impl ErrorCode {
             ErrorCode::Unauthenticated => 401,
             ErrorCode::Forbidden => 403,
             ErrorCode::NotFound => 404,
-            ErrorCode::VersionConflict | ErrorCode::InUse => 409,
+            ErrorCode::VersionConflict | ErrorCode::InUse | ErrorCode::NotPending => 409,
             ErrorCode::MisdirectedRequest => 421,
             ErrorCode::RateLimited => 429,
             ErrorCode::Internal => 500,
@@ -648,11 +654,133 @@ pub struct LinkApplied {
 
 // ---- memory and proposals ------------------------------------------------------------------------
 
-/// `PUT .../memory`.
+/// `PUT .../memory`: the service's notes after the write, per agent (a full replacement: agents
+/// and stored notes left out are removed).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryPut {
-    pub agents: BTreeMap<String, Vec<Note>>,
+    pub agents: BTreeMap<String, Vec<NoteEntry>>,
+}
+
+/// One entry of [`MemoryPut`]: a stored note to keep, or a new note.
+///
+/// - A full [`Note`], exactly as `GET .../memory` returned it, keeps that stored note.
+/// - A [`NoteInput`] `{id?, text}` is a new note: the server assigns its id (a fresh UUIDv4),
+///   `source: manual`, `ts` (now) and `approved_by` (the caller). The input's `id`, when the
+///   client sends one (the draft id a form used, say), is never used as the note's id and is
+///   not checked; a client never keeps a note with the short form.
+///
+/// Provenance always comes from the store, never from the client: a kept note whose fields
+/// differ from the stored one is refused (notes are not edited in place; remove and add).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum NoteEntry {
+    Note(Note),
+    Input(NoteInput),
+}
+
+impl<'de> Deserialize<'de> for NoteEntry {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        // An object with any key besides `id` and `text` is a full note; parsing it as one gives
+        // a precise error ("missing field `ts`", "unknown field `colour`") instead of serde's
+        // "did not match any variant".
+        let v = Value::deserialize(d)?;
+        let short = v
+            .as_object()
+            .is_some_and(|m| m.keys().all(|k| k == "id" || k == "text"));
+        if short {
+            serde_json::from_value(v)
+                .map(NoteEntry::Input)
+                .map_err(D::Error::custom)
+        } else {
+            serde_json::from_value(v)
+                .map(NoteEntry::Note)
+                .map_err(D::Error::custom)
+        }
+    }
+}
+
+/// A new note written with `PUT .../memory` (see [`NoteEntry`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NoteInput {
+    /// Optional and never used as the note's id: the server assigns a fresh one. Any string is
+    /// accepted (a client may send the draft id it used while editing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub text: String,
+}
+
+impl MemoryPut {
+    /// The notes to store: the kept notes as stored (in stored order, so the oldest stay first),
+    /// then the new notes in the order given, stamped with `author` and `ts` and an id from
+    /// `new_id`. Agents left with no notes are left out. Every problem is reported, as
+    /// `agents.<agent>[<index>]: ...`.
+    ///
+    /// This checks the entries against `stored` only. The caller checks them against the stored
+    /// charter (agents exist and have learning enabled, at most `learning.max_notes` notes of at
+    /// most `learning.max_note_chars` characters each, design §3) and the If-Match version.
+    pub fn resolve(
+        &self,
+        stored: &MemoryDoc,
+        author: &str,
+        ts: &str,
+        mut new_id: impl FnMut() -> String,
+    ) -> Result<BTreeMap<String, Vec<Note>>, Vec<String>> {
+        let mut errs = Vec::new();
+        let mut out = BTreeMap::new();
+        for (agent, entries) in &self.agents {
+            let current: &[Note] = stored.agents.get(agent).map_or(&[], Vec::as_slice);
+            let mut keep = BTreeSet::new();
+            let mut added = Vec::new();
+            for (i, entry) in entries.iter().enumerate() {
+                let at = format!("agents.{agent}[{i}]");
+                match entry {
+                    NoteEntry::Input(n) => {
+                        if n.text.trim().is_empty() {
+                            errs.push(format!("{at}: text is empty"));
+                            continue;
+                        }
+                        added.push(Note {
+                            id: new_id(),
+                            text: n.text.clone(),
+                            source: NoteSource::Manual,
+                            request_id: None,
+                            trace_id: None,
+                            approved_by: Some(author.to_string()),
+                            ts: ts.to_string(),
+                            expires_at: None,
+                        });
+                    }
+                    NoteEntry::Note(n) => {
+                        let id = n.id.as_str();
+                        let Some(stored_note) = current.iter().find(|s| s.id == id) else {
+                            errs.push(format!("{at}: {agent} has no stored note {id}"));
+                            continue;
+                        };
+                        if n != stored_note {
+                            errs.push(format!(
+                                "{at}: note {id} differs from the stored note (notes are not edited in place; remove it and add a new one)"
+                            ));
+                        }
+                        if !keep.insert(id) {
+                            errs.push(format!("{at}: note {id} is listed twice"));
+                        }
+                    }
+                }
+            }
+            let mut notes: Vec<Note> = current
+                .iter()
+                .filter(|n| keep.contains(n.id.as_str()))
+                .cloned()
+                .collect();
+            notes.append(&mut added);
+            if !notes.is_empty() {
+                out.insert(agent.clone(), notes);
+            }
+        }
+        if errs.is_empty() { Ok(out) } else { Err(errs) }
+    }
 }
 
 /// `POST /proposals/{id}/approve|reject`.
@@ -665,6 +793,7 @@ pub struct ProposalDecision {
 
 // ---- audit ---------------------------------------------------------------------------------------
 
+/// The `direction` values this build knows (an [`AuditRecord`] keeps any string).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {
@@ -673,6 +802,18 @@ pub enum Direction {
     Internal,
 }
 
+impl Direction {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "inbound" => Some(Self::Inbound),
+            "outbound" => Some(Self::Outbound),
+            "internal" => Some(Self::Internal),
+            _ => None,
+        }
+    }
+}
+
+/// The `decision` values this build knows (an [`AuditRecord`] keeps any string).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Decision {
@@ -680,50 +821,127 @@ pub enum Decision {
     Deny,
 }
 
-/// A sidecar audit record (CONTRACT.md §6) as the API serves it. Not `deny_unknown_fields`, and
-/// `kind` is any string (see the module docs).
+impl Decision {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "allow" => Some(Self::Allow),
+            "deny" => Some(Self::Deny),
+            _ => None,
+        }
+    }
+}
+
+/// A sidecar audit record (CONTRACT.md §6) as the API serves it: the lenient view of design §5.
+///
+/// This is, field for field and attribute for attribute, the shape of
+/// `attache_common::audit::AuditRecordView` (unit A1), which is not on this branch yet; once it
+/// is, this struct and [`Tokens`] become `pub use attache_common::audit::{AuditRecordView as
+/// AuditRecord, TokensView as Tokens}` and nothing else changes: the API-side behaviour lives in
+/// [`AuditRecordExt`], a trait, so that it can be implemented for the shared type, and
+/// `tests::audit_records_parse_like_the_shared_view` pins the shape both must have.
+///
+/// - `kind`, `direction` and `decision` are any string.
+/// - Only the fields that identify a record are required (`ts`, `kind`, `request_id`,
+///   `trace_id`, `service`, `caller`, `callee`, `direction`, `decision`): every other field
+///   defaults when absent (empty string, null, 0) and is then served with that default, so a
+///   record the CLI and the OpenTelemetry exporter accept is accepted here too.
+/// - [`Tokens`] keeps counters it does not know.
+/// - Top-level fields this build does not know are kept in [`AuditRecord::extra`] and
+///   serialized again unchanged, so a record from a newer sidecar is served as it arrived —
+///   except to a caller that does not see payloads ([`AuditRecordExt::without_payloads`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AuditRecord {
     pub ts: String,
     pub kind: String,
     pub request_id: String,
     pub trace_id: String,
+    #[serde(default)]
     pub span_id: String,
+    #[serde(default)]
     pub parent_span_id: Option<String>,
     pub service: String,
+    #[serde(default)]
     pub namespace: String,
+    #[serde(default)]
     pub agent: Option<String>,
     pub caller: String,
+    #[serde(default)]
     pub caller_agent: Option<String>,
     pub callee: String,
-    pub direction: Direction,
+    /// `inbound`, `outbound`, `internal`, or a later value ([`Direction::parse`]).
+    pub direction: String,
+    #[serde(default)]
     pub input: Value,
+    #[serde(default)]
     pub output: Value,
+    #[serde(default)]
     pub input_sha256: Option<String>,
+    #[serde(default)]
     pub output_sha256: Option<String>,
+    #[serde(default)]
     pub tokens: Option<Tokens>,
+    #[serde(default)]
     pub cost_usd: Option<f64>,
+    #[serde(default)]
     pub latency_ms: u64,
-    pub decision: Decision,
+    /// `allow`, `deny`, or a later value ([`Decision::parse`]).
+    pub decision: String,
+    #[serde(default)]
     pub rule: Option<String>,
+    #[serde(default)]
     pub reason: Option<String>,
+    #[serde(default)]
     pub error: Option<String>,
+    /// Top-level fields added by later sidecar versions, kept as they arrived.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
 }
 
-impl AuditRecord {
-    /// The record as a token without `payloads: true` (or `?payloads=false`) sees it.
-    pub fn without_payloads(mut self) -> Self {
+/// What the API does with an [`AuditRecord`]. A trait rather than inherent methods so that it
+/// stays when [`AuditRecord`] becomes the shared `attache_common::audit::AuditRecordView`.
+pub trait AuditRecordExt: Sized {
+    /// The record as a caller that does not see payloads sees it (a token without
+    /// `payloads: true`, or `?payloads=false`; design §8.3): `input` and `output` null (the
+    /// hashes stay), and none of the top-level fields this build does not know, since a field a
+    /// newer sidecar added may carry a payload. `tokens` keeps its unknown counters (usage, not
+    /// payload).
+    fn without_payloads(self) -> Self;
+
+    /// The direction, when it is one this build knows.
+    fn known_direction(&self) -> Option<Direction>;
+
+    /// The decision, when it is one this build knows.
+    fn known_decision(&self) -> Option<Decision>;
+}
+
+impl AuditRecordExt for AuditRecord {
+    fn without_payloads(mut self) -> Self {
         self.input = Value::Null;
         self.output = Value::Null;
+        self.extra.clear();
         self
+    }
+
+    fn known_direction(&self) -> Option<Direction> {
+        Direction::parse(&self.direction)
+    }
+
+    fn known_decision(&self) -> Option<Decision> {
+        Decision::parse(&self.decision)
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// Token usage of a record (`attache_common::audit::TokensView`): `input` and `output` (0 when
+/// absent), and any counter a newer sidecar adds, kept and served again as written.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Tokens {
+    #[serde(default)]
     pub input: u64,
+    #[serde(default)]
     pub output: u64,
+    /// Counters this build does not know (`cache_read`, say), kept as they arrived.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -955,6 +1173,11 @@ mod tests {
             json!({"error": "config.restart_required", "details": ["service.app_port"]})
         );
         assert_eq!(e.error.http_status(), 400);
+        assert_eq!(ErrorCode::NotPending.http_status(), 409);
+        assert_eq!(
+            serde_json::to_value(ErrorCode::NotPending).unwrap(),
+            "not_pending"
+        );
         assert_eq!(ErrorCode::MisdirectedRequest.http_status(), 421);
         assert_eq!(ErrorCode::RateLimited.http_status(), 429);
     }
@@ -998,21 +1221,308 @@ mod tests {
         assert!(serde_json::from_value::<Node>(json!({"id": "x", "type": "planet"})).is_err());
     }
 
-    #[test]
-    fn audit_records_keep_unknown_kinds_and_fields() {
-        let rec = json!({
-            "ts": "2026-10-21T10:00:00.000Z", "kind": "telepathy", "request_id": "r", "trace_id": "t",
+    fn record() -> Value {
+        json!({
+            "ts": "2026-10-21T10:00:00.000Z", "kind": "config", "request_id": "r", "trace_id": "t",
             "span_id": "s", "parent_span_id": null, "service": "orders", "namespace": "attache-demo",
             "agent": null, "caller": "control-plane", "caller_agent": null, "callee": "charter",
             "direction": "internal", "input": {"version": "3"}, "output": null, "input_sha256": null,
             "output_sha256": null, "tokens": null, "cost_usd": null, "latency_ms": 0,
-            "decision": "allow", "rule": "config.applied", "reason": null, "error": null,
-            "added_in_v0_3": 1
-        });
-        let r: AuditRecord = serde_json::from_value(rec).unwrap();
-        assert_eq!(r.kind, "telepathy");
+            "decision": "allow", "rule": "config.applied", "reason": null, "error": null
+        })
+    }
+
+    #[test]
+    fn audit_records_read_known_values() {
+        let r: AuditRecord = serde_json::from_value(record()).unwrap();
+        assert_eq!(r.known_direction(), Some(Direction::Internal));
+        assert_eq!(r.known_decision(), Some(Decision::Allow));
+        assert!(r.extra.is_empty());
+        assert_eq!(serde_json::to_value(&r).unwrap(), record());
         let r = r.without_payloads();
         assert!(r.input.is_null() && r.output.is_null());
+    }
+
+    #[test]
+    fn audit_records_are_lenient_and_keep_unknown_fields() {
+        // a record from a later sidecar: new kind, direction and decision values, a new token
+        // counter and new top-level fields
+        let mut rec = record();
+        rec["kind"] = json!("telepathy");
+        rec["direction"] = json!("sideways");
+        rec["decision"] = json!("shadow");
+        rec["tokens"] = json!({"input": 10, "output": 2, "cache_read": 7});
+        rec["added_in_v0_3"] = json!({"nested": [1, 2]});
+        rec["also_new"] = json!(null);
+        let r: AuditRecord = serde_json::from_value(rec.clone()).unwrap();
+        assert_eq!(r.kind, "telepathy");
+        assert_eq!(r.direction, "sideways");
+        assert_eq!(r.known_direction(), None);
+        assert_eq!(r.known_decision(), None);
+        let tokens = r.tokens.clone().unwrap();
+        assert_eq!((tokens.input, tokens.output), (10, 2));
+        assert_eq!(tokens.extra["cache_read"], json!(7));
+        assert_eq!(r.extra.len(), 2);
+        // re-served unchanged, the unknown token counter included
+        assert_eq!(serde_json::to_value(&r).unwrap(), rec);
+        // inside an SSE audit event too
+        let e = AuditEvent {
+            record: r.clone(),
+            edge_id: None,
+            animate: false,
+        };
+        let back: AuditEvent = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        assert_eq!(back, e);
+        assert_eq!(
+            back.record.extra["added_in_v0_3"],
+            json!({"nested": [1, 2]})
+        );
+        // the fields that identify a record are still required
+        for field in [
+            "ts",
+            "kind",
+            "request_id",
+            "trace_id",
+            "service",
+            "caller",
+            "callee",
+            "direction",
+            "decision",
+        ] {
+            let mut missing = record();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<AuditRecord>(missing).is_err(),
+                "{field} is required"
+            );
+        }
+        // a caller without payloads gets neither the payloads nor the fields this build does
+        // not know (one may carry a payload); token counters stay
+        let hidden = serde_json::to_value(r.without_payloads()).unwrap();
+        let mut want = rec;
+        want["input"] = Value::Null;
+        want["output"] = Value::Null;
+        let m = want.as_object_mut().unwrap();
+        m.remove("added_in_v0_3");
+        m.remove("also_new");
+        assert_eq!(hidden, want);
+        assert_eq!(hidden["tokens"]["cache_read"], json!(7));
+    }
+
+    /// The shape `attache_common::audit::AuditRecordView` (A1) has: what the CLI and the
+    /// OpenTelemetry exporter accept, embassy accepts and serves the same way. This must keep
+    /// passing when `AuditRecord` becomes that type.
+    #[test]
+    fn audit_records_parse_like_the_shared_view() {
+        // only the identifying fields: every other field defaults
+        let minimal = json!({
+            "ts": "2026-10-21T10:00:00.000Z", "kind": "model_call", "request_id": "r",
+            "trace_id": "t", "service": "orders", "caller": "local", "callee": "mock",
+            "direction": "outbound", "decision": "allow"
+        });
+        let r: AuditRecord = serde_json::from_value(minimal).unwrap();
+        assert_eq!(
+            serde_json::to_value(&r).unwrap(),
+            json!({
+                "ts": "2026-10-21T10:00:00.000Z", "kind": "model_call", "request_id": "r",
+                "trace_id": "t", "span_id": "", "parent_span_id": null, "service": "orders",
+                "namespace": "", "agent": null, "caller": "local", "caller_agent": null,
+                "callee": "mock", "direction": "outbound", "input": null, "output": null,
+                "input_sha256": null, "output_sha256": null, "tokens": null, "cost_usd": null,
+                "latency_ms": 0, "decision": "allow", "rule": null, "reason": null, "error": null
+            }),
+            "absent fields are served with their defaults, known fields in wire order"
+        );
+        // tokens: absent counters are 0
+        let mut rec = record();
+        rec["tokens"] = json!({"output": 3});
+        let r: AuditRecord = serde_json::from_value(rec).unwrap();
+        assert_eq!(
+            serde_json::to_value(r.tokens).unwrap(),
+            json!({"input": 0, "output": 3})
+        );
+        // a JSON line that is not an audit record does not parse
+        assert!(
+            serde_json::from_value::<AuditRecord>(json!({"level": "info", "msg": "listening"}))
+                .is_err()
+        );
+    }
+
+    fn note(id: &str, text: &str) -> Note {
+        Note {
+            id: id.into(),
+            text: text.into(),
+            source: NoteSource::Review,
+            request_id: Some("q".into()),
+            trace_id: Some("t".into()),
+            approved_by: Some("bob".into()),
+            ts: "2026-10-20T17:02:31.118Z".into(),
+            expires_at: None,
+        }
+    }
+
+    #[test]
+    fn memory_put_takes_full_notes_and_note_inputs() {
+        let n1 = note("n1", "first");
+        let put: MemoryPut = serde_json::from_value(json!({"agents": {"support-agent": [
+            serde_json::to_value(&n1).unwrap(),
+            {"id": "draft-2", "text": "second"},
+            {"text": "a new one"}
+        ]}}))
+        .unwrap();
+        let entries = &put.agents["support-agent"];
+        assert_eq!(entries[0], NoteEntry::Note(n1.clone()));
+        assert_eq!(
+            entries[1],
+            NoteEntry::Input(NoteInput {
+                id: Some("draft-2".into()),
+                text: "second".into()
+            })
+        );
+        assert_eq!(
+            entries[2],
+            NoteEntry::Input(NoteInput {
+                id: None,
+                text: "a new one".into()
+            })
+        );
+        // serializes back to what was sent
+        assert_eq!(
+            serde_json::to_value(&put).unwrap()["agents"]["support-agent"][2],
+            json!({"text": "a new one"})
+        );
+        // precise errors
+        for (bad, want) in [
+            (json!({"id": "n1"}), "text"),
+            (json!({"text": "x", "colour": "red"}), "colour"),
+            (json!({"id": "n1", "text": "x", "source": "manual"}), "ts"),
+            (json!({"text": "x", "source": "telepathy"}), "telepathy"),
+        ] {
+            let err = serde_json::from_value::<MemoryPut>(json!({"agents": {"a": [bad]}}))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(want), "{err}");
+        }
+    }
+
+    #[test]
+    fn memory_put_resolves_against_the_stored_notes() {
+        let stored = MemoryDoc {
+            version: "4".into(),
+            agents: BTreeMap::from([
+                (
+                    "support-agent".to_string(),
+                    vec![note("n1", "first"), note("n2", "second")],
+                ),
+                ("faq".to_string(), vec![note("n3", "third")]),
+            ]),
+        };
+        // keep n2 and n1 (full notes, listed out of order), add two (one with a client-side
+        // id, one without); faq is dropped
+        let put: MemoryPut = serde_json::from_value(json!({"agents": {
+            "support-agent": [
+                {"text": "new"}, note_json("n2", "second"), note_json("n1", "first"),
+                {"id": "draft-7", "text": "newer"}
+            ],
+            "faq": []
+        }}))
+        .unwrap();
+        let mut ids = 0;
+        let out = put
+            .resolve(&stored, "alice", "2026-10-21T10:00:00.000Z", || {
+                ids += 1;
+                format!("new-{ids}")
+            })
+            .unwrap();
+        assert_eq!(out.keys().collect::<Vec<_>>(), ["support-agent"]);
+        let notes = &out["support-agent"];
+        assert_eq!(
+            notes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
+            ["n1", "n2", "new-1", "new-2"],
+            "stored order, then the new notes in the order given; the server assigns every new id"
+        );
+        assert_eq!(notes[0], stored.agents["support-agent"][0]);
+        assert_eq!(
+            notes[2],
+            Note {
+                id: "new-1".into(),
+                text: "new".into(),
+                source: NoteSource::Manual,
+                request_id: None,
+                trace_id: None,
+                approved_by: Some("alice".into()),
+                ts: "2026-10-21T10:00:00.000Z".into(),
+                expires_at: None,
+            }
+        );
+        assert_eq!(
+            (notes[3].text.as_str(), notes[3].source),
+            ("newer", NoteSource::Manual)
+        );
+
+        // a NoteInput is always a new note, even when its id is a stored note's: that note is
+        // not kept (it is not listed as a full note), and a manual note with the text is added
+        let put: MemoryPut = serde_json::from_value(json!({"agents": {
+            "support-agent": [{"id": "n2", "text": "second"}]
+        }}))
+        .unwrap();
+        let out = put
+            .resolve(&stored, "alice", "2026-10-21T10:00:00.000Z", || {
+                "fresh".to_string()
+            })
+            .unwrap();
+        assert_eq!(out["support-agent"].len(), 1);
+        assert_eq!(out["support-agent"][0].id, "fresh");
+        assert_eq!(out["support-agent"][0].source, NoteSource::Manual);
+        assert_eq!(
+            out["support-agent"][0].approved_by.as_deref(),
+            Some("alice")
+        );
+
+        // every problem is reported
+        let mut forged = note("n1", "first");
+        forged.approved_by = Some("mallory".into());
+        let mut edited = note("n2", "second");
+        edited.text = "edited".into();
+        let put = MemoryPut {
+            agents: BTreeMap::from([
+                (
+                    "support-agent".to_string(),
+                    vec![
+                        NoteEntry::Note(forged),
+                        NoteEntry::Note(edited),
+                        NoteEntry::Note(note("n3", "third")),
+                        NoteEntry::Input(NoteInput {
+                            id: None,
+                            text: "  ".into(),
+                        }),
+                        NoteEntry::Note(note("n2", "second")),
+                    ],
+                ),
+                ("ghost".to_string(), vec![NoteEntry::Note(note("n9", "x"))]),
+            ]),
+        };
+        let errs = put
+            .resolve(&stored, "alice", "2026-10-21T10:00:00.000Z", || {
+                "never".to_string()
+            })
+            .unwrap_err();
+        let all = errs.join("\n");
+        for want in [
+            "agents.support-agent[0]: note n1 differs from the stored note",
+            "agents.support-agent[1]: note n2 differs from the stored note",
+            "agents.support-agent[2]: support-agent has no stored note n3",
+            "agents.support-agent[3]: text is empty",
+            "agents.support-agent[4]: note n2 is listed twice",
+            "agents.ghost[0]: ghost has no stored note n9",
+        ] {
+            assert!(all.contains(want), "missing {want:?} in\n{all}");
+        }
+        assert_eq!(errs.len(), 6, "{all}");
+    }
+
+    fn note_json(id: &str, text: &str) -> Value {
+        serde_json::to_value(note(id, text)).unwrap()
     }
 
     #[test]
@@ -1020,7 +1530,7 @@ mod tests {
         for name in SseEvent::NAMES {
             let data = match name {
                 "graph" => r#"{"version":"7"}"#,
-                "lagged" => r#"{"dropped":12}"#,
+                "lagged" => r#"{"dropped":1187}"#,
                 "reset" => "{}",
                 _ => continue,
             };

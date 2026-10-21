@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 
 use embassy::api::ids;
 use embassy::api::types::{
-    AgentView, AuditRecord, CharterDoc, Edge, EdgeKind, Graph, HistoryEntry, MemoryDoc, Node,
-    Proposal, ProposalStatus, ServiceSummary, SseEvent, WhoAmI,
+    AgentView, AuditRecord, CharterDoc, Edge, EdgeKind, Graph, HistoryEntry, LinkResult, MemoryDoc,
+    Node, NoteSource, Proposal, ProposalStatus, Role, ServiceStatus, ServiceSummary, SseEvent,
+    ValidateResult, WhoAmI,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -90,11 +91,13 @@ fn every_fixture_round_trips_through_its_api_type() {
             .into_string()
             .expect("utf-8 name");
         match name.as_str() {
-            "whoami.json" => round_trip::<WhoAmI>(&name),
+            "whoami.json" | "whoami-viewer.json" => round_trip::<WhoAmI>(&name),
             "graph.json" => round_trip::<Graph>(&name),
             "services.json" => round_trip::<Vec<ServiceSummary>>(&name),
-            "charter-orders.json" | "charter-inventory.json" => round_trip::<CharterDoc>(&name),
-            "agent-view.json" => round_trip::<AgentView>(&name),
+            "charter-validate.json" => round_trip::<ValidateResult>(&name),
+            n if n.starts_with("charter-") => round_trip::<CharterDoc>(&name),
+            "agent-view.json" | "agent-view-support.json" => round_trip::<AgentView>(&name),
+            "links-result.json" => round_trip::<LinkResult>(&name),
             "memory.json" => round_trip::<MemoryDoc>(&name),
             "proposals.json" => round_trip::<Vec<Proposal>>(&name),
             "events-recent.json" => round_trip::<Vec<AuditRecord>>(&name),
@@ -120,11 +123,17 @@ fn every_fixture_round_trips_through_its_api_type() {
     }
     for want in [
         "whoami.json",
+        "whoami-viewer.json",
         "graph.json",
         "services.json",
         "charter-orders.json",
         "charter-inventory.json",
+        "charter-support.json",
+        "charter-reports.json",
+        "charter-validate.json",
         "agent-view.json",
+        "agent-view-support.json",
+        "links-result.json",
         "memory.json",
         "proposals.json",
         "events-recent.json",
@@ -197,9 +206,25 @@ fn graph_follows_the_design_rules() {
                 assert!(m.id == ids::MODEL_ANTHROPIC || m.id == ids::MODEL_MOCK)
             }
             Node::External(e) => assert!(e.id.starts_with("external:http"), "{}", e.id),
-            Node::Placeholder(_) => {}
+            Node::Placeholder(p) => {
+                // a peer no charter and no instance names: its service is a placeholder too
+                if let Some(parent) = &p.parent {
+                    assert!(
+                        matches!(nodes.get(parent), Some(Node::Placeholder(_))),
+                        "{} parent {parent}",
+                        p.id
+                    );
+                }
+            }
         }
     }
+    assert!(
+        graph
+            .nodes
+            .iter()
+            .any(|n| matches!(n, Node::Placeholder(_))),
+        "a placeholder for an unknown peer"
+    );
     // edges: id format, endpoints and ports exist (undeclared edges may leave the source port)
     let mut edge_ids = BTreeSet::new();
     for e in &graph.edges {
@@ -255,7 +280,22 @@ fn fixtures_agree_with_each_other() {
     let view: AgentView = typed("agent-view.json");
 
     for svc in &services {
-        let doc: CharterDoc = typed(&format!("charter-{}.json", svc.service));
+        let file = format!("charter-{}.json", svc.service);
+        if svc.charter_version.is_none() {
+            // no stored charter: no charter document, a pending adoption, no agents in the graph
+            assert_eq!(svc.status, ServiceStatus::NoCharter, "{}", svc.service);
+            assert!(svc.pending_adoption.is_some() && !svc.instances.is_empty());
+            assert!(!fixtures().join(&file).exists(), "{file}");
+            let frame = ids::service(&svc.namespace, &svc.service);
+            assert!(
+                !graph
+                    .nodes
+                    .iter()
+                    .any(|n| matches!(n, Node::Agent(a) if a.parent == frame))
+            );
+            continue;
+        }
+        let doc: CharterDoc = typed(&file);
         assert_eq!(svc.epoch.as_deref(), Some(doc.epoch.as_str()));
         assert_eq!(svc.charter_version.as_deref(), Some(doc.version.as_str()));
         let node = graph
@@ -290,15 +330,29 @@ fn fixtures_agree_with_each_other() {
         for inst in &svc.instances {
             assert_eq!(inst.acked_version, svc.charter_version);
         }
+        // degraded: connected, and an instance has an ack error, lags or is not ready
+        let lagging = svc.instances.iter().any(|i| {
+            i.ack_error.is_some() || i.acked_version != svc.charter_version || !i.runtime_ready
+        });
+        let want = match (svc.instances.is_empty(), lagging) {
+            (true, _) => ServiceStatus::Disconnected,
+            (false, true) => ServiceStatus::Degraded,
+            (false, false) => ServiceStatus::Connected,
+        };
+        assert_eq!(svc.status, want, "{}", svc.service);
     }
+    assert!(
+        services.iter().any(|s| s.status == ServiceStatus::Degraded),
+        "a degraded service (an instance with an ack error)"
+    );
 
-    // orders: memory, proposals, history, agent view
-    let orders = services
+    // orders: history and agent view; support: memory and proposals
+    let support = services
         .iter()
-        .find(|s| s.service == "orders")
-        .expect("orders");
+        .find(|s| s.service == "support")
+        .expect("support");
     assert_eq!(
-        orders.memory_version.as_deref(),
+        support.memory_version.as_deref(),
         Some(memory.version.as_str())
     );
     let doc: CharterDoc = typed("charter-orders.json");
@@ -314,41 +368,77 @@ fn fixtures_agree_with_each_other() {
         .find(|a| a["name"] == "ops-assistant")
         .expect("ops-assistant");
     assert_eq!(&view.agent, ops);
-    let learning = graph
-        .nodes
-        .iter()
-        .find_map(|n| match n {
-            Node::Agent(a) if a.id == ids::agent("attache-demo", "orders", "ops-assistant") => {
-                Some(a.learning.clone())
-            }
-            _ => None,
-        })
-        .expect("ops-assistant node");
+    let support_view: AgentView = typed("agent-view-support.json");
+    let support_doc: CharterDoc = typed("charter-support.json");
+    assert_eq!(support_view.agent, support_doc.charter["agents"][0]);
+    let learning = |id: String| {
+        graph
+            .nodes
+            .iter()
+            .find_map(|n| match n {
+                Node::Agent(a) if a.id == id => Some(a.learning.clone()),
+                _ => None,
+            })
+            .expect("agent node")
+    };
+    // memory exists only for agents with learning enabled (design §3)
+    let ops_learning = learning(ids::agent("attache-demo", "orders", "ops-assistant"));
+    assert!(!ops_learning.enabled && ops_learning.notes == 0);
+    let sa = learning(ids::agent("attache-demo", "support", "support-agent"));
+    assert!(sa.enabled);
     let pending = proposals
         .iter()
-        .filter(|p| p.status == ProposalStatus::Pending && p.agent == "ops-assistant")
+        .filter(|p| p.status == ProposalStatus::Pending && p.agent == "support-agent")
         .count();
-    assert_eq!(learning.pending as usize, pending);
+    assert_eq!(sa.pending as usize, pending);
+    assert!(pending > 0);
+    assert_eq!(sa.notes as usize, memory.agents["support-agent"].len());
     assert_eq!(
-        learning.notes as usize,
-        memory.agents["ops-assistant"].len()
+        memory.agents.keys().collect::<Vec<_>>(),
+        ["support-agent"],
+        "only agents with learning enabled have notes"
     );
-    for note in &memory.agents["ops-assistant"] {
-        assert!(
-            proposals
-                .iter()
-                .any(|p| p.status == ProposalStatus::Approved && p.note == note.text),
-            "note {} comes from an approved proposal",
-            note.id
-        );
+    for note in &memory.agents["support-agent"] {
+        match note.source {
+            NoteSource::Review => assert!(
+                proposals
+                    .iter()
+                    .any(|p| p.status == ProposalStatus::Approved && p.note == note.text),
+                "note {} comes from an approved proposal",
+                note.id
+            ),
+            NoteSource::Manual => {
+                assert!(note.request_id.is_none() && note.approved_by.is_some())
+            }
+            NoteSource::Auto => assert!(note.expires_at.is_some()),
+        }
     }
+    let viewer: WhoAmI = typed("whoami-viewer.json");
+    assert!(viewer.role == Role::Viewer && !viewer.payloads);
 
-    // recent events: newest first, from known services
+    // recent events: strictly newest first, equal timestamps in reverse write order (a pod
+    // writes a tool_call before its call record, and an agent_invocation after the other
+    // records of its span), from known services
     let recent: Vec<AuditRecord> = typed("events-recent.json");
-    assert!(
-        recent.windows(2).all(|w| w[0].ts >= w[1].ts),
-        "newest first"
-    );
+    let rank = |r: &AuditRecord| match r.kind.as_str() {
+        "tool_call" => 0,
+        "agent_call" | "service_call" | "http_call" => 1,
+        "agent_invocation" => 3,
+        _ => 2,
+    };
+    for w in recent.windows(2) {
+        assert!(w[0].ts >= w[1].ts, "newest first: {} {}", w[0].ts, w[1].ts);
+        if w[0].ts == w[1].ts {
+            assert_eq!(w[0].service, w[1].service, "ties within one pod");
+            assert!(
+                rank(&w[0]) > rank(&w[1]),
+                "{} {} before {}: not reverse write order",
+                w[0].ts,
+                w[0].kind,
+                w[1].kind
+            );
+        }
+    }
     assert!(
         recent
             .iter()
@@ -368,47 +458,142 @@ fn sse_transcript_follows_the_design_rules() {
     let frames = sse_frames();
     assert!(frames.windows(2).all(|w| w[0].id < w[1].id), "ids increase");
     let mut kinds = BTreeSet::new();
-    let mut audit_traces = BTreeSet::new();
-    for f in &frames {
+    let mut graph_version: u64 = graph.version.parse().unwrap();
+    for (i, f) in frames.iter().enumerate() {
         kinds.insert(f.event.clone());
         match SseEvent::parse(&f.event, &f.data).expect("parses") {
             SseEvent::Audit(a) => {
                 assert_eq!(a.animate, a.edge_id.is_some(), "id {}", f.id);
                 if let Some(e) = &a.edge_id {
+                    // an edge the snapshot does not have yet: a graph event announces it
                     assert!(
-                        edges.contains(e.as_str()),
-                        "id {}: edge {e} not in the graph",
+                        edges.contains(e.as_str())
+                            || frames[i + 1..].iter().any(|g| g.event == "graph"),
+                        "id {}: edge {e} not in the graph and no graph event follows",
                         f.id
                     );
                 }
                 assert!(services.iter().any(|s| s.service == a.record.service));
                 assert!(a.record.ts > graph.generated_at, "after the snapshot");
-                audit_traces.insert(a.record.trace_id.clone());
             }
             SseEvent::Graph(g) => {
-                let (old, new): (u64, u64) =
-                    (graph.version.parse().unwrap(), g.version.parse().unwrap());
-                assert!(new > old, "graph versions increase");
+                let new: u64 = g.version.parse().unwrap();
+                assert!(new > graph_version, "graph versions increase");
+                graph_version = new;
+            }
+            SseEvent::Lagged(l) => {
+                // the 1024 queued events and the one that did not fit, at least
+                assert!(l.dropped > 1024, "id {}: dropped {}", f.id, l.dropped);
+                assert!(f.id - frames[i - 1].id >= l.dropped, "id {}: id gap", f.id);
             }
             _ => {}
         }
     }
-    for want in ["registry", "audit", "graph", "proposal", "ack"] {
+    for want in SseEvent::NAMES {
         assert!(kinds.contains(want), "events.sse has no {want} event");
     }
     assert_eq!(
-        audit_traces.len(),
-        1,
-        "the audit events are one cross-pod call"
+        frames[0].event, "reset",
+        "the client reconnected with a stale Last-Event-ID"
     );
-    let audit_services: BTreeSet<String> = frames
+    let acks: Vec<bool> = frames
         .iter()
         .filter_map(|f| match SseEvent::parse(&f.event, &f.data) {
-            Ok(SseEvent::Audit(a)) => Some(a.record.service),
+            Ok(SseEvent::Ack(a)) => Some(a.applied),
             _ => None,
         })
         .collect();
-    assert_eq!(audit_services.len(), 2, "the call crosses pods");
+    assert!(
+        acks.contains(&true) && acks.contains(&false),
+        "an applied and a failed ack"
+    );
+    // the request audit events: every request keeps one trace and one request id; one request
+    // crosses pods (the stock question), and the record kinds the UI must animate or not are there
+    let records: Vec<AuditRecord> = frames
+        .iter()
+        .filter_map(|f| match SseEvent::parse(&f.event, &f.data) {
+            Ok(SseEvent::Audit(a)) => Some(a.record),
+            _ => None,
+        })
+        .collect();
+    let mut by_request: BTreeMap<&str, (BTreeSet<&str>, BTreeSet<&str>)> = BTreeMap::new();
+    for r in records.iter().filter(|r| r.kind != "config") {
+        let (traces, pods) = by_request.entry(r.request_id.as_str()).or_default();
+        traces.insert(r.trace_id.as_str());
+        pods.insert(r.service.as_str());
+    }
+    assert!(by_request.values().all(|(traces, _)| traces.len() == 1));
+    assert!(
+        by_request.values().any(|(_, pods)| pods.len() == 2),
+        "a call across pods"
+    );
+    let has = |pred: &dyn Fn(&AuditRecord) -> bool| records.iter().any(pred);
+    assert!(has(&|r| r.kind == "config"), "a config record");
+    assert!(
+        has(&|r| r.kind == "agent_invocation" && r.caller == "local" && r.caller_agent.is_some()),
+        "a local orchestrator's call"
+    );
+    assert!(has(&|r| r.kind == "http_call"), "an http_call");
+    assert!(
+        has(&|r| r.kind == "model_call" && r.callee == "mock"),
+        "a model_call to the mock model"
+    );
+}
+
+/// Every charter in the fixtures passes `attache charter validate` (the CLI of this workspace).
+/// `cargo test --workspace` builds the CLI before it runs any test (its own tests need it); a
+/// lone `cargo test -p embassy` may not have it, and then this test says so and passes, except
+/// in CI (`CI` set), where the CLI must be there.
+#[test]
+fn fixture_charters_pass_the_cli_validator() {
+    let exe = std::env::current_exe().expect("test executable");
+    // target/<profile>/deps/fixtures-<hash> -> target/<profile>/attache
+    let cli = exe
+        .parent()
+        .and_then(Path::parent)
+        .map(|dir| dir.join(format!("attache{}", std::env::consts::EXE_SUFFIX)))
+        .expect("target directory");
+    if !cli.exists() {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "{} is missing: CI runs cargo test --workspace, which builds it",
+            cli.display()
+        );
+        eprintln!(
+            "skipped: {} is not built (cargo build -p attache-cli)",
+            cli.display()
+        );
+        return;
+    }
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(fixtures()).expect("ui/fixtures exists") {
+        let name = entry.expect("dir entry").file_name().into_string().unwrap();
+        let yaml = match name.as_str() {
+            // the candidate is JSON, which YAML reads as it is
+            "charter-validate.json" => {
+                let v: ValidateResult = typed(&name);
+                serde_json::to_string_pretty(&v.charter).unwrap()
+            }
+            n if n.starts_with("charter-") => typed::<CharterDoc>(n).yaml,
+            _ => continue,
+        };
+        let file = dir.path().join(name.replace(".json", ".yaml"));
+        std::fs::write(&file, yaml).expect("write charter");
+        let out = std::process::Command::new(&cli)
+            .args(["charter", "validate"])
+            .arg(&file)
+            .output()
+            .expect("run attache charter validate");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.starts_with("valid: "),
+            "{name}: attache charter validate: {stdout} {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        checked += 1;
+    }
+    assert!(checked >= 5, "only {checked} charters checked");
 }
 
 /// Every `$ref` of the OpenAPI document resolves, every SSE event is documented, and every
@@ -464,6 +649,8 @@ fn openapi_document_is_consistent() {
         "AuditRecord",
         "HistoryEntry",
         "Note",
+        "NoteInput",
+        "MemoryPut",
         "ValidateResult",
         "LinkRequest",
         "LinkResult",
