@@ -42,6 +42,7 @@ service SidecarTools {
   rpc InvokeAgent(ToolAgentRequest) returns (InvokeAgentResponse);
   rpc InvokeHttp(ToolHttpRequest) returns (ServiceResponse);
   rpc ReportEvent(AuditEvent) returns (Empty);
+  rpc ProposeLesson(LessonRequest) returns (LessonResponse);
 }
 
 message ToolContext {
@@ -80,4 +81,19 @@ message ToolHttpRequest {
 // A CONTRACT.md §6 record as JSON; the sidecar stamps service/namespace and redacts.
 message AuditEvent {
   string json = 1;
+}
+
+// A lesson the runtime drew from a finished run, for the agent's memory. The sidecar checks,
+// scrubs and audits it (kind `learning`); it never becomes memory without the sidecar.
+message LessonRequest {
+  ToolContext ctx = 1;         // ctx.agent is the agent that learned
+  string note = 2;
+  string rationale = 3;
+  string run_request_id = 4;   // the request_id of the run the lesson is about
+}
+
+message LessonResponse {
+  string decision = 1;         // allow | deny
+  string rule = 2;             // learning.proposed | learning.applied | learning.denied | learning.rate_limited | ...
+  string reason = 3;
 }

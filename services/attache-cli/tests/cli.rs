@@ -63,6 +63,138 @@ fn schema_is_json_and_closed() {
 }
 
 #[test]
+fn schema_crd_prints_the_committed_crd() {
+    let out = attache()
+        .args(["charter", "schema", "--crd"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let on_disk = std::fs::read_to_string(format!(
+        "{}/../../deploy/crds/charters.attache.io.yaml",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap();
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        on_disk,
+        "run `cargo run -q -p attache-cli -- charter schema --crd > deploy/crds/charters.attache.io.yaml`"
+    );
+}
+
+#[test]
+fn to_cr_prints_a_resource_that_validates() {
+    let out = attache()
+        .args(["charter", "to-cr", &examples("orders.charter.yaml")])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    let cr: serde_json::Value = serde_yaml_ng::from_str(&text).unwrap();
+    assert_eq!(cr["apiVersion"], "attache.io/v1alpha1");
+    assert_eq!(cr["kind"], "Charter");
+    assert_eq!(cr["metadata"]["name"], "orders");
+    assert_eq!(cr["metadata"]["namespace"], "attache-demo");
+    assert_eq!(cr["spec"]["service"]["name"], "orders");
+    assert!(cr["spec"]["service"].get("namespace").is_none());
+    assert!(cr["spec"].get("apiVersion").is_none());
+    // `charter validate` reads the resource form, and to-cr of it is the same document
+    let dir = std::env::temp_dir().join(format!("attache-cli-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("orders.cr.yaml");
+    std::fs::write(&file, &text).unwrap();
+    let out = attache()
+        .args(["charter", "validate", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout)
+            .contains("spiffe://attache/ns/attache-demo/svc/orders")
+    );
+    let again = attache()
+        .args(["charter", "to-cr", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8(again.stdout).unwrap(), text);
+    let _ = std::fs::remove_dir_all(dir);
+    // an invalid charter is refused, not converted
+    let out = attache()
+        .args([
+            "charter",
+            "to-cr",
+            &examples("invalid-unknown-field.charter.yaml"),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("unknown field `pii_redaction`"));
+}
+
+#[test]
+fn logs_keep_and_show_new_and_unknown_kinds() {
+    let config = r#"{"ts":"2026-10-21T10:00:00.000Z","kind":"config","request_id":"","trace_id":"","span_id":"","parent_span_id":null,"service":"orders","namespace":"shop","agent":null,"caller":"control-plane","caller_agent":null,"callee":"charter","direction":"internal","input":{"source":"control-plane","epoch":"e1","version":"7","sha256":"ab","weakened":[]},"output":null,"input_sha256":"x","output_sha256":null,"tokens":null,"cost_usd":null,"latency_ms":0,"decision":"allow","rule":"config.applied","reason":null,"error":null}"#;
+    let learning = r#"{"ts":"2026-10-21T10:00:01.000Z","kind":"learning","request_id":"r9","trace_id":"cccc1111","span_id":"s","parent_span_id":null,"service":"orders","namespace":"shop","agent":"support","caller":"local","caller_agent":null,"callee":"learning","direction":"internal","input":{"request_id_of_run":"r8"},"output":{"note":"n","rationale":"r"},"input_sha256":null,"output_sha256":null,"tokens":null,"cost_usd":null,"latency_ms":3,"decision":"deny","rule":"learning.rate_limited","reason":null,"error":null}"#;
+    let future = r#"{"ts":"2026-10-21T10:00:02.000Z","kind":"teleport","request_id":"r10","trace_id":"dddd1111","span_id":"s","parent_span_id":null,"service":"orders","namespace":"shop","agent":"support","caller":"local","caller_agent":null,"callee":"mars","direction":"sideways","input":null,"output":null,"input_sha256":null,"output_sha256":null,"tokens":null,"cost_usd":null,"latency_ms":1,"decision":"allow","rule":"teleport.ok","reason":null,"error":null,"new_field":1}"#;
+    let run = |args: &[&str]| -> String {
+        let mut child = attache()
+            .args(["logs", "--file", "-"])
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all([config, learning, future].join("\n").as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let all = run(&[]);
+    let lines: Vec<&str> = all.lines().collect();
+    assert_eq!(lines.len(), 3, "{all}");
+    assert!(
+        lines[0].contains(" config ") && lines[0].contains("allow config.applied"),
+        "{all}"
+    );
+    assert!(
+        lines[1].contains(" learning ") && lines[1].contains("DENY learning.rate_limited"),
+        "{all}"
+    );
+    assert!(
+        lines[2].contains(" teleport ")
+            && lines[2].contains(" sideways ")
+            && lines[2].contains("allow teleport.ok"),
+        "{all}"
+    );
+    let only = run(&["--kind", "teleport"]);
+    assert_eq!(only.lines().count(), 1, "{only}");
+    let only = run(&["--kind", "config", "--raw"]);
+    assert_eq!(
+        only.trim_end(),
+        config,
+        "--raw prints the record as written"
+    );
+    let raw = run(&["--kind", "teleport", "--raw"]);
+    assert!(
+        raw.contains("\"new_field\":1"),
+        "unknown fields survive --raw: {raw}"
+    );
+}
+
+#[test]
 fn logs_filters_and_sorts_records_from_a_file() {
     let lines = [
         r#"2026-10-20T11:00:00Z INFO attached: not an audit line"#,

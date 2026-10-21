@@ -174,6 +174,11 @@ class SidecarToolsStub:
                 request_serializer=attache_dot_v1alpha1_dot_runtime__pb2.AuditEvent.SerializeToString,
                 response_deserializer=attache_dot_v1alpha1_dot_common__pb2.Empty.FromString,
                 _registered_method=True)
+        self.ProposeLesson = channel.unary_unary(
+                '/attache.v1alpha1.SidecarTools/ProposeLesson',
+                request_serializer=attache_dot_v1alpha1_dot_runtime__pb2.LessonRequest.SerializeToString,
+                response_deserializer=attache_dot_v1alpha1_dot_runtime__pb2.LessonResponse.FromString,
+                _registered_method=True)
 
 
 class SidecarToolsServicer:
@@ -204,6 +209,12 @@ class SidecarToolsServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ProposeLesson(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_SidecarToolsServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -226,6 +237,11 @@ def add_SidecarToolsServicer_to_server(servicer, server):
                     servicer.ReportEvent,
                     request_deserializer=attache_dot_v1alpha1_dot_runtime__pb2.AuditEvent.FromString,
                     response_serializer=attache_dot_v1alpha1_dot_common__pb2.Empty.SerializeToString,
+            ),
+            'ProposeLesson': grpc.unary_unary_rpc_method_handler(
+                    servicer.ProposeLesson,
+                    request_deserializer=attache_dot_v1alpha1_dot_runtime__pb2.LessonRequest.FromString,
+                    response_serializer=attache_dot_v1alpha1_dot_runtime__pb2.LessonResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -337,6 +353,33 @@ class SidecarTools:
             '/attache.v1alpha1.SidecarTools/ReportEvent',
             attache_dot_v1alpha1_dot_runtime__pb2.AuditEvent.SerializeToString,
             attache_dot_v1alpha1_dot_common__pb2.Empty.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ProposeLesson(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/attache.v1alpha1.SidecarTools/ProposeLesson',
+            attache_dot_v1alpha1_dot_runtime__pb2.LessonRequest.SerializeToString,
+            attache_dot_v1alpha1_dot_runtime__pb2.LessonResponse.FromString,
             options,
             channel_credentials,
             insecure,

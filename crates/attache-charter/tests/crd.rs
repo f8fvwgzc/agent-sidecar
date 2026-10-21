@@ -1,0 +1,351 @@
+//! The `charters.attache.io` CustomResourceDefinition: in sync with
+//! `deploy/crds/charters.attache.io.yaml`, structural, and accepting the custom resource form of
+//! real charters.
+mod common;
+
+use attache_charter::crd::{self, crd_yaml, custom_resource_definition};
+use attache_charter::*;
+use common::*;
+use serde_json::{Value, json};
+
+const ON_DISK: &str = include_str!("../../../deploy/crds/charters.attache.io.yaml");
+
+#[test]
+fn the_committed_crd_is_in_sync() {
+    assert_eq!(
+        ON_DISK,
+        crd_yaml(),
+        "run `cargo run -q -p attache-cli -- charter schema --crd > deploy/crds/charters.attache.io.yaml`"
+    );
+    let parsed: Value = serde_yaml_ng::from_str(ON_DISK).unwrap();
+    assert_eq!(parsed, custom_resource_definition());
+}
+
+#[test]
+fn names_scope_versions_status_and_columns() {
+    let crd = custom_resource_definition();
+    assert_eq!(crd["apiVersion"], "apiextensions.k8s.io/v1");
+    assert_eq!(crd["kind"], "CustomResourceDefinition");
+    assert_eq!(crd["metadata"]["name"], "charters.attache.io");
+    let spec = &crd["spec"];
+    assert_eq!(spec["group"], "attache.io");
+    assert_eq!(spec["scope"], "Namespaced");
+    assert_eq!(spec["names"]["kind"], "Charter");
+    assert_eq!(spec["names"]["plural"], "charters");
+    let versions = spec["versions"].as_array().unwrap();
+    assert_eq!(versions.len(), 1);
+    let v = &versions[0];
+    assert_eq!(
+        (&v["name"], &v["served"], &v["storage"]),
+        (&json!("v1alpha1"), &json!(true), &json!(true))
+    );
+    assert_eq!(v["subresources"], json!({"status": {}}));
+    let columns: Vec<&str> = v["additionalPrinterColumns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(columns, ["Service", "Version", "Valid", "Synced", "Age"]);
+    let status = &v["schema"]["openAPIV3Schema"]["properties"]["status"]["properties"];
+    for field in [
+        "observedGeneration",
+        "appliedVersion",
+        "conditions",
+        "memory",
+        "proposals",
+    ] {
+        assert!(status.get(field).is_some(), "status.{field}");
+    }
+}
+
+/// Kubernetes' structural-schema rules, as far as they concern what we generate.
+fn assert_structural(node: &Value, path: &str) {
+    let obj = node
+        .as_object()
+        .unwrap_or_else(|| panic!("{path}: not an object"));
+    for forbidden in [
+        "$ref",
+        "$defs",
+        "$schema",
+        "anyOf",
+        "oneOf",
+        "allOf",
+        "not",
+        "if",
+        "then",
+        "else",
+        "const",
+        "default",
+        "uniqueItems",
+        "title",
+        "examples",
+    ] {
+        assert!(!obj.contains_key(forbidden), "{path}: has {forbidden}");
+    }
+    let preserve = obj.get("x-kubernetes-preserve-unknown-fields") == Some(&Value::Bool(true));
+    match obj.get("type") {
+        Some(Value::String(t)) => assert!(
+            ["object", "array", "string", "integer", "number", "boolean"].contains(&t.as_str()),
+            "{path}: type {t}"
+        ),
+        None => assert!(preserve, "{path}: no type and not preserve-unknown-fields"),
+        Some(other) => panic!("{path}: type {other}"),
+    }
+    if let Some(ap) = obj.get("additionalProperties") {
+        assert!(
+            ap.is_object(),
+            "{path}: additionalProperties must be a schema"
+        );
+        assert!(
+            !obj.contains_key("properties"),
+            "{path}: properties and additionalProperties"
+        );
+        assert_structural(ap, &format!("{path}.*"));
+    }
+    if let Some(props) = obj.get("properties").and_then(Value::as_object) {
+        for (k, v) in props {
+            assert_structural(v, &format!("{path}.{k}"));
+        }
+    }
+    if let Some(items) = obj.get("items") {
+        assert_structural(items, &format!("{path}[]"));
+    }
+}
+
+#[test]
+fn the_schema_is_structural() {
+    let crd = custom_resource_definition();
+    let root = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"];
+    assert_structural(root, "");
+    // the free-form tool parameters are kept as written
+    let params = &root["properties"]["spec"]["properties"]["agents"]["items"]["properties"]["tools"]
+        ["items"]["properties"]["parameters"];
+    assert_eq!(params["x-kubernetes-preserve-unknown-fields"], true);
+    // Option<T> is nullable; spec.service.namespace is optional in the resource form
+    let service = &root["properties"]["spec"]["properties"]["service"];
+    assert_eq!(service["required"], json!(["name", "app_port"]));
+    assert_eq!(service["properties"]["namespace"]["nullable"], true);
+}
+
+#[test]
+fn structural_conversion_handles_refs_options_enums_and_free_form_values() {
+    let schema = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "a": {"$ref": "#/$defs/A", "description": "own text", "default": {"x": 1}},
+            "b": {"anyOf": [{"$ref": "#/$defs/A"}, {"type": "null"}]},
+            "c": {"type": ["integer", "null"], "format": "uint32", "minimum": 0},
+            "d": {"oneOf": [{"type": "string", "const": "x"}, {"type": "string", "const": "y"}]},
+            "e": {"description": "anything"},
+            "f": true,
+            "g": {"type": ["string", "integer"]},
+            "h": {"anyOf": [{"type": "string"}, {"type": "integer"}]},
+            "i": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+            "j": {"type": "object", "additionalProperties": {"type": "integer"}},
+        },
+        "$defs": {"A": {"type": "object", "additionalProperties": false, "description": "def text",
+                        "properties": {"x": {"type": "integer"}}, "required": ["x"]}},
+    });
+    let s = crd::structural(&schema);
+    let p = &s["properties"];
+    assert_eq!(
+        p["a"],
+        json!({"type": "object", "description": "own text", "properties": {"x": {"type": "integer"}}, "required": ["x"]})
+    );
+    assert_eq!(p["b"]["nullable"], true);
+    assert_eq!(p["b"]["properties"]["x"]["type"], "integer");
+    assert_eq!(
+        p["c"],
+        json!({"type": "integer", "nullable": true, "minimum": 0})
+    );
+    assert_eq!(p["d"], json!({"type": "string", "enum": ["x", "y"]}));
+    assert_eq!(
+        p["e"],
+        json!({"description": "anything", "x-kubernetes-preserve-unknown-fields": true})
+    );
+    assert_eq!(
+        p["f"],
+        json!({"x-kubernetes-preserve-unknown-fields": true})
+    );
+    assert_eq!(
+        p["g"],
+        json!({"x-kubernetes-preserve-unknown-fields": true})
+    );
+    assert_eq!(
+        p["h"],
+        json!({"x-kubernetes-preserve-unknown-fields": true})
+    );
+    assert_eq!(
+        p["i"],
+        json!({"type": "array", "items": {"type": "string"}})
+    );
+    assert_eq!(
+        p["j"],
+        json!({"type": "object", "additionalProperties": {"type": "integer"}})
+    );
+    assert!(s.get("additionalProperties").is_none());
+    assert_structural(&s, "");
+}
+
+/// A small validator for the structural subset the CRD uses: what the API server would check.
+fn check(schema: &Value, v: &Value, path: &str, errs: &mut Vec<String>) {
+    if v.is_null() {
+        if schema.get("nullable") != Some(&Value::Bool(true)) {
+            errs.push(format!("{path}: null"));
+        }
+        return;
+    }
+    let preserve = schema.get("x-kubernetes-preserve-unknown-fields") == Some(&Value::Bool(true));
+    if let Some(Value::Array(allowed)) = schema.get("enum")
+        && !allowed.contains(v)
+    {
+        errs.push(format!("{path}: {v} not in {allowed:?}"));
+    }
+    match schema.get("type").and_then(Value::as_str) {
+        None if preserve => {}
+        Some("object") => {
+            let Some(o) = v.as_object() else {
+                return errs.push(format!("{path}: not an object"));
+            };
+            for r in schema
+                .get("required")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let r = r.as_str().unwrap();
+                if !o.contains_key(r) {
+                    errs.push(format!("{path}: missing {r}"));
+                }
+            }
+            if let Some(props) = schema.get("properties").and_then(Value::as_object) {
+                for (k, sub) in o {
+                    match props.get(k) {
+                        Some(s) => check(s, sub, &format!("{path}.{k}"), errs),
+                        None if preserve => {}
+                        None => errs.push(format!("{path}.{k}: unknown (would be pruned)")),
+                    }
+                }
+            } else if let Some(ap) = schema.get("additionalProperties") {
+                for (k, sub) in o {
+                    check(ap, sub, &format!("{path}.{k}"), errs);
+                }
+            } else if !preserve && !o.is_empty() && path != ".metadata" {
+                errs.push(format!("{path}: fields would be pruned"));
+            }
+        }
+        Some("array") => {
+            let Some(a) = v.as_array() else {
+                return errs.push(format!("{path}: not an array"));
+            };
+            if let Some(max) = schema.get("maxItems").and_then(Value::as_u64)
+                && a.len() as u64 > max
+            {
+                errs.push(format!("{path}: more than {max} items"));
+            }
+            for (i, item) in a.iter().enumerate() {
+                check(&schema["items"], item, &format!("{path}[{i}]"), errs);
+            }
+        }
+        Some("string") => {
+            let Some(s) = v.as_str() else {
+                return errs.push(format!("{path}: not a string"));
+            };
+            let n = s.chars().count() as u64;
+            if schema
+                .get("minLength")
+                .and_then(Value::as_u64)
+                .is_some_and(|m| n < m)
+                || schema
+                    .get("maxLength")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|m| n > m)
+            {
+                errs.push(format!("{path}: length {n}"));
+            }
+            if let Some(p) = schema.get("pattern").and_then(Value::as_str)
+                && !regex::Regex::new(p).unwrap().is_match(s)
+            {
+                errs.push(format!("{path}: {s:?} does not match {p}"));
+            }
+        }
+        Some("integer") => {
+            let Some(n) = v.as_i64() else {
+                return errs.push(format!("{path}: not an integer"));
+            };
+            if schema
+                .get("minimum")
+                .and_then(Value::as_i64)
+                .is_some_and(|m| n < m)
+                || schema
+                    .get("maximum")
+                    .and_then(Value::as_i64)
+                    .is_some_and(|m| n > m)
+            {
+                errs.push(format!("{path}: {n} out of range"));
+            }
+        }
+        Some("number") if v.is_number() => {}
+        Some("boolean") if v.is_boolean() => {}
+        other => errs.push(format!("{path}: {v} is not {other:?}")),
+    }
+}
+
+fn errors(resource: &Value) -> Vec<String> {
+    let crd = custom_resource_definition();
+    let root = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"];
+    let mut errs = Vec::new();
+    check(root, resource, "", &mut errs);
+    errs
+}
+
+#[test]
+fn real_charters_in_resource_form_pass_the_crd_schema() {
+    for c in [orders(), Charter::from_yaml(INVENTORY).unwrap(), v02()] {
+        let cr = serde_json::to_value(c.to_resource()).unwrap();
+        assert_eq!(errors(&cr), Vec::<String>::new(), "{}", c.service.name);
+    }
+    // and what the schema can see is refused
+    let mut cr = serde_json::to_value(v02().to_resource()).unwrap();
+    cr["spec"]["agents"][0]["harness"]["max_retries"] = json!(11);
+    cr["spec"]["agents"][0]["learning"]["mode"] = json!("always");
+    cr["spec"]["skills"][0]["name"] = json!("Refund_Policy");
+    cr["spec"]["telemetry"]["otlp_endpoint"] = json!("http://otel:4318/v1/traces");
+    cr["spec"]["service"]["app_port"] = json!("8000");
+    cr["spec"]["guardrails"]["pii_redaction"] = json!(true);
+    let errs = errors(&cr).join("\n");
+    for needle in [
+        "harness.max_retries: 11 out of range",
+        "learning.mode: \"always\" not in",
+        "skills[0].name: \"Refund_Policy\" does not match",
+        "otlp_endpoint: \"http://otel:4318/v1/traces\" does not match",
+        "service.app_port: not an integer",
+        "guardrails.pii_redaction: unknown",
+    ] {
+        assert!(errs.contains(needle), "{needle} in:\n{errs}");
+    }
+}
+
+#[test]
+fn charter_spec_has_exactly_the_charter_fields() {
+    let props = |v: Value| -> Vec<String> {
+        let mut keys: Vec<String> = v["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        keys
+    };
+    let charter = props(json_schema());
+    let spec = props(serde_json::to_value(schemars::schema_for!(CharterSpec)).unwrap());
+    let mut expected: Vec<String> = charter
+        .into_iter()
+        .filter(|k| k != "apiVersion" && k != "kind")
+        .collect();
+    expected.sort();
+    assert_eq!(spec, expected);
+}
