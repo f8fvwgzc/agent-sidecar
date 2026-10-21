@@ -32,13 +32,15 @@ lint:
 	cargo clippy --workspace --all-targets -- -D warnings
 	cd runtime && uv run ruff check src tests
 
-# Regenerate the Python gRPC stubs (committed) from proto/.
+# Regenerate the Python gRPC stubs (committed) from proto/. `-i.bak` is the in-place form GNU and BSD sed share.
+PB_DIR := runtime/src/attache_runtime/pb/attache/v1alpha1
 proto:
 	cd runtime && uv run python -m grpc_tools.protoc -I ../proto \
 	  --python_out=src/attache_runtime/pb --grpc_python_out=src/attache_runtime/pb --pyi_out=src/attache_runtime/pb \
 	  ../proto/attache/v1alpha1/common.proto ../proto/attache/v1alpha1/app.proto \
 	  ../proto/attache/v1alpha1/mesh.proto ../proto/attache/v1alpha1/runtime.proto
-	sed -i '' -E 's/^from attache\.v1alpha1 import/from attache_runtime.pb.attache.v1alpha1 import/' runtime/src/attache_runtime/pb/attache/v1alpha1/*_pb2*.py
+	sed -i.bak -E 's/^from attache\.v1alpha1 import/from attache_runtime.pb.attache.v1alpha1 import/' $(PB_DIR)/*_pb2*.py
+	rm -f $(PB_DIR)/*.bak
 
 # Regenerate schemas/charter.schema.json from the Rust types (a test fails when it drifts).
 schema:

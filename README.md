@@ -63,7 +63,8 @@ another pod. Many agents can live in one service.
 
 ### On this machine, no Kubernetes (about a minute)
 
-Needs `cargo`, `uv`, `go`, `python3` and `curl`. This starts both demo apps
+Needs `cargo`, `protoc`, `uv`, `go`, `python3` and `curl` (see
+[Prerequisites](#prerequisites)). This starts both demo apps
 and two sidecars with real mTLS certificates and the real Python runtime. It
 then makes the calls below and prints the audit trail.
 
@@ -224,12 +225,29 @@ docker/Dockerfile           attached (sidecar + runtime) and embassy images
 scripts/demo.sh             the minikube demo; scripts/local-demo.sh runs the same thing without Kubernetes
 ```
 
+## Prerequisites
+
+- **Rust** stable (edition 2024, so 1.85 or newer) with `rustfmt` and `clippy`.
+- **`protoc`**, the protobuf compiler. `attache-proto` compiles `proto/` at
+  build time, so every `cargo` build needs it: `brew install protobuf` or
+  `apt-get install protobuf-compiler`. Set `PROTOC` to use a binary off `PATH`.
+- **`uv`** for the Python runtime. It fetches Python 3.12 itself.
+- `go`, `python3` and `curl` for `make local-demo`; `docker`, `minikube` and
+  `kubectl` for the minikube demo.
+
 ## Tests
 
 ```bash
 make test        # cargo test --workspace and the runtime's pytest suite
 make lint        # clippy -D warnings, ruff
+make schema      # regenerate schemas/charter.schema.json from the Rust types
+make proto       # regenerate the committed Python gRPC stubs from proto/
 ```
+
+CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs all of these on
+Linux for every push and pull request, plus `cargo fmt --check` and
+`ruff format --check`. It fails when `make schema` or `make proto` changes a
+committed file.
 
 The Rust suite includes an in-process mesh test. It starts two sidecars with
 embassy-issued certificates on localhost and proves that:

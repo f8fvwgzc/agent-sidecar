@@ -1,0 +1,128 @@
+# The testing gates of CONTRACT.md §10 that run without a cluster, plus formatting and drift checks
+# for the generated files that are committed (charter JSON Schema, Python gRPC stubs).
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  rust:
+    name: Rust (fmt, clippy, test, schema drift)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      # attache-proto's build script runs protoc (via tonic-prost-build).
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends protobuf-compiler
+          protoc --version
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --locked --no-fail-fast
+
+      - name: schemas/charter.schema.json matches the Rust types
+        run: |
+          make schema
+          if ! git diff --exit-code -- schemas/charter.schema.json; then
+            echo "::error file=schemas/charter.schema.json::out of date; run 'make schema' and commit the result"
+            exit 1
+          fi
+
+  python:
+    name: Python runtime (ruff, pytest, stub drift)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      # Fail instead of rewriting runtime/uv.lock when it is out of date with pyproject.toml.
+      UV_LOCKED: "1"
+    defaults:
+      run:
+        working-directory: runtime
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: runtime/uv.lock
+          cache-python: true
+
+      - name: uv sync
+        run: uv sync
+
+      - name: ruff check
+        run: uv run ruff check src tests
+
+      - name: ruff format
+        run: uv run ruff format --check src tests
+
+      - name: pytest
+        run: uv run pytest -q
+
+      # grpcio-tools bundles its own protoc, so this job needs no system protoc.
+      - name: Python gRPC stubs match proto/
+        working-directory: .
+        run: |
+          make proto
+          pb=runtime/src/attache_runtime/pb
+          if [ -n "$(git status --porcelain -- "$pb")" ]; then
+            git status --short -- "$pb"
+            git diff -- "$pb"
+            echo "::error file=$pb::stubs are out of date with proto/ or grpcio-tools; run 'make proto' and commit the result"
+            exit 1
+          fi
+
+  # Advisory: a new advisory against a pinned dependency should be visible, not block unrelated changes.
+  audit:
+    name: Dependency audit (advisory)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: false
+
+      - name: cargo audit
+        run: cargo audit
+
+      - name: pip-audit
+        if: ${{ !cancelled() }}
+        working-directory: runtime
+        run: |
+          uv export --frozen --format requirements-txt --no-emit-project > "$RUNNER_TEMP/requirements.txt"
+          uvx pip-audit --disable-pip --requirement "$RUNNER_TEMP/requirements.txt"
