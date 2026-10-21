@@ -176,3 +176,52 @@ jobs:
         run: |
           uv export --frozen --format requirements-txt --no-emit-project > "$RUNNER_TEMP/requirements.txt"
           uvx pip-audit --disable-pip --requirement "$RUNNER_TEMP/requirements.txt"
+
+  platform-demo:
+    name: Platform demo (embassy one-process, managed sidecars, live edit)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      UV_LOCKED: "1"
+      # The runtime calls the Anthropic API when this is set; the gate runs the deterministic mock.
+      ANTHROPIC_API_KEY: ""
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends protobuf-compiler
+          protoc --version
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # examples/orders uses only the standard library: nothing to cache.
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: examples/orders/go.mod
+          cache: false
+
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: runtime/uv.lock
+          cache-python: true
+          cache-suffix: platform-demo
+
+      - name: make platform-demo
+        run: make platform-demo
+
+      - name: Demo logs
+        if: failure()
+        run: |
+          shopt -s nullglob
+          for f in .local/platform/logs/*; do
+            echo "::group::$f"
+            cat "$f"
+            echo "::endgroup::"
+          done
+
+  # Advisory: a new advisory against a pinned dependency should be visible, not block unrelated changes.

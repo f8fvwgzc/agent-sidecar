@@ -18,7 +18,7 @@ COMPOSE := docker compose -f deploy/compose/docker-compose.yml
 COMPOSE_ENV := deploy/compose/.env
 # Tests of the chart, the Compose stack, the Dockerfile and the release workflow (throwaway uv env).
 PACKAGING_PYTEST := uv run --no-project --with pytest==8.4.2 --with pyyaml==6.0.2 python -m pytest -q
-.PHONY: local-demo all build-host test test-rust test-python fmt lint proto schema validate \
+.PHONY: local-demo platform-demo all build-host test test-rust test-python fmt lint proto schema validate \
         minikube-up minikube-down build deploy charters undeploy demo logs logs-denied secret-anthropic clean dev-certs \
         compose-up compose-down helm-lint helm-template demo-helm packaging-test
 
@@ -160,6 +160,11 @@ packaging-test:
 # The same demo on this machine without Kubernetes (two sidecars, mTLS, real runtime, both apps).
 local-demo:
 	./scripts/local-demo.sh
+
+# The v0.2 platform on this machine: embassy (CA, Connect, API, console), managed sidecars with join
+# tokens, a live agent edit. CI runs it with CHECK_ONLY=1; run it yourself to keep it up for the console.
+platform-demo:
+	CHECK_ONLY=$${CHECK_ONLY:-1} ./scripts/local-platform.sh
 
 demo: $(AGENTSC)
 	AGENTSC=$(AGENTSC) NS=$(NS) KUBE_CONTEXT=$(KUBE_CONTEXT) ./scripts/demo.sh

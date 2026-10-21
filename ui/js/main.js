@@ -143,6 +143,7 @@ async function enter(me) {
       onTab: (target, tab) => writeHash(target.id, tab),
     });
     window.addEventListener('hashchange', () => openFromHash());
+    wireViews();
   }
   view.setCanLink(editor);
   view.setFilters(state.filters);
@@ -151,11 +152,58 @@ async function enter(me) {
   openFromHash();
 }
 
-// ---- deep links: #node=<node id>&tab=<tab> ------------------------------------------------------
+// ---- views: Graph | Timeline (design §11.1) -----------------------------------------------------
+
+let timeline = null;
+let currentView = 'graph';
+
+function setView(name, { write = true } = {}) {
+  const tl = name === 'timeline';
+  currentView = tl ? 'timeline' : 'graph';
+  $('#stage').hidden = tl;
+  $('#timeline-view').hidden = !tl;
+  $('#graph-tools').hidden = tl;
+  $('#view-graph').setAttribute('aria-selected', String(!tl));
+  $('#view-timeline').setAttribute('aria-selected', String(tl));
+  if (tl) {
+    if (inspector) inspector.close();
+    if (!timeline) {
+      import('./timeline/index.js')
+        .then(({ mountTimeline }) => {
+          timeline = mountTimeline($('#timeline-view'), { live: state.live });
+        })
+        .catch((e) => toast(`The timeline did not load: ${e.message || e}`, { kind: 'error' }));
+    }
+  }
+  if (write) {
+    const want = tl ? '#view=timeline' : '';
+    if (location.hash !== want) history.replaceState(null, '', want || `${location.pathname}${location.search}`);
+  }
+}
+
+function wireViews() {
+  $('#view-graph').addEventListener('click', () => setView('graph'));
+  $('#view-timeline').addEventListener('click', () => setView('timeline'));
+  const tl = $('#timeline-view');
+  // a lane label: the agent in the graph
+  tl.addEventListener('agentsc:select-node', (e) => {
+    const n = e.detail && app.node(e.detail.node_id);
+    setView('graph');
+    if (n) openNode(n);
+  });
+  // a segment: that agent's Traffic tab
+  tl.addEventListener('agentsc:open-traffic', (e) => {
+    const n = e.detail && e.detail.agent && app.node(e.detail.agent);
+    setView('graph');
+    if (n) openNode(n, 'traffic');
+  });
+}
+
+// ---- deep links: #node=<node id>&tab=<tab>, #view=timeline --------------------------------------
 
 function readHash() {
   const p = new URLSearchParams(location.hash.slice(1));
-  return { node: p.get('node'), tab: p.get('tab') };
+  return { node: p.get('node'), tab: p.get('tab'), view: p.get('view') };
 }
 
 function writeHash(id, tab) {
@@ -165,8 +213,14 @@ function writeHash(id, tab) {
 }
 
 function openFromHash() {
-  const { node, tab } = readHash();
-  if (!node || !state.me) return;
+  const { node, tab, view: wanted } = readHash();
+  if (!state.me) return;
+  if (wanted === 'timeline') {
+    if (currentView !== 'timeline') setView('timeline', { write: false });
+    return;
+  }
+  if (currentView !== 'graph') setView('graph', { write: false });
+  if (!node) return;
   const n = app.node(node);
   if (n && !(inspector.target && inspector.target.id === n.id && inspector.current === tab)) openNode(n, tab || undefined);
 }

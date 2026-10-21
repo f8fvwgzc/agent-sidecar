@@ -8,6 +8,7 @@
     <title>agentsc console</title>
     <link rel="icon" href="favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="timeline.css">
     <script src="vendor/d3.v7.9.0.min.js"></script>
     <script type="module" src="js/main.js"></script>
   </head>
@@ -54,7 +55,12 @@
           <span class="brand-name">agentsc</span>
         </div>
 
-        <div class="tb-group" role="group" aria-label="View">
+        <div class="tb-group view-switch" role="tablist" aria-label="View">
+          <button id="view-graph" type="button" role="tab" class="tb-btn" aria-selected="true" aria-controls="stage">Graph</button>
+          <button id="view-timeline" type="button" role="tab" class="tb-btn" aria-selected="false" aria-controls="timeline-view">Timeline</button>
+        </div>
+
+        <div id="graph-tools" class="tb-group" role="group" aria-label="Graph">
           <button id="btn-fit" type="button" class="tb-btn" title="Fit the graph to the window (F)">
             <svg viewBox="0 0 24 24" width="16" height="16" class="icon" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
             <span class="tb-label">Fit</span>
@@ -119,6 +125,8 @@
         </details>
         <aside id="inspector" class="inspector" aria-label="Inspector" hidden></aside>
       </main>
+
+      <section id="timeline-view" class="timeline-view" role="tabpanel" aria-label="Agent timeline" hidden></section>
     </div>
 
     <div id="toasts" class="toasts" aria-live="polite"></div>
