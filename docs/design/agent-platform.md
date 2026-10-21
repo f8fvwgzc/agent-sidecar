@@ -342,7 +342,7 @@ OTLP/HTTP JSON: `POST <endpoint>/v1/traces`, `/v1/metrics`.
 
 ## 10. REST API (`/api/v1`) and events
 
-The exact shapes are in [`docs/api/openapi.yaml`](../api/openapi.yaml) and the golden fixtures in `ui/fixtures/`. Summary:
+The exact shapes are in [`docs/api/openapi.yaml`](../api/openapi.yaml). **No example, recorded or fake data ships with the project** (decided 2026-10-21 at the user's request): the UI only shows what a real control plane returns, and contract tests run a real in-process `embassy serve` and validate its real responses against the OpenAPI document. Summary:
 
 | Method and path | Role |
 | --- | --- |
@@ -448,7 +448,7 @@ Every event has `id: <monotonic seq>`. On reconnect the server replays from `Las
 
 ComfyUI-style node canvas only (no other ComfyUI layout).
 
-- **Files:** `ui/index.html`, `ui/styles.css`, `ui/js/*.js` (ES modules), `ui/vendor/d3.v7.9.0.min.js` (classic script, loaded before `<script type="module" src="js/main.js">`; modules use `globalThis.d3`), `ui/vendor/d3.LICENSE`, `ui/vendor/SHA256SUMS` (checked by an embassy test against the file and the embedded bytes), `ui/fixtures/*` (golden API data; `ui/js/api.js` can run against them with `?fixtures=1`).
+- **Files:** `ui/index.html`, `ui/styles.css`, `ui/js/*.js` (ES modules), `ui/vendor/d3.v7.9.0.min.js` (classic script, loaded before `<script type="module" src="js/main.js">`; modules use `globalThis.d3`), `ui/vendor/d3.LICENSE`, `ui/vendor/SHA256SUMS` (checked by an embassy test against the file and the embedded bytes). The UI has no fixture or demo mode: it always talks to the real API, and shows honest empty and disconnected states.
 - **Security:** untrusted text only through `textContent` / D3 `.text()`; JSON shown via `JSON.stringify` into `<pre>` with `textContent`. Forbidden: `.html()`, `innerHTML`, `outerHTML`, `insertAdjacentHTML`, inline event attributes, inline `<script>`/`<style>`, `eval`, `new Function`. A test greps `ui/js` for these. No other third-party JS.
 - **Canvas:** dark dotted grid; d3-zoom (pan/zoom); nodes draggable (d3-drag). Service = translucent frame = bounding box of its children + 24 px; dragging a frame moves its children. Layout: one column per service ordered by topological depth of cross-service agent calls; inside a frame the app on the left and agents stacked by local agent-call depth; model providers and external nodes in a final column. Positions in `localStorage` key `attache.positions.v1` by node id; "Auto-layout" resets them.
 - **Agent node:** header (name, `agent`/`orchestrator` badge, status dot), rows for model, skill chips, learning badge (notes/pending), an input port `invoke` on the left, output ports on the right per `ports.out` coloured by tool type (agent, service, http, model). Tools with `allowed: false` are dimmed.
@@ -545,16 +545,16 @@ The invocation's own extent is a faint track behind its segments. While an invoc
 | Unit | Owns (exclusive) | Delivers |
 | --- | --- | --- |
 | A1 Foundation: model | `proto/**`, `runtime/src/attache_runtime/pb/**`, `crates/attache-proto/**`, `crates/attache-charter/**`, `schemas/**`, `crates/attache-common/src/audit.rs`, `services/attache-cli/**`, `deploy/crds/**`, `runtime/src/attache_runtime/spec.py`, CONTRACT.md §3 and §6 | proto (§7, plus `ProposeLesson` in the runtime proto), charter fields and rules (§4), CR form, `charter to-cr`, `schema --crd`, audit kinds and `subscribe()`, spec.py fields, tests |
-| A2 Foundation: API + embassy skeleton | `docs/api/openapi.yaml`, `ui/fixtures/**`, `services/embassy/**` (skeleton only) | OpenAPI 3.1 for §8–10 and golden fixtures (graph, services, charter, agent view, memory, proposals, events/recent, an SSE transcript); the embassy module tree with the `Store` trait, shared API types (serde structs matching the fixtures, with a test that the fixtures deserialize), `ControlPlaneConfig` types, `serve` and `token create` subcommands with all flags parsed, and compiling stubs; no proto-generated types used |
+| A2 Foundation: API + embassy skeleton | `docs/api/openapi.yaml`, `services/embassy/**` (skeleton only) | OpenAPI 3.1 for §8–10; the embassy module tree with the `Store` trait, shared API types, `ControlPlaneConfig` types, `serve` and `token create` subcommands with all flags parsed, and compiling stubs (the golden fixtures it first produced were removed on 2026-10-21) |
 | B1 Sidecar | `services/attached/**` | §6 (wires OTel at integration) |
 | B2 OTel | `crates/attache-otel/**` | §9 |
 | B3a Control plane core | `services/embassy/src/lib.rs`, `main.rs`, `Cargo.toml`, and new modules `serve/**`, `api/**`, `auth/**`, `store/mod.rs`, `store/file.rs`, plus any new top-level modules it needs (session, graph, events, proposals, controlplane, ui, cp_audit) | §8 except Kubernetes, §10 |
 | B3b Kubernetes + CA | `services/embassy/src/{k8s/**,issuance.rs,webhook.rs,servingcert.rs}`, `crates/attache-pki/**`; may add its own dependencies to embassy `Cargo.toml` (merge conflicts there are resolved at integration) | kube store, IssueCertificate, webhooks, caBundle reconcile, serving cert |
-| B4 UI | `ui/**` except fixtures | §11 |
+| B4 UI | `ui/**` | §11 |
 | B5 Runtime | `runtime/**` except stubs and spec.py | §12 |
 | B6 Packaging | `deploy/helm/**`, `deploy/compose/**`, `docker/**`, `.github/workflows/release.yml`, `Makefile` | §13–14, release workflow |
-| T0 Timeline foundation | `proto/**` (SpanStart), stubs, CONTRACT §4/§6, `docs/api/openapi.yaml`, `ui/fixtures/**`, `docs/api/check_fixtures.py`, embassy `api/types.rs` | `SpanStart` message, `/traces` endpoints and `span_start` SSE in OpenAPI, fixtures (`traces.json`, `trace-<id>.json`, span_start events) |
+| T0 Timeline foundation | `proto/**` (SpanStart), stubs, CONTRACT §4/§6, `docs/api/openapi.yaml`, embassy `api/types.rs` | `SpanStart` message, `/traces` endpoints and `span_start` SSE in OpenAPI |
 | B4b Timeline UI | `ui/js/timeline*.js`, toolbar/view switch in `ui/**` | §11.1 |
-| C Integration | — | merge, wire OTel into the sidecar (spawn on start, or on the reload that first enables traces or metrics; `set_flags` on later reloads), workspace version 0.2.0, CI jobs for `make packaging-test`, `docs/api/check_fixtures.py` and `ui/tests`, end-to-end on Compose and minikube, fixes |
+| C Integration | — | merge, wire OTel into the sidecar (spawn on start, or on the reload that first enables traces or metrics; `set_flags` on later reloads), workspace version 0.2.0, CI jobs for `make packaging-test`, `ui/tests` and a contract test that validates real responses of an in-process `embassy serve` against `docs/api/openapi.yaml`, end-to-end on Compose and minikube, fixes |
 | D Review | — | adversarial security and correctness review against §15, fixes |
 | E Docs | CONTRACT.md, docs, README | final documentation |

@@ -7,11 +7,10 @@ info:
     identifier: MIT
   description: |
     The REST, SSE and session API that `embassy serve` exposes with the `api` component
-    (design: docs/design/agent-platform.md §8 and §10). Golden example data for every
-    response lives in `ui/fixtures/`; the Rust types are `services/embassy/src/api/types.rs`,
-    and a test keeps the fixtures and those types in step. `docs/api/check_fixtures.py` checks
-    the fixtures against the schemas below (each operation names its fixtures in `x-fixture`),
-    against each other and against the design.
+    (design: docs/design/agent-platform.md §8 and §10). The Rust types are
+    `services/embassy/src/api/types.rs`. No example or recorded data ships with the project:
+    the integration tests run a real `embassy serve` and check its real responses against the
+    schemas below.
 
     ## Transport and Host check
 
@@ -183,7 +182,6 @@ paths:
       operationId: whoami
       summary: The identity of the caller.
       x-required-role: viewer
-      x-fixture: [ui/fixtures/whoami.json, ui/fixtures/whoami-viewer.json]
       responses:
         "200":
           description: The caller.
@@ -205,7 +203,6 @@ paths:
         Design §10.1. Filtered to the caller's namespaces. `version` increases whenever
         topology or stats change; the SSE `graph` event announces a new version.
       x-required-role: viewer
-      x-fixture: ui/fixtures/graph.json
       responses:
         "200":
           description: The graph.
@@ -227,7 +224,6 @@ paths:
         A service is listed when the store has a charter for it, or when an instance is
         connected for it, or both. Sorted by namespace, then service.
       x-required-role: viewer
-      x-fixture: ui/fixtures/services.json
       responses:
         "200":
           description: The services.
@@ -280,11 +276,6 @@ paths:
       operationId: getCharter
       summary: The stored charter.
       x-required-role: viewer
-      x-fixture:
-        - ui/fixtures/charter-orders.json
-        - ui/fixtures/charter-inventory.json
-        - ui/fixtures/charter-support.json
-        - ui/fixtures/charter-reports.json
       responses:
         "200":
           description: The charter, as YAML text and as JSON.
@@ -361,7 +352,6 @@ paths:
         Runs the validator, the policy and the skew check, and reports the role the write
         would need against the stored charter and the changes that weaken protection.
       x-required-role: editor
-      x-fixture: ui/fixtures/charter-validate.json
       parameters:
         - $ref: "#/components/parameters/Csrf"
       requestBody:
@@ -398,7 +388,6 @@ paths:
       summary: Every stored version of the charter, newest first.
       description: The Kubernetes store keeps the last 20 versions.
       x-required-role: viewer
-      x-fixture: ui/fixtures/history.json
       responses:
         "200":
           description: The history.
@@ -585,7 +574,6 @@ paths:
       operationId: getAgent
       summary: One agent with the policy around it.
       x-required-role: viewer
-      x-fixture: [ui/fixtures/agent-view.json, ui/fixtures/agent-view-support.json]
       responses:
         "200":
           description: The agent view. The ETag is the charter version.
@@ -772,7 +760,6 @@ paths:
         write is reported in `failed` without undoing `applied`. Audited as `link_post`.
       x-required-role: editor
       x-role-on-diff: true
-      x-fixture: ui/fixtures/links-result.json
       parameters:
         - $ref: "#/components/parameters/Csrf"
       requestBody:
@@ -808,7 +795,6 @@ paths:
       operationId: getMemory
       summary: The service's learned notes, per agent.
       x-required-role: viewer
-      x-fixture: ui/fixtures/memory.json
       responses:
         "200":
           description: The memory document. The ETag is the memory version.
@@ -889,7 +875,6 @@ paths:
       operationId: listProposals
       summary: Lessons agents proposed, newest first.
       x-required-role: viewer
-      x-fixture: ui/fixtures/proposals.json
       parameters:
         - name: status
           in: query
@@ -1032,7 +1017,6 @@ paths:
         The ring holds the records the control plane kept: see `AuditRecord` for the ones it
         drops.
       x-required-role: viewer
-      x-fixture: ui/fixtures/events-recent.json
       parameters:
         - name: limit
           in: query
@@ -1116,9 +1100,8 @@ paths:
         **Keep-alive.** A comment line (`: keepalive`) every 15 s.
 
         Event types and their `data` schemas are listed in `x-sse-events` below and in the
-        `SseEvent*` schemas. A golden transcript is `ui/fixtures/events.sse`.
+        `SseEvent*` schemas.
       x-required-role: viewer
-      x-fixture: ui/fixtures/events.sse
       x-sse-events:
         audit:
           $ref: "#/components/schemas/AuditEvent"
