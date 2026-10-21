@@ -100,14 +100,14 @@ WRITE_RANK = {"tool_call": 0, "agent_call": 1, "service_call": 1, "http_call": 1
 MUTATING = ("post", "put", "delete", "patch")
 SSE_QUEUE = 1024  # design §10.2: a client's queue; an overflow drops it and the event that did not fit
 # Charter writes that OpenAPI marks `x-role-on-diff: true` while the design §10 table names only
-# their minimum role. Design §8.3 and §8.4 check every charter write on the diff, so they agree in
-# substance; the table rows still need "(+role on diff)" (the design is not this unit's file).
-# Printed as notes, and reported as stale once the table says it.
-DESIGN_TABLE_GAPS = {
-    ("PUT", "/services/{ns}/{svc}/skills/{skill}"),
-    ("DELETE", "/services/{ns}/{svc}/skills/{skill}"),
-    ("DELETE", "/services/{ns}/{svc}/agents/{agent}"),
-}
+# their minimum role (printed as notes, reported as stale once the table says "(+role on diff)").
+# Empty: the table names every one of them now.
+DESIGN_TABLE_GAPS: set[tuple[str, str]] = set()
+# The SSE event types of design §10.2.
+SSE_EVENTS = {"audit", "graph", "registry", "config", "ack", "proposal", "span_start", "cp_audit", "lagged", "reset"}
+# The timeline's runs (design §10.1.1): validated when present, against GET /traces and
+# GET /traces/{trace_id}.
+TRACE_FIXTURES = re.compile(r"^(traces|trace-[0-9a-f]+)\.json$")
 
 
 class Problems:
@@ -400,11 +400,7 @@ def check_openapi(doc, design: str) -> None:
     )
 
     events = doc["paths"]["/events"]["get"]["x-sse-events"]
-    P.check(
-        set(events) == {"audit", "graph", "registry", "config", "ack", "proposal", "cp_audit", "lagged", "reset"},
-        where,
-        f"x-sse-events lists {sorted(events)}",
-    )
+    P.check(set(events) == SSE_EVENTS, where, f"x-sse-events lists {sorted(events)}")
 
 
 # ---- schema validation of every fixture --------------------------------------------------------
@@ -487,6 +483,24 @@ def check_schemas(doc) -> None:
                 continue
             schema = op["responses"]["200"]["content"]["application/json"]["schema"]
             validate(for_schema(schema), load_json(name), f"ui/fixtures/{name}")
+    # the timeline's runs, when present (they may come before an operation names them)
+    for name in SRC.files:
+        if not TRACE_FIXTURES.match(name):
+            continue
+        named.add(name)
+        path = "/traces" if name == "traces.json" else "/traces/{trace_id}"
+        op = doc["paths"].get(path, {}).get("get")
+        if not P.check(op is not None, "openapi.yaml", f"GET {path} is not documented ({name})"):
+            continue
+        schema = op["responses"]["200"]["content"]["application/json"]["schema"]
+        data = load_json(name)
+        validate(for_schema(schema), data, f"ui/fixtures/{name}")
+        if name != "traces.json" and isinstance(data, dict):
+            P.check(
+                name == f"trace-{data.get('trace_id')}.json",
+                f"ui/fixtures/{name}",
+                "the file is not named trace-<trace_id>.json",
+            )
     for name in SRC.files:
         if name != "README.md":
             P.check(name in named, f"ui/fixtures/{name}", "no operation names it in x-fixture")
@@ -1492,6 +1506,13 @@ def _drop_node(node_id):
     return _json_edit("graph.json", lambda g: g.__setitem__("nodes", [n for n in g["nodes"] if n["id"] != node_id]))
 
 
+def _add_file(name: str, text: str):
+    def mutate(src: Source) -> None:
+        src.files[name] = text
+
+    return mutate
+
+
 def _sse_ids(src: Source) -> None:
     """Pull the lagged event's id down to just above the event before it."""
     text = src.files["events.sse"]
@@ -1632,6 +1653,13 @@ MUTATIONS = [
         _doc_edit(lambda d: d["components"]["schemas"]["Error"]["properties"]["error"]["enum"].remove("not_pending")),
         "not_pending",
     ),
+    ("a runs fixture off its schema", _add_file("traces.json", '[{"trace_id": 1}]\n'), "ui/fixtures/traces.json"),
+    (
+        "a trace fixture named after another trace",
+        _add_file("trace-abc.json", '{"trace_id": "def", "spans": []}\n'),
+        "trace-<trace_id>.json",
+    ),
+    ("a fixture no operation names", _add_file("extra.json", "{}\n"), "no operation names it"),
     (
         "a role on the diff the design table does not show",
         _doc_edit(lambda d: _op(d, "/services/{ns}/{svc}/memory", "put").__setitem__("x-role-on-diff", True)),

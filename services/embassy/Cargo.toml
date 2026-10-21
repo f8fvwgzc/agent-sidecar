@@ -11,6 +11,22 @@ publish.workspace = true
 [dependencies]
 attache-pki.workspace = true
 attache-common.workspace = true
+attache-charter.workspace = true
+attache-proto.workspace = true
+tonic.workspace = true
+prost.workspace = true
+axum.workspace = true
+http.workspace = true
+tower.workspace = true
+tokio-stream.workspace = true
+futures.workspace = true
+uuid.workspace = true
+# The Connect listener and --http-tls accept TLS here with the serving certificate's rustls
+# configuration (the tokio-rustls tonic uses, so client certificates reach the requests).
+tokio-rustls = { version = "0.26", default-features = false }
+# Session cookies (HMAC-SHA256, design §8.3) and constant-time token and MAC comparison.
+hmac = "0.12"
+subtle = "2"
 tokio.workspace = true
 reqwest.workspace = true
 serde.workspace = true

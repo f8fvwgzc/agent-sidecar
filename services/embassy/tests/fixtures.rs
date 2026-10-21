@@ -7,7 +7,7 @@ use embassy::api::ids;
 use embassy::api::types::{
     AgentView, AuditRecord, CharterDoc, Edge, EdgeKind, Graph, HistoryEntry, LinkResult, MemoryDoc,
     Node, NoteSource, Proposal, ProposalStatus, Role, ServiceStatus, ServiceSummary, SseEvent,
-    ValidateResult, WhoAmI,
+    TraceDoc, TraceSummary, ValidateResult, WhoAmI,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -102,6 +102,17 @@ fn every_fixture_round_trips_through_its_api_type() {
             "proposals.json" => round_trip::<Vec<Proposal>>(&name),
             "events-recent.json" => round_trip::<Vec<AuditRecord>>(&name),
             "history.json" => round_trip::<Vec<HistoryEntry>>(&name),
+            // the timeline's runs (added with the timeline fixtures; checked when present)
+            "traces.json" => round_trip::<Vec<TraceSummary>>(&name),
+            n if n.starts_with("trace-") && n.ends_with(".json") => {
+                round_trip::<TraceDoc>(&name);
+                let doc: TraceDoc = typed(&name);
+                assert_eq!(
+                    name,
+                    format!("trace-{}.json", doc.trace_id),
+                    "trace-<trace_id>.json"
+                );
+            }
             "events.sse" => {
                 for f in sse_frames() {
                     let event = SseEvent::parse(&f.event, &f.data)
@@ -490,6 +501,10 @@ fn sse_transcript_follows_the_design_rules() {
         }
     }
     for want in SseEvent::NAMES {
+        // span_start events arrive with the timeline fixtures
+        if want == "span_start" {
+            continue;
+        }
         assert!(kinds.contains(want), "events.sse has no {want} event");
     }
     assert_eq!(
@@ -660,6 +675,11 @@ fn openapi_document_is_consistent() {
         "Error",
         "CpAuditRecord",
         "SseEvent",
+        "TraceSummary",
+        "Span",
+        "SpanEvent",
+        "TraceDoc",
+        "SpanStartEvent",
     ] {
         assert!(
             schemas.contains_key(name),

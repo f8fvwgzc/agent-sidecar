@@ -831,74 +831,24 @@ impl Decision {
     }
 }
 
-/// A sidecar audit record (CONTRACT.md §6) as the API serves it: the lenient view of design §5.
-///
-/// This is, field for field and attribute for attribute, the shape of
-/// `attache_common::audit::AuditRecordView` (unit A1), which is not on this branch yet; once it
-/// is, this struct and [`Tokens`] become `pub use attache_common::audit::{AuditRecordView as
-/// AuditRecord, TokensView as Tokens}` and nothing else changes: the API-side behaviour lives in
-/// [`AuditRecordExt`], a trait, so that it can be implemented for the shared type, and
-/// `tests::audit_records_parse_like_the_shared_view` pins the shape both must have.
+/// A sidecar audit record (CONTRACT.md §6) as the API serves it: the shared lenient view of
+/// design §5, `attache_common::audit::AuditRecordView`, which the CLI and the OpenTelemetry
+/// exporter read too.
 ///
 /// - `kind`, `direction` and `decision` are any string.
 /// - Only the fields that identify a record are required (`ts`, `kind`, `request_id`,
 ///   `trace_id`, `service`, `caller`, `callee`, `direction`, `decision`): every other field
-///   defaults when absent (empty string, null, 0) and is then served with that default, so a
-///   record the CLI and the OpenTelemetry exporter accept is accepted here too.
+///   defaults when absent (empty string, null, 0) and is then served with that default.
 /// - [`Tokens`] keeps counters it does not know.
-/// - Top-level fields this build does not know are kept in [`AuditRecord::extra`] and
-///   serialized again unchanged, so a record from a newer sidecar is served as it arrived —
-///   except to a caller that does not see payloads ([`AuditRecordExt::without_payloads`]).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AuditRecord {
-    pub ts: String,
-    pub kind: String,
-    pub request_id: String,
-    pub trace_id: String,
-    #[serde(default)]
-    pub span_id: String,
-    #[serde(default)]
-    pub parent_span_id: Option<String>,
-    pub service: String,
-    #[serde(default)]
-    pub namespace: String,
-    #[serde(default)]
-    pub agent: Option<String>,
-    pub caller: String,
-    #[serde(default)]
-    pub caller_agent: Option<String>,
-    pub callee: String,
-    /// `inbound`, `outbound`, `internal`, or a later value ([`Direction::parse`]).
-    pub direction: String,
-    #[serde(default)]
-    pub input: Value,
-    #[serde(default)]
-    pub output: Value,
-    #[serde(default)]
-    pub input_sha256: Option<String>,
-    #[serde(default)]
-    pub output_sha256: Option<String>,
-    #[serde(default)]
-    pub tokens: Option<Tokens>,
-    #[serde(default)]
-    pub cost_usd: Option<f64>,
-    #[serde(default)]
-    pub latency_ms: u64,
-    /// `allow`, `deny`, or a later value ([`Decision::parse`]).
-    pub decision: String,
-    #[serde(default)]
-    pub rule: Option<String>,
-    #[serde(default)]
-    pub reason: Option<String>,
-    #[serde(default)]
-    pub error: Option<String>,
-    /// Top-level fields added by later sidecar versions, kept as they arrived.
-    #[serde(flatten)]
-    pub extra: serde_json::Map<String, Value>,
-}
+/// - Top-level fields this build does not know are kept in `extra` and serialized again
+///   unchanged, so a record from a newer sidecar is served as it arrived — except to a caller
+///   that does not see payloads ([`AuditRecordExt::without_payloads`]).
+pub use attache_common::audit::AuditRecordView as AuditRecord;
+/// Token usage of a record (`attache_common::audit::TokensView`): `input` and `output` (0 when
+/// absent), and any counter a newer sidecar adds, kept and served again as written.
+pub use attache_common::audit::TokensView as Tokens;
 
-/// What the API does with an [`AuditRecord`]. A trait rather than inherent methods so that it
-/// stays when [`AuditRecord`] becomes the shared `attache_common::audit::AuditRecordView`.
+/// What the API does with an [`AuditRecord`] (a trait: the record type is the shared one).
 pub trait AuditRecordExt: Sized {
     /// The record as a caller that does not see payloads sees it (a token without
     /// `payloads: true`, or `?payloads=false`; design §8.3): `input` and `output` null (the
@@ -929,19 +879,6 @@ impl AuditRecordExt for AuditRecord {
     fn known_decision(&self) -> Option<Decision> {
         Decision::parse(&self.decision)
     }
-}
-
-/// Token usage of a record (`attache_common::audit::TokensView`): `input` and `output` (0 when
-/// absent), and any counter a newer sidecar adds, kept and served again as written.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct Tokens {
-    #[serde(default)]
-    pub input: u64,
-    #[serde(default)]
-    pub output: u64,
-    /// Counters this build does not know (`cache_read`, say), kept as they arrived.
-    #[serde(flatten)]
-    pub extra: serde_json::Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1001,7 +938,138 @@ pub struct CpAuditRecord {
     pub reason: Option<String>,
 }
 
+// ---- traces (design §10.1.1) ----------------------------------------------------------------------
+
+/// The state of a span, and of a whole run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpanStatus {
+    /// Started (a `SpanStart` arrived) and not ended yet.
+    Running,
+    Ok,
+    Denied,
+    Error,
+}
+
+/// How the timeline draws a span (design §11.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Segment {
+    /// `model_call`.
+    Thinking,
+    /// `service_call`, `http_call`, `tool_call` (incl. `load_skill`).
+    Tool,
+    /// `agent_call`: the caller waits on the sub-agent.
+    Waiting,
+    /// `agent_invocation`.
+    Invocation,
+}
+
+/// One run (one trace) in `GET /traces`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TraceSummary {
+    pub trace_id: String,
+    /// The root invocation's input (first 120 characters) for callers that see payloads,
+    /// otherwise `<root agent> · <first 8 characters of the trace id>`.
+    pub title: String,
+    /// The root invocation's agent node id.
+    pub root_agent: String,
+    pub root_request_id: String,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub status: SpanStatus,
+    /// Distinct agents that took part.
+    pub agents: u32,
+    pub invocations: u32,
+    pub model_calls: u32,
+    pub tool_calls: u32,
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    pub cost_usd: f64,
+}
+
+/// A record of another kind (`guardrail`, `budget`, `authz`, `config`, `learning`, ...)
+/// attached to the span whose `span_id` it carries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpanEvent {
+    pub kind: String,
+    pub rule: Option<String>,
+    pub decision: String,
+    pub ts: String,
+}
+
+/// One span of a run (`GET /traces/{trace_id}`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Span {
+    pub span_id: String,
+    pub parent_span_id: Option<String>,
+    pub kind: String,
+    /// The agent node id, null when the record names no agent.
+    pub agent: Option<String>,
+    pub namespace: String,
+    pub service: String,
+    pub callee: String,
+    /// The node the call reaches, when there is one.
+    pub callee_node: Option<String>,
+    /// From the `SpanStart` when one arrived, else `ts − latency_ms` of the record.
+    pub start: String,
+    /// The record's `ts`; null while running.
+    pub end: Option<String>,
+    pub latency_ms: Option<u64>,
+    pub status: SpanStatus,
+    pub decision: Option<String>,
+    pub rule: Option<String>,
+    pub request_id: String,
+    pub caller: String,
+    pub caller_agent: Option<String>,
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    pub cost_usd: f64,
+    /// Repeated calls from the same caller agent to the same callee within the trace: 1, 2, ...
+    pub call_index: u32,
+    pub segment: Segment,
+    /// `model_call`: `input.attempt` (1-based); 1 otherwise.
+    pub attempt: u32,
+    /// `model_call`: `input.fallback`.
+    pub fallback: bool,
+    pub events: Vec<SpanEvent>,
+}
+
+/// `GET /traces/{trace_id}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TraceDoc {
+    pub trace_id: String,
+    pub spans: Vec<Span>,
+}
+
 // ---- SSE events (design §10.2) --------------------------------------------------------------------
+
+/// `event: span_start`: an invocation or a tool call started (the matching `audit` event closes
+/// the span).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpanStartEvent {
+    pub namespace: String,
+    pub service: String,
+    pub request_id: String,
+    pub trace_id: String,
+    pub span_id: String,
+    pub parent_span_id: Option<String>,
+    pub kind: String,
+    pub agent: Option<String>,
+    pub agent_node: Option<String>,
+    pub caller: String,
+    pub caller_agent: Option<String>,
+    pub callee: String,
+    pub callee_node: Option<String>,
+    pub ts: String,
+    pub call_index: u32,
+}
 
 /// `event: audit`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1091,6 +1159,7 @@ pub enum SseEvent {
     Config(ConfigEvent),
     Ack(AckEvent),
     Proposal(Proposal),
+    SpanStart(SpanStartEvent),
     /// Sent to admins only.
     CpAudit(CpAuditRecord),
     Lagged(LaggedEvent),
@@ -1099,8 +1168,17 @@ pub enum SseEvent {
 
 impl SseEvent {
     /// Every event name, in the order of design §10.2.
-    pub const NAMES: [&'static str; 9] = [
-        "audit", "graph", "registry", "config", "ack", "proposal", "cp_audit", "lagged", "reset",
+    pub const NAMES: [&'static str; 10] = [
+        "audit",
+        "graph",
+        "registry",
+        "config",
+        "ack",
+        "proposal",
+        "span_start",
+        "cp_audit",
+        "lagged",
+        "reset",
     ];
 
     /// The SSE `event:` field.
@@ -1112,6 +1190,7 @@ impl SseEvent {
             SseEvent::Config(_) => "config",
             SseEvent::Ack(_) => "ack",
             SseEvent::Proposal(_) => "proposal",
+            SseEvent::SpanStart(_) => "span_start",
             SseEvent::CpAudit(_) => "cp_audit",
             SseEvent::Lagged(_) => "lagged",
             SseEvent::Reset(_) => "reset",
@@ -1127,6 +1206,7 @@ impl SseEvent {
             SseEvent::Config(e) => serde_json::to_string(e),
             SseEvent::Ack(e) => serde_json::to_string(e),
             SseEvent::Proposal(e) => serde_json::to_string(e),
+            SseEvent::SpanStart(e) => serde_json::to_string(e),
             SseEvent::CpAudit(e) => serde_json::to_string(e),
             SseEvent::Lagged(e) => serde_json::to_string(e),
             SseEvent::Reset(e) => serde_json::to_string(e),
@@ -1142,6 +1222,7 @@ impl SseEvent {
             "config" => SseEvent::Config(serde_json::from_str(data)?),
             "ack" => SseEvent::Ack(serde_json::from_str(data)?),
             "proposal" => SseEvent::Proposal(serde_json::from_str(data)?),
+            "span_start" => SseEvent::SpanStart(serde_json::from_str(data)?),
             "cp_audit" => SseEvent::CpAudit(serde_json::from_str(data)?),
             "lagged" => SseEvent::Lagged(serde_json::from_str(data)?),
             "reset" => SseEvent::Reset(serde_json::from_str(data)?),
@@ -1541,6 +1622,41 @@ mod tests {
         assert!(SseEvent::parse("gossip", "{}").is_err());
         assert!(SseEvent::parse("reset", r#"{"x":1}"#).is_err());
         assert!(SseEvent::parse("lagged", r#"{"dropped":-1}"#).is_err());
+    }
+
+    #[test]
+    fn span_start_events_and_traces_round_trip() {
+        let data = json!({
+            "namespace": "shop", "service": "orders", "request_id": "q", "trace_id": "t",
+            "span_id": "s", "parent_span_id": null, "kind": "agent_call", "agent": "ops",
+            "agent_node": "agent:shop/orders/ops", "caller": "local", "caller_agent": null,
+            "callee": "inventory/stock", "callee_node": "agent:shop/inventory/stock",
+            "ts": "2026-10-21T10:00:00.000Z", "call_index": 2
+        })
+        .to_string();
+        let e = SseEvent::parse("span_start", &data).unwrap();
+        assert_eq!(e.name(), "span_start");
+        assert_eq!(
+            serde_json::from_str::<Value>(&e.data().unwrap()).unwrap(),
+            serde_json::from_str::<Value>(&data).unwrap()
+        );
+        let span = json!({
+            "span_id": "s", "parent_span_id": "p", "kind": "model_call",
+            "agent": "agent:shop/orders/ops", "namespace": "shop", "service": "orders",
+            "callee": "mock", "callee_node": "model:mock", "start": "2026-10-21T10:00:00.000Z",
+            "end": null, "latency_ms": null, "status": "running", "decision": null, "rule": null,
+            "request_id": "q", "caller": "local", "caller_agent": null, "tokens_in": 0,
+            "tokens_out": 0, "cost_usd": 0.0, "call_index": 1, "segment": "thinking",
+            "attempt": 2, "fallback": true,
+            "events": [{"kind": "guardrail", "rule": null, "decision": "allow", "ts": "2026-10-21T10:00:00.000Z"}]
+        });
+        let doc: TraceDoc =
+            serde_json::from_value(json!({"trace_id": "t", "spans": [span.clone()]})).unwrap();
+        assert_eq!(doc.spans[0].segment, Segment::Thinking);
+        assert_eq!(serde_json::to_value(&doc.spans[0]).unwrap(), span);
+        let mut bad = span;
+        bad["segment"] = json!("dancing");
+        assert!(serde_json::from_value::<Span>(bad).is_err());
     }
 
     #[test]
