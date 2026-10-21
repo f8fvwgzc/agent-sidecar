@@ -4,8 +4,8 @@
 //   view.unmount();                    // or unmountTimeline(container)
 //
 // `api` is either a source object with listTraces/getTrace/subscribe (see data.js; the console can
-// pass one that shares its EventSource) or options for the built-in source ({fixtures, baseUrl,
-// fixturesUrl}); without it the source follows the page URL (`?fixtures=1` uses ui/fixtures).
+// pass one that shares its EventSource) or options for the built-in control-plane source
+// ({baseUrl}, default `/api/v1`): `GET /traces`, `GET /traces/{id}` and the SSE stream.
 // `live` (default true) subscribes to SSE `span_start` and `audit` events.
 //
 // The view dispatches, on `container` (bubbling):
@@ -161,10 +161,13 @@ class TimelineView {
       list = await this.source.listTraces({ limit: LIST_LIMIT, ...this.filter });
     } catch (err) {
       if (this.destroyed) return;
+      this.list.setNote("Runs could not be loaded.");
+      this.renderList();
       if (!this.selectedId) this.card.setMessage(err && err.message ? err.message : "Could not load runs.");
       return;
     }
     if (this.destroyed) return;
+    this.list.setNote(null);
     const rows = Array.isArray(list) ? list : [];
     const next = new Map();
     for (const s of rows) {

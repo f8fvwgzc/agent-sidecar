@@ -1,8 +1,0 @@
-{
-  "name": "alice",
-  "role": "admin",
-  "namespaces": [
-    "*"
-  ],
-  "payloads": true
-}

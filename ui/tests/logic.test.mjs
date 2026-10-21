@@ -1,13 +1,10 @@
-// Unit tests for the console's pure modules and the fixture-mode backend. Run with
-// `node --test ui/tests/` (Node 20+), or through `python3 -I ui/tests/check_ui.py`.
+// Unit tests for the console's pure modules. Run with `node --test ui/tests/*.test.mjs`
+// (Node 22.7+), or through `python3 -I ui/tests/check_ui.py`. Every input is written inline
+// below: the console has no fixture data.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
 
-import { parseSse } from '../js/sse.js';
 import {
   roleAtLeast,
   parseNodeId,
@@ -38,87 +35,102 @@ import {
 } from '../js/util.js';
 import { G, nodeBox, portPoint, bezier, edgePath, frameRect, emptyFrameRect, rectsOverlap } from '../js/geometry.js';
 import { autoLayout, resolvePositions, depths } from '../js/layout.js';
-import { createFixtureServer, synthAgentView, toolTarget, validateAgent, judgeCharter } from '../js/fixtures.js';
-import { Api, ApiError, parseEtag } from '../js/api.js';
+import { Api, ApiError, apiUrl, isUnreachable, parseEtag } from '../js/api.js';
 import { viewPayload, normalizeView } from '../js/tab-config.js';
 import { targetFor, tabsFor } from '../js/inspector.js';
 import { learningTurnedOff } from '../js/tab-yaml.js';
 import { loadPositions, savePositions, clearPositions, POSITIONS_KEY } from '../js/store.js';
+import { ApiSource, createTimelineSource } from '../js/timeline/data.js';
 
-const FIX = join(dirname(fileURLToPath(import.meta.url)), '..', 'fixtures');
-const fixture = (name) => readFileSync(join(FIX, name), 'utf8');
-const json = (name) => JSON.parse(fixture(name));
-const load = async (name) => {
-  try {
-    return readFileSync(join(FIX, name), 'utf8');
-  } catch {
-    return null;
-  }
-};
 const boxOf = (n) => nodeBox(n, { linkPort: true });
 
-/** Fake timers and clock for the fixture server's replay. */
-function fakeTime() {
-  let now = 0;
-  let seq = 0;
-  const queue = [];
+// ---- inline inputs -------------------------------------------------------------------------------
+//
+// A small graph in the GET /graph shape (design §10.1): service `front` (an app, the orchestrator
+// `lead` and the agent `assist` that `lead` calls) calls service `back` (an app and `worker`).
+// Both use one model provider; `lead` also reached an external origin through a tool it does not
+// declare (an undeclared edge on a port the card does not have).
+
+const NS = 'ns';
+const svcId = (s) => `svc:${NS}/${s}`;
+const appId = (s) => `app:${NS}/${s}`;
+const agentId = (s, a) => `agent:${NS}/${s}/${a}`;
+const MODEL = 'model:anthropic';
+const ORIGIN = 'external:https://api.example.com';
+
+function serviceNode(s, extra = {}) {
+  return { id: svcId(s), type: 'service', label: s, namespace: NS, service: s, status: 'connected', instances: 1, charter_version: '1', ...extra };
+}
+
+function appNode(s) {
+  return { id: appId(s), type: 'app', parent: svcId(s), label: `${s} app`, port: 8080, ports: { in: ['service'], out: ['invoke'] } };
+}
+
+function agentNode(s, a, tools = [], extra = {}) {
   return {
-    monotonic: () => now,
-    timers: {
-      setTimeout(fn, ms) {
-        const id = ++seq;
-        queue.push({ id, at: now + Math.max(0, ms), fn });
-        return id;
-      },
-      clearTimeout(id) {
-        const i = queue.findIndex((t) => t.id === id);
-        if (i >= 0) queue.splice(i, 1);
-      },
-    },
-    advance(ms) {
-      const end = now + ms;
-      for (;;) {
-        queue.sort((a, b) => a.at - b.at || a.id - b.id);
-        const next = queue[0];
-        if (!next || next.at > end) break;
-        queue.shift();
-        now = next.at;
-        next.fn();
-      }
-      now = end;
-    },
+    id: agentId(s, a),
+    type: 'agent',
+    parent: svcId(s),
+    label: a,
+    agent_type: 'agent',
+    model: 'model-a',
+    skills: [],
+    status: 'ok',
+    ports: { in: ['invoke'], out: [...tools.map((t) => t.name), 'model'] },
+    tools: tools.map((t) => ({ ...t, allowed: true })),
+    learning: { enabled: false, mode: 'review', notes: 0, pending: 0 },
+    ...extra,
   };
 }
 
-async function server(query = '', opts = {}) {
-  const t = fakeTime();
-  const s = await createFixtureServer({ load, params: new URLSearchParams(query), timers: t.timers, monotonic: t.monotonic, replay: opts.replay ?? false });
-  return { s, t };
+function edge(kind, source, sourcePort, target, targetPort, declared = true) {
+  return { id: `edge:${kind}:${source}->${target}${kind === 'tool' ? `#${sourcePort}` : ''}`, kind, source, source_port: sourcePort, target, target_port: targetPort, declared };
 }
 
-const W = { 'Content-Type': 'application/json', 'X-Attache-CSRF': '1' };
+function sampleGraph() {
+  const leadTools = [
+    { name: 'lookup', type: 'service', target: appId('front') },
+    { name: 'ask_worker', type: 'agent', target: agentId('back', 'worker') },
+    { name: 'ask_assist', type: 'agent', target: agentId('front', 'assist') },
+  ];
+  const lead = agentId('front', 'lead');
+  const assist = agentId('front', 'assist');
+  const worker = agentId('back', 'worker');
+  return {
+    version: '1',
+    nodes: [
+      serviceNode('front'),
+      appNode('front'),
+      agentNode('front', 'lead', leadTools, { agent_type: 'orchestrator' }),
+      agentNode('front', 'assist'),
+      serviceNode('back'),
+      appNode('back'),
+      agentNode('back', 'worker', [{ name: 'read', type: 'service', target: appId('back') }]),
+      { id: MODEL, type: 'model_provider', label: 'Anthropic', ports: { in: ['model'], out: [] } },
+      { id: ORIGIN, type: 'external', label: 'api.example.com', ports: { in: ['http'], out: [] } },
+    ],
+    edges: [
+      edge('invoke', appId('front'), 'invoke', lead, 'invoke'),
+      edge('invoke', appId('front'), 'invoke', assist, 'invoke'),
+      edge('tool', lead, 'lookup', appId('front'), 'service'),
+      edge('tool', lead, 'ask_worker', worker, 'invoke'),
+      edge('tool', lead, 'ask_assist', assist, 'invoke'),
+      edge('model', lead, 'model', MODEL, 'model'),
+      edge('model', assist, 'model', MODEL, 'model'),
+      edge('invoke', appId('back'), 'invoke', worker, 'invoke'),
+      edge('tool', worker, 'read', appId('back'), 'service'),
+      edge('model', worker, 'model', MODEL, 'model'),
+      edge('tool', lead, 'call_out', ORIGIN, 'http', false),
+    ],
+  };
+}
 
-// ---- sse ------------------------------------------------------------------------------------------
+const nodeOf = (g, id) => g.nodes.find((n) => n.id === id);
 
-test('parseSse reads the golden transcript', () => {
-  const { events, comments } = parseSse(fixture('events.sse'));
-  assert.ok(events.length >= 17);
-  assert.equal(comments, 1);
-  assert.equal(events[0].id, '48211');
-  assert.equal(events[0].event, 'registry');
-  for (const e of events) JSON.parse(e.data);
-  const types = new Set(events.map((e) => e.event));
-  for (const t of ['registry', 'ack', 'audit', 'graph', 'proposal', 'cp_audit']) assert.ok(types.has(t), t);
-});
-
-test('parseSse joins multi-line data, handles CRLF, ignores comments and unknown fields', () => {
-  const { events, comments } = parseSse(': hi\r\nid: 7\r\nevent: x\r\ndata: a\r\ndata:b\r\nretry: 5\r\n\r\ndata: tail');
-  assert.deepEqual(events, [
-    { id: '7', event: 'x', data: 'a\nb' },
-    { id: '7', event: 'message', data: 'tail' },
-  ]);
-  assert.equal(comments, 1);
-});
+/** An audit record as GET /events/recent returns it (only the fields the grouping reads). */
+function record(request_id, ts, kind, decision = 'allow', extra = {}) {
+  return { ts, kind, request_id, parent_span_id: null, decision, error: null, ...extra };
+}
 
 // ---- util ----------------------------------------------------------------------------------------
 
@@ -131,9 +143,9 @@ test('roles are ordered viewer < editor < admin and unknown roles are never enou
 });
 
 test('parseNodeId understands every node id form', () => {
-  assert.deepEqual(parseNodeId('svc:shop/orders'), { kind: 'svc', ns: 'shop', svc: 'orders' });
-  assert.deepEqual(parseNodeId('app:shop/orders'), { kind: 'app', ns: 'shop', svc: 'orders' });
-  assert.deepEqual(parseNodeId('agent:shop/orders/ops'), { kind: 'agent', ns: 'shop', svc: 'orders', agent: 'ops' });
+  assert.deepEqual(parseNodeId('svc:ns-a/svc-a'), { kind: 'svc', ns: 'ns-a', svc: 'svc-a' });
+  assert.deepEqual(parseNodeId('app:ns-a/svc-a'), { kind: 'app', ns: 'ns-a', svc: 'svc-a' });
+  assert.deepEqual(parseNodeId('agent:ns-a/svc-a/agent-a'), { kind: 'agent', ns: 'ns-a', svc: 'svc-a', agent: 'agent-a' });
   assert.deepEqual(parseNodeId('model:anthropic'), { kind: 'model', provider: 'anthropic' });
   assert.deepEqual(parseNodeId('external:https://api.x.example:8443'), { kind: 'external', origin: 'https://api.x.example:8443' });
   assert.equal(parseNodeId('nope'), null);
@@ -141,19 +153,42 @@ test('parseNodeId understands every node id form', () => {
 });
 
 test('groupByRequest groups the recent events newest request first, records oldest first', () => {
-  const groups = groupByRequest(json('events-recent.json'));
-  assert.equal(groups.length, 3);
-  assert.equal(groups[0].request_id, 'a6cd1b82-8713-4940-a670-ea20303e6b47');
+  // Newest first, as GET /events/recent returns them.
+  const recent = [
+    record('req-c', '2026-01-01T00:00:30.000Z', 'agent_invocation', 'deny'),
+    record('req-c', '2026-01-01T00:00:30.000Z', 'guardrail', 'deny'),
+    record('req-b', '2026-01-01T00:00:20.000Z', 'agent_invocation'),
+    record('req-b', '2026-01-01T00:00:19.000Z', 'model_call'),
+    record('req-b', '2026-01-01T00:00:18.000Z', 'service_call', 'deny'),
+    record('req-b', '2026-01-01T00:00:18.000Z', 'tool_call', 'deny'),
+    record('req-b', '2026-01-01T00:00:17.000Z', 'http_call', 'deny'),
+    record('req-b', '2026-01-01T00:00:16.000Z', 'model_call'),
+    record('req-a', '2026-01-01T00:00:10.000Z', 'agent_invocation'),
+    record('req-a', '2026-01-01T00:00:09.000Z', 'agent_invocation', 'allow', { parent_span_id: 'aaaaaaaaaaaaaaaa' }),
+    record('req-a', '2026-01-01T00:00:08.000Z', 'model_call', 'allow', { error: 'timeout' }),
+  ];
+  const groups = groupByRequest(recent);
+  assert.deepEqual(
+    groups.map((g) => g.request_id),
+    ['req-c', 'req-b', 'req-a'],
+  );
   assert.equal(groups[0].outcome, 'deny');
-  const reset = groups.find((g) => g.request_id.startsWith('6d3e3a28'));
-  assert.equal(reset.outcome, 'allow', 'the invocation itself was allowed');
-  assert.equal(reset.denied, 3);
-  assert.equal(reset.root.kind, 'agent_invocation');
+  const b = groups[1];
+  assert.equal(b.outcome, 'allow', 'the invocation itself was allowed');
+  assert.equal(b.denied, 3);
+  assert.equal(b.root.kind, 'agent_invocation');
+  assert.equal(b.first, '2026-01-01T00:00:16.000Z');
+  assert.equal(b.last, '2026-01-01T00:00:20.000Z');
+  const a = groups[2];
+  assert.equal(a.root.parent_span_id, null, 'the root is the invocation without a parent span');
+  assert.equal(a.errors, 1);
+  assert.equal(a.outcome, 'allow', 'a failed model call inside an allowed run');
   for (const g of groups) {
     const ts = g.records.map((r) => Date.parse(r.ts));
-    assert.deepEqual(ts, [...ts].sort((a, b) => a - b));
+    assert.deepEqual(ts, [...ts].sort((x, y) => x - y));
   }
   assert.deepEqual(groupByRequest([null, 5, { ts: 'x' }]).map((g) => g.request_id), ['(none)']);
+  assert.deepEqual(groupByRequest([]), []);
 });
 
 test('payload display: hidden without payload rights, absent when only the hash came', () => {
@@ -232,17 +267,20 @@ test('diffLines and diffHunks show a YAML change with context', () => {
 });
 
 test('visibleGraph filters by namespace and service and keeps connected providers', () => {
-  const g = json('graph.json');
+  const g = sampleGraph();
   assert.equal(visibleGraph(g, {}).nodes.length, g.nodes.length);
-  const inv = visibleGraph(g, { ns: 'attache-demo', svc: 'inventory' });
-  const ids = inv.nodes.map((n) => n.id);
-  assert.ok(ids.includes('svc:attache-demo/inventory'));
-  assert.ok(ids.includes('agent:attache-demo/inventory/stock-analyst'));
-  assert.ok(ids.includes('model:anthropic'));
-  assert.ok(!ids.includes('agent:attache-demo/orders/ops-assistant'));
-  assert.ok(!ids.includes('external:https://api.partner.example'));
-  for (const e of inv.edges) assert.ok(ids.includes(e.source) && ids.includes(e.target));
+  const back = visibleGraph(g, { ns: NS, svc: 'back' });
+  const ids = back.nodes.map((n) => n.id);
+  assert.deepEqual(ids.sort(), [appId('back'), agentId('back', 'worker'), MODEL, svcId('back')].sort());
+  assert.ok(!ids.includes(agentId('front', 'lead')), 'the calling agent of another service is filtered out');
+  assert.ok(!ids.includes(ORIGIN), 'an origin only the other service reaches is filtered out');
+  assert.ok(back.edges.length > 0);
+  for (const e of back.edges) assert.ok(ids.includes(e.source) && ids.includes(e.target));
+  const front = visibleGraph(g, { ns: NS, svc: 'front' }).nodes.map((n) => n.id);
+  assert.ok(front.includes(ORIGIN) && front.includes(MODEL));
+  assert.ok(!front.includes(agentId('back', 'worker')));
   assert.equal(visibleGraph(g, { ns: 'other' }).nodes.length, 0);
+  assert.deepEqual(visibleGraph({ nodes: [], edges: [] }, { ns: NS }), { nodes: [], edges: [] });
 });
 
 test('link requirements: same service editor, cross service admin, cross namespace refused', () => {
@@ -251,8 +289,8 @@ test('link requirements: same service editor, cross service admin, cross namespa
   assert.equal(linkRequirement('agent:a/s/x', 'agent:b/s/y').level, 'refused');
   assert.equal(linkRequirement('agent:a/s/x', 'agent:a/s/x').level, 'refused');
   assert.equal(linkRequirement('app:a/s', 'agent:a/s/x').level, 'refused');
-  assert.equal(suggestToolName('stock-analyst', []), 'stock_analyst');
-  assert.equal(suggestToolName('stock-analyst', ['stock_analyst']), 'stock_analyst_2');
+  assert.equal(suggestToolName('my-agent', []), 'my_agent');
+  assert.equal(suggestToolName('my-agent', ['my_agent']), 'my_agent_2');
 });
 
 test('formatting helpers', () => {
@@ -281,19 +319,21 @@ test('formatting helpers', () => {
 // ---- geometry and layout ---------------------------------------------------------------------------
 
 test('nodeBox places ports in declaration order; unknown ports attach to the border', () => {
-  const g = json('graph.json');
-  const ops = g.nodes.find((n) => n.id === 'agent:attache-demo/orders/ops-assistant');
-  const box = nodeBox(ops, { linkPort: true });
-  assert.deepEqual(box.outPorts.map((p) => p.name), ops.ports.out);
+  const g = sampleGraph();
+  const lead = nodeOf(g, agentId('front', 'lead'));
+  const box = nodeBox(lead, { linkPort: true });
+  assert.deepEqual(box.outPorts.map((p) => p.name), ['lookup', 'ask_worker', 'ask_assist', 'model']);
   assert.equal(box.inPorts[0].x, 0);
   assert.equal(box.outPorts[0].x, box.w);
   assert.ok(box.linkPort, 'orchestrators get the + port when linking is allowed');
-  assert.equal(nodeBox(ops).linkPort, null);
+  assert.equal(nodeBox(lead).linkPort, null);
+  assert.equal(nodeBox(nodeOf(g, agentId('front', 'assist')), { linkPort: true }).linkPort, null, 'plain agents never do');
   const pos = { x: 100, y: 50 };
-  const known = portPoint(box, pos, 'out', 'stock_analyst');
+  const known = portPoint(box, pos, 'out', 'ask_worker');
   assert.ok(known.known);
   assert.equal(known.x, 100 + box.w);
-  const border = portPoint(box, pos, 'out', 'partner_eta');
+  assert.ok(known.y > portPoint(box, pos, 'out', 'lookup').y, 'declaration order, top to bottom');
+  const border = portPoint(box, pos, 'out', 'call_out');
   assert.equal(border.known, false);
   assert.equal(border.x, 100 + box.w);
   const placeholder = nodeBox({ id: 'agent:a/b/c', type: 'agent', placeholder: true, ports: { in: ['invoke'], out: [] } });
@@ -330,33 +370,35 @@ test('depths: longest path, cycle-safe', () => {
 });
 
 test('autoLayout: service columns by call depth, app left of agents, providers last, no overlaps', () => {
-  const g = json('graph.json');
+  const g = sampleGraph();
   const pos = autoLayout(g, boxOf);
   const at = (id) => pos.get(id);
-  const orders = ['app:attache-demo/orders', 'agent:attache-demo/orders/ops-assistant', 'agent:attache-demo/orders/order-triage'];
-  const inventory = ['app:attache-demo/inventory', 'agent:attache-demo/inventory/stock-analyst'];
-  const right = (ids) => Math.max(...ids.map((id) => at(id).x + boxOf(g.nodes.find((n) => n.id === id)).w));
-  assert.ok(right(orders) < Math.min(...inventory.map((id) => at(id).x)), 'orders (the caller) comes first');
-  assert.ok(at('app:attache-demo/orders').x < at('agent:attache-demo/orders/ops-assistant').x);
-  assert.ok(at('agent:attache-demo/orders/ops-assistant').y < at('agent:attache-demo/orders/order-triage').y, 'the caller sits above the agent it calls');
-  assert.equal(at('agent:attache-demo/orders/ops-assistant').x, at('agent:attache-demo/orders/order-triage').x);
-  for (const id of ['model:anthropic', 'external:https://api.partner.example']) assert.ok(at(id).x > right(inventory));
+  const front = [appId('front'), agentId('front', 'lead'), agentId('front', 'assist')];
+  const back = [appId('back'), agentId('back', 'worker')];
+  const right = (ids) => Math.max(...ids.map((id) => at(id).x + boxOf(nodeOf(g, id)).w));
+  // `back` sorts before `front` by name: only the call depth puts the caller first.
+  assert.ok(right(front) < Math.min(...back.map((id) => at(id).x)), 'front (the caller) comes first');
+  assert.ok(at(appId('front')).x < at(agentId('front', 'lead')).x);
+  assert.ok(at(agentId('front', 'lead')).y < at(agentId('front', 'assist')).y, 'the caller sits above the agent it calls');
+  assert.equal(at(agentId('front', 'lead')).x, at(agentId('front', 'assist')).x);
+  for (const id of [MODEL, ORIGIN]) assert.ok(at(id).x > right(back));
   const rects = g.nodes.filter((n) => n.type !== 'service').map((n) => ({ ...at(n.id), w: boxOf(n).w, h: boxOf(n).h, id: n.id }));
   for (let i = 0; i < rects.length; i++) for (let j = i + 1; j < rects.length; j++) assert.ok(!rectsOverlap(rects[i], rects[j]), `${rects[i].id} overlaps ${rects[j].id}`);
+  assert.equal(autoLayout({ nodes: [], edges: [] }, boxOf).size, 0, 'an empty graph has nothing to place');
 });
 
 test('resolvePositions keeps saved positions and puts a new agent below its hand-placed siblings', () => {
-  const g = json('graph.json');
+  const g = sampleGraph();
   const saved = new Map([
-    ['agent:attache-demo/orders/ops-assistant', { x: 1000, y: 1000 }],
-    ['agent:attache-demo/orders/order-triage', { x: 1000, y: 1400 }],
+    [agentId('front', 'lead'), { x: 1000, y: 1000 }],
+    [agentId('front', 'assist'), { x: 1000, y: 1400 }],
   ]);
   const g2 = clone(g);
-  g2.nodes.push({ ...clone(g.nodes.find((n) => n.id.endsWith('order-triage'))), id: 'agent:attache-demo/orders/new-one', label: 'new-one' });
+  const assist = nodeOf(g, agentId('front', 'assist'));
+  g2.nodes.push({ ...clone(assist), id: agentId('front', 'extra'), label: 'extra' });
   const pos = resolvePositions(g2, saved, boxOf);
-  assert.deepEqual(pos.get('agent:attache-demo/orders/ops-assistant'), { x: 1000, y: 1000 });
-  const triage = g.nodes.find((n) => n.id.endsWith('order-triage'));
-  assert.deepEqual(pos.get('agent:attache-demo/orders/new-one'), { x: 1000, y: 1400 + boxOf(triage).h + 40 });
+  assert.deepEqual(pos.get(agentId('front', 'lead')), { x: 1000, y: 1000 });
+  assert.deepEqual(pos.get(agentId('front', 'extra')), { x: 1000, y: 1400 + boxOf(assist).h + 40 });
 });
 
 /** Every card and frame of `g` at `pos`; a frame may only contain its own cards. */
@@ -388,63 +430,70 @@ function overlapsIn(g, pos) {
 }
 
 test('resolvePositions: nothing saved is exactly the auto-layout', () => {
-  const g = json('graph.json');
+  const g = sampleGraph();
   assert.deepEqual([...resolvePositions(g, new Map(), boxOf)], [...autoLayout(g, boxOf)]);
 });
 
 test('resolvePositions: services, providers and origins that appear later do not cover placed cards', () => {
-  const g = json('graph.json');
+  const g = sampleGraph();
   const before = resolvePositions(g, new Map(), boxOf);
   const g2 = clone(g);
   // Sorts first among the services and the externals, so its auto-layout slot is taken.
   g2.nodes.push(
-    { id: 'svc:attache-demo/aaa', type: 'service', label: 'aaa', status: 'connected', instances: 1, charter_version: '1' },
-    { id: 'app:attache-demo/aaa', type: 'app', parent: 'svc:attache-demo/aaa', label: 'aaa app', ports: { in: [], out: ['invoke'] } },
-    { id: 'agent:attache-demo/aaa/bot', type: 'agent', parent: 'svc:attache-demo/aaa', label: 'bot', agent_type: 'agent', ports: { in: ['invoke'], out: ['model'] }, tools: [] },
-    { id: 'svc:attache-demo/idle', type: 'service', label: 'idle', status: 'no_charter', instances: 1, charter_version: null },
+    serviceNode('aaa'),
+    { ...appNode('aaa'), ports: { in: [], out: ['invoke'] } },
+    agentNode('aaa', 'bot'),
+    serviceNode('idle', { status: 'no_charter', charter_version: null }),
     { id: 'external:https://aaa.example', type: 'external', label: 'aaa.example', ports: { in: ['http'], out: [] } },
     { id: 'model:mock', type: 'model_provider', label: 'Mock', ports: { in: ['model'], out: [] } },
   );
   const pos = resolvePositions(g2, before, boxOf);
   for (const [id, p] of before) assert.deepEqual(pos.get(id), p, `${id} stays where it was`);
   assert.deepEqual(overlapsIn(g2, pos), []);
-  const column = before.get('external:https://api.partner.example').x;
+  const column = before.get(ORIGIN).x;
   for (const id of ['external:https://aaa.example', 'model:mock']) {
     assert.equal(pos.get(id).x, column, `${id} joins the final column`);
-    assert.ok(pos.get(id).y > before.get('external:https://api.partner.example').y, `${id} goes below it`);
+    assert.ok(pos.get(id).y > before.get(ORIGIN).y, `${id} goes below it`);
   }
-  assert.ok(pos.get('app:attache-demo/aaa').x < column, 'a new service stays left of the final column');
+  assert.ok(pos.get(appId('aaa')).x < column, 'a new service stays left of the final column');
 
   // The same with hand-placed cards: the user stacked everything in one column.
   const stacked = new Map();
   let y = 0;
   for (const id of before.keys()) {
-    const n = g.nodes.find((x) => x.id === id);
+    const n = nodeOf(g, id);
     stacked.set(id, { x: 0, y });
     y += boxOf(n).h + 120;
   }
   const pos2 = resolvePositions(g2, stacked, boxOf);
   assert.deepEqual(overlapsIn(g2, pos2), []);
 
-  // A service whose frame was empty keeps the frame's place when its first agent arrives.
+  // A service whose frame was empty keeps the frame's place when its first agent arrives: here
+  // the empty frame was dragged to free space right of everything, away from its auto slot.
   const g3 = clone(g2);
-  g3.nodes.push({ id: 'agent:attache-demo/idle/first', type: 'agent', parent: 'svc:attache-demo/idle', label: 'first', agent_type: 'agent', ports: { in: ['invoke'], out: ['model'] }, tools: [] });
-  const pos3 = resolvePositions(g3, pos, boxOf);
-  const frame = frameRect([{ ...pos3.get('agent:attache-demo/idle/first'), ...boxOf(g3.nodes.at(-1)) }]);
-  assert.deepEqual({ x: frame.x, y: frame.y }, pos.get('svc:attache-demo/idle'));
+  g3.nodes.push(agentNode('idle', 'first'));
+  const moved = new Map(pos);
+  const dropped = { x: column + 800, y: 0 };
+  moved.set(svcId('idle'), dropped);
+  const pos3 = resolvePositions(g3, moved, boxOf);
+  const frame = frameRect([{ ...pos3.get(agentId('idle', 'first')), ...boxOf(g3.nodes.at(-1)) }]);
+  assert.deepEqual({ x: frame.x, y: frame.y }, dropped);
   assert.deepEqual(overlapsIn(g3, pos3), []);
+  // Where the grown frame would cover cards it moves instead, still without overlaps.
+  assert.deepEqual(overlapsIn(g3, resolvePositions(g3, pos, boxOf)), []);
 });
 
 test('resolvePositions: a new card next to hand-placed cards of the other kind keeps its offset', () => {
-  const g = json('graph.json');
+  const g = sampleGraph();
   const auto = autoLayout(g, boxOf);
-  const saved = new Map([...auto].filter(([id]) => id !== 'agent:attache-demo/inventory/stock-analyst'));
-  saved.set('app:attache-demo/inventory', { x: auto.get('app:attache-demo/inventory').x + 500, y: 900 });
+  const worker = agentId('back', 'worker');
+  const saved = new Map([...auto].filter(([id]) => id !== worker));
+  saved.set(appId('back'), { x: auto.get(appId('back')).x + 500, y: 900 });
   const pos = resolvePositions(g, saved, boxOf);
-  const app = pos.get('app:attache-demo/inventory');
-  const agent = pos.get('agent:attache-demo/inventory/stock-analyst');
-  const a = auto.get('app:attache-demo/inventory');
-  const b = auto.get('agent:attache-demo/inventory/stock-analyst');
+  const app = pos.get(appId('back'));
+  const agent = pos.get(worker);
+  const a = auto.get(appId('back'));
+  const b = auto.get(worker);
   assert.deepEqual({ dx: agent.x - app.x, dy: agent.y - app.y }, { dx: b.x - a.x, dy: b.y - a.y });
   assert.deepEqual(overlapsIn(g, pos), []);
 });
@@ -490,7 +539,7 @@ test('the API client sends CSRF, JSON and quoted If-Match on writes, nothing ext
       calls.push({ method, path, ...opts });
       return { status: 200, etag: '"7"', data: { version: '8' } };
     },
-    { now: () => 0, subscribe: () => null, fixtures: false },
+    { now: () => 0, subscribe: () => null },
   );
   const r = await api.putAgent('ns', 'svc', 'a b', { agent: {} }, '7');
   assert.deepEqual(calls[0].headers, { 'Content-Type': 'application/json', 'X-Attache-CSRF': '1', 'If-Match': '"7"' });
@@ -521,6 +570,82 @@ test('API errors carry code, details and current_version; 401 signs out', async 
   assert.equal(parseEtag('abc'), null);
 });
 
+test('no control plane: network errors, 404s, proxy errors and non-API replies are "unreachable"', async () => {
+  for (const status of [404, 405, 502, 503]) {
+    const api = new Api(async () => ({ status, data: null }), { now: () => 0 });
+    await assert.rejects(api.whoami(), (e) => isUnreachable(e), `HTTP ${status}`);
+  }
+  assert.ok(isUnreachable(new ApiError(0, { error: 'network', details: ['Failed to fetch'] })));
+  assert.ok(isUnreachable(new ApiError(200, { error: 'not_the_api' })));
+  assert.ok(isUnreachable(null));
+  for (const status of [400, 401, 403, 409, 429]) assert.ok(!isUnreachable(new ApiError(status, null)), `HTTP ${status} came from the API`);
+  assert.equal(new Api(async () => ({}), {}).baseUrl, 'api/v1');
+  globalThis.location = { href: 'http://127.0.0.1:7070/console/index.html#timeline' };
+  try {
+    assert.equal(apiUrl(), 'http://127.0.0.1:7070/console/api/v1');
+    assert.equal(apiUrl('/api/v1'), 'http://127.0.0.1:7070/api/v1');
+  } finally {
+    delete globalThis.location;
+  }
+  assert.equal(apiUrl(), 'api/v1', 'without a page the relative base is kept');
+});
+
+// ---- timeline source -------------------------------------------------------------------------------------
+
+/** A fetch stand-in: `routes` maps a path to {status, type, body} or an Error to throw. */
+function stubFetch(routes) {
+  const seen = [];
+  const fn = async (url, init) => {
+    seen.push({ url, init });
+    const r = routes[url];
+    if (!r || r instanceof Error) throw r || new TypeError('Failed to fetch');
+    return {
+      status: r.status,
+      ok: r.status >= 200 && r.status < 300,
+      headers: { get: (k) => (k.toLowerCase() === 'content-type' ? r.type ?? 'application/json' : null) },
+      json: async () => (typeof r.body === 'string' ? JSON.parse(r.body) : r.body),
+    };
+  };
+  return { fn, seen };
+}
+
+test('the timeline reads runs from the control plane: GET /traces and /traces/{id}', async () => {
+  const run = { trace_id: '0'.repeat(32), title: null, root_agent: agentId('front', 'lead'), status: 'running' };
+  const { fn, seen } = stubFetch({
+    '/api/v1/traces?limit=50&namespace=ns': { status: 200, body: [run] },
+    [`/api/v1/traces/${run.trace_id}`]: { status: 200, body: { trace_id: run.trace_id, spans: [] } },
+    '/api/v1/traces?limit=50': { status: 200, body: [] },
+  });
+  const src = new ApiSource({ fetchImpl: fn });
+  assert.deepEqual(await src.listTraces({ namespace: 'ns' }), [run]);
+  assert.deepEqual(await src.getTrace(run.trace_id), { trace_id: run.trace_id, spans: [] });
+  assert.deepEqual(await src.listTraces(), [], 'no runs is an empty list, not an error');
+  assert.equal(seen[0].init.credentials, 'same-origin');
+  assert.equal(createTimelineSource(undefined).base, '/api/v1');
+  assert.equal(createTimelineSource({ baseUrl: 'api/v1/' }).base, 'api/v1');
+  const own = { listTraces: async () => [], getTrace: async () => ({}) };
+  assert.equal(createTimelineSource(own), own, "the console's own source is used as it is");
+});
+
+test('the timeline says when no control plane answers, and when a run is gone', async () => {
+  const unreachable = /^Cannot reach the control plane at \S*api\/v1 — start embassy serve\.$/;
+  const cases = [
+    { route: new TypeError('Failed to fetch'), why: 'network error' },
+    { route: { status: 404, type: 'text/html', body: '' }, why: 'a static server' },
+    { route: { status: 502, type: 'text/plain', body: '' }, why: 'a proxy error' },
+    { route: { status: 200, type: 'text/html', body: '' }, why: 'a page that is not the API' },
+    { route: { status: 200, body: { nodes: [] } }, why: 'JSON that is not a run list' },
+  ];
+  for (const { route, why } of cases) {
+    const src = new ApiSource({ fetchImpl: stubFetch({ '/api/v1/traces?limit=50': route }).fn });
+    await assert.rejects(src.listTraces(), (e) => unreachable.test(e.message), why);
+  }
+  const signin = new ApiSource({ fetchImpl: stubFetch({ '/api/v1/traces?limit=50': { status: 401, body: { error: 'unauthenticated' } } }).fn });
+  await assert.rejects(signin.listTraces(), (e) => e.status === 401 && e.message === 'Sign in to see runs.');
+  const gone = new ApiSource({ fetchImpl: stubFetch({ '/api/v1/traces/abc': { status: 404, body: { error: 'not_found' } } }).fn });
+  await assert.rejects(gone.getTrace('abc'), (e) => e.status === 404 && e.message === 'This run is no longer available.');
+});
+
 // ---- config form payload -------------------------------------------------------------------------------
 
 test('viewPayload drops empty sections the original lacked and fields of other tool types', () => {
@@ -541,234 +666,13 @@ test('viewPayload drops empty sections the original lacked and fields of other t
 });
 
 test('inspector targets and tabs per node kind', () => {
-  const g = json('graph.json');
-  const t = targetFor(g.nodes.find((n) => n.id === 'agent:attache-demo/orders/ops-assistant'));
-  assert.deepEqual(t, { kind: 'agent', id: 'agent:attache-demo/orders/ops-assistant', ns: 'attache-demo', svc: 'orders', agent: 'ops-assistant' });
+  const g = sampleGraph();
+  const t = targetFor(nodeOf(g, agentId('front', 'lead')));
+  assert.deepEqual(t, { kind: 'agent', id: agentId('front', 'lead'), ns: NS, svc: 'front', agent: 'lead' });
   assert.deepEqual(tabsFor(t, true), ['config', 'traffic', 'learning', 'yaml', 'instances']);
+  assert.deepEqual(targetFor(nodeOf(g, svcId('back'))), { kind: 'service', id: svcId('back'), ns: NS, svc: 'back' });
   assert.deepEqual(tabsFor({ kind: 'service' }, false), ['overview', 'instances']);
-  assert.deepEqual(tabsFor(targetFor({ id: 'model:anthropic', type: 'model_provider' }), false), ['overview']);
+  assert.deepEqual(tabsFor(targetFor(nodeOf(g, appId('back'))), true), ['overview', 'traffic', 'yaml', 'instances']);
+  assert.deepEqual(tabsFor(targetFor(nodeOf(g, MODEL)), false), ['overview']);
   assert.equal(targetFor({ id: 'agent:a/b/c', type: 'agent', placeholder: true }).kind, 'node');
-});
-
-// ---- fixture backend ---------------------------------------------------------------------------------------
-
-test('fixture agent views are derived from the charter exactly like agent-view.json', async () => {
-  const orders = json('charter-orders.json').charter;
-  assert.deepEqual(synthAgentView(orders, 'ops-assistant'), json('agent-view.json'));
-  const { s } = await server();
-  const r = await s.handle('GET', '/services/attache-demo/orders/agents/ops-assistant');
-  assert.equal(r.status, 200);
-  assert.equal(r.etag, '"3"');
-  assert.deepEqual(r.data, json('agent-view.json'));
-  assert.equal(toolTarget('ns', 'svc', { type: 'http', url: 'https://x.example:8443/a/{id}' }), 'external:https://x.example:8443');
-});
-
-test('fixture graph: every edge endpoint is a node', async () => {
-  for (const q of ['', 'scenario=full']) {
-    const { s } = await server(q);
-    const g = (await s.handle('GET', '/graph')).data;
-    const ids = new Set(g.nodes.map((n) => n.id));
-    for (const e of g.edges) assert.ok(ids.has(e.source) && ids.has(e.target), `${q}: ${e.id}`);
-  }
-});
-
-test('fixture writes: CSRF, role, If-Match and 409 with current_version', async () => {
-  const { s } = await server();
-  const view = json('agent-view.json');
-  assert.equal((await s.handle('PUT', '/services/attache-demo/orders/agents/ops-assistant', { headers: { 'If-Match': '"3"' }, body: view })).status, 403, 'no CSRF header');
-  assert.equal((await s.handle('PUT', '/services/attache-demo/orders/agents/ops-assistant', { headers: W, body: view })).data.error, 'invalid', 'no If-Match');
-  const stale = await s.handle('PUT', '/services/attache-demo/orders/agents/ops-assistant', { headers: { ...W, 'If-Match': '"2"' }, body: view });
-  assert.equal(stale.status, 409);
-  assert.equal(stale.data.current_version, '3');
-  const v0 = Number((await s.handle('GET', '/graph')).data.version);
-  view.agent.budgets.max_steps = 9;
-  const ok = await s.handle('PUT', '/services/attache-demo/orders/agents/ops-assistant', { headers: { ...W, 'If-Match': '"3"' }, body: view });
-  assert.equal(ok.status, 200);
-  assert.equal(ok.data.version, '4');
-  assert.ok(Number((await s.handle('GET', '/graph')).data.version) > v0);
-  const bad = clone(view);
-  bad.agent.tools.push({ name: 'load_skill', description: 'x', type: 'agent', agent: 'order-triage' });
-  const inv = await s.handle('PUT', '/services/attache-demo/orders/agents/ops-assistant', { headers: { ...W, 'If-Match': '"4"' }, body: bad });
-  assert.equal(inv.status, 400);
-  assert.ok(inv.data.details.some((d) => d.includes('load_skill')));
-});
-
-test('fixture viewer is read-only and conflict=1 simulates a concurrent edit', async () => {
-  const { s } = await server('role=viewer');
-  assert.equal((await s.handle('GET', '/whoami')).data.role, 'viewer');
-  assert.equal((await s.handle('POST', '/services/attache-demo/orders/agents', { headers: { ...W, 'If-Match': '"3"' }, body: { agent: { name: 'x', model: 'm' } } })).status, 403);
-  const { s: c } = await server('conflict=1');
-  const r = await c.handle('PUT', '/services/attache-demo/orders/agents/ops-assistant', { headers: { ...W, 'If-Match': '"3"' }, body: json('agent-view.json') });
-  assert.equal(r.status, 409);
-  assert.equal(r.data.current_version, '4');
-  const now = (await c.handle('GET', '/services/attache-demo/orders/agents/ops-assistant')).data;
-  assert.equal(now.agent.budgets.max_steps, 8);
-});
-
-test('fixture POST agent adds the node, the local invoke edge and refuses duplicates', async () => {
-  const { s } = await server();
-  const body = { agent: { name: 'refund-helper', model: 'claude-opus-5-5' } };
-  const r = await s.handle('POST', '/services/attache-demo/orders/agents', { headers: { ...W, 'If-Match': '"3"' }, body });
-  assert.equal(r.status, 201);
-  const g = (await s.handle('GET', '/graph')).data;
-  assert.ok(g.nodes.some((n) => n.id === 'agent:attache-demo/orders/refund-helper'));
-  assert.ok(g.edges.some((e) => e.id === 'edge:invoke:app:attache-demo/orders->agent:attache-demo/orders/refund-helper'));
-  const dup = await s.handle('POST', '/services/attache-demo/orders/agents', { headers: { ...W, 'If-Match': '"4"' }, body });
-  assert.equal(dup.status, 400);
-});
-
-test('fixture links: cross-namespace refused, cross-service needs admin, admin applies both charters', async () => {
-  const body = (from, to, ifm) => ({ from, to, tool: { name: 'ask_stock', description: 'Ask.' }, if_match: ifm });
-  const ops = 'agent:attache-demo/orders/ops-assistant';
-  const stock = 'agent:attache-demo/inventory/stock-analyst';
-  const { s: editor } = await server('role=editor');
-  assert.equal((await editor.handle('POST', '/links', { headers: W, body: body(ops, 'agent:other/inventory/stock-analyst', {}) })).status, 400);
-  assert.equal((await editor.handle('POST', '/links', { headers: W, body: body(ops, stock, {}) })).status, 403);
-  const same = await editor.handle('POST', '/links', { headers: W, body: body(ops, 'agent:attache-demo/orders/order-triage', { 'attache-demo/orders': '3' }) });
-  assert.deepEqual(same.data.applied, [{ service: 'attache-demo/orders', version: '4' }]);
-  const { s: admin } = await server();
-  const stale = await admin.handle('POST', '/links', { headers: W, body: body(ops, stock, { 'attache-demo/inventory': '0' }) });
-  assert.equal(stale.data.failed['attache-demo/inventory'].error, 'version_conflict');
-  const r = await admin.handle('POST', '/links', { headers: W, body: body(ops, stock, { 'attache-demo/inventory': '1', 'attache-demo/orders': '3' }) });
-  assert.deepEqual(r.data.applied.map((a) => a.service), ['attache-demo/inventory', 'attache-demo/orders']);
-  const inv = (await admin.handle('GET', '/services/attache-demo/inventory/charter')).data.charter;
-  assert.ok(inv.authz.callers.find((c) => c.identity === 'spiffe://attache/ns/attache-demo/svc/orders').agents.includes('stock-analyst'));
-  const view = (await admin.handle('GET', '/services/attache-demo/orders/agents/ops-assistant')).data;
-  assert.ok(view.agent.tools.some((t) => t.name === 'ask_stock' && t.service === 'inventory'));
-  assert.ok(view.allowed_tools.includes('ask_stock'));
-});
-
-test('fixture proposals: approve needs the memory version and learning, stores the note, then refuses again', async () => {
-  const { s } = await server();
-  const id = '784722e9-e727-4c29-9f39-e116fd9afcd5';
-  const approve = (v) => s.handle('POST', `/proposals/${id}/approve`, { headers: { ...W, 'If-Match': `"${v}"` } });
-  assert.equal((await approve(0)).status, 409);
-  // The golden orders charter has no learning block for ops-assistant: no memory to write to.
-  const off = await approve(1);
-  assert.equal(off.status, 400);
-  assert.match(off.data.details[0], /learning is off/);
-  const path = '/services/attache-demo/orders/agents/ops-assistant';
-  const setLearning = async (enabled) => {
-    const cur = await s.handle('GET', path);
-    const body = clone(cur.data);
-    body.agent.learning = { enabled };
-    return s.handle('PUT', path, { headers: { ...W, 'If-Match': cur.etag }, body });
-  };
-  assert.equal((await setLearning(true)).status, 200);
-  const r = await approve(1);
-  assert.equal(r.status, 200);
-  assert.equal(r.data.memory_version, '2');
-  assert.equal(r.data.proposal.status, 'approved');
-  const mem = (await s.handle('GET', '/services/attache-demo/orders/memory')).data;
-  assert.equal(mem.agents['ops-assistant'].length, 2);
-  assert.equal(mem.agents['ops-assistant'][1].approved_by, 'alice');
-  assert.equal((await s.handle('POST', `/proposals/${id}/reject`, { headers: { ...W, 'If-Match': '"2"' } })).status, 409);
-  const put = await s.handle('PUT', '/services/attache-demo/orders/memory', { headers: { ...W, 'If-Match': '"2"' }, body: { agents: {} } });
-  assert.equal(put.data.version, '3');
-  // Turning learning off drops the agent's notes in the same change (design §3).
-  const back = await s.handle('PUT', '/services/attache-demo/orders/memory', { headers: { ...W, 'If-Match': '"3"' }, body: { agents: { 'ops-assistant': [{ text: 'Keep answers short.' }] } } });
-  assert.equal(back.status, 200);
-  assert.equal((await setLearning(false)).status, 200);
-  const after = await s.handle('GET', '/services/attache-demo/orders/memory');
-  assert.deepEqual(after.data.agents, {});
-  assert.equal(after.data.version, '5');
-  const refused = await s.handle('PUT', '/services/attache-demo/orders/memory', { headers: { ...W, 'If-Match': '"5"' }, body: { agents: { 'ops-assistant': [{ text: 'x' }] } } });
-  assert.equal(refused.status, 400);
-});
-
-test('fixture events/recent filters (agent matches caller_agent) and hides payloads per token', async () => {
-  const { s } = await server();
-  const r = (await s.handle('GET', '/events/recent?service=inventory&agent=ops-assistant')).data;
-  assert.ok(r.length > 0);
-  assert.ok(r.every((x) => x.service === 'inventory' && (x.agent === 'ops-assistant' || x.caller_agent === 'ops-assistant')));
-  assert.equal((await s.handle('GET', '/events/recent?limit=0')).status, 400);
-  const { s: hidden } = await server('payloads=0');
-  const h = (await hidden.handle('GET', '/events/recent')).data;
-  assert.ok(h.every((x) => x.input === null && x.output === null));
-  assert.ok(h.some((x) => x.input_sha256), 'hashes stay');
-});
-
-test('fixture sign-in: 401 until a well-formed token logs in', async () => {
-  const { s } = await server('signin=1');
-  assert.equal((await s.handle('GET', '/graph')).status, 401);
-  assert.equal((await s.handle('POST', '/login', { headers: W, body: { token: 'nope' } })).status, 400);
-  assert.equal((await s.handle('POST', '/login', { headers: W, body: { token: `att_${'a'.repeat(43)}` } })).status, 200);
-  assert.equal((await s.handle('GET', '/graph')).status, 200);
-  assert.equal((await s.handle('POST', '/logout', { headers: W })).status, 204);
-  assert.equal((await s.handle('GET', '/whoami')).status, 401);
-});
-
-test('fixture scenario=full has every service and agent status, placeholders and a pending adoption', async () => {
-  const { s } = await server('scenario=full');
-  const g = (await s.handle('GET', '/graph')).data;
-  const svcStatus = new Set(g.nodes.filter((n) => n.type === 'service' && !n.placeholder).map((n) => n.status));
-  for (const st of ['connected', 'degraded', 'disconnected', 'no_charter']) assert.ok(svcStatus.has(st), st);
-  const agentStatus = new Set(g.nodes.filter((n) => n.type === 'agent' && !n.placeholder).map((n) => n.status));
-  for (const st of ['ok', 'denied', 'errors', 'idle']) assert.ok(agentStatus.has(st), st);
-  assert.ok(g.nodes.some((n) => n.placeholder && n.id === 'agent:attache-demo/shipping/eta-agent'));
-  assert.ok(g.nodes.some((n) => n.id === 'model:mock'));
-  assert.ok(g.nodes.some((n) => n.id === 'external:https://api.carrier.example:8443'));
-  const billing = (await s.handle('GET', '/services')).data.find((x) => x.service === 'billing');
-  const r = await s.handle('POST', '/services/attache-demo/billing/adopt', { headers: W, body: { sha256: billing.pending_adoption.sha256 } });
-  assert.equal(r.status, 200);
-  assert.equal((await s.handle('POST', '/services/attache-demo/billing/adopt', { headers: W, body: { sha256: billing.pending_adoption.sha256 } })).status, 409);
-});
-
-test('fixture charter validation reports needs_role and weakened changes', async () => {
-  const { s } = await server('role=editor');
-  const doc = (await s.handle('GET', '/services/attache-demo/inventory/charter')).data;
-  const weak = doc.yaml.replace('default: deny', 'default: allow').replace('pii_redact: true', 'pii_redact: false');
-  const v = await s.handle('POST', '/services/attache-demo/inventory/charter/validate', { headers: W, body: { yaml: weak } });
-  assert.equal(v.data.needs_role, 'admin');
-  assert.deepEqual(v.data.weakened, ['authz.default', 'guardrails.pii_redact']);
-  const put = await s.handle('PUT', '/services/attache-demo/inventory/charter', { headers: { ...W, 'If-Match': '"1"' }, body: { yaml: weak } });
-  assert.equal(put.status, 403);
-  const fine = await s.handle('POST', '/services/attache-demo/inventory/charter/validate', { headers: W, body: { yaml: doc.yaml.replace('Keep it to three sentences.', 'Be brief.') } });
-  assert.equal(fine.data.needs_role, 'editor');
-  assert.equal((await s.handle('POST', '/services/attache-demo/inventory/charter/validate', { headers: W, body: { yaml: '\tagents: []' } })).status, 400);
-  assert.deepEqual(judgeCharter({ authz: { default: 'deny' } }, '', { authz: { default: 'allow' } }, ''), { needs_role: 'admin', weakened: ['authz.default'] });
-  assert.ok(validateAgent({ name: 'a', model: 'm', learning: { mode: 'auto' } }, {}).some((d) => d.includes('auto requires enabled')));
-});
-
-test('fixture replay delivers the transcript in order and applies it to the state', async () => {
-  const { s, t } = await server('', { replay: true });
-  const seen = [];
-  const statuses = [];
-  const sub = s.subscribe({ onEvent: (type, data, id) => seen.push({ type, data, id }), onStatus: (st) => statuses.push(st) });
-  t.advance(20000);
-  const types = seen.map((e) => e.type);
-  assert.deepEqual(types.filter((x) => x !== 'graph').slice(0, 3), ['registry', 'registry', 'ack']);
-  assert.ok(types.indexOf('graph') > types.indexOf('registry'), 'state events come before the graph refresh they cause');
-  assert.ok(types.filter((x) => x === 'audit').length >= 11);
-  assert.ok(types.includes('proposal') && types.includes('cp_audit'));
-  const ids = seen.map((e) => Number(e.id));
-  assert.deepEqual(ids, [...ids].sort((a, b) => a - b));
-  assert.deepEqual(statuses.slice(0, 2), ['connecting', 'live']);
-  const inv = (await s.handle('GET', '/services')).data.find((x) => x.service === 'inventory');
-  assert.deepEqual(inv.instances.map((i) => i.instance_id), ['f835313f-ef20-4fd6-82b7-cecc5c6a973f']);
-  assert.equal(inv.status, 'connected');
-  const p = (await s.handle('GET', '/proposals?status=pending')).data;
-  assert.equal(p.length, 0, 'the transcript rejects the pending proposal');
-  const animated = seen.filter((e) => e.type === 'audit' && e.data.animate).map((e) => e.data.edge_id);
-  const g = (await s.handle('GET', '/graph')).data;
-  for (const id of animated) assert.ok(g.edges.some((e) => e.id === id), `animated edge ${id} is in the graph`);
-  const before = seen.length;
-  t.advance(20000);
-  const loop = seen.slice(before);
-  assert.ok(loop.length > 0 && loop.every((e) => e.type === 'audit'), 'later passes replay traffic only');
-  assert.notEqual(loop[0].data.record.request_id, seen.find((e) => e.type === 'audit').data.record.request_id);
-  sub.close();
-  assert.equal(statuses.at(-1), 'paused');
-  s.stop();
-});
-
-test('fixture replay hides payloads from a token without them, and cp_audit from non-admins', async () => {
-  const { s, t } = await server('payloads=0&role=editor', { replay: true });
-  const seen = [];
-  s.subscribe({ onEvent: (type, data) => seen.push({ type, data }), onStatus: () => {} });
-  t.advance(16000);
-  const audits = seen.filter((e) => e.type === 'audit');
-  assert.ok(audits.length > 0 && audits.every((e) => e.data.record.input === null && e.data.record.output === null));
-  assert.ok(!seen.some((e) => e.type === 'cp_audit'));
-  s.stop();
 });

@@ -344,7 +344,7 @@ export class ConfigTab {
     const d = this.draft;
     const restricted = Array.isArray(d.allowed_services);
     const id = nextId('svcs');
-    const input = h('input', { class: 'input mono', id, value: restricted ? d.allowed_services.join(', ') : '', placeholder: 'orders, inventory', disabled: !this.canEdit || !restricted });
+    const input = h('input', { class: 'input mono', id, value: restricted ? d.allowed_services.join(', ') : '', placeholder: 'service-name, …', disabled: !this.canEdit || !restricted });
     const err = h('span', { class: 'field-error', hidden: true });
     const parse = () => {
       const list = input.value
