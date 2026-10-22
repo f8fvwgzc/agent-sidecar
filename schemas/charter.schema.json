@@ -238,6 +238,17 @@
             }
           ],
           "description": "Governed learning. Absent = off."
+        },
+        "taint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaintSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Taint-aware policy (docs/design/taint-policy.md). Absent = off."
         }
       },
       "required": [
@@ -303,6 +314,28 @@
             "string",
             "null"
           ]
+        },
+        "label": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaintLabel"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Label of what this tool returns (taint policy). Default: `untrusted` for `http` tools,\n`trusted` for `service` and `agent` tools."
+        },
+        "effect": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolEffect"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What the call does (taint policy). Default from the method: GET, HEAD and OPTIONS read,\neverything else writes; `agent` tools read (the callee's sidecar enforces its own policy)."
         }
       },
       "required": [
@@ -318,6 +351,34 @@
         "agent",
         "http"
       ]
+    },
+    "TaintLabel": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "trusted",
+          "description": "Data the service vouches for (its own records, the authenticated caller's request)."
+        },
+        {
+          "type": "string",
+          "const": "untrusted",
+          "description": "Text a third party controls (emails, tickets, web pages, uploaded files): it may carry\ninstructions aimed at the model."
+        },
+        {
+          "type": "string",
+          "const": "sensitive",
+          "description": "Data that must not leave the organisation (PII, account and health records)."
+        }
+      ],
+      "description": "Where a run's data came from. A run carries every label it has read."
+    },
+    "ToolEffect": {
+      "type": "string",
+      "enum": [
+        "read",
+        "write"
+      ],
+      "description": "What a tool call does to the world."
     },
     "Budgets": {
       "type": "object",
@@ -474,6 +535,30 @@
           "description": "A proposed lesson becomes a note at once and expires after `note_ttl_days`."
         }
       ]
+    },
+    "TaintSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/TaintMode",
+          "default": "enforce"
+        },
+        "input": {
+          "$ref": "#/$defs/TaintLabel",
+          "description": "Label of the invocation's own input. `trusted` (the default) for an authenticated\ncaller's request; `untrusted` when the input itself is third-party text.",
+          "default": "trusted"
+        }
+      },
+      "description": "Taint-aware policy of one agent: once a run has read untrusted data it may not call tools that\nwrite; once it has read sensitive data it may not call `http` tools (data leaving)."
+    },
+    "TaintMode": {
+      "type": "string",
+      "enum": [
+        "enforce",
+        "audit"
+      ],
+      "description": "`enforce` denies a call a rule forbids; `audit` allows it and records what would have been\ndenied (rule `taint.would_deny.<rule>`), for trying a policy on real traffic first."
     },
     "Guardrails": {
       "type": "object",

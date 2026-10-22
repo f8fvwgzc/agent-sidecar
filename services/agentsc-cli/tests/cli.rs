@@ -200,6 +200,7 @@ fn logs_filters_and_sorts_records_from_a_file() {
         r#"2026-10-20T11:00:00Z INFO agentscd: not an audit line"#,
         r#"{"ts":"2026-10-20T11:00:02.000Z","kind":"service_call","request_id":"r1","trace_id":"aaaa1111bbbb2222cccc3333dddd4444","span_id":"s2","parent_span_id":null,"service":"inventory","namespace":"agentsc-demo","agent":"ops-assistant","caller":"spiffe://agentsc/ns/agentsc-demo/svc/orders","caller_agent":"ops-assistant","callee":"inventory POST /admin/reset","direction":"inbound","input":null,"output":null,"input_sha256":null,"output_sha256":null,"tokens":null,"cost_usd":null,"latency_ms":1,"decision":"deny","rule":"authz.services.deny-admin","reason":"x","error":null}"#,
         r#"{"ts":"2026-10-20T11:00:01.000Z","kind":"agent_invocation","request_id":"r1","trace_id":"aaaa1111bbbb2222cccc3333dddd4444","span_id":"s1","parent_span_id":null,"service":"orders","namespace":"agentsc-demo","agent":"ops-assistant","caller":"local","caller_agent":null,"callee":"ops-assistant","direction":"inbound","input":"hi","output":"ok","input_sha256":null,"output_sha256":null,"tokens":{"input":10,"output":5},"cost_usd":0.0,"latency_ms":20,"decision":"allow","rule":"authz.callers.local","reason":null,"error":null}"#,
+        r#"{"ts":"2026-10-20T11:00:04.000Z","kind":"guardrail","request_id":"r2","trace_id":"ffff1111bbbb2222cccc3333dddd4444","span_id":"s4","parent_span_id":null,"service":"orders","namespace":"agentsc-demo","agent":"order-triage","caller":"local","caller_agent":null,"callee":"issue_refund","direction":"internal","input":null,"output":null,"input_sha256":null,"output_sha256":null,"tokens":null,"cost_usd":null,"latency_ms":0,"decision":"allow","rule":"taint.would_deny.untrusted_write","reason":"x","error":null}"#,
         r#"{"ts":"2026-10-20T11:00:03.000Z","kind":"agent_invocation","request_id":"r2","trace_id":"ffff1111bbbb2222cccc3333dddd4444","span_id":"s3","parent_span_id":null,"service":"orders","namespace":"agentsc-demo","agent":"order-triage","caller":"local","caller_agent":null,"callee":"order-triage","direction":"inbound","input":"hi","output":"ok","input_sha256":null,"output_sha256":null,"tokens":null,"cost_usd":null,"latency_ms":2,"decision":"allow","rule":null,"reason":null,"error":null}"#,
     ];
     let run = |args: &[&str]| -> String {
@@ -221,7 +222,7 @@ fn logs_filters_and_sorts_records_from_a_file() {
         String::from_utf8(out.stdout).unwrap()
     };
     let all = run(&[]);
-    assert_eq!(all.lines().count(), 3, "{all}");
+    assert_eq!(all.lines().count(), 4, "{all}");
     assert!(
         all.lines().next().unwrap().contains("agent_invocation"),
         "sorted by ts: {all}"
@@ -235,7 +236,19 @@ fn logs_filters_and_sorts_records_from_a_file() {
         "{denied}"
     );
     assert!(denied.contains("svc/orders (ops-assistant)"), "{denied}");
-    let agent = run(&["--agent", "order-triage", "--raw"]);
+    let would = run(&["--rule", "taint.would_deny"]);
+    assert_eq!(would.lines().count(), 1, "{would}");
+    assert!(
+        would.contains("allow taint.would_deny.untrusted_write"),
+        "{would}"
+    );
+    let agent = run(&[
+        "--agent",
+        "order-triage",
+        "--kind",
+        "agent_invocation",
+        "--raw",
+    ]);
     let v: serde_json::Value = serde_json::from_str(agent.trim()).unwrap();
     assert_eq!(v["agent"], "order-triage");
 }

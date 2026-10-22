@@ -25,8 +25,9 @@ pub const DEFAULT_MESH_PORT: u16 = 50002;
 /// Largest `max_tokens` any current Claude model accepts.
 pub const MAX_TOKENS_PER_CALL_LIMIT: u32 = 128_000;
 /// The charter schema level this build understands: 1 = v0.1 fields only, 2 = v0.2
-/// (`skills`, `telemetry`, `service.service_accounts`, `agents[].skills/harness/learning`).
-pub const CHARTER_SCHEMA_LEVEL: u32 = 2;
+/// (`skills`, `telemetry`, `service.service_accounts`, `agents[].skills/harness/learning`),
+/// 3 = taint policy (`agents[].taint`, `tools[].label`, `tools[].effect`).
+pub const CHARTER_SCHEMA_LEVEL: u32 = 3;
 /// A charter is at most this many bytes, measured the same way whatever form it arrived in
 /// ([`Charter::validate`]): its JSON serialization and its plain YAML ([`Charter::to_yaml`], the
 /// text `CharterUpdate.charter_yaml` and the file store carry) are each at most this size, so a
@@ -357,6 +358,69 @@ pub struct AgentSpec {
     /// Governed learning. Absent = off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub learning: Option<LearningSpec>,
+    /// Taint-aware policy (docs/design/taint-policy.md). Absent = off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taint: Option<TaintSpec>,
+}
+
+/// Where a run's data came from. A run carries every label it has read.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum TaintLabel {
+    /// Data the service vouches for (its own records, the authenticated caller's request).
+    Trusted,
+    /// Text a third party controls (emails, tickets, web pages, uploaded files): it may carry
+    /// instructions aimed at the model.
+    Untrusted,
+    /// Data that must not leave the organisation (PII, account and health records).
+    Sensitive,
+}
+
+impl TaintLabel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TaintLabel::Trusted => "trusted",
+            TaintLabel::Untrusted => "untrusted",
+            TaintLabel::Sensitive => "sensitive",
+        }
+    }
+}
+
+/// What a tool call does to the world.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolEffect {
+    Read,
+    Write,
+}
+
+/// `enforce` denies a call a rule forbids; `audit` allows it and records what would have been
+/// denied (rule `taint.would_deny.<rule>`), for trying a policy on real traffic first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TaintMode {
+    #[default]
+    Enforce,
+    Audit,
+}
+
+/// Taint-aware policy of one agent: once a run has read untrusted data it may not call tools that
+/// write; once it has read sensitive data it may not call `http` tools (data leaving).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TaintSpec {
+    #[serde(default)]
+    pub mode: TaintMode,
+    /// Label of the invocation's own input. `trusted` (the default) for an authenticated
+    /// caller's request; `untrusted` when the input itself is third-party text.
+    #[serde(default = "default_taint_input")]
+    pub input: TaintLabel,
+}
+
+fn default_taint_input() -> TaintLabel {
+    TaintLabel::Trusted
 }
 
 impl AgentSpec {
@@ -412,6 +476,45 @@ pub struct ToolSpec {
     pub agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// Label of what this tool returns (taint policy). Default: `untrusted` for `http` tools,
+    /// `trusted` for `service` and `agent` tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<TaintLabel>,
+    /// What the call does (taint policy). Default from the method: GET, HEAD and OPTIONS read,
+    /// everything else writes; `agent` tools read (the callee's sidecar enforces its own policy).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect: Option<ToolEffect>,
+}
+
+impl ToolSpec {
+    /// [`ToolSpec::label`] with its default.
+    pub fn effective_label(&self) -> TaintLabel {
+        self.label.unwrap_or(match self.tool_type {
+            ToolType::Http => TaintLabel::Untrusted,
+            ToolType::Service | ToolType::Agent => TaintLabel::Trusted,
+        })
+    }
+
+    /// [`ToolSpec::effect`] with its default.
+    pub fn effective_effect(&self) -> ToolEffect {
+        if let Some(e) = self.effect {
+            return e;
+        }
+        match self.tool_type {
+            ToolType::Agent => ToolEffect::Read,
+            ToolType::Service | ToolType::Http => {
+                match self
+                    .method
+                    .as_deref()
+                    .map(str::to_ascii_uppercase)
+                    .as_deref()
+                {
+                    Some("GET" | "HEAD" | "OPTIONS") => ToolEffect::Read,
+                    _ => ToolEffect::Write,
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -645,18 +748,51 @@ impl Charter {
         self.telemetry.clone().unwrap_or_default()
     }
 
-    /// 1 when the charter uses only v0.1 fields, 2 when it uses any v0.2 field (`skills`,
-    /// `telemetry`, `service.service_accounts`, `agents[].skills`, `harness` or `learning`).
+    /// The fields above v0.1 the charter uses, as `(path, level)`: level 2 for the v0.2 fields
+    /// (`skills`, `telemetry`, `service.service_accounts`, `agents[].skills`, `harness`,
+    /// `learning`), 3 for the taint fields (`agents[].taint`, `tools[].label`, `tools[].effect`).
     /// Empty lists count as unused: they are left out when the charter is serialized.
+    pub fn level_fields(&self) -> Vec<(String, u32)> {
+        let mut out = Vec::new();
+        if !self.skills.is_empty() {
+            out.push(("skills".to_string(), 2));
+        }
+        if self.telemetry.is_some() {
+            out.push(("telemetry".into(), 2));
+        }
+        if !self.service.service_accounts.is_empty() {
+            out.push(("service.service_accounts".into(), 2));
+        }
+        for a in &self.agents {
+            if !a.skills.is_empty() {
+                out.push((format!("agents.{}.skills", a.name), 2));
+            }
+            if a.harness.is_some() {
+                out.push((format!("agents.{}.harness", a.name), 2));
+            }
+            if a.learning.is_some() {
+                out.push((format!("agents.{}.learning", a.name), 2));
+            }
+            if a.taint.is_some() {
+                out.push((format!("agents.{}.taint", a.name), 3));
+            }
+            for t in &a.tools {
+                if t.label.is_some() || t.effect.is_some() {
+                    out.push((format!("agents.{}.tools.{}", a.name, t.name), 3));
+                }
+            }
+        }
+        out
+    }
+
+    /// The lowest `charter_schema_level` that can load this charter: the highest level in
+    /// [`Charter::level_fields`], 1 when there is none.
     pub fn schema_level(&self) -> u32 {
-        let v2 = !self.skills.is_empty()
-            || self.telemetry.is_some()
-            || !self.service.service_accounts.is_empty()
-            || self
-                .agents
-                .iter()
-                .any(|a| !a.skills.is_empty() || a.harness.is_some() || a.learning.is_some());
-        if v2 { 2 } else { 1 }
+        self.level_fields()
+            .into_iter()
+            .map(|(_, l)| l)
+            .max()
+            .unwrap_or(1)
     }
 
     /// `ExecuteRequest.agent_spec_json` for `agent` (design §4 "What the runtime receives"): the
@@ -696,6 +832,16 @@ impl Charter {
                 "learning".into(),
                 serde_json::to_value(a.learning_or_default()).unwrap_or(Value::Null),
             );
+            // the taint policy is the sidecar's: the runtime never sees it
+            map.remove("taint");
+            if let Some(Value::Array(tools)) = map.get_mut("tools") {
+                for t in tools.iter_mut() {
+                    if let Value::Object(t) = t {
+                        t.remove("label");
+                        t.remove("effect");
+                    }
+                }
+            }
             let memory: &[RuntimeNote] = if a.learning_enabled() { memory } else { &[] };
             map.insert(
                 "memory".into(),
@@ -1804,6 +1950,8 @@ mod tests {
             path: None,
             agent: None,
             url: Some("https://api.example.com/v1//items/{id}".into()),
+            label: None,
+            effect: None,
         });
         let err = c.validate().unwrap_err().to_string();
         assert!(err.contains("empty segment"), "{err}");

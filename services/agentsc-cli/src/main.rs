@@ -89,6 +89,9 @@ struct LogsArgs {
     /// Only records of this kind (agent_invocation, model_call, tool_call, agent_call, service_call, http_call, authz, guardrail, budget, config, learning, or any other kind a sidecar writes).
     #[arg(long)]
     kind: Option<String>,
+    /// Only records whose rule starts with this (e.g. `taint.would_deny`).
+    #[arg(long)]
+    rule: Option<String>,
     /// Only denials.
     #[arg(long)]
     denied: bool,
@@ -249,6 +252,14 @@ fn logs(args: LogsArgs) -> anyhow::Result<()> {
         {
             continue;
         }
+        if let Some(r) = &args.rule
+            && !rec
+                .rule
+                .as_deref()
+                .is_some_and(|x| x.starts_with(r.as_str()))
+        {
+            continue;
+        }
         if args.denied && rec.decision != "deny" {
             continue;
         }
@@ -293,12 +304,14 @@ fn print_record(out: &mut impl Write, entry: &LogLine, raw: bool) -> anyhow::Res
         }
         _ => caller,
     };
-    // The v0.1 kinds show an allow's rule only for PII redaction; `config`, `learning` and any
-    // kind this CLI does not know show the decision and rule as written.
+    // The v0.1 kinds show an allow's rule only for PII redaction and taint audit mode; `config`,
+    // `learning` and any kind this CLI does not know show the decision and rule as written.
     let v01_kind = V01_KINDS.contains(&rec.kind.as_str());
     let decision = match (rec.decision.as_str(), &rec.rule) {
         ("deny", rule) => format!("DENY {}", rule.clone().unwrap_or_default()),
-        ("allow", Some(r)) if r.starts_with("guardrail.pii") || !v01_kind => {
+        ("allow", Some(r))
+            if r.starts_with("guardrail.pii") || r.starts_with("taint.") || !v01_kind =>
+        {
             format!("allow {r}")
         }
         ("allow", _) => "allow".to_string(),

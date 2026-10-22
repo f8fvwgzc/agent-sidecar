@@ -20,6 +20,7 @@ pub mod reload;
 pub mod runs;
 pub mod runtime;
 pub mod state;
+pub mod taint;
 pub mod tls;
 pub mod tools;
 

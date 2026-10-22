@@ -191,6 +191,25 @@ spec:
                           url:
                             type: string
                             nullable: true
+                          label:
+                            type: string
+                            description: |-
+                              Label of what this tool returns (taint policy). Default: `untrusted` for `http` tools,
+                              `trusted` for `service` and `agent` tools.
+                            enum:
+                            - trusted
+                            - untrusted
+                            - sensitive
+                            nullable: true
+                          effect:
+                            type: string
+                            description: |-
+                              What the call does (taint policy). Default from the method: GET, HEAD and OPTIONS read,
+                              everything else writes; `agent` tools read (the callee's sidecar enforces its own policy).
+                            enum:
+                            - read
+                            - write
+                            nullable: true
                         required:
                         - name
                         - description
@@ -281,6 +300,29 @@ spec:
                           description: Lessons the agent may propose per hour, 1..=100.
                           minimum: 1
                           maximum: 100
+                      x-kubernetes-preserve-unknown-fields: true
+                      nullable: true
+                    taint:
+                      type: object
+                      description: Taint-aware policy (docs/design/taint-policy.md). Absent = off.
+                      properties:
+                        mode:
+                          type: string
+                          description: |-
+                            `enforce` denies a call a rule forbids; `audit` allows it and records what would have been
+                            denied (rule `taint.would_deny.<rule>`), for trying a policy on real traffic first.
+                          enum:
+                          - enforce
+                          - audit
+                        input:
+                          type: string
+                          description: |-
+                            Label of the invocation's own input. `trusted` (the default) for an authenticated
+                            caller's request; `untrusted` when the input itself is third-party text.
+                          enum:
+                          - trusted
+                          - untrusted
+                          - sensitive
                       x-kubernetes-preserve-unknown-fields: true
                       nullable: true
                   required:

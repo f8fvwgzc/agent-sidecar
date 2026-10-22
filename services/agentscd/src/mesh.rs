@@ -182,6 +182,11 @@ impl Mesh for MeshService {
                 &body.caller_agent,
             )
         };
+        let peer_taint = request
+            .metadata()
+            .get(crate::taint::HEADER)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
         let req = request.into_inner();
         let caller = match &inb.caller {
             Ok(c) => c.clone(),
@@ -190,6 +195,12 @@ impl Mesh for MeshService {
                 return Err(deny_status(v));
             }
         };
+        // the caller's run already read these labels: this part of the run starts with them
+        if let Some(h) = &peer_taint {
+            self.state
+                .taint
+                .add_header(&inb.request_id, h, &format!("caller {caller}"));
+        }
         let inv = Invocation {
             agent: req.agent,
             input: req.input,
@@ -201,10 +212,21 @@ impl Mesh for MeshService {
             depth: req.depth,
             deadline: inb.deadline,
         };
+        let request_id = inv.request_id.clone();
         let resp = pipeline::invoke(&self.state, inv).await;
         match pipeline::grpc_status(&resp) {
             Some(st) => Err(st),
-            None => Ok(Response::new(resp)),
+            None => {
+                let mut out = Response::new(resp);
+                // tell the caller what this run read, so its own policy sees it
+                let taint = self.state.taint.header(&request_id);
+                if !taint.is_empty()
+                    && let Ok(v) = taint.parse()
+                {
+                    out.metadata_mut().insert(crate::taint::HEADER, v);
+                }
+                Ok(out)
+            }
         }
     }
 

@@ -148,32 +148,6 @@ pub fn needed_role(stored: Option<&StoredCharter>, new: &Charter, via: Via) -> (
     (role, reasons)
 }
 
-/// The fields of a v0.2 charter (`charter_schema_level` 2), as paths.
-pub fn level2_fields(c: &Charter) -> Vec<String> {
-    let mut out = Vec::new();
-    if !c.skills.is_empty() {
-        out.push("skills".to_string());
-    }
-    if c.telemetry.is_some() {
-        out.push("telemetry".into());
-    }
-    if !c.service.service_accounts.is_empty() {
-        out.push("service.service_accounts".into());
-    }
-    for a in &c.agents {
-        if !a.skills.is_empty() {
-            out.push(format!("agents.{}.skills", a.name));
-        }
-        if a.harness.is_some() {
-            out.push(format!("agents.{}.harness", a.name));
-        }
-        if a.learning.is_some() {
-            out.push(format!("agents.{}.learning", a.name));
-        }
-    }
-    out
-}
-
 /// Design §7 version skew: the charter must load on the lowest `charter_schema_level` of the
 /// service's connected instances. One detail per field, naming the instances.
 pub fn skew_problems(registry: &Registry, key: &ServiceKey, c: &Charter) -> Vec<String> {
@@ -192,18 +166,15 @@ pub fn skew_against(instances: Vec<(String, u32)>, c: &Charter) -> Vec<String> {
     let Some(lowest) = instances.iter().map(|(_, l)| (*l).max(1)).min() else {
         return Vec::new();
     };
-    let level = c.schema_level();
-    if level <= lowest {
-        return Vec::new();
-    }
-    let pods: Vec<String> = instances
-        .iter()
-        .filter(|(_, l)| (*l).max(1) < level)
-        .map(|(p, l)| format!("{p} (level {})", (*l).max(1)))
-        .collect();
-    level2_fields(c)
+    c.level_fields()
         .into_iter()
-        .map(|f| {
+        .filter(|(_, l)| *l > lowest)
+        .map(|(f, level)| {
+            let pods: Vec<String> = instances
+                .iter()
+                .filter(|(_, l)| (*l).max(1) < level)
+                .map(|(p, l)| format!("{p} (level {})", (*l).max(1)))
+                .collect();
             format!(
                 "{f} needs charter_schema_level {level}; connected instances that cannot load it: {}",
                 pods.join(", ")
@@ -431,6 +402,23 @@ mod tests {
         );
         assert!(
             got[0].contains("p0 (level 1)") && !got[0].contains("p1"),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn taint_fields_need_level_3() {
+        let c = charter(
+            "agents:\n  - name: a\n    model: mock\n    harness: {max_retries: 1}\n    taint: {mode: audit}\n",
+        );
+        assert_eq!(c.schema_level(), 3);
+        assert!(skew_against(vec![("p3".into(), 3)], &c).is_empty());
+        let got = skew_against(vec![("p2".into(), 2), ("p3".into(), 3)], &c);
+        assert_eq!(got.len(), 1, "only the taint field is a problem: {got:?}");
+        assert!(
+            got[0].starts_with("agents.a.taint needs charter_schema_level 3")
+                && got[0].contains("p2 (level 2)")
+                && !got[0].contains("p3"),
             "{got:?}"
         );
     }

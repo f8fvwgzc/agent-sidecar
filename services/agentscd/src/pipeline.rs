@@ -314,6 +314,9 @@ pub async fn invoke(state: &Arc<AppState>, inv: Invocation) -> InvokeAgentRespon
         &inv.caller,
         &inv.trace.trace_id,
     );
+    if let Some(t) = &agent.taint {
+        state.taint.add(&inv.request_id, t.input, "input");
+    }
     let exec = client.execute(req).await;
     drop(run);
     pending.disarm();

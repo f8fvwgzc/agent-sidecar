@@ -71,6 +71,8 @@ pub struct AppState {
     pub runtime_provider: Mutex<String>,
     mesh_clients: Mutex<HashMap<String, MeshClient<Channel>>>,
     pub runs: Runs,
+    /// Taint labels per run (taint.rs).
+    pub taint: crate::taint::TaintStore,
     pub outbox: Arc<Outbox>,
     /// Accepted lesson proposals per agent in the last hour (`max_proposals_per_hour`).
     pub lessons: Mutex<HashMap<String, VecDeque<Instant>>>,
@@ -277,6 +279,7 @@ impl AppState {
             runtime_provider: Mutex::new(String::from("unknown")),
             mesh_clients: Mutex::new(HashMap::new()),
             runs: Runs::new(config.timing.run_window),
+            taint: Default::default(),
             outbox: Arc::new(Outbox::new(managed)),
             lessons: Mutex::new(HashMap::new()),
             otel: Mutex::new(None),

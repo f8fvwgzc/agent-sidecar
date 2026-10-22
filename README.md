@@ -20,6 +20,7 @@ agent-sidecar brings AgentSecOps to LLM agents: identity, policy, budgets, guard
 - **One YAML charter per service.** Every tool call an agent makes is checked against it, including calls to other services. Model calls are bounded by its budgets.
 - **mTLS identity per service.** Each service gets `spiffe://agentsc/ns/<ns>/svc/<svc>`. The called sidecar decides which peers and which of their agents may call.
 - **Budgets and guardrails.** Tokens per model call, invocations per minute, cost per day, steps per run, input size, regex deny rules on input and output, and PII redaction of the agent's output.
+- **Prompt injection contained by design.** Taint rules track what each run has read. After untrusted text (a ticket, a web page), the run can't call a tool that writes. After sensitive data, it can't call out to the internet. [How it works](docs/design/taint-policy.md).
 - **One JSONL audit line per action.** The sidecar writes them to stdout (or to a file with `audit.sink: file`). Read them with `kubectl logs` or `agentsc logs`.
 
 ```mermaid

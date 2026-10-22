@@ -627,7 +627,7 @@ fn rule8_service_accounts_are_dns_labels() {
 
 #[test]
 fn schema_level_is_1_without_v02_fields_and_2_with_any() {
-    assert_eq!(CHARTER_SCHEMA_LEVEL, 2);
+    assert_eq!(CHARTER_SCHEMA_LEVEL, 3);
     assert_eq!(orders().schema_level(), 1);
     assert_eq!(Charter::from_yaml(INVENTORY).unwrap().schema_level(), 1);
     assert_eq!(v02().schema_level(), 2);
@@ -669,6 +669,20 @@ fn schema_level_is_1_without_v02_fields_and_2_with_any() {
         accepts(&c);
         assert_eq!(c.schema_level(), 2, "{what}");
     }
+    // taint fields are level 3
+    let mut c = orders();
+    c.agents[0].tools[0].label = Some(TaintLabel::Untrusted);
+    assert_eq!(c.schema_level(), 3);
+    assert_eq!(
+        c.level_fields(),
+        vec![(
+            format!(
+                "agents.{}.tools.{}",
+                c.agents[0].name, c.agents[0].tools[0].name
+            ),
+            3
+        )]
+    );
     // empty v0.2 lists are not "used": they are not even serialized
     let c = Charter::from_yaml(&format!("{ORDERS}\nskills: []\n")).unwrap();
     assert_eq!(c.schema_level(), 1);

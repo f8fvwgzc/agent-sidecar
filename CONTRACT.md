@@ -143,6 +143,9 @@ agents:
       note_ttl_days: 7               # 1..=365; auto notes only
       from_peers: false              # also reflect on invocations whose caller is a peer service
       max_proposals_per_hour: 10     # 1..=100
+    taint:                           # level 3, optional; absent = no taint rules (§5.2)
+      mode: enforce                  # enforce | audit
+      input: trusted                 # label of the invocation's own input: trusted | untrusted | sensitive
 guardrails:
   max_input_bytes: 16384
   pii_redact: true             # redact emails and phone numbers in agent output (response + audit)
@@ -196,6 +199,9 @@ audit:
   # never in the scheme, host or port (the origin is fixed by the charter)
   method: GET
   url: https://example.com/items/{id}
+  # level 3, any type, used by `agents[].taint` (§5.2)
+  label: untrusted             # trusted | untrusted | sensitive — what the tool returns (default: untrusted for http, else trusted)
+  effect: read                 # read | write (default: read for agent tools and GET/HEAD/OPTIONS, else write)
 ```
 
 `agent` tools take `{ "input": string }`; their `parameters` default to that.
@@ -336,10 +342,13 @@ an oversized plain charter before it is parsed.
 
 ### 3.5 Schema level and restart-only fields
 
-- `Charter::schema_level()` is 1 for a charter that uses only v0.1 fields and 2 when it uses any
+- `Charter::schema_level()` is 1 for a charter that uses only v0.1 fields, 2 when it uses any
   v0.2 field (`skills`, `telemetry`, `service.service_accounts`, `agents[].skills`, `harness`,
-  `learning`; empty lists count as unused). `CHARTER_SCHEMA_LEVEL` = 2 is the level this build
-  understands (sent as `Hello.charter_schema_level`).
+  `learning`; empty lists count as unused) and 3 when it uses a taint field (`agents[].taint`,
+  `tools[].label`, `tools[].effect`). `Charter::level_fields()` lists each such field with its
+  level. `CHARTER_SCHEMA_LEVEL` = 3 is the level this build understands (sent as
+  `Hello.charter_schema_level`); the control plane refuses to push a field to a connected
+  instance below its level, naming the field and the instances.
 - **Restart-only fields**: a hot reload may not change `service.name`, `service.namespace`,
   `service.app_port`, `mesh.port`, `audit.sink`, `audit.file` or `telemetry.otlp_endpoint`
   (`agentsc_charter::diff::restart_required` lists the ones that differ). A sidecar refuses such
@@ -347,7 +356,8 @@ an oversized plain charter before it is parsed.
   `config.restart_required` while instances are connected.
 - `agentsc_charter::diff::weakened` lists the changes that reduce protection (§6, `config`
   records) and `agentsc_charter::diff::required_role` the role a change needs (viewer < editor <
-  admin, with one `"<field> requires admin"` reason per field that needs admin). A service with
+  admin, with one `"<field> requires admin"` reason per field that needs admin; any change to
+  `agents[].taint`, and setting or changing a tool's `label` or `effect`, needs admin). A service with
   no stored charter has nothing to diff: `agentsc_charter::diff::first_charter_role` says that
   adopting a pending charter needs editor and a first `PUT` needs admin.
 
@@ -425,6 +435,14 @@ client certificate's URI SAN. `x-agentsc-agent` is a claim made by the
 caller's sidecar (it is set by `agentscd`, never by the app or the model); the
 callee cannot see the caller's charter, so it trusts the pair (SAN, agent)
 exactly as far as its own `authz` rules say.
+
+`x-agentsc-taint` (§5.2) carries the run's taint labels, `untrusted,sensitive`
+(sorted, comma-separated, absent when the run is clean). The caller's sidecar
+sends it on every mesh request; the callee of `InvokeAgent` adds the labels to
+its record of that `x-agentsc-request-id` and returns the run's labels on a
+successful response, which the caller adds in turn (`InvokeService` callees
+ignore it). Only sidecars set it; unknown words are ignored. Labels only add
+restrictions, so a peer gains nothing by lying.
 
 - `Mesh.InvokeAgent(InvokeAgentRequest) → InvokeAgentResponse` — the callee
   runs `authz.callers` (identity SAN → agent) then the agent, same as a local
@@ -623,6 +641,38 @@ The canonical method and path are what is authorized, audited and sent.
 agents (egress and self calls); a SPIFFE identity matches inbound calls from
 that peer.
 
+### 5.2 Taint rules (caller side, every tool call)
+
+Design: [docs/design/taint-policy.md](docs/design/taint-policy.md).
+
+The sidecar keeps, per `request_id`, the set of labels the run has read and
+the tools they came from. A label is added:
+
+- when an invocation of an agent with `taint` starts: `taint.input` (source `input`);
+- when a `service`, `http` or `agent` tool call succeeds: the tool's `label`
+  (source: the tool name);
+- from `x-agentsc-taint` on an inbound `InvokeAgent` (source `caller <identity>`)
+  and on an `InvokeAgent` response (source `agent <name>`).
+
+`trusted` adds nothing. Labels are never removed; a run's set is forgotten 15
+minutes after its last change. The state is in memory, per sidecar.
+
+For an agent with a `taint` block, each `InvokeService`, `InvokeAgent` and
+`InvokeHttp` tool RPC is checked right after the tool is resolved
+(`guardrail.allowed_tools`), before any other rule:
+
+| rule | the run has read | the tool |
+| ---- | ---------------- | -------- |
+| `taint.untrusted_write` | `untrusted` | has `effect: write` |
+| `taint.sensitive_egress` | `sensitive` | has `type: http` |
+
+The effect is the charter's (`effect`, or the default from the declared
+method), never the request's. With `mode: enforce` the call is denied
+(`PERMISSION_DENIED`, a `deny` record with the rule, reason `this run read
+untrusted data (from read_ticket) and tool issue_refund writes`). With `mode:
+audit` it goes on, after a `guardrail` record with decision `allow` and rule
+`taint.would_deny.untrusted_write` / `taint.would_deny.sensitive_egress`.
+
 ## 6. Audit record
 
 One JSON object per line, written by `agentscd` only (sink `stdout`, readable
@@ -651,7 +701,7 @@ with `kubectl logs -c agentscd`, or `file`). Field order is fixed as below so
   "cost_usd": 0.0052 | null,
   "latency_ms": 1180,
   "decision": "allow | deny",
-  "rule": "authz.services.deny-admin | guardrail.input_deny.no-secrets | budget.max_calls_per_minute | null",
+  "rule": "authz.services.deny-admin | guardrail.input_deny.no-secrets | budget.max_calls_per_minute | taint.untrusted_write | null",
   "reason": "human readable or null",
   "error": "string or null"
 }
@@ -727,7 +777,11 @@ with `decision: deny` and the same `request_id` and `trace_id`.
 (`audit.redact[<path>]`), `guardrails.pii_redact` true → false,
 `telemetry.export_payloads` false → true, `authz.default` deny → allow, and a
 removed `input_deny` / `output_deny` rule (`guardrails.input_deny[<name>]`; a
-rule whose regex changed counts as removed).
+rule whose regex changed counts as removed). Taint (§5.2): a removed
+`agents.<a>.taint`, `agents.<a>.taint.mode` enforce → audit,
+`agents.<a>.taint.input` and `agents.<a>.tools.<t>.label` changed away from
+untrusted or sensitive (each guards a different rule), `agents.<a>.tools.<t>.effect`
+write → read.
 
 **Unknown kinds.** A consumer that sees a `kind` it does not know keeps the
 record and shows the kind as written: `agentsc logs` and embassy never reject a
@@ -801,7 +855,7 @@ agentsc charter validate <file>        # plain or resource form (§3.4); exit 0 
 agentsc charter schema                 # JSON Schema to stdout (== schemas/charter.schema.json)
 agentsc charter schema --crd           # the CustomResourceDefinition charters.agentsc.io, YAML (== deploy/crds/charters.agentsc.io.yaml)
 agentsc charter to-cr <file>           # the charter as a `Charter` custom resource, YAML; exit 1 if the charter is invalid
-agentsc logs <svc>[,<svc>…] [-n NS] [--context C] [--agent A] [--trace T] [--request R] [--kind <any kind>] [--denied] [-f] [--raw] [--file F|-] [--tail N]
+agentsc logs <svc>[,<svc>…] [-n NS] [--context C] [--agent A] [--trace T] [--request R] [--kind <any kind>] [--rule PREFIX] [--denied] [-f] [--raw] [--file F|-] [--tail N]
 agentsc version
 ```
 
@@ -814,7 +868,7 @@ prints the same document. `agentsc charter schema --crd` prints the CRD of
 `agentsc logs` runs `kubectl logs -n NS -l 'agentsc.io/service in (<svcs>)' -c
 agentscd --tail N [-f]`, keeps only lines that parse as §6 records (sidecar
 diagnostics share the container log on stderr and are skipped), applies the
-filters (`--trace`/`--request` match by prefix; `--agent` matches `agent` or
+filters (`--trace`/`--request`/`--rule` match by prefix; `--agent` matches `agent` or
 `caller_agent`), sorts by `ts` unless following, and prints one line per
 record. Records of any sidecar version are read (`AuditRecordView`, §6.1): a
 kind, direction or decision this CLI does not know is shown as written, and

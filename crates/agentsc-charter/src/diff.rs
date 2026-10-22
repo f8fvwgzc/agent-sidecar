@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AgentSpec, CallerRule, Charter, Decision, LOCAL_IDENTITY, LearningMode, RegexRule, ToolType,
-    http_origin,
+    AgentSpec, CallerRule, Charter, Decision, LOCAL_IDENTITY, LearningMode, RegexRule, TaintLabel,
+    TaintMode, ToolEffect, ToolType, http_origin,
 };
 
 /// The roles of the control-plane API, lowest first (`Role::Viewer < Role::Editor < Role::Admin`).
@@ -106,6 +106,40 @@ pub fn weakened(old: &Charter, new: &Charter) -> Vec<String> {
         &new.guardrails.output_deny,
         &mut out,
     );
+    // taint policy: off or audit where it enforced, a label's protection dropped, writes made reads
+    for o in &old.agents {
+        let Some(n) = new.agent(&o.name) else {
+            continue;
+        };
+        if let Some(ot) = &o.taint {
+            match &n.taint {
+                None => out.push(format!("agents.{}.taint", o.name)),
+                Some(nt) => {
+                    if ot.mode == TaintMode::Enforce && nt.mode == TaintMode::Audit {
+                        out.push(format!("agents.{}.taint.mode", o.name));
+                    }
+                    if ot.input != TaintLabel::Trusted && nt.input != ot.input {
+                        out.push(format!("agents.{}.taint.input", o.name));
+                    }
+                }
+            }
+        }
+        for ot in &o.tools {
+            let Some(nt) = n.tools.iter().find(|t| t.name == ot.name) else {
+                continue;
+            };
+            if ot.effective_label() != TaintLabel::Trusted
+                && nt.effective_label() != ot.effective_label()
+            {
+                out.push(format!("agents.{}.tools.{}.label", o.name, ot.name));
+            }
+            if ot.effective_effect() == ToolEffect::Write
+                && nt.effective_effect() == ToolEffect::Read
+            {
+                out.push(format!("agents.{}.tools.{}.effect", o.name, ot.name));
+            }
+        }
+    }
     out
 }
 
@@ -220,6 +254,23 @@ pub fn required_role(old: &Charter, new: &Charter) -> (Role, Vec<String>) {
                 "agents.{}.learning.mode: auto requires admin",
                 a.name
             ));
+        }
+        // taint policy is security policy: any change to it, or to a tool's label or effect
+        if prev.map(|p| &p.taint) != Some(&a.taint) && (prev.is_some() || a.taint.is_some()) {
+            admin.push(format!("agents.{}.taint requires admin", a.name));
+        }
+        for t in &a.tools {
+            let before = prev.and_then(|p| p.tools.iter().find(|x| x.name == t.name));
+            let changed = match before {
+                Some(b) => b.label != t.label || b.effect != t.effect,
+                None => t.label.is_some() || t.effect.is_some(),
+            };
+            if changed {
+                admin.push(format!(
+                    "agents.{}.tools.{} label or effect requires admin",
+                    a.name, t.name
+                ));
+            }
         }
         for t in a.tools.iter().filter(|t| t.tool_type == ToolType::Http) {
             let origin = t.url.as_deref().and_then(http_origin);

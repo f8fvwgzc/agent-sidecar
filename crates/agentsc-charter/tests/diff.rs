@@ -131,6 +131,88 @@ fn weakening_changes_are_listed() {
     );
 }
 
+/// v02 with taint enforced on `support` and get_order labeled sensitive.
+fn tainted() -> Charter {
+    let mut c = v02();
+    let a = c.agents.iter_mut().find(|a| a.name == "support").unwrap();
+    a.taint = Some(TaintSpec {
+        mode: TaintMode::Enforce,
+        input: TaintLabel::Untrusted,
+    });
+    a.tools[0].label = Some(TaintLabel::Sensitive);
+    c
+}
+
+fn tool<'c>(c: &'c mut Charter, name: &str) -> &'c mut ToolSpec {
+    c.agents[0]
+        .tools
+        .iter_mut()
+        .find(|t| t.name == name)
+        .unwrap()
+}
+
+#[test]
+fn loosening_taint_is_weakening_and_needs_admin() {
+    let old = tainted();
+    let check = |edit: fn(&mut Charter), want: &[&str]| {
+        let mut new = old.clone();
+        edit(&mut new);
+        new.validate().unwrap();
+        assert_eq!(weakened(&old, &new), want);
+        assert_eq!(required_role(&old, &new).0, Role::Admin, "{want:?}");
+    };
+    check(|c| c.agents[0].taint = None, &["agents.support.taint"]);
+    check(
+        |c| c.agents[0].taint.as_mut().unwrap().mode = TaintMode::Audit,
+        &["agents.support.taint.mode"],
+    );
+    check(
+        |c| c.agents[0].taint.as_mut().unwrap().input = TaintLabel::Trusted,
+        &["agents.support.taint.input"],
+    );
+    // each label guards its own rule: sensitive -> untrusted drops the egress rule
+    check(
+        |c| tool(c, "get_order").label = Some(TaintLabel::Untrusted),
+        &["agents.support.tools.get_order.label"],
+    );
+    // http tools default to untrusted
+    check(
+        |c| tool(c, "partner").label = Some(TaintLabel::Trusted),
+        &["agents.support.tools.partner.label"],
+    );
+    // POST defaults to write
+    check(
+        |c| tool(c, "refund").effect = Some(ToolEffect::Read),
+        &["agents.support.tools.refund.effect"],
+    );
+}
+
+#[test]
+fn tightening_taint_is_not_weakening_but_still_needs_admin() {
+    let old = v02();
+    let mut new = tainted();
+    tool(&mut new, "triage").effect = Some(ToolEffect::Write);
+    new.validate().unwrap();
+    assert!(
+        weakened(&old, &new).is_empty(),
+        "{:?}",
+        weakened(&old, &new)
+    );
+    let (role, reasons) = required_role(&old, &new);
+    assert_eq!(role, Role::Admin);
+    for r in [
+        "agents.support.taint requires admin",
+        "agents.support.tools.get_order label or effect requires admin",
+        "agents.support.tools.triage label or effect requires admin",
+    ] {
+        assert!(reasons.iter().any(|x| x == r), "{r:?} in {reasons:?}");
+    }
+    // spelling out a default is not a weakening either
+    let mut same = old.clone();
+    tool(&mut same, "refund").effect = Some(ToolEffect::Write);
+    assert!(weakened(&old, &same).is_empty());
+}
+
 #[test]
 fn strengthening_changes_are_not_weakening() {
     let (old, new) = changed(|c| {
@@ -196,6 +278,8 @@ fn editors_may_change_agents_skills_and_local_callers() {
             path: Some("/orders/{id}/cancel".into()),
             agent: None,
             url: None,
+            label: None,
+            effect: None,
         });
         c.agents[0].tools.push(ToolSpec {
             name: "stock".into(),
@@ -207,6 +291,8 @@ fn editors_may_change_agents_skills_and_local_callers() {
             path: None,
             agent: Some("stock-analyst".into()),
             url: None,
+            label: None,
+            effect: None,
         });
         c.guardrails.allowed_tools.remove("support");
     });

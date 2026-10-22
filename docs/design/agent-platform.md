@@ -49,7 +49,7 @@ One binary `embassy` with `embassy serve --components <list>`; components are `c
 
 ## 4. Charter additions (agentsc.io/v1alpha1, backward compatible)
 
-All new fields are optional; unknown fields stay errors. `charter_schema_level` for v0.2 is `2` (v0.1 is `1`).
+All new fields are optional; unknown fields stay errors. `charter_schema_level` for v0.2 is `2` (v0.1 is `1`); the taint policy fields are `3` ([taint-policy.md](taint-policy.md)).
 
 ```yaml
 service:

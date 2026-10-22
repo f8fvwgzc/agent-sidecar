@@ -353,6 +353,36 @@ impl<'a> Call<'a> {
         self.tool(input, Value::Null, &v, None);
         denied_status(&v)
     }
+
+    /// The taint rules (taint.rs): deny the call, or in audit mode record what would be denied.
+    fn taint_gate(&self, spec: &AgentSpec, tool: &ToolSpec, input: &Value) -> Result<(), Status> {
+        let Some(v) = self.svc.state.taint.check(spec, tool, &self.c.request_id) else {
+            return Ok(());
+        };
+        if !v.allow {
+            return Err(self.deny(input, v));
+        }
+        let rec = self
+            .record(
+                Kind::Guardrail,
+                Direction::Internal,
+                &self.trace,
+                &self.c.tool,
+                input,
+                Value::Null,
+            )
+            .verdict(&v);
+        self.svc.state.audit.write(rec);
+        Ok(())
+    }
+
+    /// The call returned data to the run: the run now carries the tool's label.
+    fn taint_mark(&self, tool: &ToolSpec) {
+        self.svc
+            .state
+            .taint
+            .add(&self.c.request_id, tool.effective_label(), &tool.name);
+    }
 }
 
 impl ToolsService {
@@ -477,6 +507,12 @@ impl ToolsService {
         if let Ok(v) = c.agent.parse() {
             md.insert("x-agentsc-agent", v);
         }
+        let taint = self.state.taint.header(&c.request_id);
+        if !taint.is_empty()
+            && let Ok(v) = taint.parse()
+        {
+            md.insert(crate::taint::HEADER, v);
+        }
         req
     }
 }
@@ -506,6 +542,7 @@ impl SidecarTools for ToolsService {
             Ok(x) => x,
             Err(v) => return Err(call.deny(&input, v)),
         };
+        call.taint_gate(spec, tool, &input)?;
         let method = req.method.to_ascii_uppercase();
         let mismatch = |path: &str| {
             Verdict::deny(
@@ -612,6 +649,7 @@ impl SidecarTools for ToolsService {
         match result {
             Ok(resp) => {
                 let out = json!({ "status": resp.status, "body": body_value(&resp.body) });
+                call.taint_mark(tool);
                 call.tool(&input, out.clone(), &v, None);
                 call.attempt(
                     Kind::ServiceCall,
@@ -688,6 +726,7 @@ impl SidecarTools for ToolsService {
             Ok(x) => x,
             Err(v) => return Err(call.deny(&input, v)),
         };
+        call.taint_gate(spec, tool, &input)?;
         let remote = !self.is_self(Some(&req.target_service));
         let declared = tool.tool_type == ToolType::Agent
             && tool.agent.as_deref() == Some(req.target_agent.as_str())
@@ -750,7 +789,21 @@ impl SidecarTools for ToolsService {
                         .invoke_agent(self.mesh_request(&call.c, &child, call.deadline, msg))
                         .await
                     {
-                        Ok(r) => r.into_inner(),
+                        Ok(r) => {
+                            // the callee's run read these labels: so has this one now
+                            if let Some(h) = r
+                                .metadata()
+                                .get(crate::taint::HEADER)
+                                .and_then(|v| v.to_str().ok())
+                            {
+                                self.state.taint.add_header(
+                                    &call.c.request_id,
+                                    h,
+                                    &format!("agent {}", req.target_agent),
+                                );
+                            }
+                            r.into_inner()
+                        }
                         Err(st) => {
                             let denied = is_denial(st.code());
                             let rule = rule_from_status(
@@ -805,6 +858,7 @@ impl SidecarTools for ToolsService {
         match resp.status.as_str() {
             "ok" => {
                 let out = Value::String(resp.output.clone());
+                call.taint_mark(tool);
                 call.tool(&input, out.clone(), &v, None);
                 call.attempt(
                     Kind::AgentCall,
@@ -886,10 +940,11 @@ impl SidecarTools for ToolsService {
         let mut input =
             json!({ "method": req.method, "url": req.url, "body": body_value(&req.body) });
 
-        let (_spec, tool) = match self.tool_spec(&snap, &call.c.agent, &call.c.tool) {
+        let (spec, tool) = match self.tool_spec(&snap, &call.c.agent, &call.c.tool) {
             Ok(x) => x,
             Err(v) => return Err(call.deny(&input, v)),
         };
+        call.taint_gate(spec, tool, &input)?;
         let method = req.method.to_ascii_uppercase();
         let mismatch = |url: &str| {
             Verdict::deny(
@@ -985,6 +1040,7 @@ impl SidecarTools for ToolsService {
         match sent {
             Ok(sr) => {
                 let out = json!({ "status": sr.status, "body": body_value(&sr.body) });
+                call.taint_mark(tool);
                 call.tool(&input, out.clone(), &v, None);
                 call.attempt(
                     Kind::HttpCall,

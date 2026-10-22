@@ -135,6 +135,8 @@ async fn mesh_mtls_end_to_end() {
         path: Some("/stock/{sku}".into()),
         agent: None,
         url: None,
+        label: None,
+        effect: None,
     });
     // and an http tool aimed at the same fake app, to check the URL template on InvokeHttp
     ops.tools.push(ToolSpec {
@@ -150,6 +152,8 @@ async fn mesh_mtls_end_to_end() {
             "http://127.0.0.1:{}/stock/{{sku}}",
             app_addr.port()
         )),
+        label: None,
+        effect: None,
     });
     let allowed = ord
         .guardrails
