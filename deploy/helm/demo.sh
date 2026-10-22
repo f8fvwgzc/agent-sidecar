@@ -92,6 +92,20 @@ for svc in orders inventory; do
 done
 echo "✓ both pods run the injected agentscd sidecar"
 
+# Ready pods are not yet reachable through their Service for a moment after a rollout: wait until
+# the orders sidecar can open inventory's mesh port before the first cross-service call.
+echo -n "▶ waiting until orders reaches inventory's mesh port"
+reached=
+for _ in $(seq 1 60); do
+  if kc -n "$NS" exec deploy/orders -c agentscd -- python3 -c \
+    "import socket,sys; s=socket.socket(); s.settimeout(1); sys.exit(s.connect_ex(('inventory.$NS.svc.cluster.local', 50002)))" \
+    >/dev/null 2>&1; then
+    reached=1; echo " ok"; break
+  fi
+  echo -n "."; sleep 1
+done
+[[ -n $reached ]] || { echo; echo "✗ orders cannot reach inventory.$NS.svc:50002" >&2; exit 1; }
+
 AGENTSC=$AGENTSC NS=$NS KUBE_CONTEXT=$KUBE_CONTEXT ./scripts/demo.sh
 
 echo
