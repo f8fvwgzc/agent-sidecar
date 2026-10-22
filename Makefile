@@ -18,7 +18,7 @@ COMPOSE := docker compose -f deploy/compose/docker-compose.yml
 COMPOSE_ENV := deploy/compose/.env
 # Tests of the chart, the Compose stack, the Dockerfile and the release workflow (throwaway uv env).
 PACKAGING_PYTEST := uv run --no-project --with pytest==8.4.2 --with pyyaml==6.0.2 python -m pytest -q
-.PHONY: local-demo platform-demo all build-host test test-rust test-python fmt lint proto schema validate \
+.PHONY: local-demo platform-demo e2e-helm all build-host test test-rust test-python fmt lint proto schema validate \
         minikube-up minikube-down build deploy charters undeploy demo logs logs-denied secret-anthropic clean dev-certs \
         compose-up compose-down helm-lint helm-template demo-helm packaging-test
 
@@ -129,6 +129,11 @@ helm-template:
 # The v0.2 demo on minikube: the four images in minikube's docker, the chart, an injection-enabled
 # namespace, Charter resources made with `agentsc charter to-cr`, the two apps with the inject label
 # and annotations (no sidecar in their spec), then the demo calls of scripts/demo.sh.
+# The full end-to-end test against an installed chart and the demo apps (after demo-helm, or any
+# cluster: make e2e-helm KUBE_CONTEXT=<context>).
+e2e-helm:
+	KUBE_CONTEXT=$(KUBE_CONTEXT) ./deploy/helm/e2e.sh
+
 demo-helm: minikube-up build
 	cargo build -q -p agentsc-cli -p embassy
 	KUBE_CONTEXT=$(KUBE_CONTEXT) CP_NS=$(CP_NS) RELEASE=$(HELM_RELEASE) AGENTSC=$(AGENTSC) EMBASSY=$(EMBASSY) \
