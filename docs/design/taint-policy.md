@@ -103,8 +103,11 @@ which makes a run stricter, so a peer has no reason to lie and gains nothing by 
 
 ## Changing the policy
 
-Every change to `taint`, and setting or changing a tool's `label` or `effect`, needs the admin
-role. These changes are also listed as `weakened` in the `config` audit record:
+Through the control-plane API and the console, every change to `taint`, and setting or changing
+a tool's `label` or `effect`, needs the admin role. A `Charter` written with `kubectl` gets no
+role check: whoever may write Charter resources is in effect an admin for that service, so grant
+that RBAC narrowly (see the chart README). Loosening changes are listed as `weakened` in the
+`config` audit record whichever way they arrive:
 
 - removing an agent's `taint` block;
 - `taint.mode` from `enforce` to `audit`;
@@ -113,8 +116,10 @@ role. These changes are also listed as `weakened` in the `config` audit record:
   rule, so `sensitive` to `untrusted` counts too);
 - a tool's `effect` changed from `write` to `read`.
 
-The fields are charter schema level 3. The control plane refuses to push them to a connected
-sidecar older than that (it would reject them as unknown fields), and names the pods.
+The fields are charter schema level 3. An API or console write that uses them is refused while
+a connected sidecar is older than that, and the error names the pods. A `kubectl` write is not
+checked this way: an older sidecar rejects the charter as having unknown fields
+(`config.invalid`) and keeps running the one it has.
 
 ## Limits
 
@@ -129,5 +134,8 @@ sidecar older than that (it would reject them as unknown fields), and names the 
   and moving it into its own container is on the gaps list.
 - **The model provider is not a tool.** The runtime sends sensitive data to the model API as it
   does today. `sensitive_egress` covers `http` tools only.
+- **Inbound service calls aren't checked.** A peer's `Mesh.InvokeService` call to this app is
+  held to `authz.services` only. The taint rules apply where the calling agent runs, so the
+  caller needs its own `taint` block.
 - **State is in memory, per sidecar replica.** It lasts 15 minutes after the run's last change.
   A run that spans replicas only shares labels through the header on agent calls.
