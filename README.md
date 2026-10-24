@@ -106,6 +106,7 @@ Check a charter with `cargo run -p agentsc-cli -- charter validate <file>`.
 | [Microservices](docs/guides/microservices.md) | Adopt it across many services, for a startup or an enterprise. |
 | [Monolith and monorepo](docs/guides/monolith-and-monorepo.md) | One service with many agents, and a monorepo layout. |
 | [Operations](docs/operations.md) | Audit logs, the CLI, troubleshooting, production checklist, limitations. |
+| [Decision records](docs/adr/README.md) | Why HTTP/3 for the console, the response caches and the SQLite store are built the way they are. |
 | [CONTRACT.md](CONTRACT.md) | Full reference: wire protocol, charter, authz order, audit record. |
 
 ## Status

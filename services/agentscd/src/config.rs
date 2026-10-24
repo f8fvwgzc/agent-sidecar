@@ -101,6 +101,20 @@ pub struct Config {
     /// Charter `telemetry.otlp_endpoint` values allowed (globs, comma separated; empty = refused).
     #[arg(long, env = "AGENTSC_OTLP_ENDPOINT_ALLOW", value_delimiter = ',')]
     pub otlp_endpoint_allow: Vec<String>,
+    /// Bytes of service-call responses the response cache keeps (0 disables it; cache.rs).
+    #[arg(
+        long,
+        env = "AGENTSC_MESH_CACHE_BYTES",
+        default_value_t = crate::cache::DEFAULT_CAPACITY_BYTES
+    )]
+    pub mesh_cache_bytes: u64,
+    /// The longest a cached service-call response is served, in seconds, whatever the app's max-age says.
+    #[arg(
+        long,
+        env = "AGENTSC_MESH_CACHE_MAX_AGE",
+        default_value_t = crate::cache::DEFAULT_MAX_AGE_SECS
+    )]
+    pub mesh_cache_max_age: u64,
 
     /// Intervals and windows of design §6; tests shorten them.
     #[arg(skip)]
@@ -183,6 +197,8 @@ impl Config {
             app_token: None,
             peer_address_template: DEFAULT_PEER_ADDRESS_TEMPLATE.into(),
             otlp_endpoint_allow: Vec::new(),
+            mesh_cache_bytes: crate::cache::DEFAULT_CAPACITY_BYTES,
+            mesh_cache_max_age: crate::cache::DEFAULT_MAX_AGE_SECS,
             timing: Timing::default(),
             otel_env: Some(BTreeMap::new()),
         }
@@ -329,9 +345,14 @@ mod tests {
             "{service}-sidecar:{port}",
             "--otlp-endpoint-allow",
             "http://otel-collector:4318,https://*.example",
+            "--mesh-cache-bytes",
+            "0",
+            "--mesh-cache-max-age",
+            "30",
         ])
         .unwrap();
         assert!(c.managed());
+        assert_eq!((c.mesh_cache_bytes, c.mesh_cache_max_age), (0, 30));
         assert_eq!(c.ca_addr(), Some("embassy.agentsc-system.svc:15012"));
         assert_eq!(c.service_flag(), Some("orders"));
         assert_eq!(c.namespace_flag(), Some("shop"));
@@ -353,6 +374,8 @@ mod tests {
         assert_eq!(d.state_dir(), PathBuf::from("/run/x/state"));
         assert_eq!(d.peer_address_template, DEFAULT_PEER_ADDRESS_TEMPLATE);
         assert!(d.otlp_allow().is_empty());
+        assert_eq!(d.mesh_cache_bytes, crate::cache::DEFAULT_CAPACITY_BYTES);
+        assert_eq!(d.mesh_cache_max_age, crate::cache::DEFAULT_MAX_AGE_SECS);
         assert_eq!(d.timing, Timing::default());
 
         let e = Config::try_parse_from([

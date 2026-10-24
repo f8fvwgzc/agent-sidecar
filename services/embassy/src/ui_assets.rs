@@ -1,6 +1,11 @@
 //! The `ui` component: the console's static files (design §8.1, §11), embedded at compile time
 //! (`build.rs`) or, with `--ui-dir`, read from disk. Served for `GET`/`HEAD` outside `/api/v1`;
 //! `/` is `index.html`; `.js` is `text/javascript; charset=utf-8`.
+//!
+//! Caching (docs/adr/0002-response-caching.md): the console's own files are `no-cache` (kept,
+//! revalidated on every load; [`crate::api::cache::conditional`] adds the `ETag` and answers
+//! `304`), so a new embassy is picked up on the next reload. `vendor/` files carry their version
+//! in their name (`d3.v7.9.0.min.js`), so they are immutable for a year.
 use std::path::{Component, Path, PathBuf};
 
 use axum::body::Body;
@@ -45,6 +50,20 @@ pub fn content_type(path: &str) -> &'static str {
         "woff2" => "font/woff2",
         "txt" | "license" => "text/plain; charset=utf-8",
         _ => "application/octet-stream",
+    }
+}
+
+/// `Cache-Control` of the console's own files: kept by the browser, revalidated every time.
+pub const CACHE_CONTROL: &str = "no-cache";
+/// `Cache-Control` of `vendor/` files, whose names carry their version.
+pub const VENDOR_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
+
+/// The `Cache-Control` a console file gets.
+pub fn cache_control(rel: &str) -> &'static str {
+    if rel.starts_with("vendor/") && rel != "vendor/SHA256SUMS" {
+        VENDOR_CACHE_CONTROL
+    } else {
+        CACHE_CONTROL
     }
 }
 
@@ -112,7 +131,10 @@ pub async fn serve(files: &UiFiles, method: &Method, uri: &Uri) -> Response {
         header::CONTENT_TYPE,
         HeaderValue::from_static(content_type(&rel)),
     );
-    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    h.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(cache_control(&rel)),
+    );
     resp
 }
 
@@ -141,6 +163,10 @@ mod tests {
         assert_eq!(content_type("styles.css"), "text/css; charset=utf-8");
         assert_eq!(content_type("favicon.svg"), "image/svg+xml");
         assert_eq!(content_type("x.bin"), "application/octet-stream");
+        assert_eq!(cache_control("index.html"), "no-cache");
+        assert_eq!(cache_control("js/main.js"), "no-cache");
+        assert_eq!(cache_control("vendor/SHA256SUMS"), "no-cache");
+        assert_eq!(cache_control("vendor/d3.v7.9.0.min.js"), VENDOR_CACHE_CONTROL);
     }
 
     #[test]

@@ -49,6 +49,7 @@ embassyCa:
   dnsNames: [agentsc.example.com]
 embassy:
   httpTLS: true
+  http3: true
   dnsNames: [agentsc.example.com]
 networkPolicy:
   enabled: true

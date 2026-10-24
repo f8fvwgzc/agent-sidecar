@@ -794,3 +794,32 @@ Fixed limits and timeouts in the code:
 | Sidecar HTTP client (app and `http` tools) timeout | 30 seconds |
 | Runtime restart wait | 1 second, doubling up to 30 seconds |
 | Leaf certificate and CA lifetime | 365 days and 10 years |
+
+## Transport, caches and the control-plane store
+
+Three later additions, each with a decision record under [`docs/adr/`](adr/README.md).
+
+### HTTP/3 for the console
+
+`embassy serve --http-tls --http3` serves `--http-addr` over HTTP/3 as well: QUIC on the same port over UDP, advertised to browsers with `Alt-Svc` on every TCP response. The Helm value is `embassy.http3` (it opens UDP 8080 on the Service and the NetworkPolicy). Whatever sits in front of embassy must pass UDP through, or browsers simply stay on HTTP/1.1 or HTTP/2 and nothing is lost. Check it with:
+
+```bash
+curl --http3-only -sS -o /dev/null -w '%{http_version}\n' https://<host>:8080/api/v1/healthz
+```
+
+Only the console's hop is affected. `Connect`, `IssueCertificate` and the mesh stay gRPC over HTTP/2 with mTLS, and the app's loopback hop to its sidecar stays plain HTTP/1.1 ([ADR 0001](adr/0001-http3-for-the-console.md)).
+
+### Caches
+
+Two caches, both revalidating, neither ever serving something the origin would not ([ADR 0002](adr/0002-response-caching.md)):
+
+- **Console ↔ control plane.** Every API `GET` carries an `ETag` and answers `304 Not Modified` to a matching `If-None-Match`; the console keeps the last body per URL and revalidates. An unchanged graph or trace list costs a round trip and no payload. Console files are `no-cache` (revalidated on every load); `vendor/` files, versioned in their names, are immutable for a year.
+- **Service to service.** A `GET`/`HEAD` the app answers with `Cache-Control: max-age=N` is kept for `N` seconds (at most `--mesh-cache-max-age`, default 300) by the sidecars on both ends of the call, keyed by service, caller, agent, method, path and the response's `Vary` headers. A hit carries `Age` and `x-agentsc-cache: hit` and still writes its `service_call` record. A write through a sidecar empties that service's entries in it. Nothing is kept without `Cache-Control`, with `no-store`, `no-cache` or `private`, or for anything but a `200`. `--mesh-cache-bytes 0` turns it off. `InvokeAgent` and `http` tools are never cached.
+
+### The SQLite store
+
+`embassy serve --store sqlite:<path>` keeps charters, their history, memory, proposals and the control-plane audit in one database file (WAL mode; the schema is `services/embassy/src/store/schema.sql`). Compared with `file:<dir>` it adds integrity the file layout cannot: foreign keys with cascades, unique and partial indexes on every query path, and triggers that keep versions monotonic, refuse a second decision on a proposal and refuse `UPDATE`/`DELETE` on the audit ([ADR 0003](adr/0003-sqlite-store-schema.md)). There is no external editor for it (edit charters through the API, the console or `kubectl`), so there is no poll. Back it up by copying the file while embassy is stopped, or with `sqlite3 <path> ".backup <copy>"` while it runs; query it read-only with `sqlite3 -readonly <path>`, for example:
+
+```bash
+sqlite3 -readonly /var/lib/agentsc/embassy.db "SELECT ts, actor, action, namespace, service, result FROM cp_audit ORDER BY seq DESC LIMIT 20"
+```

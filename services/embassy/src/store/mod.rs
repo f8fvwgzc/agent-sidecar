@@ -1,6 +1,7 @@
 //! The control-plane store (design §8.4): charters with history, memory, proposals and pending
-//! adoptions, per service. Two implementations follow: `file:<dir>` (B3a, `store/file.rs`) and
-//! `kubernetes` (B3b, `k8s`).
+//! adoptions, per service. Three implementations follow: `file:<dir>` (B3a, `store/file.rs`),
+//! `sqlite:<path>` (`store/sqlite.rs`, docs/adr/0003-sqlite-store-schema.md) and `kubernetes`
+//! (B3b, `k8s`).
 //!
 //! The store only persists. Every write reaching it has already passed, in order: the charter
 //! validator → `policy` → role on the diff → the version-skew check (design §8.4). The store
@@ -22,6 +23,7 @@ use crate::api::types::CpAuditRecord;
 use crate::config::Role;
 
 pub mod file;
+pub mod sqlite;
 
 /// The plain charter document inside a stored charter: `spec` for the custom-resource form
 /// (`metadata` + `spec`), the document itself otherwise.

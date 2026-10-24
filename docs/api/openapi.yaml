@@ -91,6 +91,15 @@ info:
     `editor` (design §8.3). Creating a service's first charter with `PUT .../charter`
     (`If-None-Match: *`) needs `admin`.
 
+    ## Conditional GETs
+
+    Every `200` to a `GET` carries an `ETag`: the version where the resource has one (above), a
+    content hash (`"h-<hex>"`) otherwise. A `GET` whose `If-None-Match` names that tag is
+    answered `304 Not Modified` with no body. Responses carry `Cache-Control: private, no-cache`
+    and `Vary: Cookie, Authorization` unless stated otherwise: a client may keep a copy, but must
+    revalidate it before every use (docs/adr/0002-response-caching.md). The event stream
+    (`GET /events`) is `no-store` and never conditional.
+
     ## Errors
 
     Every error body is an `Error`: `{"error": "<code>", "details": ["..."], "current_version": "<v>"?}`.

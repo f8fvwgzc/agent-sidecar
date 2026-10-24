@@ -138,6 +138,8 @@ New `kind` values: `config`, `learning`. A consumer that sees an unknown kind mu
 | `--app-token-file <path>` | `AGENTSC_APP_TOKEN` (token text) | require `Authorization: Bearer` on the app HTTP and gRPC APIs |
 | `--peer-address-template <t>` | `AGENTSC_PEER_ADDRESS_TEMPLATE` | default `{service}.{namespace}.svc.cluster.local:{port}`; used when `mesh.peers` has no entry |
 | `--otlp-endpoint-allow <glob,...>` | `AGENTSC_OTLP_ENDPOINT_ALLOW` | charter `telemetry.otlp_endpoint` values allowed (empty = charter endpoints refused) |
+| `--mesh-cache-bytes <n>` | `AGENTSC_MESH_CACHE_BYTES` (default `16777216`) | bytes of service-call responses the response cache keeps; `0` disables it (docs/adr/0002-response-caching.md) |
+| `--mesh-cache-max-age <s>` | `AGENTSC_MESH_CACHE_MAX_AGE` (default `300`) | the longest a cached service-call response is served, whatever the app's `max-age` says |
 
 Standalone mode (no `--control-plane`) is v0.1 behaviour plus hot reload of the `--charter` file and everything in §6.3–6.6. In managed mode `--charter` is optional: if given it is the start-up charter until the control plane sends one.
 
@@ -261,11 +263,12 @@ embassy serve
   --ca-dir <dir> | --ca-secret <ns>/<name>        CA material (ca.crt may hold several roots; the first key-matching one signs)
   --tls-secret <ns>/<name>                        where embassy-ca writes embassy-tls (Kubernetes)
   --tls-dir <dir>                                 where the controlplane component reads embassy-tls (mounted Secret)
-  --store file:<dir> | kubernetes
+  --store file:<dir> | sqlite:<path> | kubernetes  (sqlite: docs/adr/0003-sqlite-store-schema.md)
   --config <file>                                 ControlPlaneConfig (reloaded on change)
   --dns-name <name> (repeatable)                  serving-cert DNS SANs and allowed Host headers
   --http-tls                                      serve the HTTP API over TLS with the serving cert
-  --auto-adopt                                    adopt sidecar start-up charters automatically (file store only)
+  --http3                                         also serve --http-addr over HTTP/3 (QUIC, UDP, same port; needs --http-tls; docs/adr/0001-http3-for-the-console.md)
+  --auto-adopt                                    adopt sidecar start-up charters automatically (file and sqlite stores only)
   --webhook-config-name agentsc-sidecar-injector  --validating-webhook-name agentsc-charter-validator
   --injector-image <image>                        image injected as agentscd
   --cp-namespace agentsc-system
@@ -274,7 +277,7 @@ embassy serve
 embassy token create [--name n --role r --namespaces a,b]   prints a new token (att_ + 43 base64url chars) and its config entry
 ```
 
-Plain HTTP is allowed (Kubernetes users front it with an Ingress or port-forward). The HTTP server answers 421 when the `Host` header is not a `--dns-name`, `localhost`, `127.0.0.1` or `[::1]` (with any port). Every response carries `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`. No `Access-Control-Allow-*` header is ever sent. `.js` is served as `text/javascript; charset=utf-8`.
+Plain HTTP is allowed (Kubernetes users front it with an Ingress or port-forward). With `--http-tls --http3` the same address also answers HTTP/3 over UDP, and every TCP response carries `Alt-Svc: h3=":<port>"; ma=86400`, so a browser moves to QUIC after its first request (docs/adr/0001-http3-for-the-console.md). Every `GET` answers `304 Not Modified` to a matching `If-None-Match`; responses carry an `ETag` (the version where there is one, a content hash otherwise) and `Cache-Control: private, no-cache` (docs/adr/0002-response-caching.md). The HTTP server answers 421 when the `Host` header is not a `--dns-name`, `localhost`, `127.0.0.1` or `[::1]` (with any port). Every response carries `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`. No `Access-Control-Allow-*` header is ever sent. `.js` is served as `text/javascript; charset=utf-8`.
 
 ### 8.2 ControlPlaneConfig
 

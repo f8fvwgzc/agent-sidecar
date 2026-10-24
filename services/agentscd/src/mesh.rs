@@ -309,6 +309,26 @@ impl Mesh for MeshService {
             return Err(deny_status(&v));
         }
 
+        // The response cache (cache.rs), after authz: a fresh copy answers a read without the
+        // app; a write empties this service's entries first, so the peer's next read sees it.
+        let cache_key = crate::cache::Key {
+            service: me.clone(),
+            caller: caller.clone(),
+            agent: inb.agent.clone().unwrap_or_default(),
+            method: method.clone(),
+            path: path.clone(),
+        };
+        let cacheable = crate::cache::cacheable_method(&method);
+        if cacheable && let Some(hit) = self.state.response_cache.get(&cache_key, &req.headers) {
+            let out = json!({ "status": hit.response.status, "body": body_value(&hit.response.body) });
+            self.state
+                .audit
+                .write(record(&callee, &input, out).verdict(&v));
+            return Ok(Response::new(hit.response));
+        } else if !cacheable {
+            self.state.response_cache.invalidate_service(&me);
+        }
+
         let url = format!("{}{}", self.state.app_base_url(&snap), path);
         let method = match reqwest::Method::from_bytes(method.as_bytes()) {
             Ok(m) => m,
@@ -351,6 +371,11 @@ impl Mesh for MeshService {
         pending.disarm();
         match sent {
             Ok(sr) => {
+                if cacheable {
+                    self.state
+                        .response_cache
+                        .store(cache_key, &sr, &req.headers);
+                }
                 let out = json!({ "status": sr.status, "body": body_value(&sr.body) });
                 self.state
                     .audit

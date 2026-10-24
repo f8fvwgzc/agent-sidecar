@@ -146,6 +146,11 @@ embassy:
       memory: 1Gi
   # Serve the HTTP API and UI over TLS with the control-plane serving certificate (--http-tls).
   httpTLS: false
+  # Also serve them over HTTP/3 (--http3): QUIC on UDP 8080 next to TCP 8080, advertised with
+  # Alt-Svc, so browsers move to it after their first request. Needs httpTLS. The Service and
+  # the NetworkPolicy then open UDP 8080 too; an Ingress or load balancer in front must pass UDP
+  # through, or browsers simply stay on TCP.
+  http3: false
   # Extra Host names the API answers to (--dns-name), e.g. the Ingress host. The Service names,
   # localhost, 127.0.0.1 and [::1] are always accepted.
   dnsNames: []

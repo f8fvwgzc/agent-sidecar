@@ -11,6 +11,11 @@
 //!   with the file store) and honours `auth.anonymous: viewer`.
 //! - `--http-tls` serves `--http-addr` with the serving certificate; session cookies are then
 //!   `Secure`.
+//! - `--http3` (with `--http-tls`) also serves `--http-addr` over HTTP/3: QUIC on the same port
+//!   over UDP, advertised with `Alt-Svc` on every TCP response ([`http3`],
+//!   docs/adr/0001-http3-for-the-console.md).
+//! - `--store sqlite:<path>` keeps everything the file store keeps in one SQLite database
+//!   ([`crate::store::sqlite`], docs/adr/0003-sqlite-store-schema.md).
 //! - When `ca` and `controlplane` both run they share `--grpc-addr`: `Connect` is served with
 //!   optional client certificates there (it still refuses a stream without a verified one), and
 //!   [`crate::controlplane::serve`] takes the `IssueCertificate` routes as `extra`.
@@ -34,6 +39,8 @@ use crate::names::{ObjectRef, is_dns_label, is_dns_subdomain};
 use crate::servingcert::{ClientAuth, ServingCertSource};
 use crate::store::Store;
 
+#[cfg(feature = "http3")]
+pub mod http3;
 pub mod tls;
 
 /// How often `--config` is looked at.
@@ -124,11 +131,21 @@ impl std::fmt::Display for ComponentSet {
     }
 }
 
-/// `--store file:<dir> | kubernetes`.
+/// `--store file:<dir> | sqlite:<path> | kubernetes`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreSpec {
     File(PathBuf),
+    /// One SQLite database file (docs/adr/0003-sqlite-store-schema.md).
+    Sqlite(PathBuf),
     Kubernetes,
+}
+
+impl StoreSpec {
+    /// The stores this process owns outright (no external editor, no API server): the ones
+    /// `--auto-adopt` may write to.
+    pub fn is_local(&self) -> bool {
+        matches!(self, Self::File(_) | Self::Sqlite(_))
+    }
 }
 
 impl std::str::FromStr for StoreSpec {
@@ -138,13 +155,23 @@ impl std::str::FromStr for StoreSpec {
         if s == "kubernetes" {
             return Ok(Self::Kubernetes);
         }
-        match s.strip_prefix("file:") {
-            Some(dir) if !dir.is_empty() => Ok(Self::File(PathBuf::from(dir))),
-            Some(_) => Err("file: needs a directory, e.g. file:/var/lib/agentsc".into()),
-            None => Err(format!(
-                "{s:?} is not a store (expected file:<dir> or kubernetes)"
-            )),
+        if let Some(dir) = s.strip_prefix("file:") {
+            return if dir.is_empty() {
+                Err("file: needs a directory, e.g. file:/var/lib/agentsc".into())
+            } else {
+                Ok(Self::File(PathBuf::from(dir)))
+            };
         }
+        if let Some(path) = s.strip_prefix("sqlite:") {
+            return if path.is_empty() {
+                Err("sqlite: needs a file, e.g. sqlite:/var/lib/agentsc/embassy.db".into())
+            } else {
+                Ok(Self::Sqlite(PathBuf::from(path)))
+            };
+        }
+        Err(format!(
+            "{s:?} is not a store (expected file:<dir>, sqlite:<path> or kubernetes)"
+        ))
     }
 }
 
@@ -195,7 +222,10 @@ pub struct ServeArgs {
     /// Serve the HTTP API over TLS with the serving certificate.
     #[arg(long)]
     pub http_tls: bool,
-    /// Adopt sidecar start-up charters automatically (file store only).
+    /// Also serve --http-addr over HTTP/3 (QUIC on the same port, UDP); needs --http-tls.
+    #[arg(long)]
+    pub http3: bool,
+    /// Adopt sidecar start-up charters automatically (file and sqlite stores only).
     #[arg(long)]
     pub auto_adopt: bool,
     /// The MutatingWebhookConfiguration whose caBundle is kept current.
@@ -277,10 +307,13 @@ impl ServeArgs {
         if self.http_tls && !(self.has(Api) || self.has(Ui)) {
             errs.push("--http-tls needs the api or ui component".into());
         }
+        if self.http3 && !self.http_tls {
+            errs.push("--http3 needs --http-tls (QUIC is always TLS)".into());
+        }
 
         if (self.has(Controlplane) || self.has(Api)) && self.store.is_none() {
             errs.push(
-                "the controlplane and api components need --store file:<dir> or --store kubernetes"
+                "the controlplane and api components need --store file:<dir>, --store sqlite:<path> or --store kubernetes"
                     .into(),
             );
         }
@@ -288,14 +321,16 @@ impl ServeArgs {
             // IssueCertificate admits a pod's service account only if it is the service's name
             // or listed in the stored charter's service.service_accounts (design §7).
             errs.push(
-                "the ca component needs --store file:<dir> or --store kubernetes \
+                "the ca component needs --store file:<dir>, --store sqlite:<path> or --store kubernetes \
                  (IssueCertificate checks service.service_accounts in the stored charter)"
                     .into(),
             );
         }
         if self.auto_adopt {
-            if !matches!(self.store, Some(StoreSpec::File(_))) {
-                errs.push("--auto-adopt works only with --store file:<dir>".into());
+            if !self.store.as_ref().is_some_and(StoreSpec::is_local) {
+                errs.push(
+                    "--auto-adopt works only with --store file:<dir> or --store sqlite:<path>".into(),
+                );
             }
             if !self.has(Controlplane) {
                 errs.push("--auto-adopt needs the controlplane component".into());
@@ -390,6 +425,8 @@ pub struct Started {
     pub hub: Option<Arc<Hub>>,
     /// The bound `--http-addr` (`api`/`ui`).
     pub http_addr: Option<SocketAddr>,
+    /// The bound HTTP/3 (UDP) address (`--http3`).
+    pub http3_addr: Option<SocketAddr>,
     /// The bound `--grpc-addr` of `Connect` (`controlplane`).
     pub grpc_addr: Option<SocketAddr>,
     /// `--dev`: where the one-time admin token is.
@@ -402,6 +439,7 @@ impl std::fmt::Debug for Started {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Started")
             .field("http_addr", &self.http_addr)
+            .field("http3_addr", &self.http3_addr)
             .field("grpc_addr", &self.grpc_addr)
             .finish_non_exhaustive()
     }
@@ -517,6 +555,11 @@ async fn open_store(
             fs.set_validator(file_store_validator(config.clone(), hub.clone()));
             Some(fs)
         }
+        Some(StoreSpec::Sqlite(path)) => {
+            let db = crate::store::sqlite::SqliteStore::open(path.clone())
+                .with_context(|| format!("--store sqlite:{}", path.display()))?;
+            Some(db)
+        }
         Some(StoreSpec::Kubernetes) => Some(crate::k8s::open_store(args).await?),
     })
 }
@@ -525,6 +568,10 @@ async fn open_store(
 pub fn dev_token_path(args: &ServeArgs) -> PathBuf {
     match &args.store {
         Some(StoreSpec::File(dir)) => dir.join(".dev-admin-token"),
+        Some(StoreSpec::Sqlite(path)) => match path.parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => dir.join(".dev-admin-token"),
+            _ => PathBuf::from(".dev-admin-token"),
+        },
         _ => std::env::temp_dir().join("embassy-dev-admin-token"),
     }
 }
@@ -703,6 +750,8 @@ pub async fn start(
     }
 
     let mut http_addr = None;
+    #[allow(unused_mut, unused_assignments)]
+    let mut http3_addr = None;
     if (args.has(Api) || args.has(Ui))
         && let Some(h) = &hub
     {
@@ -710,11 +759,36 @@ pub async fn start(
             Some(d) => crate::ui_assets::UiFiles::Dir(d.clone()),
             None => crate::ui_assets::UiFiles::Embedded,
         });
-        let app = crate::api::router(h.clone(), args.has(Api), ui);
+        #[allow(unused_mut)]
+        let mut app = crate::api::router(h.clone(), args.has(Api), ui);
         let listener = tokio::net::TcpListener::bind(args.http_addr)
             .await
             .with_context(|| format!("bind --http-addr {}", args.http_addr))?;
         let bound = listener.local_addr()?;
+        if args.http3 {
+            #[cfg(not(feature = "http3"))]
+            bail!("--http3: this embassy was built without the http3 feature");
+            #[cfg(feature = "http3")]
+            {
+                let Some(serving) = &serving else {
+                    bail!("--http3 needs the serving certificate");
+                };
+                // QUIC on the port the TCP listener got (so `--http-addr :0` works too)
+                let (bound3, endpoint) =
+                    http3::bind(bound, serving.rustls_server_config(ClientAuth::None))?;
+                app = app.layer(axum::middleware::from_fn_with_state(
+                    http3::alt_svc_value(bound3.port()),
+                    http3::alt_svc,
+                ));
+                let stop = shutdown.clone();
+                let app3 = app.clone();
+                tasks.push(tokio::spawn(async move {
+                    http3::serve(endpoint, app3, stop).await
+                }));
+                tracing::info!(addr = %bound3, "the API/UI is listening over HTTP/3 (QUIC)");
+                http3_addr = Some(bound3);
+            }
+        }
         let stop = shutdown.clone();
         let task = if args.http_tls {
             let Some(serving) = &serving else {
@@ -766,6 +840,7 @@ pub async fn start(
         ctx,
         hub,
         http_addr,
+        http3_addr,
         grpc_addr,
         dev_token_file,
         tasks,
@@ -839,6 +914,7 @@ mod tests {
             "--dns-name",
             "localhost",
             "--http-tls",
+            "--http3",
             "--auto-adopt",
             "--webhook-config-name",
             "inj",
@@ -871,7 +947,7 @@ mod tests {
             Some("ghcr.io/x/agentscd:0.2.0")
         );
         assert_eq!(a.cp_namespace, "agentsc-cp");
-        assert!(a.http_tls && a.auto_adopt && a.dev);
+        assert!(a.http_tls && a.http3 && a.auto_adopt && a.dev);
         // CA material and --tls-secret without the ca component
         let e = a.validate().unwrap_err().join("\n");
         assert!(
@@ -892,6 +968,7 @@ mod tests {
             &["--components", "ca,,api"],
             &["--store", "s3://bucket"],
             &["--store", "file:"],
+            &["--store", "sqlite:"],
             &["--ca-secret", "agentsc-ca"],
             &["--dns-name", "Bad_Name"],
             &["--http-addr", "localhost"],
@@ -903,6 +980,39 @@ mod tests {
             parse(&["--store", "kubernetes"]).unwrap().store,
             Some(StoreSpec::Kubernetes)
         );
+        assert_eq!(
+            parse(&["--store", "sqlite:/var/lib/agentsc/embassy.db"])
+                .unwrap()
+                .store,
+            Some(StoreSpec::Sqlite("/var/lib/agentsc/embassy.db".into()))
+        );
+    }
+
+    #[test]
+    fn http3_needs_tls_and_the_sqlite_store_is_local() {
+        let e = errors(&["--components", "ui", "--http3"]);
+        assert!(e.contains("--http3 needs --http-tls"), "{e}");
+        // with TLS it is fine
+        parse(&["--components", "ui", "--tls-dir", "/tls", "--http-tls", "--http3"])
+            .unwrap()
+            .validate()
+            .unwrap();
+        // --auto-adopt accepts the sqlite store like the file store
+        parse(&[
+            "--ca-dir",
+            "/ca",
+            "--store",
+            "sqlite:/data/embassy.db",
+            "--auto-adopt",
+        ])
+        .unwrap()
+        .validate()
+        .unwrap();
+        assert!(StoreSpec::Sqlite("/x.db".into()).is_local());
+        assert!(StoreSpec::File("/x".into()).is_local());
+        assert!(!StoreSpec::Kubernetes.is_local());
+        let a = parse(&["--store", "sqlite:/data/embassy.db"]).unwrap();
+        assert_eq!(dev_token_path(&a), PathBuf::from("/data/.dev-admin-token"));
     }
 
     #[test]

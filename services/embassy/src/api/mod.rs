@@ -4,7 +4,8 @@
 //!   `tests/fixtures.rs`;
 //! - [`ids`]: graph node and edge ids (design §3, §10.1);
 //! - [`router`]: the routes, behind [`crate::auth::http::guard`] (Host check, CSRF and content
-//!   type on mutations, security headers), with the UI files when the `ui` component runs.
+//!   type on mutations, security headers) and [`cache::conditional`] (`ETag` and `304` on every
+//!   `GET`), with the UI files when the `ui` component runs.
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -25,6 +26,7 @@ use crate::hub::Hub;
 use crate::names::is_dns_label;
 use crate::store::ServiceKey;
 
+pub mod cache;
 pub mod edit;
 pub mod error;
 mod handlers;
@@ -249,7 +251,8 @@ pub fn api_routes() -> Router<Arc<Hub>> {
 }
 
 /// Every route of `--http-addr`: the API (`api`), the UI (`ui`), `/healthz` and `/readyz`,
-/// behind the Host check, CSRF and content-type checks and the security headers.
+/// behind the Host check, CSRF and content-type checks and the security headers, with
+/// conditional GETs ([`cache::conditional`]) inside them.
 pub fn router(hub: Arc<Hub>, api: bool, ui: Option<crate::ui_assets::UiFiles>) -> Router {
     let policy = Arc::new(HostPolicy {
         dns_names: hub.opts.dns_names.clone(),
@@ -271,6 +274,8 @@ pub fn router(hub: Arc<Hub>, api: bool, ui: Option<crate::ui_assets::UiFiles>) -
     };
     app.with_state(hub)
         .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY))
+        // inside the guard, so a 304 carries the security headers like every other response
+        .layer(axum::middleware::from_fn(cache::conditional))
         .layer(axum::middleware::from_fn_with_state(
             policy,
             crate::auth::http::guard,

@@ -84,6 +84,8 @@ Flags / environment of `agentscd` (flag wins over env):
 | `--socket-dir`    | `AGENTSC_SOCKET_DIR`     | `/run/agentsc`                    |
 | `--runtime-cmd`   | `AGENTSC_RUNTIME_CMD`    | `agentsc-runtime` (shell words; `--listen` and `--sidecar` are appended) |
 | `--no-runtime`    | `AGENTSC_NO_RUNTIME`     | off. `1/true/yes/on` = do not spawn the runtime; something else serves `runtime.sock`, and readiness still follows its `Health` |
+| `--mesh-cache-bytes` | `AGENTSC_MESH_CACHE_BYTES` | `16777216`. Bytes of service-call responses the response cache keeps (`GET`/`HEAD` the app marked with `Cache-Control: max-age`; docs/adr/0002-response-caching.md); `0` disables it |
+| `--mesh-cache-max-age` | `AGENTSC_MESH_CACHE_MAX_AGE` | `300`. The longest, in seconds, a cached service-call response is served, whatever the app's `max-age` says |
 | —                 | `ANTHROPIC_API_KEY`      | unset → the runtime uses the `mock` model for every agent |
 
 ## 3. `charter.yaml`

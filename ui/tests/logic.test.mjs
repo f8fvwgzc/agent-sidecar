@@ -35,7 +35,7 @@ import {
 } from '../js/util.js';
 import { G, nodeBox, portPoint, bezier, edgePath, frameRect, emptyFrameRect, rectsOverlap } from '../js/geometry.js';
 import { autoLayout, resolvePositions, depths } from '../js/layout.js';
-import { Api, ApiError, apiUrl, isUnreachable, parseEtag } from '../js/api.js';
+import { Api, ApiError, ResponseCache, apiUrl, httpTransport, isUnreachable, parseEtag } from '../js/api.js';
 import { viewPayload, normalizeView } from '../js/tab-config.js';
 import { targetFor, tabsFor } from '../js/inspector.js';
 import { learningTurnedOff } from '../js/tab-yaml.js';
@@ -675,4 +675,63 @@ test('inspector targets and tabs per node kind', () => {
   assert.deepEqual(tabsFor(targetFor(nodeOf(g, appId('back'))), true), ['overview', 'traffic', 'yaml', 'instances']);
   assert.deepEqual(tabsFor(targetFor(nodeOf(g, MODEL)), false), ['overview']);
   assert.equal(targetFor({ id: 'agent:a/b/c', type: 'agent', placeholder: true }).kind, 'node');
+});
+
+// ---- response cache (docs/adr/0002-response-caching.md) ------------------------------------------------
+
+test('the transport revalidates GETs with If-None-Match and answers a 304 from its copy', async () => {
+  const calls = [];
+  let etag = '"h-1"';
+  let body = { nodes: [1] };
+  const headersOf = (tag, type) => ({ get: (k) => (k.toLowerCase() === 'etag' ? tag : k.toLowerCase() === 'content-type' ? type : null) });
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init });
+    if (init.method === 'GET' && init.headers['If-None-Match'] === etag) {
+      return { status: 304, headers: headersOf(etag, null), json: async () => { throw new Error('a 304 has no body'); } };
+    }
+    return { status: 200, headers: headersOf(etag, 'application/json'), json: async () => body };
+  };
+  const cache = new ResponseCache(2);
+  const t = httpTransport('api/v1', { fetchImpl, cache });
+  const first = await t('GET', '/graph');
+  assert.deepEqual(first, { status: 200, etag: '"h-1"', data: { nodes: [1] } });
+  assert.equal(calls[0].url, 'api/v1/graph');
+  assert.equal(calls[0].init.headers['If-None-Match'], undefined, 'nothing to validate yet');
+  assert.equal(calls[0].init.cache, 'no-store', "the browser's own cache stays off");
+  const second = await t('GET', '/graph');
+  assert.equal(calls[1].init.headers['If-None-Match'], '"h-1"');
+  assert.deepEqual(second, { status: 200, etag: '"h-1"', data: { nodes: [1] }, cached: true });
+  // the body changed on the server: the copy is replaced
+  etag = '"h-2"';
+  body = { nodes: [1, 2] };
+  const third = await t('GET', '/graph');
+  assert.deepEqual([third.etag, third.data, third.cached], ['"h-2"', { nodes: [1, 2] }, undefined]);
+  assert.equal(cache.get('api/v1/graph').etag, '"h-2"');
+  // mutations are neither conditional nor cached
+  await t('POST', '/links', { body: {} });
+  assert.equal(calls[3].init.headers['If-None-Match'], undefined);
+  assert.equal(cache.size, 1);
+  // an explicit If-None-Match (the first charter's PUT sends *) is left alone
+  await t('PUT', '/x', { headers: { 'If-None-Match': '*' }, body: {} });
+  assert.equal(calls[4].init.headers['If-None-Match'], '*');
+  // the Api can drop the copies (sign-out)
+  const api = new Api(t, { now: () => 0 });
+  api.clearCache();
+  assert.equal(cache.size, 0);
+});
+
+test('the response cache is bounded; the least recently used copy goes first; no ETag, no copy', () => {
+  const c = new ResponseCache(2);
+  c.set('/a', { etag: '"1"', data: 1 });
+  c.set('/b', { etag: '"2"', data: 2 });
+  assert.equal(c.get('/a').data, 1, 'reading /a makes it the most recent');
+  c.set('/c', { etag: '"3"', data: 3 });
+  assert.equal(c.get('/b'), null, '/b was the least recently used');
+  assert.equal(c.size, 2);
+  c.set('/d', { data: 4 });
+  assert.equal(c.get('/d'), null, 'without an ETag there is nothing to revalidate with');
+  c.delete('/a');
+  assert.equal(c.get('/a'), null);
+  c.clear();
+  assert.equal(c.size, 0);
 });

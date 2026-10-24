@@ -49,6 +49,7 @@ See [`values.yaml`](values.yaml); [`values.schema.json`](values.schema.json) ref
 | `injection.failurePolicy`, `injection.resources`, `injection.securityContext` | `Fail`, 50m/128Mi (limit 512Mi), non-root and read-only | the injected `agentscd` container |
 | `embassy.resources` | requests 100m/256Mi, limit 1Gi | |
 | `embassy.httpTLS`, `embassy.dnsNames` | `false`, `[]` | API over TLS; extra Host names (Ingress) |
+| `embassy.http3` | `false` | API and console over HTTP/3 too (QUIC on UDP 8080, advertised with `Alt-Svc`); needs `httpTLS` |
 | `networkPolicy.enabled`, `networkPolicy.httpFrom` | `false`, `[]` | |
 
 ## What embassy-ca reads from the chart

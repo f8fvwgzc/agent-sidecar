@@ -5,8 +5,50 @@
 //
 // The console always talks to the control plane that serves it (`embassy serve`): REST under
 // `api/v1`, the live stream from `EventSource api/v1/events`. There is no offline or demo mode.
+//
+// Caching (docs/adr/0002-response-caching.md): the transport keeps the last body of every GET
+// with its ETag and sends `If-None-Match` next time; a `304 Not Modified` is answered from the
+// copy. Nothing is ever served without asking the control plane, so a mutation needs no
+// invalidation; the cache only saves the payload of an unchanged graph, service list or trace.
 
 const BASE = 'api/v1';
+
+/** How many validated GET responses the transport keeps for `If-None-Match`. */
+export const RESPONSE_CACHE_ENTRIES = 256;
+
+/**
+ * The last body per URL, with its ETag, least recently used first out. An entry without an
+ * ETag is not kept: there is nothing to revalidate it with.
+ */
+export class ResponseCache {
+  constructor(max = RESPONSE_CACHE_ENTRIES) {
+    this.max = max;
+    this.entries = new Map();
+  }
+  get size() {
+    return this.entries.size;
+  }
+  get(key) {
+    const e = this.entries.get(key);
+    if (!e) return null;
+    // Map keeps insertion order: re-insert to make it the most recent
+    this.entries.delete(key);
+    this.entries.set(key, e);
+    return e;
+  }
+  set(key, entry) {
+    if (!entry || typeof entry.etag !== 'string' || !entry.etag) return;
+    this.entries.delete(key);
+    this.entries.set(key, entry);
+    while (this.entries.size > this.max) this.entries.delete(this.entries.keys().next().value);
+  }
+  delete(key) {
+    this.entries.delete(key);
+  }
+  clear() {
+    this.entries.clear();
+  }
+}
 
 /** The absolute URL of the API for messages (`http://host:port/api/v1`). */
 export function apiUrl(base = BASE) {
@@ -60,8 +102,17 @@ function query(params) {
   return s ? `?${s}` : '';
 }
 
-function httpTransport(base) {
-  return async (method, path, { headers = {}, body } = {}) => {
+/**
+ * The HTTP transport: `(method, path, {headers, body}) → {status, etag, data}`. GETs are
+ * conditional (`If-None-Match` from the cache; a 304 is answered from it, as a 200 with
+ * `cached: true`). The browser's own cache stays off (`cache: 'no-store'`): the validation here
+ * is the one that counts, and it works the same over HTTP/1.1, HTTP/2 and HTTP/3.
+ */
+export function httpTransport(base, { fetchImpl = (url, init) => globalThis.fetch(url, init), cache = new ResponseCache() } = {}) {
+  const transport = async (method, path, { headers = {}, body } = {}) => {
+    const url = `${base}${path}`;
+    const conditional = method === 'GET' || method === 'HEAD';
+    const cached = conditional ? cache.get(url) : null;
     const init = {
       method,
       headers: { Accept: 'application/json', ...headers },
@@ -69,13 +120,15 @@ function httpTransport(base) {
       cache: 'no-store',
       redirect: 'error',
     };
+    if (cached && init.headers['If-None-Match'] === undefined) init.headers['If-None-Match'] = cached.etag;
     if (body !== undefined) init.body = JSON.stringify(body);
     let res;
     try {
-      res = await fetch(`${base}${path}`, init);
+      res = await fetchImpl(url, init);
     } catch (e) {
       throw new ApiError(0, { error: 'network', details: [String((e && e.message) || e)] });
     }
+    if (res.status === 304 && cached) return { status: 200, etag: cached.etag, data: cached.data, cached: true };
     let data = null;
     const type = res.headers.get('Content-Type') || '';
     if (res.status !== 204 && type.includes('json')) {
@@ -85,8 +138,15 @@ function httpTransport(base) {
         data = null;
       }
     }
-    return { status: res.status, etag: res.headers.get('ETag'), data };
+    const etag = res.headers.get('ETag');
+    if (conditional) {
+      if (res.status === 200 && etag) cache.set(url, { etag, data });
+      else if (res.status !== 304) cache.delete(url);
+    }
+    return { status: res.status, etag, data };
   };
+  transport.cache = cache;
+  return transport;
 }
 
 /** The live stream over EventSource (the session cookie authenticates it). */
@@ -172,7 +232,11 @@ export class Api {
     return this.call('POST', '/login', { body: { token } });
   }
   logout() {
-    return this.call('POST', '/logout');
+    return this.call('POST', '/logout').finally(() => this.clearCache());
+  }
+  /** Forget the transport's validated copies (another session may be shown other data). */
+  clearCache() {
+    if (this.transport && this.transport.cache) this.transport.cache.clear();
   }
 
   // graph and services

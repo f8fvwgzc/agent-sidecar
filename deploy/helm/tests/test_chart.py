@@ -42,6 +42,7 @@ SERVE_FLAGS = {
     "config",
     "dns-name",
     "http-tls",
+    "http3",
     "auto-adopt",
     "webhook-config-name",
     "validating-webhook-name",
@@ -499,7 +500,7 @@ def test_embassy_runs_one_replica_with_probes_on_the_api(default: list[dict]) ->
         f"embassy.{NS}.svc",
         f"embassy.{NS}.svc.cluster.local",
     }
-    for absent in ("ca-dir", "ca-secret", "tls-secret", "dev", "auto-adopt", "http-tls"):
+    for absent in ("ca-dir", "ca-secret", "tls-secret", "dev", "auto-adopt", "http-tls", "http3"):
         assert absent not in flags
 
     c = container(dep)
@@ -531,6 +532,27 @@ def test_http_tls_switches_flag_and_probe_scheme(full: list[dict]) -> None:
     c = container(find(full, "Deployment", "embassy"))
     assert c["livenessProbe"]["httpGet"]["scheme"] == "HTTPS"
     assert c["readinessProbe"]["httpGet"]["scheme"] == "HTTPS"
+
+
+@needs_helm
+def test_http3_adds_the_flag_and_a_udp_port_everywhere(full: list[dict]) -> None:
+    assert deployment_flags(full, "embassy")["http3"] == [""]
+    c = container(find(full, "Deployment", "embassy"))
+    ports = {(p["name"], p["protocol"]): p["containerPort"] for p in c["ports"]}
+    assert ports[("http", "TCP")] == 8080
+    assert ports[("http3", "UDP")] == 8080
+    svc = find(full, "Service", "embassy")
+    assert {(p["name"], p["protocol"], p["port"]) for p in svc["spec"]["ports"]} == {
+        ("grpc", "TCP", 15012),
+        ("http", "TCP", 8080),
+        ("http3", "UDP", 8080),
+    }
+    policy = find(full, "NetworkPolicy", "embassy")
+    http_rule = [r for r in policy["spec"]["ingress"] if "from" in r][0]
+    assert {(p["port"], p["protocol"]) for p in http_rule["ports"]} == {(8080, "TCP"), (8080, "UDP")}
+    # QUIC is always TLS: http3 without httpTLS is refused at render time
+    err = render_fails("--set", "embassy.http3=true")
+    assert "embassy.http3 needs embassy.httpTLS" in err
 
 
 @needs_helm

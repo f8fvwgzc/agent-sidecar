@@ -2,6 +2,7 @@
 //! follow their sections.
 pub mod app_auth;
 pub mod audit;
+pub mod cache;
 pub mod config;
 pub mod control;
 pub mod deadline;

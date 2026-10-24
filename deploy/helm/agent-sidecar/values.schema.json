@@ -196,6 +196,7 @@
       "properties": {
         "resources": { "$ref": "#/definitions/resources" },
         "httpTLS": { "type": "boolean" },
+        "http3": { "type": "boolean" },
         "dnsNames": { "type": "array", "items": { "$ref": "#/definitions/dnsName" } },
         "service": {
           "type": "object",

@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use agentsc_charter::{AgentSpec, LOAD_SKILL_TOOL, ToolSpec, ToolType};
+use agentsc_charter::{AgentSpec, LOAD_SKILL_TOOL, ToolEffect, ToolSpec, ToolType};
 use agentsc_common::audit::{AuditRecord, AuditRecordView, Direction, Kind, OnCancel, Tokens};
 use agentsc_common::authz::{self, Verdict};
 use agentsc_common::guardrails::INPUT_DENY;
@@ -591,6 +591,22 @@ impl SidecarTools for ToolsService {
             return Err(call.deny(&input, v));
         }
 
+        // The response cache (cache.rs), after authz: a read the app marked cacheable is
+        // answered here without leaving the pod; a write empties the target's entries here (the
+        // target's own sidecar empties its own), so this run's next read sees what it wrote.
+        let cache_key = crate::cache::Key {
+            service: target.clone(),
+            caller: authz::LOCAL.to_string(),
+            agent: call.c.agent.clone(),
+            method: method.clone(),
+            path: path.clone(),
+        };
+        let cacheable = crate::cache::cacheable_method(&method)
+            && matches!(tool.effective_effect(), ToolEffect::Read);
+        if !cacheable {
+            self.state.response_cache.invalidate_service(&target);
+        }
+
         // 3. perform it: our own app on localhost, or a peer's sidecar over mTLS
         let callee = format!("{target} {method} {path}");
         let child = call.trace.child();
@@ -601,7 +617,15 @@ impl SidecarTools for ToolsService {
             Direction::Outbound
         };
         let pending = call.begin(Kind::ServiceCall, dir, &child, &callee, &input, &v);
-        let result: Result<ServiceResponse, Status> = if is_self {
+        let hit = if cacheable {
+            self.state.response_cache.get(&cache_key, &req.headers)
+        } else {
+            None
+        };
+        let from_cache = hit.is_some();
+        let result: Result<ServiceResponse, Status> = if let Some(hit) = hit {
+            Ok(hit.response)
+        } else if is_self {
             self.call_local_app(
                 &snap,
                 &call.c,
@@ -648,6 +672,11 @@ impl SidecarTools for ToolsService {
 
         match result {
             Ok(resp) => {
+                if cacheable && !from_cache {
+                    self.state
+                        .response_cache
+                        .store(cache_key, &resp, &req.headers);
+                }
                 let out = json!({ "status": resp.status, "body": body_value(&resp.body) });
                 call.taint_mark(tool);
                 call.tool(&input, out.clone(), &v, None);

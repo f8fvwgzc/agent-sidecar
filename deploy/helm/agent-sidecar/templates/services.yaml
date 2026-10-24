@@ -20,7 +20,7 @@ spec:
       targetPort: webhook
       protocol: TCP
 ---
-# Connect for sidecars (15012) and the API/UI (8080).
+# Connect for sidecars (15012) and the API/UI (8080; UDP 8080 too for HTTP/3 with embassy.http3).
 apiVersion: v1
 kind: Service
 metadata:
@@ -41,3 +41,9 @@ spec:
       port: 8080
       targetPort: http
       protocol: TCP
+    {{- if .Values.embassy.http3 }}
+    - name: http3
+      port: 8080
+      targetPort: http3
+      protocol: UDP
+    {{- end }}

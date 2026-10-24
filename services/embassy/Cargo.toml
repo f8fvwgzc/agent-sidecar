@@ -55,8 +55,25 @@ hyper-util = { version = "0.1", features = ["server", "server-auto", "http1", "h
 x509-parser.workspace = true
 kube = { version = "4.2", default-features = false, features = ["client", "runtime", "rustls-tls", "ring", "admission"] }
 k8s-openapi = { version = "0.28", default-features = false, features = ["std", "v1_32"] }
+# Conditional GETs (ETag / 304, docs/adr/0002-response-caching.md) read response bodies and
+# their size hints; the HTTP/3 bridge streams them frame by frame.
+bytes = "1"
+http-body = "1"
+http-body-util = "0.1"
+# `--store sqlite:<path>` (docs/adr/0003-sqlite-store-schema.md): one embedded database with the
+# schema in src/store/schema.sql. `bundled` compiles SQLite in, so the image needs no system
+# library.
+rusqlite = { version = "0.37", features = ["bundled"] }
+# `--http3` (docs/adr/0001-http3-for-the-console.md): QUIC with the serving certificate's rustls
+# configuration (ring), HTTP/3 framing by h3. Optional: `--no-default-features` builds without.
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"], optional = true }
+h3 = { version = "0.0.8", optional = true }
+h3-quinn = { version = "0.0.10", optional = true }
+
+[features]
+default = ["http3"]
+http3 = ["dep:quinn", "dep:h3", "dep:h3-quinn"]
 
 [dev-dependencies]
-http-body-util = "0.1"
 tempfile.workspace = true
 rcgen.workspace = true

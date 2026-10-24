@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use agentsc_charter::Charter;
 use agentsc_common::budget::Budgets;
@@ -70,6 +70,8 @@ pub struct AppState {
     pub runtime_ready: AtomicBool,
     pub runtime_provider: Mutex<String>,
     mesh_clients: Mutex<HashMap<String, MeshClient<Channel>>>,
+    /// Service-call responses the app marked cacheable (cache.rs), for the mesh and the tools.
+    pub response_cache: crate::cache::ResponseCache,
     pub runs: Runs,
     /// Taint labels per run (taint.rs).
     pub taint: crate::taint::TaintStore,
@@ -278,6 +280,10 @@ impl AppState {
             runtime_ready: AtomicBool::new(false),
             runtime_provider: Mutex::new(String::from("unknown")),
             mesh_clients: Mutex::new(HashMap::new()),
+            response_cache: crate::cache::ResponseCache::new(
+                config.mesh_cache_bytes,
+                Duration::from_secs(config.mesh_cache_max_age),
+            ),
             runs: Runs::new(config.timing.run_window),
             taint: Default::default(),
             outbox: Arc::new(Outbox::new(managed)),
