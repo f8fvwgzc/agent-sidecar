@@ -816,10 +816,15 @@ Redaction, in this order, over the full payloads:
    `input`/`output` (arrays are walked). Values found at those paths (strings
    and numbers of 4+ characters) are also remembered per `request_id` for 15
    minutes and scrubbed from every later record of the same request in that
-   sidecar — they reappear as text inside model prompts and tool results.
+   sidecar — they reappear as text inside model prompts and tool results —
+   in `input`/`output` and in the text fields `callee`, `reason` and `error`
+   (a callee such as `GET https://api.example.com/x?ssn=…`, an error that
+   echoes the input).
 3. `guardrails.pii_redact` rewrites emails to `[redacted:email]` and phone
    numbers to `[redacted:phone]` in the agent's output returned to the caller
-   **and** in every string of every audit `input`/`output` that sidecar writes.
+   **and** in every string of every audit `input`/`output`, `callee`, `reason`
+   and `error` that sidecar writes. The record's shape and field order do not
+   change: only string values are rewritten, `null` stays `null`.
 4. Payloads larger than 8 KiB are truncated to 8 KiB plus
    `…(truncated, N bytes)` — after redaction, so a cut never exposes part of a
    redacted value.

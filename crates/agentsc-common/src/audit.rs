@@ -418,17 +418,35 @@ const SECRET_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 fn scrub(v: &mut Value, secrets: &[String]) {
     match v {
-        Value::String(s) => {
-            for secret in secrets {
-                if s.contains(secret.as_str()) {
-                    *s = s.replace(secret.as_str(), "[redacted]");
-                }
-            }
-        }
+        Value::String(s) => scrub_text(s, secrets),
         Value::Array(items) => items.iter_mut().for_each(|i| scrub(i, secrets)),
         Value::Object(map) => map.values_mut().for_each(|i| scrub(i, secrets)),
         _ => {}
     }
+}
+
+fn scrub_text(s: &mut String, secrets: &[String]) {
+    for secret in secrets {
+        if s.contains(secret.as_str()) {
+            *s = s.replace(secret.as_str(), "[redacted]");
+        }
+    }
+}
+
+/// [`redact_pii_value`] for one string.
+fn redact_pii_text(s: &mut String) {
+    let (out, n) = crate::guardrails::redact_pii(s);
+    if n > 0 {
+        *s = out;
+    }
+}
+
+/// The free-text fields besides the payloads that can carry what a payload carried: a `callee`
+/// such as `GET https://api.example.com/x?ssn=…`, an `error` echoing the input, a `reason`.
+fn text_fields(record: &mut AuditRecord) -> impl Iterator<Item = &mut String> {
+    std::iter::once(&mut record.callee)
+        .chain(record.reason.as_mut())
+        .chain(record.error.as_mut())
 }
 
 fn redact_path(v: &mut Value, dotted: &str) {
@@ -463,12 +481,7 @@ fn redact_path(v: &mut Value, dotted: &str) {
 /// Rewrite emails and phone numbers in every string of a JSON value.
 pub fn redact_pii_value(v: &mut Value) {
     match v {
-        Value::String(s) => {
-            let (out, n) = crate::guardrails::redact_pii(s);
-            if n > 0 {
-                *s = out;
-            }
-        }
+        Value::String(s) => redact_pii_text(s),
         Value::Array(items) => items.iter_mut().for_each(redact_pii_value),
         Value::Object(map) => map.values_mut().for_each(redact_pii_value),
         _ => {}
@@ -650,7 +663,8 @@ impl AuditWriter {
     }
 
     /// Stamp, hash (over the original payloads), redact paths, scrub remembered values, redact PII,
-    /// then truncate — redaction always sees the whole payload (CONTRACT.md §6).
+    /// then truncate — redaction always sees the whole payload (CONTRACT.md §6). Remembered
+    /// values and PII are also scrubbed from `callee`, `reason` and `error`.
     pub fn write(&self, mut record: AuditRecord) {
         let redaction = self.snapshot();
         record.service = self.service.clone();
@@ -672,10 +686,12 @@ impl AuditWriter {
         {
             scrub(&mut record.input, secrets);
             scrub(&mut record.output, secrets);
+            text_fields(&mut record).for_each(|s| scrub_text(s, secrets));
         }
         if redaction.pii_redact {
             redact_pii_value(&mut record.input);
             redact_pii_value(&mut record.output);
+            text_fields(&mut record).for_each(redact_pii_text);
         }
         record.truncate_payloads();
         let line = record.to_json_line();
@@ -1388,6 +1404,79 @@ mod tests {
         let tokens = v.tokens.unwrap();
         assert_eq!((tokens.input, tokens.output), (0, 0));
         assert_eq!(tokens.extra["reasoning"], 9);
+    }
+
+    #[test]
+    fn callee_reason_and_error_are_scrubbed_like_the_payloads() {
+        let buf = Buf::default();
+        let w = AuditWriter::with_sink(
+            "s",
+            "n",
+            vec!["input.context.ssn".into()],
+            Box::new(buf.clone()),
+        )
+        .with_pii_redact(true);
+        let t = TraceContext::new_root();
+        // the invocation's input carries the value at an audit.redact path
+        w.remember(
+            "r1",
+            "input",
+            &serde_json::json!({"input": "x", "context": {"ssn": "123-45-6789"}}),
+        );
+        // a withheld payload counts too
+        w.withhold("r1", ["api_key=sk-live-777".to_string()]);
+        let mut rec = AuditRecord::new(
+            Kind::HttpCall,
+            Direction::Outbound,
+            "r1",
+            &t,
+            Some("a"),
+            "local",
+            Some("a"),
+            "GET https://api.example.com/x?ssn=123-45-6789&mail=ops@example.com",
+            Value::Null,
+            Value::Null,
+        );
+        rec.reason = Some("upstream refused api_key=sk-live-777 for ops@example.com".into());
+        rec.error = Some("bad request: ssn 123-45-6789, call +1 555-123-4567".into());
+        w.write(rec);
+        // another request's record is not touched by r1's values (PII still is)
+        let mut other = AuditRecord::new(
+            Kind::Config,
+            Direction::Internal,
+            "",
+            &t,
+            None,
+            "file",
+            None,
+            "GET https://api.example.com/x?ssn=123-45-6789",
+            Value::Null,
+            Value::Null,
+        );
+        other.request_id = "r2".into();
+        w.write(other);
+
+        let lines = buf.lines();
+        assert_eq!(
+            lines[0]["callee"],
+            "GET https://api.example.com/x?ssn=[redacted]&mail=[redacted:email]"
+        );
+        assert_eq!(
+            lines[0]["reason"],
+            "upstream refused [redacted] for [redacted:email]"
+        );
+        assert_eq!(
+            lines[0]["error"],
+            "bad request: ssn [redacted], call [redacted:phone]"
+        );
+        assert_eq!(
+            lines[1]["callee"],
+            "GET https://api.example.com/x?ssn=123-45-6789"
+        );
+        // the record shape is unchanged: null stays null
+        assert!(lines[1]["reason"].is_null() && lines[1]["error"].is_null());
+        let keys: Vec<&String> = lines[0].as_object().unwrap().keys().collect();
+        assert_eq!(keys.len(), 24, "{keys:?}");
     }
 
     #[test]
