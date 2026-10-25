@@ -6,7 +6,7 @@
 use base64::Engine;
 use chrono::{DateTime, SubsecRound, Utc};
 use clap::Args;
-use rand::TryRngCore;
+use rand::TryRng;
 use sha2::{Digest, Sha256};
 
 use crate::config::{
@@ -22,7 +22,7 @@ pub const TOKEN_LEN: usize = 4 + 43;
 /// A new token from the operating system's random source.
 pub fn generate() -> anyhow::Result<String> {
     let mut secret = [0u8; SECRET_BYTES];
-    rand::rngs::OsRng
+    rand::rngs::SysRng
         .try_fill_bytes(&mut secret)
         .map_err(|e| anyhow::anyhow!("read random bytes from the operating system: {e}"))?;
     Ok(format!(

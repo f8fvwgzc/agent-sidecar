@@ -74,7 +74,7 @@ One `Execute` call is one agent loop:
 3. If the model asks for tools, the runtime sends each tool call to the sidecar, one after another, and gives the results back to the model. Tool results longer than 20,000 characters are cut before the model sees them.
 4. The loop ends when the model stops (`end_turn`), refuses (`model.refusal`), runs out of steps (`budget.max_steps`), is cut off by `max_tokens` (see [Budgets](#budgets)), or the model call fails (`model.error`).
 
-Model selection: if the sidecar holds `ANTHROPIC_API_KEY` and the agent's `model` is not `mock`, the runtime uses the Anthropic API through the sidecar's model gateway. Otherwise it uses a deterministic mock model. The mock picks a tool by matching words in the input against tool names and descriptions, so the demo runs offline. `Health` reports `model_provider: "anthropic"` or `"mock"`, from the providers the gateway lists.
+Model selection: an agent with `model: mock` uses a deterministic mock model. Any other agent uses the Anthropic API through the sidecar's model gateway when the sidecar holds `ANTHROPIC_API_KEY`. Without the key it is refused with `FAILED_PRECONDITION`, unless `AGENTSC_MOCK_FALLBACK=1` runs it on the mock (the demos and CI set it). The mock picks a tool by matching words in the input against tool names and descriptions, so the demo runs offline. `Health` reports `model_provider: "anthropic"`, `"mock"` (the fallback) or `"none"`, from the providers the gateway lists.
 
 The runtime never calls the model API itself and never holds the key. Its Anthropic SDK talks to the sidecar's model gateway on `unix:/run/agentsc/model.sock` (CONTRACT.md §4.4). The gateway checks each call against the run and the agent's charter (`model`, `max_tokens_per_call`, `max_steps`, the daily cost budget), adds the key, streams the provider's answer back unchanged, counts the usage the provider reported and writes the `model_call` record.
 
@@ -122,7 +122,8 @@ Other flags of `agentscd`:
 | `--tls-dir` | `AGENTSC_TLS_DIR` | `/etc/agentsc/tls` (files `ca.crt`, `tls.crt`, `tls.key`) |
 | `--runtime-cmd` | `AGENTSC_RUNTIME_CMD` | `agentsc-runtime` (split like shell words) |
 | `--no-runtime` | `AGENTSC_NO_RUNTIME` | off. When on, the sidecar does not spawn the runtime. Something else must serve `runtime.sock`. |
-| none | `ANTHROPIC_API_KEY` | unset, so every agent uses the mock model |
+| none | `ANTHROPIC_API_KEY` | unset, so only `model: mock` agents run (the others are refused) |
+| none | `AGENTSC_MOCK_FALLBACK` | unset. `1`: without `ANTHROPIC_API_KEY`, every agent uses the mock model |
 
 **Two different mesh ports.** `--mesh-addr` is where this sidecar listens. The charter field `mesh.port` (default `50002`) is the port this sidecar dials on its peers. A peer's address is `<service>.<own namespace>.svc.cluster.local:<mesh.port>`, unless `mesh.peers.<service>` in the charter gives a `host:port`.
 

@@ -1,4 +1,6 @@
-from agentsc_runtime.models import MockModel, model_for
+import pytest
+
+from agentsc_runtime.models import MockModel, ModelUnavailable, model_for, provider
 from agentsc_runtime.prompts import load_skill_tool, reflection_system
 from agentsc_runtime.spec import Skill
 
@@ -62,11 +64,24 @@ def test_two_turn_conversation():
     assert second.input_tokens > 0 and second.output_tokens > 0
 
 
-def test_model_for_falls_back_to_mock_without_key(monkeypatch):
+def test_model_for_fails_closed_without_key(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("AGENTSC_MOCK_FALLBACK", raising=False)
+    with pytest.raises(ModelUnavailable, match="ANTHROPIC_API_KEY"):
+        model_for("claude-opus-5-5")
+    assert provider() == "none"
+    assert model_for("mock").name == "mock", "model: mock never needs a key"
+
+
+def test_model_for_falls_back_to_mock_only_when_asked(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("AGENTSC_MOCK_FALLBACK", "1")
     m = model_for("claude-opus-5-5")
-    assert m.provider == "mock"
-    assert model_for("mock").name == "mock"
+    assert m.provider == "mock" and m.name == "mock"
+    assert provider() == "mock"
+    monkeypatch.setenv("AGENTSC_MOCK_FALLBACK", "true")
+    with pytest.raises(ModelUnavailable):
+        model_for("claude-opus-5-5")
 
 
 def load_skill(*skills: tuple[str, str]) -> dict:
