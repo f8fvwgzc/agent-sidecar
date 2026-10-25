@@ -3,7 +3,9 @@
 # mid-stream overloads (retried by the harness), a refusal and a stalled stream at the deadline
 # (the last four injected by a proxy in front of the API: runtime/tests/live/test_real_model.py).
 #
-# Runs nightly and by hand, and only when the repository secret ANTHROPIC_API_KEY exists. The key
+# Runs nightly, by hand, and on a pull request when it is given the label `real-model` (the PR's
+# own workflow runs, so a change can be tried before it merges); only when the repository secret
+# ANTHROPIC_API_KEY exists (pull requests from forks get no secrets). The key
 # reaches the agentscd process alone; the test checks that the runtime process does not have it.
 # The charter caps the run's spend at $1 a day, which the gateway enforces.
 name: Real model
@@ -17,12 +19,14 @@ on:
         default: claude-opus-5-5
   schedule:
     - cron: "23 3 * * *"
+  pull_request:
+    types: [labeled]
 
 permissions:
   contents: read
 
 concurrency:
-  group: real-model
+  group: real-model-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: false
 
 env:
@@ -32,6 +36,7 @@ env:
 jobs:
   key:
     name: Is ANTHROPIC_API_KEY set?
+    if: github.event_name != 'pull_request' || github.event.label.name == 'real-model'
     runs-on: ubuntu-24.04
     outputs:
       present: ${{ steps.check.outputs.present }}

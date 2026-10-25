@@ -88,8 +88,9 @@ reported); until then learning does not get past such a sidecar.
 
 ## Mock model
 
-When the sidecar holds no provider key (its model gateway lists none) or with `model: mock`, every
-agent runs on a deterministic mock:
+An agent with `model: mock` runs on a deterministic mock. When the sidecar holds no provider key (its
+model gateway lists none) any other agent is refused, unless `AGENTSC_MOCK_FALLBACK=1` (set by the demos
+and CI) runs it on the mock too:
 
 1. When `load_skill` is offered and a skill's name and description share words with the input,
    it loads that skill first (once).

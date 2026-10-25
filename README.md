@@ -47,7 +47,7 @@ make local-demo
 
 The script starts two example apps (Go `orders`, FastAPI `inventory`), each with its own sidecar and real mTLS certificates.
 It makes three calls (allowed across services, denied admin call, blocked by a guardrail) and prints the audit trail.
-Without `ANTHROPIC_API_KEY` the runtime uses a mock model. Export the key first to use Claude.
+Without `ANTHROPIC_API_KEY` the demo runs on a mock model (it sets `AGENTSC_MOCK_FALLBACK=1`; elsewhere a missing key refuses Claude agents). Export the key first to use Claude.
 The full v0.2 platform (control plane, console, managed sidecars) runs without Docker with `CHECK_ONLY=0 make platform-demo`; the console is then at http://localhost:38088.
 With Docker, `make compose-up` runs the same stack plus an OpenTelemetry collector and Jaeger (set `AGENTSC_CONSOLE_PORT`, `AGENTSC_ORDERS_PORT` or `AGENTSC_JAEGER_PORT` if 8080, 8081 or 16686 are taken).
 On minikube (also needs Docker, minikube and `kubectl`), run `make minikube-up build deploy demo`.
