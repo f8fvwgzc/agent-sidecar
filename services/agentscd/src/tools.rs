@@ -1,7 +1,9 @@
 //! `SidecarTools`: every tool call the runtime makes comes through here (CONTRACT.md §4.3).
 //!
 //! The runtime is in the pod but it is driven by a model, so nothing it sends is taken on trust:
-//! the call must match a tool the agent declared and may use, the path is canonicalised before
+//! the call must belong to an Execute of its agent that is in flight (its request id and agent
+//! name a run the sidecar started, runs.rs; the run's trace and depth replace the runtime's), it
+//! must match a tool the agent declared and may use, the path is canonicalised before
 //! authz, and every outcome — allowed, denied, failed or cancelled — leaves exactly one `tool_call`
 //! record plus, once something was actually attempted, one `service_call` / `agent_call` / `http_call`.
 //! `ReportEvent` takes only what design §6.5 allows, for runs this sidecar knows.
@@ -33,9 +35,13 @@ use crate::pipeline::{self, Invocation};
 use crate::state::AppState;
 
 pub const RULE_TOOL_SPEC: &str = "guardrail.tool_spec";
+/// A tool call that names no Execute of its agent in flight.
+pub const RULE_UNBOUND: &str = "tool.unbound";
 pub const RULE_MESH_UNAVAILABLE: &str = "mesh.unavailable";
 pub const RULE_APP_UNAVAILABLE: &str = "app.unavailable";
 pub const RULE_HTTP_ERROR: &str = "http.error";
+/// A response body larger than `--max-response-bytes`.
+pub const RULE_RESPONSE_TOO_LARGE: &str = "http.response_too_large";
 /// A record or lesson the runtime may not send (design §6.5).
 pub const RULE_REPORT_REJECTED: &str = "runtime.report_rejected";
 /// On every `ReportEvent` answer once the agent's daily cost budget is spent (design §6.5).
@@ -142,7 +148,23 @@ fn body_value(body: &[u8]) -> Value {
         .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(body).into_owned()))
 }
 
-pub async fn to_service_response(resp: reqwest::Response) -> ServiceResponse {
+/// A response body that could not be read whole: too large ([`RULE_RESPONSE_TOO_LARGE`]), or the
+/// connection failed mid-body (the caller's rule).
+#[derive(Debug)]
+pub struct BodyError {
+    pub rule: &'static str,
+    pub reason: String,
+}
+
+/// The response as a `ServiceResponse`, its body read chunk by chunk and refused past `max`
+/// bytes (`--max-response-bytes`): one large answer from the app, a peer or an http tool's origin
+/// must not exhaust the sidecar's memory. A body that breaks off is an error (`read_rule`), not
+/// a short answer.
+pub async fn to_service_response(
+    mut resp: reqwest::Response,
+    max: usize,
+    read_rule: &'static str,
+) -> Result<ServiceResponse, BodyError> {
     let status = resp.status().as_u16() as u32;
     let headers = resp
         .headers()
@@ -153,12 +175,38 @@ pub async fn to_service_response(resp: reqwest::Response) -> ServiceResponse {
                 .map(|v| (k.as_str().to_string(), v.to_string()))
         })
         .collect();
-    let body = resp.bytes().await.map(|b| b.to_vec()).unwrap_or_default();
-    ServiceResponse {
+    let too_large = |what: String| BodyError {
+        rule: RULE_RESPONSE_TOO_LARGE,
+        reason: format!("the response body is {what}, more than the {max} bytes the sidecar reads"),
+    };
+    if let Some(len) = resp.content_length()
+        && len > max as u64
+    {
+        return Err(too_large(format!("{len} bytes")));
+    }
+    let mut body = Vec::new();
+    loop {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => {
+                if body.len() + chunk.len() > max {
+                    return Err(too_large("longer".into()));
+                }
+                body.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(e) => {
+                return Err(BodyError {
+                    rule: read_rule,
+                    reason: format!("the response body broke off: {e}"),
+                });
+            }
+        }
+    }
+    Ok(ServiceResponse {
         status,
         headers,
         body,
-    }
+    })
 }
 
 /// Headers the sidecar owns. Values for them from the runtime or a peer are dropped, never forwarded.
@@ -350,6 +398,37 @@ impl<'a> Call<'a> {
             .on_cancel(vec![tool, attempt], self.started)
     }
 
+    /// The call must belong to an Execute of its agent in flight (runs.rs): a runtime cannot make
+    /// up a request id (a fresh, untainted one, say), act for another agent, or keep calling after
+    /// its run returned. The run's trace and agent-call depth replace what the runtime sent.
+    fn bind(&mut self) -> Result<(), Verdict> {
+        let c = &self.c;
+        match self.svc.state.runs.lookup(&c.request_id, &c.agent) {
+            Some(run) if run.in_flight => {
+                self.c.depth = run.depth;
+                if !run.trace_id.is_empty() {
+                    self.trace.trace_id = run.trace_id.clone();
+                    self.c.trace_id = run.trace_id;
+                }
+                Ok(())
+            }
+            Some(_) => Err(Verdict::deny(
+                RULE_UNBOUND,
+                format!(
+                    "the Execute of {} for request {:?} has returned; its tools are closed",
+                    c.agent, c.request_id
+                ),
+            )),
+            None => Err(Verdict::deny(
+                RULE_UNBOUND,
+                format!(
+                    "no Execute of {} for request {:?} is in flight",
+                    c.agent, c.request_id
+                ),
+            )),
+        }
+    }
+
     /// Deny before anything was attempted: one `tool_call` record, then the status for the runtime.
     fn deny(&self, input: &Value, v: Verdict) -> Status {
         self.tool(input, Value::Null, &v, None);
@@ -464,9 +543,11 @@ impl ToolsService {
         path: &str,
         headers: &HashMap<String, String>,
         body: &[u8],
-    ) -> Result<ServiceResponse, String> {
+    ) -> Result<ServiceResponse, Status> {
+        let unavailable = |e: String| status_with_rule(Code::Unavailable, RULE_APP_UNAVAILABLE, &e);
         let url = format!("{}{}", self.state.app_base_url(snap), path);
-        let m = reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| e.to_string())?;
+        let m = reqwest::Method::from_bytes(method.as_bytes())
+            .map_err(|e| unavailable(e.to_string()))?;
         let mut req = self
             .state
             .http
@@ -486,8 +567,14 @@ impl ToolsService {
         let resp = req
             .send()
             .await
-            .map_err(|e| format!("app unreachable at {url}: {e}"))?;
-        Ok(to_service_response(resp).await)
+            .map_err(|e| unavailable(format!("app unreachable at {url}: {e}")))?;
+        to_service_response(
+            resp,
+            self.state.config.max_response_bytes,
+            RULE_APP_UNAVAILABLE,
+        )
+        .await
+        .map_err(|e| status_with_rule(Code::Unavailable, e.rule, &e.reason))
     }
 
     fn mesh_request<T>(
@@ -529,7 +616,7 @@ impl SidecarTools for ToolsService {
         let req = request.into_inner();
         let (c, trace) = ctx_of(&req.ctx)?;
         let snap = self.state.loaded().ok_or_else(no_charter)?;
-        let call = Call {
+        let mut call = Call {
             svc: self,
             c,
             trace,
@@ -539,6 +626,10 @@ impl SidecarTools for ToolsService {
         };
         let mut input = json!({ "service": req.service, "method": req.method, "path": req.path, "body": body_value(&req.body) });
 
+        // 0. the call belongs to a run in flight
+        if let Err(v) = call.bind() {
+            return Err(call.deny(&input, v));
+        }
         // 1. the call must be a tool this agent declared and may use, with the declared target
         let (spec, tool) = match self.tool_spec(&snap, &call.c.agent, &call.c.tool) {
             Ok(x) => x,
@@ -639,7 +730,6 @@ impl SidecarTools for ToolsService {
                 &req.body,
             )
             .await
-            .map_err(|e| status_with_rule(Code::Unavailable, RULE_APP_UNAVAILABLE, &e))
         } else {
             match self.state.mesh_client(&snap, &target) {
                 Err(e) => Err(status_with_rule(
@@ -753,6 +843,9 @@ impl SidecarTools for ToolsService {
         };
         let input = Value::String(req.input.clone());
 
+        if let Err(v) = call.bind() {
+            return Err(call.deny(&input, v));
+        }
         let (spec, tool) = match self.tool_spec(&snap, &call.c.agent, &call.c.tool) {
             Ok(x) => x,
             Err(v) => return Err(call.deny(&input, v)),
@@ -960,7 +1053,7 @@ impl SidecarTools for ToolsService {
         let req = request.into_inner();
         let (c, trace) = ctx_of(&req.ctx)?;
         let snap = self.state.loaded().ok_or_else(no_charter)?;
-        let call = Call {
+        let mut call = Call {
             svc: self,
             c,
             trace,
@@ -971,6 +1064,9 @@ impl SidecarTools for ToolsService {
         let mut input =
             json!({ "method": req.method, "url": req.url, "body": body_value(&req.body) });
 
+        if let Err(v) = call.bind() {
+            return Err(call.deny(&input, v));
+        }
         let (spec, tool) = match self.tool_spec(&snap, &call.c.agent, &call.c.tool) {
             Ok(x) => x,
             Err(v) => return Err(call.deny(&input, v)),
@@ -1063,9 +1159,13 @@ impl SidecarTools for ToolsService {
             &input,
             &v,
         );
+        let max = self.state.config.max_response_bytes;
         let sent = match hreq.send().await {
-            Ok(resp) => Ok(to_service_response(resp).await),
-            Err(e) => Err(e),
+            Ok(resp) => to_service_response(resp, max, RULE_HTTP_ERROR).await,
+            Err(e) => Err(BodyError {
+                rule: RULE_HTTP_ERROR,
+                reason: e.to_string(),
+            }),
         };
         pending.disarm();
         match sent {
@@ -1087,7 +1187,7 @@ impl SidecarTools for ToolsService {
                 Ok(Response::new(sr))
             }
             Err(e) => {
-                call.tool(&input, Value::Null, &v, Some(e.to_string()));
+                call.tool(&input, Value::Null, &v, Some(e.reason.clone()));
                 call.attempt(
                     Kind::HttpCall,
                     Direction::Outbound,
@@ -1096,14 +1196,10 @@ impl SidecarTools for ToolsService {
                     &input,
                     Value::Null,
                     &v,
-                    Some(e.to_string()),
+                    Some(e.reason.clone()),
                     None,
                 );
-                Err(status_with_rule(
-                    Code::Unavailable,
-                    RULE_HTTP_ERROR,
-                    &e.to_string(),
-                ))
+                Err(status_with_rule(Code::Unavailable, e.rule, &e.reason))
             }
         }
     }

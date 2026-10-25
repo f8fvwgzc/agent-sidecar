@@ -46,7 +46,8 @@ async fn fake_inventory_app() -> std::net::SocketAddr {
                 }))
             }),
         )
-        .route("/admin/reset", post(|| async { Json(json!({"reset": true})) }));
+        .route("/admin/reset", post(|| async { Json(json!({"reset": true})) }))
+        .route("/restock", post(|| async { Json(json!({"restocked": true})) }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -173,6 +174,24 @@ async fn mesh_mtls_end_to_end() {
     )
     .await;
     let mut tools = tools_client(&root.join("sock-orders")).await;
+    // The runs these tool calls belong to, in flight as while the runtime runs.
+    let _runs: Vec<_> = [
+        "req-allowed",
+        "req-denied",
+        "req-guardrail",
+        "req-traversal",
+        "req-http",
+    ]
+    .into_iter()
+    .map(|id| {
+        orders.state.runs.start(
+            id,
+            "ops-assistant",
+            "local",
+            "4bf92f3577b34da6a3ce929d0e0e4736",
+        )
+    })
+    .collect();
 
     // 1. allowed: orders/ops-assistant → mesh → inventory sidecar → fake app GET /stock/WIDGET-1
     let ok = tools
@@ -616,5 +635,102 @@ async fn mesh_mtls_end_to_end() {
 
     let _ = Arc::new(());
     orders.abort();
+    inventory.abort();
+}
+
+#[tokio::test]
+async fn a_peer_run_that_read_untrusted_data_cannot_write_with_authz_taint() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let pki = Pki {
+        ca: agentsc_pki::ca_init().unwrap(),
+    };
+    let app_addr = fake_inventory_app().await;
+    let mut inv = Charter::from_yaml(INVENTORY).unwrap();
+    inv.service.app_port = app_addr.port();
+    inv.audit.sink = agentsc_charter::AuditSink::File;
+    let audit = root.join("inventory-audit.jsonl");
+    inv.audit.file = Some(audit.to_string_lossy().into_owned());
+    inv.authz.taint = Some(agentsc_charter::InboundTaintSpec {
+        mode: agentsc_charter::TaintMode::Enforce,
+    });
+    inv.authz.services.push(
+        serde_json::from_value(json!({
+            "name": "orders-restocks", "identity": "spiffe://agentsc/ns/agentsc-demo/svc/orders",
+            "service": "inventory", "allow": ["POST /restock"]
+        }))
+        .unwrap(),
+    );
+    let inventory = start(
+        root,
+        "inventory",
+        write_charter(root, "inventory", &inv),
+        pki.tls_dir(root, "inventory"),
+    )
+    .await;
+    let orders = agentsc_pki::TlsMaterial::load(pki.tls_dir(root, "orders")).unwrap();
+    let channel = agentscd::tls::client_channel(
+        &orders,
+        &inventory.mesh_addr.unwrap().to_string(),
+        "inventory.agentsc-demo.svc.cluster.local",
+    )
+    .unwrap();
+    let mut mesh = MeshClient::new(channel);
+    let call = |method: &str, path: &str, taint: Option<&str>| {
+        let mut req = tonic::Request::new(agentsc_proto::ServiceRequest {
+            method: method.into(),
+            path: path.into(),
+            headers: Default::default(),
+            body: vec![],
+            request_id: format!("req-{method}-{}", taint.unwrap_or("clean")),
+            traceparent: String::new(),
+            agent: String::new(),
+        });
+        req.metadata_mut()
+            .insert("x-agentsc-agent", "ops-assistant".parse().unwrap());
+        if let Some(t) = taint {
+            req.metadata_mut()
+                .insert("x-agentsc-taint", t.parse().unwrap());
+        }
+        req
+    };
+
+    // the caller's run read untrusted data: no write here
+    let err = mesh
+        .invoke_service(call("POST", "/restock", Some("untrusted")))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::PermissionDenied, "{err:?}");
+    assert_eq!(
+        err.metadata().get("x-agentsc-rule").unwrap(),
+        "taint.untrusted_write"
+    );
+    // a clean run writes, and a tainted one still reads
+    let ok = mesh
+        .invoke_service(call("POST", "/restock", None))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(ok.status, 200);
+    let read = mesh
+        .invoke_service(call("GET", "/stock/WIDGET-1", Some("untrusted")))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(read.status, 200);
+
+    let recs: Vec<serde_json::Value> = std::fs::read_to_string(&audit)
+        .unwrap()
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .filter(|v: &serde_json::Value| v["rule"] == "taint.untrusted_write")
+        .collect();
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0]["kind"], "service_call");
+    assert_eq!(recs[0]["decision"], "deny");
+    assert_eq!(
+        recs[0]["caller"],
+        "spiffe://agentsc/ns/agentsc-demo/svc/orders"
+    );
     inventory.abort();
 }

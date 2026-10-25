@@ -441,6 +441,23 @@ spec:
                       - name
                       - service
                       x-kubernetes-preserve-unknown-fields: true
+                  taint:
+                    type: object
+                    description: |-
+                      The taint rule for inbound service calls (docs/design/taint-policy.md): a peer's call
+                      whose run read untrusted data (its sidecar's `x-agentsc-taint`) may not write to this
+                      service. Absent = off.
+                    properties:
+                      mode:
+                        type: string
+                        description: |-
+                          `enforce` denies a call a rule forbids; `audit` allows it and records what would have been
+                          denied (rule `taint.would_deny.<rule>`), for trying a policy on real traffic first.
+                        enum:
+                        - enforce
+                        - audit
+                    x-kubernetes-preserve-unknown-fields: true
+                    nullable: true
                 x-kubernetes-preserve-unknown-fields: true
               audit:
                 type: object

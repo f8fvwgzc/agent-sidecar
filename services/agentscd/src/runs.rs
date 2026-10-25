@@ -1,7 +1,8 @@
 //! Executes in flight and recently finished (design §6.5): `ReportEvent` and `ProposeLesson` are
 //! accepted only for a request id and agent whose Execute is running or returned less than the
-//! run window (120 s) ago. Keyed by (request id, agent): a local orchestrator and the local agent
-//! it calls share the request id.
+//! run window (120 s) ago, and tool calls only while it runs (tools.rs). Keyed by (request id,
+//! agent): a local orchestrator and the local agent it calls share the request id. What the
+//! sidecar knows of the run (its trace, its agent-call depth) wins over what the runtime says.
 //!
 //! Each run also carries what the model gateway (gateway.rs) measured for it: the model calls it
 //! let through, their usage and cost as the provider reported them, and the rule of a call it
@@ -21,6 +22,7 @@ struct Entry {
     trace_id: String,
     span_id: String,
     deadline: Option<Instant>,
+    depth: u32,
     in_flight: u32,
     finished_at: Option<Instant>,
     meter: Meter,
@@ -53,6 +55,8 @@ pub struct RunState {
     pub span_id: String,
     /// When the caller stops waiting for the Execute in flight (`None`: no deadline).
     pub deadline: Option<Instant>,
+    /// The Execute's agent-call nesting depth.
+    pub depth: u32,
     pub meter: Meter,
 }
 
@@ -64,6 +68,7 @@ pub struct RunInfo {
     pub trace_id: String,
     pub span_id: String,
     pub deadline: Option<Instant>,
+    pub depth: u32,
 }
 
 /// Which model call [`Runs::admit_model_call`] let through.
@@ -136,6 +141,7 @@ impl Entry {
             trace_id: self.trace_id.clone(),
             span_id: self.span_id.clone(),
             deadline: self.deadline,
+            depth: self.depth,
             meter: self.meter.clone(),
         }
     }
@@ -214,8 +220,10 @@ impl Runs {
             e.caller = info.caller;
             e.caller_agent = info.caller_agent;
         }
-        // The latest Execute's deadline and span: its model calls are the ones arriving now.
+        // The latest Execute's deadline and span: its model calls are the ones arriving now. Its
+        // depth only grows: a nested Execute of the same agent and request is the deeper one.
         e.deadline = info.deadline;
+        e.depth = e.depth.max(info.depth);
         if !info.span_id.is_empty() {
             e.span_id = info.span_id;
         }

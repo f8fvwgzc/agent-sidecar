@@ -26,8 +26,9 @@ pub const DEFAULT_MESH_PORT: u16 = 50002;
 pub const MAX_TOKENS_PER_CALL_LIMIT: u32 = 128_000;
 /// The charter schema level this build understands: 1 = v0.1 fields only, 2 = v0.2
 /// (`skills`, `telemetry`, `service.service_accounts`, `agents[].skills/harness/learning`),
-/// 3 = taint policy (`agents[].taint`, `tools[].label`, `tools[].effect`).
-pub const CHARTER_SCHEMA_LEVEL: u32 = 3;
+/// 3 = taint policy (`agents[].taint`, `tools[].label`, `tools[].effect`), 4 = the taint rule
+/// for inbound service calls (`authz.taint`).
+pub const CHARTER_SCHEMA_LEVEL: u32 = 4;
 /// A charter is at most this many bytes, measured the same way whatever form it arrived in
 /// ([`Charter::validate`]): its JSON serialization and its plain YAML ([`Charter::to_yaml`], the
 /// text `CharterUpdate.charter_yaml` and the file store carry) are each at most this size, so a
@@ -612,6 +613,20 @@ pub struct Authz {
     pub callers: Vec<CallerRule>,
     #[serde(default)]
     pub services: Vec<ServiceRule>,
+    /// The taint rule for inbound service calls (docs/design/taint-policy.md): a peer's call
+    /// whose run read untrusted data (its sidecar's `x-agentsc-taint`) may not write to this
+    /// service. Absent = off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taint: Option<InboundTaintSpec>,
+}
+
+/// `authz.taint`: `enforce` refuses a write (any method but GET, HEAD and OPTIONS) from a peer
+/// run that read untrusted data; `audit` lets it through and records what it would refuse.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InboundTaintSpec {
+    #[serde(default)]
+    pub mode: TaintMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -750,10 +765,14 @@ impl Charter {
 
     /// The fields above v0.1 the charter uses, as `(path, level)`: level 2 for the v0.2 fields
     /// (`skills`, `telemetry`, `service.service_accounts`, `agents[].skills`, `harness`,
-    /// `learning`), 3 for the taint fields (`agents[].taint`, `tools[].label`, `tools[].effect`).
-    /// Empty lists count as unused: they are left out when the charter is serialized.
+    /// `learning`), 3 for the taint fields (`agents[].taint`, `tools[].label`, `tools[].effect`),
+    /// 4 for `authz.taint`. Empty lists count as unused: they are left out when the charter is
+    /// serialized.
     pub fn level_fields(&self) -> Vec<(String, u32)> {
         let mut out = Vec::new();
+        if self.authz.taint.is_some() {
+            out.push(("authz.taint".to_string(), 4));
+        }
         if !self.skills.is_empty() {
             out.push(("skills".to_string(), 2));
         }

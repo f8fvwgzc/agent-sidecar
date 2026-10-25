@@ -338,6 +338,7 @@ pub async fn invoke(state: &Arc<AppState>, inv: Invocation) -> InvokeAgentRespon
             // What the runtime is given: the caller's deadline, else the run timeout.
             deadline: Instant::now()
                 .checked_add(deadline::budget(inv.deadline, deadline::RUN_TIMEOUT)),
+            depth: inv.depth,
         },
     );
     if let Some(t) = &agent.taint {

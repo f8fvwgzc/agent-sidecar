@@ -172,6 +172,19 @@ pub fn ctx_for(req: &ExecuteRequest, agent: &str, tool: &str) -> Option<ToolCont
     })
 }
 
+/// Hold an Execute of `agent` for `request_id` in flight, as the pipeline does while the runtime
+/// runs, so the test may make that run's tool calls itself (tool calls of no run are refused).
+pub fn in_flight<'a>(
+    sidecar: &'a Sidecar,
+    request_id: &str,
+    agent: &str,
+) -> agentscd::runs::RunGuard<'a> {
+    sidecar
+        .state
+        .runs
+        .start(request_id, agent, agentsc_charter::LOCAL_IDENTITY, TRACE_ID)
+}
+
 pub fn read_audit(path: &Path) -> Vec<Value> {
     std::fs::read_to_string(path)
         .unwrap_or_default()
