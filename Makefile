@@ -17,7 +17,8 @@ CHART := deploy/helm/agent-sidecar
 COMPOSE := docker compose -f deploy/compose/docker-compose.yml
 COMPOSE_ENV := deploy/compose/.env
 # Tests of the chart, the Compose stack, the Dockerfile and the release workflow (throwaway uv env).
-PACKAGING_PYTEST := uv run --no-project --with pytest==8.4.2 --with pyyaml==6.0.2 python -m pytest -q
+# cel-python evaluates the chart's ValidatingAdmissionPolicy expressions (deploy/helm/tests).
+PACKAGING_PYTEST := uv run --no-project --with pytest==8.4.2 --with pyyaml==6.0.2 --with cel-python==0.5.0 python -m pytest -q
 .PHONY: local-demo platform-demo e2e-helm all build-host test test-rust test-python test-live fmt lint proto schema validate \
         minikube-up minikube-down build deploy charters undeploy demo logs logs-denied secret-anthropic clean dev-certs \
         compose-up compose-down helm-lint helm-template demo-helm packaging-test

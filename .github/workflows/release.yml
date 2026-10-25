@@ -1,9 +1,10 @@
 # Release on a v* tag: the agentscd, agentsc and embassy binaries for Linux (x86_64 and aarch64,
 # glibc 2.28 or newer, cross-built with cargo-zigbuild) and macOS (Apple silicon); multi-arch
 # (linux/amd64, linux/arm64) agentscd and embassy images on GHCR, assembled from those binaries; and
-# a GitHub release with the archives and their SHA-256 checksums. Nothing is built until the tag
-# matches the crate and chart versions and `make packaging-test` (chart, Compose stack, Dockerfile,
-# this workflow) passes.
+# a GitHub release with the archives, their SHA-256 checksums and the images' digests
+# (IMAGE_DIGESTS, one `<image>@sha256:<hex>` per line, which the chart's sidecar image allow-list
+# takes). Nothing is built until the tag matches the crate and chart versions and
+# `make packaging-test` (chart, Compose stack, Dockerfile, this workflow) passes.
 #
 # Every action is pinned to a commit SHA (the tag it was taken from is in the comment). No caches:
 # a release builds from a clean slate.
@@ -260,7 +261,8 @@ jobs:
             org.opencontainers.image.title=${{ matrix.image }}
             org.opencontainers.image.licenses=MIT
 
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      - id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: docker/Dockerfile
@@ -272,6 +274,25 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           provenance: mode=max
           sbom: true
+
+      # The multi-arch index digest: what the chart's sidecar image allow-list takes
+      # (images.agentscd.digest), published with the release as IMAGE_DIGESTS.
+      - name: Record the image digest
+        env:
+          IMAGE: ${{ env.IMAGE_PREFIX }}/${{ matrix.image }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+          NAME: ${{ matrix.image }}
+        run: |
+          [[ $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no image digest for $IMAGE: $DIGEST"; exit 1; }
+          mkdir -p digests
+          echo "$IMAGE@$DIGEST" >"digests/$NAME"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digest-${{ matrix.image }}
+          path: digests/${{ matrix.image }}
+          if-no-files-found: error
+          retention-days: 7
 
   release:
     name: GitHub release
@@ -293,6 +314,17 @@ jobs:
           sha256sum -- *.tar.gz >SHA256SUMS
           cat SHA256SUMS
 
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: digest-*
+          path: digests
+          merge-multiple: true
+
+      - name: Image digests
+        run: |
+          cat digests/agentscd digests/embassy >dist/IMAGE_DIGESTS
+          cat dist/IMAGE_DIGESTS
+
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -304,4 +336,4 @@ jobs:
           if [[ $VERSION == *-* ]]; then
             flags+=(--prerelease)
           fi
-          gh release create "$TAG" --repo "$REPO" "${flags[@]}" dist/*.tar.gz dist/SHA256SUMS
+          gh release create "$TAG" --repo "$REPO" "${flags[@]}" dist/*.tar.gz dist/SHA256SUMS dist/IMAGE_DIGESTS

@@ -7,9 +7,16 @@ agent-sidecar {{ .Chart.AppVersion }} is installed in namespace {{ .Release.Name
 2. Enable injection for a namespace and give each service a Charter:
      kubectl label namespace <ns> agentsc.io/injection=enabled
      agentsc charter to-cr <service>.charter.yaml | kubectl apply -f -
-   Pods get the agentscd sidecar when they carry the label agentsc.io/inject: "true" and the
-   annotations agentsc.io/service: <service> and agentsc.io/app-port: "<port>". The pod's service
-   account must be named like the service or be listed in the charter's service.service_accounts.
+   Pods get the agentsc-runtime and agentscd sidecars when they carry the label
+   agentsc.io/inject: "true" and the annotations agentsc.io/service: <service> and
+   agentsc.io/app-port: "<port>". The pod's service account must be named like the service or be
+   listed in the charter's service.service_accounts.
+{{- if not (include "agent-sidecar.sidecarImageDigests" . | fromJsonArray) }}
+
+WARNING: the sidecar image allow-list is OFF (no images.agentscd.digest, no
+injection.allowedImageDigests): any image may run as the sidecar and get certificates. This is
+for development builds only; in production pin images.agentscd.digest (README: Sidecar integrity).
+{{- end }}
 
 3. Open the console:
      kubectl -n {{ .Release.Namespace }} port-forward svc/embassy 8080:8080

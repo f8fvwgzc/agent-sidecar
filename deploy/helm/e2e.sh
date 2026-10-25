@@ -90,6 +90,23 @@ grep -q -i 'denied\|unknown field' <<<"$bad" && ok "a Charter with an unknown fi
 echo "▶ injection rules"
 out=$(kc -n "$NS" run e2e-noannot --image=agentsc/inventory:dev --image-pull-policy=Never --labels=agentsc.io/inject=true --dry-run=server -o name 2>&1 || true)
 grep -q -i 'agentsc.io/service' <<<"$out" && ok "a pod without agentsc.io/service is refused with a clear message" || die "pod without annotations: $out"
+own=$(kc -n "$NS" apply --dry-run=server -o name -f - 2>&1 <<'EOF' || true
+apiVersion: v1
+kind: Pod
+metadata:
+  name: e2e-own-sidecar
+  labels: {agentsc.io/inject: "true"}
+  annotations: {agentsc.io/service: orders, agentsc.io/app-port: "8080", agentsc.io/injected: "true"}
+spec:
+  serviceAccountName: orders
+  containers:
+    - {name: app, image: agentsc/orders:dev}
+    - {name: agentscd, image: agentsc/agentscd:dev}
+EOF
+)
+grep -q 'container named "agentscd"' <<<"$own" && ok "a pod that brings its own agentscd is refused" || die "own sidecar: $own"
+renv=$(kc -n "$NS" get pods -l app=orders -o jsonpath='{.items[0].spec.initContainers[?(@.name=="agentsc-runtime")].env}')
+[[ -z $renv ]] && ok "the agentsc-runtime container has no environment (no API key)" || die "agentsc-runtime env: $renv"
 
 echo "▶ identity cannot be borrowed"
 # A pod that claims to be orders, but runs as the default service account: the CA refuses it.

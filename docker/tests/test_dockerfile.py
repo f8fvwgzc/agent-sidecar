@@ -287,6 +287,37 @@ def test_release_publishes_binaries_and_checksums(workflow: dict) -> None:
             assert j["permissions"].get("contents") == "read", name
 
 
+def test_release_publishes_the_image_digests(workflow: dict, tmp_path: Path) -> None:
+    # the chart's sidecar image allow-list (images.agentscd.digest) takes these digests
+    images = workflow["jobs"]["images"]["steps"]
+    push = next(s for s in images if s.get("uses", "").startswith("docker/build-push-action@"))
+    record = next(s for s in images if s.get("name") == "Record the image digest")
+    assert push["id"] == "push"
+    assert record["env"]["DIGEST"] == "${{ steps.push.outputs.digest }}"
+    assert record["env"]["IMAGE"] == "${{ env.IMAGE_PREFIX }}/${{ matrix.image }}"
+    upload = next(s for s in images if s.get("uses", "").startswith("actions/upload-artifact@"))
+    assert upload["with"]["name"] == "digest-${{ matrix.image }}"
+    # the step itself: one `<image>@<digest>` line, and no line without a digest
+    for digest, ok in (("sha256:" + "a" * 64, True), ("", False), ("sha256:short", False)):
+        r = subprocess.run(
+            ["bash", "-eo", "pipefail", "-c", record["run"]],
+            cwd=tmp_path,
+            env={"PATH": "/usr/bin:/bin", "IMAGE": "ghcr.io/x/agentscd", "DIGEST": digest, "NAME": "agentscd"},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert (r.returncode == 0) == ok, r.stdout + r.stderr
+        if ok:
+            assert (tmp_path / "digests/agentscd").read_text() == f"ghcr.io/x/agentscd@{digest}\n"
+    release = workflow["jobs"]["release"]["steps"]
+    download = [s for s in release if s.get("uses", "").startswith("actions/download-artifact@")]
+    assert {s["with"]["pattern"] for s in download} == {"binaries-*", "digest-*"}
+    run = "\n".join(s.get("run", "") for s in release)
+    assert "cat digests/agentscd digests/embassy >dist/IMAGE_DIGESTS" in run
+    assert "dist/SHA256SUMS dist/IMAGE_DIGESTS" in run
+
+
 @pytest.mark.parametrize(
     ("tag", "crate", "chart", "ok"),
     [

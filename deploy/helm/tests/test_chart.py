@@ -3,7 +3,8 @@
 Run with `make packaging-test`. They render the chart with `helm template` (skipped when
 helm is not installed) and check the resources against the design: RBAC, webhooks, the
 CRD link, both Deployments and their embassy flags, the injection template, Secrets,
-Services and NetworkPolicy.
+Services, NetworkPolicy and the sidecar ValidatingAdmissionPolicy, whose CEL expressions are
+evaluated against sample pods with cel-python (skipped when it is not installed).
 """
 
 from __future__ import annotations
@@ -26,7 +27,11 @@ CHART_CRD_FILE = CHART / "files/crds/charters.agentsc.io.yaml"
 DEMO_APPS = ROOT / "deploy/helm/demo/apps.yaml"
 DEMO_SCRIPT = ROOT / "deploy/helm/demo.sh"
 README = CHART / "README.md"
+WEBHOOK_RS = ROOT / "services/embassy/src/webhook.rs"
 NS = "agentsc-system"
+# `helm template` reports no ValidatingAdmissionPolicy API unless told; a cluster's discovery does.
+VAP_API = "admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy"
+D1, D2, D3 = ("sha256:" + "0" * 63 + n for n in "123")
 
 # `embassy serve` flags (design §8.1).
 SERVE_FLAGS = {
@@ -548,7 +553,7 @@ def test_http3_adds_the_flag_and_a_udp_port_everywhere(full: list[dict]) -> None
         ("http3", "UDP", 8080),
     }
     policy = find(full, "NetworkPolicy", "embassy")
-    http_rule = [r for r in policy["spec"]["ingress"] if "from" in r][0]
+    http_rule = next(r for r in policy["spec"]["ingress"] if "from" in r)
     assert {(p["port"], p["protocol"]) for p in http_rule["ports"]} == {(8080, "TCP"), (8080, "UDP")}
     # QUIC is always TLS: http3 without httpTLS is refused at render time
     err = render_fails("--set", "embassy.http3=true")
@@ -565,7 +570,7 @@ def test_every_flag_is_an_embassy_serve_flag(default: list[dict], full: list[dic
     binary = os.environ.get("EMBASSY_BIN")
     if binary and Path(binary).exists():
         help_text = subprocess.run([binary, "serve", "--help"], capture_output=True, text=True, check=True).stdout
-        accepted = set(re.findall(r"--([a-z][a-z-]+)", help_text))
+        accepted = set(re.findall(r"--([a-z][a-z0-9-]+)", help_text))
         assert used <= accepted, used - accepted
 
 
@@ -593,7 +598,11 @@ def test_images_default_to_app_version_and_digest_wins(default: list[dict], full
         assert container(find(full, "Deployment", name))["image"] == (
             "registry.example/agentsc/embassy@sha256:" + "0" * 63 + "1"
         )
-    assert deployment_flags(full, "embassy-ca")["injector-image"] == ["registry.example/agentsc/agentscd:0.2.0-rc.1"]
+    assert deployment_flags(full, "embassy-ca")["injector-image"] == [f"registry.example/agentsc/agentscd@{D2}"]
+    tagged = render("--set", "images.agentscd.tag=0.2.0-rc.1")
+    assert deployment_flags(tagged, "embassy-ca")["injector-image"] == [
+        "ghcr.io/f8fvwgzc/agent-sidecar/agentscd:0.2.0-rc.1"
+    ]
 
 
 def inject_template(docs: list[dict]) -> dict:
@@ -690,9 +699,13 @@ def test_config_secret_holds_the_control_plane_config(default: list[dict], full:
             "session_key_file": "/etc/agentsc/session/key",
         },
         "issuance": {"kubernetes": True, "workload_cert_ttl": "24h", "join_tokens": []},
+        # no digest pinned: the allow-list is off (development builds; embassy-ca warns)
+        "sidecar_images": {"allowed_digests": []},
         "events": {"retain_bytes": 67108864},
     }
     cfg = config(full)
+    # the pinned injector image first, then the extra digests
+    assert cfg["sidecar_images"] == {"allowed_digests": [D2, D3]}
     assert cfg["auth"]["tokens"] == [
         {
             "name": "alice",
@@ -744,6 +757,8 @@ def test_config_secret_holds_the_control_plane_config(default: list[dict], full:
         ["--set", "issuance.workloadCertTTL=one day"],
         ["--set", "injection.failurePolicy=Maybe"],
         ["--set", "images.embassy.digest=latest"],
+        ["--set-json", 'injection.allowedImageDigests=["latest"]'],
+        ["--set-json", f'injection.allowedImageDigests=["{D1.upper()}"]'],
         ["--set", "unknownKey=1"],
     ],
 )
@@ -761,6 +776,350 @@ def test_session_key_is_random_or_existing(default: list[dict], full: list[dict]
     volumes = find(full, "Deployment", "embassy")["spec"]["template"]["spec"]["volumes"]
     session = next(v for v in volumes if v["name"] == "session-key")
     assert session["secret"]["secretName"] == "my-session-key"
+
+
+# ---- the sidecar image allow-list and the ValidatingAdmissionPolicy -------------------------
+
+
+@needs_helm
+def test_extra_digests_need_a_pinned_injector_image() -> None:
+    # with the allow-list on, a tag-only injector image would be refused for every pod
+    err = render_fails("--set-json", f'injection.allowedImageDigests=["{D1}"]')
+    assert "injection.allowedImageDigests needs images.agentscd.digest" in err
+    pinned = render("--set", f"images.agentscd.digest={D1}")
+    assert config(pinned)["sidecar_images"] == {"allowed_digests": [D1]}
+    # the pinned digest listed again is not repeated
+    both = render(
+        "--set", f"images.agentscd.digest={D1}", "--set-json", f'injection.allowedImageDigests=["{D1}","{D2}"]'
+    )
+    assert config(both)["sidecar_images"] == {"allowed_digests": [D1, D2]}
+
+
+def policy_docs(docs: list[dict]) -> list[dict]:
+    return [d for d in docs if d["kind"].startswith("ValidatingAdmissionPolicy")]
+
+
+@needs_helm
+def test_sidecar_policy_is_rendered_only_where_the_api_exists(default: list[dict]) -> None:
+    assert not policy_docs(default), "no admissionregistration.k8s.io/v1 ValidatingAdmissionPolicy"
+    beta = render("--api-versions", "admissionregistration.k8s.io/v1beta1/ValidatingAdmissionPolicy")
+    assert not policy_docs(beta)
+    docs = render("--api-versions", VAP_API, kube_version="1.30.0")
+    assert {(d["kind"], d["metadata"]["name"]) for d in policy_docs(docs)} == {
+        ("ValidatingAdmissionPolicy", "agentsc-sidecar-integrity"),
+        ("ValidatingAdmissionPolicyBinding", "agentsc-sidecar-integrity"),
+    }
+    for d in policy_docs(docs):
+        assert d["apiVersion"] == "admissionregistration.k8s.io/v1"
+        assert d["metadata"]["labels"]["app.kubernetes.io/part-of"] == "agentsc"
+
+
+@needs_helm
+def test_sidecar_policy_scope_follows_the_injector() -> None:
+    docs = render("--api-versions", VAP_API)
+    policy = find(docs, "ValidatingAdmissionPolicy", "agentsc-sidecar-integrity")["spec"]
+    assert policy["failurePolicy"] == "Fail"
+    assert policy["matchConstraints"]["resourceRules"] == [
+        {
+            "apiGroups": [""],
+            "apiVersions": ["v1"],
+            "operations": ["CREATE", "UPDATE"],
+            "resources": ["pods", "pods/ephemeralcontainers"],
+        }
+    ]
+    binding = find(docs, "ValidatingAdmissionPolicyBinding", "agentsc-sidecar-integrity")["spec"]
+    assert binding["policyName"] == "agentsc-sidecar-integrity"
+    assert binding["validationActions"] == ["Deny"]
+    # the injector's namespace exclusions; agent pods are picked by matchConditions (label or
+    # sidecar container names), so a pod outside an injection-enabled namespace is checked too
+    [hook] = find(docs, "MutatingWebhookConfiguration", "agentsc-sidecar-injector")["webhooks"]
+    excluded = [e for e in hook["namespaceSelector"]["matchExpressions"] if e["operator"] == "NotIn"]
+    assert binding["matchResources"] == {"namespaceSelector": {"matchExpressions": excluded}}
+    assert excluded[0]["values"] == ["kube-system", NS]
+
+
+def test_the_readme_says_how_to_turn_the_allow_list_on() -> None:
+    readme = README.read_text()
+    for needle in (
+        "`agentsc-sidecar-integrity`",
+        "`injection.allowedImageDigests`",
+        "`images.agentscd.digest`",
+        "`sidecar_images.allowed_digests`",
+        "`agentsc-runtime`",
+    ):
+        assert needle in readme, needle
+
+
+@needs_helm
+def test_sidecar_policy_names_match_the_injector() -> None:
+    # the policy repeats the injector's container, volume and runtime names: they must not drift
+    src = WEBHOOK_RS.read_text()
+    consts = dict(re.findall(r'pub const ([A-Z_]+): &str = "([^"]+)";', src))
+    args_block = re.search(r"pub const RUNTIME_ARGS: \[&str; \d+\] = \[(.*?)\];", src, re.DOTALL)
+    assert args_block, "RUNTIME_ARGS not found in webhook.rs"
+    runtime_args = re.findall(r'"([^"]+)"', args_block.group(1))
+    policy = json.dumps(
+        find(render("--api-versions", VAP_API), "ValidatingAdmissionPolicy", "agentsc-sidecar-integrity")
+    )
+    for name in (
+        "SIDECAR_CONTAINER",
+        "RUNTIME_CONTAINER",
+        "RUN_VOLUME",
+        "STATE_VOLUME",
+        "TOKEN_VOLUME",
+        "TOKEN_AUDIENCE",
+    ):
+        assert f"'{consts[name]}'" in policy, name
+    assert "c.command == ['" + consts["RUNTIME_COMMAND"] + "']" in policy
+    assert "c.args == [" + ", ".join(f"'{a}'" for a in runtime_args) + "]" in policy
+
+
+IMAGE_RULE = "must run an image pinned to a digest in the sidecar image allow-list"
+PROGRAM_RULE = "agentscd must run its image's entrypoint"
+UPDATE_RULE = "image of the agentscd and agentsc-runtime containers cannot be changed"
+EPHEMERAL_RULE = "ephemeral containers cannot be added"
+SHARE_RULE = "shareProcessNamespace must not be true"
+HOST_PID_RULE = "hostPID must not be true"
+VOLUME_RULE = "only the agentscd and agentsc-runtime containers may mount the sidecar volumes"
+RUNTIME_MOUNT_RULE = "agentsc-runtime may mount only agentsc-run"
+TOKEN_RULE = "only the volume agentsc-token may project a service-account token"
+
+
+def injected_pod(image: str) -> dict:
+    """A pod as the injector leaves it (services/embassy/src/webhook.rs)."""
+    run = {"name": "agentsc-run", "mountPath": "/run/agentsc"}
+    return {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": "orders-0", "labels": {"app": "orders", "agentsc.io/inject": "true"}},
+        "spec": {
+            "containers": [{"name": "app", "image": "orders:1"}],
+            "initContainers": [
+                {
+                    "name": "agentsc-runtime",
+                    "image": image,
+                    "restartPolicy": "Always",
+                    "command": ["agentsc-runtime"],
+                    "args": [
+                        "--listen",
+                        "unix:/run/agentsc/runtime.sock",
+                        "--sidecar",
+                        "unix:/run/agentsc/sidecar.sock",
+                    ],
+                    "volumeMounts": [run],
+                },
+                {
+                    "name": "agentscd",
+                    "image": image,
+                    "restartPolicy": "Always",
+                    "volumeMounts": [
+                        run,
+                        {"name": "agentsc-state", "mountPath": "/var/lib/agentsc/state"},
+                        {"name": "agentsc-token", "mountPath": "/var/run/secrets/agentsc", "readOnly": True},
+                    ],
+                },
+            ],
+            "volumes": [
+                {"name": "agentsc-run", "emptyDir": {}},
+                {"name": "agentsc-state", "emptyDir": {}},
+                {
+                    "name": "agentsc-token",
+                    "projected": {
+                        "sources": [
+                            {"serviceAccountToken": {"audience": "agentsc", "expirationSeconds": 3600, "path": "token"}}
+                        ]
+                    },
+                },
+            ],
+        },
+    }
+
+
+class Policy:
+    """The rendered policy, evaluated like the API server does: matchConditions, then the
+    variables in order, then every validation (cel-python implements the CEL the expressions use)."""
+
+    def __init__(self, docs: list[dict]) -> None:
+        self.celpy = pytest.importorskip("celpy")
+        self.env = self.celpy.Environment()
+        self.spec = find(docs, "ValidatingAdmissionPolicy", "agentsc-sidecar-integrity")["spec"]
+
+    def _eval(self, expression: str, activation: dict):
+        return self.env.program(self.env.compile(expression)).evaluate(activation)
+
+    def admit(
+        self, pod: dict, operation: str = "CREATE", old: dict | None = None, sub_resource: str = ""
+    ) -> list[str] | None:
+        """None when the policy does not select the request; else the failing validations' messages."""
+        to_cel = self.celpy.json_to_cel
+        activation = {
+            "object": to_cel(pod),
+            "oldObject": to_cel(old),
+            "request": to_cel({"operation": operation, "subResource": sub_resource}),
+        }
+        if not all(bool(self._eval(m["expression"], activation)) for m in self.spec["matchConditions"]):
+            return None
+        variables = self.celpy.celtypes.MapType()
+        for v in self.spec.get("variables", []):
+            activation["variables"] = variables
+            variables[self.celpy.celtypes.StringType(v["name"])] = self._eval(v["expression"], activation)
+        activation["variables"] = variables
+        failed = []
+        for rule in self.spec["validations"]:
+            result = self._eval(rule["expression"], activation)
+            assert isinstance(result, self.celpy.celtypes.BoolType), f"{rule['expression']}: {result!r}"
+            if not result:
+                failed.append(" ".join(rule["message"].split()))
+        return failed
+
+
+@pytest.fixture(scope="module")
+def enforced() -> Policy:
+    return Policy(render("--api-versions", VAP_API, "--set", f"images.agentscd.digest={D1}"))
+
+
+@pytest.fixture(scope="module")
+def unenforced() -> Policy:
+    return Policy(render("--api-versions", VAP_API))
+
+
+def changed(pod: dict, change) -> dict:
+    out = json.loads(json.dumps(pod))
+    change(out)
+    return out
+
+
+def sidecar(pod: dict, name: str) -> dict:
+    return next(c for c in pod["spec"]["initContainers"] if c["name"] == name)
+
+
+@needs_helm
+def test_the_policy_admits_the_injected_pod_and_ignores_other_pods(enforced: Policy, unenforced: Policy) -> None:
+    pod = injected_pod(f"ghcr.io/f8fvwgzc/agent-sidecar/agentscd@{D1}")
+    assert enforced.admit(pod) == []
+    # pinned to an allowed digest in any registry: the digest names the content
+    assert enforced.admit(injected_pod(f"mirror.example/agentscd:0.2.0@{D1}")) == []
+    other = {
+        "metadata": {"labels": {"app": "web"}},
+        "spec": {
+            "containers": [
+                {"name": "web", "image": "nginx", "volumeMounts": [{"name": "agentsc-run", "mountPath": "/x"}]}
+            ],
+            "hostPID": True,
+        },
+    }
+    assert enforced.admit(other) is None, "not an agent pod"
+    # allow-list off (development builds): any image, the other rules still hold
+    assert unenforced.admit(injected_pod("agentsc/agentscd:dev")) == []
+    [failed] = unenforced.admit(changed(injected_pod("agentsc/agentscd:dev"), lambda p: p["spec"].update(hostPID=True)))
+    assert HOST_PID_RULE in failed
+
+
+@needs_helm
+@pytest.mark.parametrize(
+    ("case", "change", "rules"),
+    [
+        (
+            "tag-only image",
+            lambda p: sidecar(p, "agentscd").update(image="ghcr.io/f8fvwgzc/agent-sidecar/agentscd:0.2.0"),
+            [IMAGE_RULE],
+        ),
+        (
+            "another digest",
+            lambda p: sidecar(p, "agentsc-runtime").update(image=f"evil.example/agentscd@{D2}"),
+            [IMAGE_RULE],
+        ),
+        (
+            "agentscd runs another program",
+            lambda p: sidecar(p, "agentscd").update(command=["python3", "/tmp/x.py"]),
+            [PROGRAM_RULE],
+        ),
+        ("agentscd gets arguments", lambda p: sidecar(p, "agentscd").update(args=["--no-runtime"]), [PROGRAM_RULE]),
+        (
+            "the runtime runs another program",
+            lambda p: sidecar(p, "agentsc-runtime").update(args=["-c", "x"]),
+            [PROGRAM_RULE],
+        ),
+        ("shareProcessNamespace", lambda p: p["spec"].update(shareProcessNamespace=True), [SHARE_RULE]),
+        ("hostPID", lambda p: p["spec"].update(hostPID=True), [HOST_PID_RULE]),
+        (
+            "the app mounts the sockets",
+            lambda p: p["spec"]["containers"][0].update(
+                volumeMounts=[{"name": "agentsc-run", "mountPath": "/run/agentsc"}]
+            ),
+            [VOLUME_RULE],
+        ),
+        (
+            "an init container mounts the key",
+            lambda p: p["spec"]["initContainers"].append(
+                {"name": "copy", "image": "busybox", "volumeMounts": [{"name": "agentsc-state", "mountPath": "/s"}]}
+            ),
+            [VOLUME_RULE],
+        ),
+        (
+            "the runtime mounts the token",
+            lambda p: sidecar(p, "agentsc-runtime")["volumeMounts"].append(
+                {"name": "agentsc-token", "mountPath": "/t"}
+            ),
+            [RUNTIME_MOUNT_RULE],
+        ),
+        (
+            "another agentsc token",
+            lambda p: p["spec"]["volumes"].append(
+                {
+                    "name": "mine",
+                    "projected": {"sources": [{"serviceAccountToken": {"audience": "agentsc", "path": "t"}}]},
+                }
+            ),
+            [TOKEN_RULE],
+        ),
+    ],
+)
+def test_the_policy_refuses_weakened_agent_pods(enforced: Policy, case: str, change, rules: list[str]) -> None:
+    pod = changed(injected_pod(f"ghcr.io/f8fvwgzc/agent-sidecar/agentscd@{D1}"), change)
+    failed = enforced.admit(pod)
+    assert failed is not None and len(failed) == len(rules), (case, failed)
+    for rule, message in zip(rules, failed, strict=True):
+        assert rule in message, (case, message)
+
+
+@needs_helm
+def test_a_bypassed_injector_cannot_bring_its_own_sidecar(enforced: Policy) -> None:
+    # no injection label, a sidecar of its own: the container name selects the pod
+    own = {
+        "metadata": {"labels": {"app": "orders"}},
+        "spec": {
+            "containers": [
+                {"name": "app", "image": "orders:1"},
+                {"name": "agentscd", "image": "evil.example/agentscd:1"},
+            ]
+        },
+    }
+    assert [m for m in enforced.admit(own) if IMAGE_RULE in m]
+    # an allowed image with a command of its own
+    own["spec"]["containers"][1].update(image=f"r@{D1}", command=["python3", "-c", "..."])
+    assert [m for m in enforced.admit(own) if PROGRAM_RULE in m]
+
+
+@needs_helm
+def test_updates_keep_the_sidecar_images_and_ephemeral_containers_are_refused(enforced: Policy) -> None:
+    old = injected_pod(f"ghcr.io/f8fvwgzc/agent-sidecar/agentscd@{D1}")
+    # a label change is fine, even when the label goes (the sidecar names still select the pod)
+    relabelled = changed(old, lambda p: p["metadata"]["labels"].pop("agentsc.io/inject"))
+    assert enforced.admit(relabelled, "UPDATE", old) == []
+    for name in ("agentscd", "agentsc-runtime"):
+        swapped = changed(
+            old, lambda p, n=name: sidecar(p, n).update(image=f"ghcr.io/f8fvwgzc/agent-sidecar/agentscd@{D2}")
+        )
+        assert [m for m in enforced.admit(swapped, "UPDATE", old) if UPDATE_RULE in m], name
+    # kubectl debug: pods/ephemeralcontainers
+    debug = changed(old, lambda p: p["spec"].update(ephemeralContainers=[{"name": "debugger", "image": "busybox"}]))
+    assert [m for m in enforced.admit(debug, "UPDATE", old, "ephemeralcontainers") if EPHEMERAL_RULE in m]
+    # spec rules apply on CREATE only: a pod admitted before the policy can still be patched
+    legacy = changed(
+        old, lambda p: (p["spec"].update(hostPID=True), sidecar(p, "agentscd").update(image="agentsc/agentscd:dev"))
+    )
+    assert enforced.admit(changed(legacy, lambda p: p["metadata"]["labels"].update(tier="x")), "UPDATE", legacy) == []
 
 
 # ---- the demo apps (make demo-helm) -------------------------------------------------------
