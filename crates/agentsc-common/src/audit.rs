@@ -1,8 +1,17 @@
 //! The audit record (CONTRACT.md §6). Field order below is the wire order.
+//!
+//! **Durability.** [`AuditWriter`] never ignores its sink: a line the sink did not take (a full
+//! disk, a closed pipe) is kept, up to [`MAX_PENDING_BYTES`], and written first by the next
+//! write or [`AuditWriter::retry`], resuming at the first byte the sink did not take, so a line
+//! is never written twice or cut. Beyond that bound a new record is not kept (counted as
+//! `dropped`). Failures are counted and the sink is reported unhealthy ([`AuditWriter::health`])
+//! until that backlog is written and flushed; the sidecar logs them and can refuse work while
+//! they last (CONTRACT.md §6, docs/operations.md "Audit sink failures").
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Instant;
 use tokio::sync::broadcast;
@@ -10,6 +19,9 @@ use tokio::sync::broadcast;
 pub const MAX_PAYLOAD_BYTES: usize = 8 * 1024;
 /// Records a [`AuditWriter::subscribe`] receiver may fall behind by before it loses the oldest.
 pub const SUBSCRIBE_CAPACITY: usize = 4096;
+/// Bytes of lines the sink did not take that the writer keeps for the next attempt (see the
+/// module docs); a record that would go past it is not kept.
+pub const MAX_PENDING_BYTES: usize = 4 * 1024 * 1024;
 
 /// The kinds this build writes. A reader must keep a record of a kind it does not know and show
 /// the kind as written (CONTRACT.md §6): parse `kind` as a string when reading other sidecars' logs.
@@ -511,6 +523,63 @@ struct Redaction {
     pii_redact: bool,
 }
 
+/// What [`AuditWriter::health`] reports about the sink (module docs, **Durability**).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct SinkHealth {
+    /// Every record so far reached the sink and the last flush succeeded: no backlog.
+    pub healthy: bool,
+    /// Writes and flushes that failed since start (a retry that fails again counts again).
+    pub write_errors: u64,
+    /// Records the sink never got because the backlog was full.
+    pub dropped: u64,
+    /// Bytes waiting for the next attempt.
+    pub pending_bytes: u64,
+    /// The most recent failure (kept after a recovery), e.g. `No space left on device (os error 28)`.
+    pub last_error: Option<String>,
+}
+
+/// The sink and what it has not taken yet, under one lock.
+struct Sink {
+    out: Box<dyn Write + Send>,
+    /// Bytes of whole lines the sink did not take, oldest first; the front may be the rest of a
+    /// line whose start it took, so the next attempt resumes exactly there.
+    pending: Vec<u8>,
+    /// The sink took bytes that no flush has pushed out yet.
+    unflushed: bool,
+}
+
+impl Sink {
+    /// Write the backlog, then flush. What the sink took leaves the backlog, also on an error.
+    fn drain(&mut self) -> std::io::Result<()> {
+        while !self.pending.is_empty() {
+            match self.out.write(&self.pending) {
+                Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+                Ok(n) => {
+                    self.pending.drain(..n.min(self.pending.len()));
+                    self.unflushed = true;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        if self.unflushed {
+            self.out.flush()?;
+            self.unflushed = false;
+        }
+        Ok(())
+    }
+}
+
+/// The counters of [`SinkHealth`], readable without the sink lock (a readiness probe never waits
+/// for a slow write).
+struct SinkStats {
+    healthy: AtomicBool,
+    write_errors: AtomicU64,
+    dropped: AtomicU64,
+    pending_bytes: AtomicU64,
+    last_error: Mutex<Option<String>>,
+}
+
 /// Writes records to stdout or a file, one line each, serialised, and publishes each written
 /// record to [`AuditWriter::subscribe`] receivers.
 pub struct AuditWriter {
@@ -523,7 +592,8 @@ pub struct AuditWriter {
     /// request_id → values found at `audit.redact` paths, scrubbed from every later record of that
     /// request (the same value reappears as text inside model prompts and tool results).
     secrets: Mutex<std::collections::HashMap<String, (std::time::Instant, Vec<String>)>>,
-    sink: Mutex<Box<dyn Write + Send>>,
+    sink: Mutex<Sink>,
+    stats: SinkStats,
     published: broadcast::Sender<Arc<AuditRecord>>,
 }
 
@@ -562,8 +632,71 @@ impl AuditWriter {
                 pii_redact: false,
             })),
             secrets: Mutex::new(std::collections::HashMap::new()),
-            sink: Mutex::new(sink),
+            sink: Mutex::new(Sink {
+                out: sink,
+                pending: Vec::new(),
+                unflushed: false,
+            }),
+            stats: SinkStats {
+                healthy: AtomicBool::new(true),
+                write_errors: AtomicU64::new(0),
+                dropped: AtomicU64::new(0),
+                pending_bytes: AtomicU64::new(0),
+                last_error: Mutex::new(None),
+            },
             published: broadcast::channel(SUBSCRIBE_CAPACITY).0,
+        }
+    }
+
+    /// The sink's state: healthy, the failure counters, the backlog and the last error.
+    pub fn health(&self) -> SinkHealth {
+        SinkHealth {
+            healthy: self.stats.healthy.load(Ordering::Acquire),
+            write_errors: self.stats.write_errors.load(Ordering::Relaxed),
+            dropped: self.stats.dropped.load(Ordering::Relaxed),
+            pending_bytes: self.stats.pending_bytes.load(Ordering::Relaxed),
+            last_error: self
+                .stats
+                .last_error
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone(),
+        }
+    }
+
+    /// Write the backlog and flush again, if the sink is unhealthy; returns whether it is healthy
+    /// now. Every [`AuditWriter::write`] does the same first, so this is for when nothing is
+    /// written (a readiness probe, a timer).
+    pub fn retry(&self) -> bool {
+        if self.stats.healthy.load(Ordering::Acquire) {
+            return true;
+        }
+        let mut sink = self.sink.lock().unwrap_or_else(PoisonError::into_inner);
+        let result = sink.drain();
+        self.note(&sink, result)
+    }
+
+    /// Record the outcome of an attempt (with the sink lock held, so the counters follow the
+    /// sink's order); returns whether the sink is healthy.
+    fn note(&self, sink: &Sink, result: std::io::Result<()>) -> bool {
+        self.stats
+            .pending_bytes
+            .store(sink.pending.len() as u64, Ordering::Relaxed);
+        match result {
+            Ok(()) => {
+                self.stats.healthy.store(true, Ordering::Release);
+                true
+            }
+            Err(e) => {
+                self.stats.write_errors.fetch_add(1, Ordering::Relaxed);
+                *self
+                    .stats
+                    .last_error
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = Some(e.to_string());
+                self.stats.healthy.store(false, Ordering::Release);
+                false
+            }
         }
     }
 
@@ -664,7 +797,8 @@ impl AuditWriter {
 
     /// Stamp, hash (over the original payloads), redact paths, scrub remembered values, redact PII,
     /// then truncate — redaction always sees the whole payload (CONTRACT.md §6). Remembered
-    /// values and PII are also scrubbed from `callee`, `reason` and `error`.
+    /// values and PII are also scrubbed from `callee`, `reason` and `error`. A line the sink does
+    /// not take is kept for the next attempt (module docs); this never fails and never panics.
     pub fn write(&self, mut record: AuditRecord) {
         let redaction = self.snapshot();
         record.service = self.service.clone();
@@ -694,13 +828,21 @@ impl AuditWriter {
             text_fields(&mut record).for_each(redact_pii_text);
         }
         record.truncate_payloads();
-        let line = record.to_json_line();
+        let mut line = record.to_json_line().into_bytes();
+        line.push(b'\n');
         // A guard may write while a panic unwinds; a poisoned lock must not turn that into an abort.
         let mut sink = self.sink.lock().unwrap_or_else(PoisonError::into_inner);
-        let _ = writeln!(sink, "{line}");
-        let _ = sink.flush();
-        // Published under the sink lock, so receivers see the sink's order. `send` never blocks
-        // (a full channel drops the oldest for lagging receivers) and fails only with none.
+        if !sink.pending.is_empty() && sink.pending.len() + line.len() > MAX_PENDING_BYTES {
+            self.stats.dropped.fetch_add(1, Ordering::Relaxed);
+        } else {
+            sink.pending.extend_from_slice(&line);
+        }
+        let result = sink.drain();
+        self.note(&sink, result);
+        // Published under the sink lock, so receivers see the sink's order — also a record the
+        // sink did not take, which may still reach the control plane or the exporter. `send`
+        // never blocks (a full channel drops the oldest for lagging receivers) and fails only
+        // with none.
         if self.published.receiver_count() > 0 {
             let _ = self.published.send(Arc::new(record));
         }
@@ -1406,6 +1548,207 @@ mod tests {
         assert_eq!(tokens.extra["reasoning"], 9);
     }
 
+    /// A sink whose writes and flushes fail on demand, or take only part of each write.
+    #[derive(Clone, Default)]
+    struct Flaky(Arc<Mutex<FlakyState>>);
+
+    #[derive(Default)]
+    struct FlakyState {
+        out: Vec<u8>,
+        fail_writes: bool,
+        fail_flushes: bool,
+        /// Take at most this many bytes per write, then fail the next one (a disk filling up).
+        short: Option<usize>,
+        flushes: usize,
+    }
+
+    impl Write for Flaky {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            let mut s = self.0.lock().unwrap();
+            if s.fail_writes {
+                return Err(std::io::Error::other("No space left on device"));
+            }
+            if let Some(n) = s.short.take() {
+                s.out.extend_from_slice(&b[..n.min(b.len())]);
+                s.fail_writes = true;
+                return Ok(n.min(b.len()));
+            }
+            s.out.extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            let mut s = self.0.lock().unwrap();
+            s.flushes += 1;
+            if s.fail_flushes {
+                return Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+            }
+            Ok(())
+        }
+    }
+
+    impl Flaky {
+        fn set(&self, f: impl FnOnce(&mut FlakyState)) {
+            f(&mut self.0.lock().unwrap());
+        }
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().out.clone()).unwrap()
+        }
+        fn callees(&self) -> Vec<String> {
+            self.text()
+                .lines()
+                .map(|l| {
+                    let v: Value = serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}"));
+                    v["callee"].as_str().unwrap().to_string()
+                })
+                .collect()
+        }
+    }
+
+    fn config_rec(callee: &str) -> AuditRecord {
+        AuditRecord::new(
+            Kind::Config,
+            Direction::Internal,
+            "",
+            &TraceContext::new_root(),
+            None,
+            "file",
+            None,
+            callee,
+            Value::Null,
+            Value::Null,
+        )
+    }
+
+    #[test]
+    fn a_failing_sink_is_counted_kept_and_written_when_it_recovers() {
+        let sink = Flaky::default();
+        let w = AuditWriter::with_sink("s", "n", vec![], Box::new(sink.clone()));
+        let mut rx = w.subscribe();
+        w.write(config_rec("before"));
+        assert_eq!(
+            w.health(),
+            SinkHealth {
+                healthy: true,
+                ..Default::default()
+            }
+        );
+
+        // the disk fills up: nothing is lost silently
+        sink.set(|s| s.fail_writes = true);
+        w.write(config_rec("during-1"));
+        w.write(config_rec("during-2"));
+        let h = w.health();
+        assert!(!h.healthy);
+        assert_eq!((h.write_errors, h.dropped), (2, 0));
+        assert!(h.pending_bytes > 0);
+        assert_eq!(h.last_error.as_deref(), Some("No space left on device"));
+        assert_eq!(sink.callees(), ["before"]);
+        // a retry that fails again counts again
+        assert!(!w.retry());
+        assert_eq!(w.health().write_errors, 3);
+        // subscribers still got every record, in order
+        let got: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|r| r.callee.clone())
+            .collect();
+        assert_eq!(got, ["before", "during-1", "during-2"]);
+
+        // space again: the retry writes the backlog in order, once
+        sink.set(|s| s.fail_writes = false);
+        assert!(w.retry());
+        assert_eq!(sink.callees(), ["before", "during-1", "during-2"]);
+        let h = w.health();
+        assert!(h.healthy && h.pending_bytes == 0, "{h:?}");
+        assert_eq!(h.write_errors, 3, "the history stays");
+        assert!(h.last_error.is_some());
+        // and later writes go straight through
+        w.write(config_rec("after"));
+        assert_eq!(sink.callees().last().unwrap(), "after");
+    }
+
+    #[test]
+    fn a_short_write_resumes_where_the_sink_stopped() {
+        let sink = Flaky::default();
+        let w = AuditWriter::with_sink("s", "n", vec![], Box::new(sink.clone()));
+        // the sink takes 20 bytes of the line, then fails
+        sink.set(|s| s.short = Some(20));
+        w.write(config_rec("cut"));
+        assert!(!w.health().healthy);
+        assert_eq!(sink.text().len(), 20);
+        sink.set(|s| s.fail_writes = false);
+        // the next write finishes the cut line first: no line is written twice or broken
+        w.write(config_rec("next"));
+        assert_eq!(sink.callees(), ["cut", "next"]);
+        assert!(w.health().healthy);
+    }
+
+    #[test]
+    fn a_failing_flush_is_retried_without_writing_twice() {
+        let sink = Flaky::default();
+        let w = AuditWriter::with_sink("s", "n", vec![], Box::new(sink.clone()));
+        sink.set(|s| s.fail_flushes = true);
+        w.write(config_rec("a"));
+        let h = w.health();
+        assert!(
+            !h.healthy && h.pending_bytes == 0,
+            "the sink took the bytes"
+        );
+        assert_eq!(h.last_error.as_deref(), Some("broken pipe"));
+        sink.set(|s| s.fail_flushes = false);
+        assert!(w.retry());
+        assert_eq!(sink.callees(), ["a"]);
+        // healthy: a retry does nothing at all
+        let flushes = sink.0.lock().unwrap().flushes;
+        assert!(w.retry());
+        assert_eq!(sink.0.lock().unwrap().flushes, flushes);
+    }
+
+    #[test]
+    fn a_full_backlog_drops_new_records_and_counts_them() {
+        let sink = Flaky::default();
+        let w = AuditWriter::with_sink("s", "n", vec![], Box::new(sink.clone()));
+        sink.set(|s| s.fail_writes = true);
+        let big = "x".repeat(MAX_PAYLOAD_BYTES - 100);
+        let mut kept = 0;
+        while w.health().dropped == 0 {
+            let mut r = config_rec(&format!("r{kept}"));
+            r.input = Value::String(big.clone());
+            w.write(r);
+            kept += 1;
+        }
+        kept -= 1; // the last one was dropped
+        let h = w.health();
+        assert!(h.pending_bytes as usize <= MAX_PENDING_BYTES, "{h:?}");
+        sink.set(|s| s.fail_writes = false);
+        assert!(w.retry());
+        let callees = sink.callees();
+        assert_eq!(callees.len(), kept, "the oldest are kept, in order");
+        assert_eq!(callees[0], "r0");
+        assert_eq!(callees[kept - 1], format!("r{}", kept - 1));
+    }
+
+    #[test]
+    fn a_writer_with_a_broken_sink_never_blocks_or_panics_from_a_guard() {
+        let sink = Flaky::default();
+        sink.set(|s| {
+            s.fail_writes = true;
+            s.fail_flushes = true;
+        });
+        let w = AuditWriter::with_sink("s", "n", vec![], Box::new(sink.clone()));
+        // a guard dropped while a panic unwinds still writes (and fails) without aborting
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = w.on_cancel(vec![config_rec("owed")], Instant::now());
+            panic!("handler panicked");
+        }));
+        assert!(result.is_err());
+        assert_eq!(w.health().write_errors, 1);
+        sink.set(|s| {
+            s.fail_writes = false;
+            s.fail_flushes = false;
+        });
+        assert!(w.retry());
+        assert_eq!(sink.callees(), ["owed"]);
+    }
+
     #[test]
     fn callee_reason_and_error_are_scrubbed_like_the_payloads() {
         let buf = Buf::default();
@@ -1441,18 +1784,7 @@ mod tests {
         rec.error = Some("bad request: ssn 123-45-6789, call +1 555-123-4567".into());
         w.write(rec);
         // another request's record is not touched by r1's values (PII still is)
-        let mut other = AuditRecord::new(
-            Kind::Config,
-            Direction::Internal,
-            "",
-            &t,
-            None,
-            "file",
-            None,
-            "GET https://api.example.com/x?ssn=123-45-6789",
-            Value::Null,
-            Value::Null,
-        );
+        let mut other = config_rec("GET https://api.example.com/x?ssn=123-45-6789");
         other.request_id = "r2".into();
         w.write(other);
 

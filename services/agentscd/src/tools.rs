@@ -612,6 +612,7 @@ impl SidecarTools for ToolsService {
         &self,
         request: Request<ToolServiceRequest>,
     ) -> Result<Response<ServiceResponse>, Status> {
+        self.state.audit.gate_tool(request.get_ref().ctx.as_ref())?;
         let deadline = deadline::from_metadata(request.metadata());
         let req = request.into_inner();
         let (c, trace) = ctx_of(&req.ctx)?;
@@ -829,6 +830,7 @@ impl SidecarTools for ToolsService {
         &self,
         request: Request<ToolAgentRequest>,
     ) -> Result<Response<InvokeAgentResponse>, Status> {
+        self.state.audit.gate_tool(request.get_ref().ctx.as_ref())?;
         let deadline = deadline::from_metadata(request.metadata());
         let req = request.into_inner();
         let (c, trace) = ctx_of(&req.ctx)?;
@@ -1049,6 +1051,7 @@ impl SidecarTools for ToolsService {
         &self,
         request: Request<ToolHttpRequest>,
     ) -> Result<Response<ServiceResponse>, Status> {
+        self.state.audit.gate_tool(request.get_ref().ctx.as_ref())?;
         let deadline = deadline::from_metadata(request.metadata());
         let req = request.into_inner();
         let (c, trace) = ctx_of(&req.ctx)?;
@@ -1323,6 +1326,7 @@ impl SidecarTools for ToolsService {
         &self,
         request: Request<LessonRequest>,
     ) -> Result<Response<LessonResponse>, Status> {
+        self.state.audit.gate()?;
         crate::learning::propose(&self.state, request.into_inner()).map(Response::new)
     }
 }

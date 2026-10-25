@@ -140,6 +140,7 @@ New `kind` values: `config`, `learning`. A consumer that sees an unknown kind mu
 | `--otlp-endpoint-allow <glob,...>` | `AGENTSC_OTLP_ENDPOINT_ALLOW` | charter `telemetry.otlp_endpoint` values allowed (empty = charter endpoints refused) |
 | `--mesh-cache-bytes <n>` | `AGENTSC_MESH_CACHE_BYTES` (default `16777216`) | bytes of service-call responses the response cache keeps; `0` disables it (docs/adr/0002-response-caching.md) |
 | `--mesh-cache-max-age <s>` | `AGENTSC_MESH_CACHE_MAX_AGE` (default `300`) | the longest a cached service-call response is served, whatever the app's `max-age` says |
+| `--audit-fail-closed` | `AGENTSC_AUDIT_FAIL_CLOSED` (default off) | while the audit sink fails, refuse new work (`audit.unavailable`) and report not ready until a write succeeds again (CONTRACT.md §6 "Sink failures") |
 
 Standalone mode (no `--control-plane`) is v0.1 behaviour plus hot reload of the `--charter` file and everything in §6.3–6.6. In managed mode `--charter` is optional: if given it is the start-up charter until the control plane sends one.
 

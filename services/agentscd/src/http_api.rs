@@ -173,7 +173,10 @@ async fn readyz(State(state): State<Arc<AppState>>) -> Response {
     let runtime = state
         .runtime_ready
         .load(std::sync::atomic::Ordering::Relaxed);
+    // a probe is also a retry of a failing audit sink (audit.rs)
+    state.audit.retry();
     let ready = state.is_ready();
+    let audit = state.audit.health();
     let body = json!({
         "ready": ready,
         "runtime": runtime,
@@ -181,6 +184,14 @@ async fn readyz(State(state): State<Arc<AppState>>) -> Response {
         "mesh": state.tls().is_some(),
         "charter": state.loaded().is_some(),
         "cert_expires_in_s": state.cert_expires_in_s(),
+        "audit": {
+            "healthy": audit.healthy,
+            "fail_closed": state.audit.fail_closed(),
+            "write_errors": audit.write_errors,
+            "dropped": audit.dropped,
+            "pending_bytes": audit.pending_bytes,
+            "last_error": audit.last_error,
+        },
     });
     let code = if ready {
         StatusCode::OK

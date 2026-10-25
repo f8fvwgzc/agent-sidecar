@@ -1,4 +1,5 @@
-//! The invocation pipeline (CONTRACT.md §5.1): authz → budgets → guardrails → run → guardrails.
+//! The invocation pipeline (CONTRACT.md §5.1): authz → budgets → guardrails → run → guardrails,
+//! behind the fail-closed audit gate (audit.rs, `audit.unavailable`).
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -32,6 +33,8 @@ pub struct Invocation {
 pub const RULE_UNKNOWN_AGENT: &str = "agent.unknown";
 pub const RULE_RUNTIME: &str = "runtime.unavailable";
 pub const RULE_NO_CHARTER: &str = crate::tools::RULE_NO_CHARTER;
+/// Fail-closed mode refused the invocation: the audit sink is failing (audit.rs).
+pub const RULE_AUDIT_UNAVAILABLE: &str = crate::audit::RULE_UNAVAILABLE;
 
 fn denied(inv: &Invocation, v: &Verdict, steps: Vec<Step>) -> InvokeAgentResponse {
     InvokeAgentResponse {
@@ -80,6 +83,7 @@ fn step(kind: &str, name: &str, v: &Verdict, latency_ms: u32, summary: &str) -> 
 pub fn http_status(resp: &InvokeAgentResponse) -> u16 {
     match resp.status.as_str() {
         "ok" => 200,
+        _ if resp.rule == RULE_AUDIT_UNAVAILABLE => 503,
         "denied" if resp.rule.starts_with("budget.") => 429,
         "denied" => 403,
         _ if resp.rule == RULE_UNKNOWN_AGENT => 404,
@@ -92,6 +96,7 @@ pub fn grpc_status(resp: &InvokeAgentResponse) -> Option<tonic::Status> {
     let msg = format!("{}: {}", resp.rule, resp.reason);
     let mut st = match resp.status.as_str() {
         "ok" => return None,
+        _ if resp.rule == RULE_AUDIT_UNAVAILABLE => tonic::Status::unavailable(msg),
         "denied" if resp.rule.starts_with("budget.") => tonic::Status::resource_exhausted(msg),
         "denied" => tonic::Status::permission_denied(msg),
         _ if resp.rule == RULE_UNKNOWN_AGENT => tonic::Status::not_found(msg),
@@ -193,6 +198,14 @@ pub async fn invoke(state: &Arc<AppState>, inv: Invocation) -> InvokeAgentRespon
         &inv.agent,
         Direction::Inbound,
     ));
+    // Fail-closed (audit.rs): no new work while the audit sink fails. The refusal's own record
+    // is written (or kept) like any other, and is a retry of the sink.
+    if let Err(v) = state.audit.check() {
+        state
+            .audit
+            .write(record(Value::Null).verdict(&v).latency(started));
+        return denied(&inv, &v, vec![]);
+    }
     // One snapshot of the charter, its guardrails and memory for the whole request (design §6.2).
     let Some(snap) = state.loaded() else {
         let reason = "no charter is loaded yet".to_string();

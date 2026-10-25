@@ -69,6 +69,8 @@ pub async fn start(config: Config) -> anyhow::Result<Sidecar> {
     let (state, startup, file_error) = AppState::build(config.clone()).await?;
     let state = Arc::new(state);
     let mut tasks = Vec::new();
+    // A failing audit sink is retried (and its recovery logged) without waiting for traffic.
+    tasks.push(tokio::spawn(audit::retry_loop(state.clone())));
 
     // Managed mode exports every record from the start, also while the stream is down (subscribed
     // before the start-up charter applies, so the export sees its `config.applied` record).

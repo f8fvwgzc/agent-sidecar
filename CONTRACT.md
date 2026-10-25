@@ -88,6 +88,7 @@ Flags / environment of `agentscd` (flag wins over env):
 | `--mesh-cache-bytes` | `AGENTSC_MESH_CACHE_BYTES` | `16777216`. Bytes of service-call responses the response cache keeps (`GET`/`HEAD` the app marked with `Cache-Control: max-age`; docs/adr/0002-response-caching.md); `0` disables it |
 | `--mesh-cache-max-age` | `AGENTSC_MESH_CACHE_MAX_AGE` | `300`. The longest, in seconds, a cached service-call response is served, whatever the app's `max-age` says |
 | `--max-response-bytes` | `AGENTSC_MAX_RESPONSE_BYTES` | `3145728` (3 MiB). The largest response body a tool or mesh call reads from the app, a peer or an http tool's origin, read as it streams; a longer one fails the call (`http.response_too_large`) |
+| `--audit-fail-closed` | `AGENTSC_AUDIT_FAIL_CLOSED` | off. `1/true/yes/on` = while the audit sink fails, refuse new work with rule `audit.unavailable` and report not ready, until a write succeeds again (§6 "Sink failures") |
 | `--anthropic-api-key-file` | `AGENTSC_ANTHROPIC_API_KEY_FILE` | unset. The Anthropic API key, read by the sidecar's model gateway only (§4.4) |
 | —                 | `ANTHROPIC_API_KEY`      | the same key as text (env only, never a flag). Neither set → the gateway has no provider and the runtime runs every agent on the `mock` model. The runtime the sidecar starts never gets either, nor `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY` or `AGENTSC_APP_TOKEN` |
 | `--anthropic-base-url` | `AGENTSC_ANTHROPIC_BASE_URL` | `https://api.anthropic.com` |
@@ -413,6 +414,7 @@ Other statuses, same envelope with `status` and `rule`/`reason`:
 | 404  | `error`   | unknown agent                                          |
 | 429  | `denied`  | budget exceeded (`budget.max_calls_per_minute`, `budget.max_cost_usd_per_day`) |
 | 502  | `error`   | runtime unavailable / model error                      |
+| 503  | `denied`  | `audit.unavailable`: `--audit-fail-closed` and the audit sink is failing (§6) |
 
 A tool call that is denied inside the run does **not** fail the invocation; it
 is returned to the model as an error tool result, appears in `steps[]` with
@@ -423,8 +425,11 @@ Response headers always include `traceparent` and `x-agentsc-request-id`.
 Also: `GET /v1/agents` → `{"agents":[{"name","type","model","tools":[...]}]}`,
 `GET /v1/charter` → the loaded charter as JSON, `GET /healthz` → `200 ok`
 (process up), `GET /readyz` → `200` once the charter is loaded, TLS is
-loaded and the runtime answered `Health`; `503` otherwise. Body:
-`{"ready", "runtime", "model_provider", "mesh"}`.
+loaded and the runtime answered `Health` (and, with `--audit-fail-closed`,
+the audit sink takes writes); `503` otherwise. Body:
+`{"ready", "runtime", "model_provider", "mesh", "charter", "cert_expires_in_s",
+"audit": {"healthy", "fail_closed", "write_errors", "dropped", "pending_bytes",
+"last_error"}}` (§6 "Sink failures").
 
 An unknown agent is reported only after `authz.callers` passed: the app gets
 `404 agent.unknown`, a peer not allowed for that name gets
@@ -432,8 +437,9 @@ An unknown agent is reported only after `authz.callers` passed: the app gets
 
 gRPC equivalent on `127.0.0.1:50001`: `AppApi.InvokeAgent(InvokeAgentRequest)`
 and `AppApi.ListAgents`. Denials map to `PERMISSION_DENIED` /
-`RESOURCE_EXHAUSTED`, unknown agent to `NOT_FOUND`, runtime errors to
-`UNAVAILABLE`; the JSON envelope above is the gRPC message `InvokeAgentResponse`.
+`RESOURCE_EXHAUSTED`, unknown agent to `NOT_FOUND`, runtime errors and
+`audit.unavailable` to `UNAVAILABLE`; the JSON envelope above is the gRPC
+message `InvokeAgentResponse`.
 
 ### 4.2 Sidecar ↔ sidecar (mesh, gRPC over mTLS, port 50002)
 
@@ -771,6 +777,29 @@ sidecar sends the run's labels on every mesh call.
 One JSON object per line, written by `agentscd` only (sink `stdout`, readable
 with `kubectl logs -c agentscd`, or `file`). Field order is fixed as below so
 `grep` and humans see the same thing.
+
+**Sink failures.** A write or flush error is never ignored. The line the sink
+did not take is kept and written first by the next attempt, resuming at the
+first byte not taken (so no line is written twice or cut); up to 4 MiB is
+kept, a record beyond that is not (counted as `dropped`). The sink is
+unhealthy from the first failure until that backlog is written and flushed.
+Attempts: every later write, every `GET /readyz`, and a retry once a second.
+Failures are logged on stderr (the first at once, then at most one summary
+every 10 s, and the recovery) and reported in the `/readyz` body (`audit`).
+Subscribers (§6.2) get every record, also one the sink did not take.
+
+With `--audit-fail-closed` (off by default) an unhealthy sink stops new work:
+an invocation from the app (`503`, `status: denied`, rule
+`audit.unavailable`; gRPC `UNAVAILABLE`), a peer's `InvokeAgent` /
+`InvokeService` and the runtime's `InvokeService` / `InvokeAgent` /
+`InvokeHttp` / `ProposeLesson` are refused (`UNAVAILABLE`, `x-agentsc-rule:
+audit.unavailable`), and `/readyz` answers `503`. Each refusal writes its own
+record (`agent_invocation`, `service_call` inbound or `tool_call`, `decision:
+deny`, rule `audit.unavailable`; a refused `ProposeLesson` writes none), which
+is itself an attempt: the first attempt that writes the backlog ends the
+refusals. Work that already started finishes and its records are written or
+kept; `ReportEvent` is never refused (the model call it reports already ran
+and was billed).
 
 ```json
 {
