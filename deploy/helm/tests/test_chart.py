@@ -548,7 +548,7 @@ def test_http3_adds_the_flag_and_a_udp_port_everywhere(full: list[dict]) -> None
         ("http3", "UDP", 8080),
     }
     policy = find(full, "NetworkPolicy", "embassy")
-    http_rule = [r for r in policy["spec"]["ingress"] if "from" in r][0]
+    http_rule = next(r for r in policy["spec"]["ingress"] if "from" in r)
     assert {(p["port"], p["protocol"]) for p in http_rule["ports"]} == {(8080, "TCP"), (8080, "UDP")}
     # QUIC is always TLS: http3 without httpTLS is refused at render time
     err = render_fails("--set", "embassy.http3=true")
