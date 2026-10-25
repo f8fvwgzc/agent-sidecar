@@ -152,24 +152,31 @@ jobs:
             echo "::endgroup::"
           done
 
-  # Advisory: a new advisory against a pinned dependency should be visible, not block unrelated changes.
+  # Blocking: a new advisory against a dependency fails CI until the dependency is fixed, or the
+  # advisory is accepted with a reason in deny.toml and .cargo/audit.toml.
   audit:
-    name: Dependency audit (advisory)
+    name: Dependency audit (cargo-deny, cargo-audit, pip-audit)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
 
+      - uses: dtolnay/rust-toolchain@stable
+
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-audit
+          tool: cargo-deny@0.20.2,cargo-audit@0.22.2
 
       - uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: false
 
+      # Advisories, licences, bans and sources, per deny.toml.
+      - name: cargo deny check
+        run: cargo deny --locked check
+
       - name: cargo audit
+        if: ${{ !cancelled() }}
         run: cargo audit
 
       - name: pip-audit
