@@ -1078,7 +1078,8 @@ When is the mock used?
 
 | `ANTHROPIC_API_KEY` in the sidecar's environment | `model: mock` | `model: <Claude id>` |
 | --- | --- | --- |
-| not set | mock | mock |
+| not set | mock | refused (`FAILED_PRECONDITION`) |
+| not set, `AGENTSC_MOCK_FALLBACK=1` | mock | mock |
 | set | mock | Claude |
 
 `GET /readyz` shows `"model_provider": "mock"` or `"anthropic"`, depending only on the key.

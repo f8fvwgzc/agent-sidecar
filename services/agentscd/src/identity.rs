@@ -15,7 +15,7 @@ use agentsc_pki::TlsMaterial;
 use agentsc_proto::CertificateRequest;
 use agentsc_proto::certificate_authority_client::CertificateAuthorityClient;
 use anyhow::Context;
-use rand::Rng;
+use rand::RngExt;
 
 use crate::config::Config;
 use crate::persist::StateDir;

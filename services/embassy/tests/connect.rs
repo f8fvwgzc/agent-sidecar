@@ -699,11 +699,17 @@ async fn learning_proposals_are_checked_deduplicated_and_auto_noted() {
         .unwrap()
         .clone();
     assert_eq!((auto.len(), auto[0]["auto"].as_bool()), (1, Some(true)));
-    assert!(
+    // The memory update reaches the sidecar before the note's audit line is written.
+    let audited = || {
         audit_actions(&env)
             .iter()
             .any(|l| l["action"] == "note_auto" && l["result"] == "ok" && l["agent"] == "helper")
-    );
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !audited() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(audited());
     env.stop().await;
 }
 

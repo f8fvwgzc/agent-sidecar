@@ -242,7 +242,12 @@ def test_binaries_cover_the_three_targets(workflow: dict) -> None:
 
 def test_images_are_multi_arch_on_ghcr(workflow: dict) -> None:
     job = workflow["jobs"]["images"]
-    assert job["permissions"] == {"contents": "read", "packages": "write"}
+    assert job["permissions"] == {
+        "contents": "read",
+        "packages": "write",
+        "id-token": "write",
+        "attestations": "write",
+    }
     assert job["strategy"]["matrix"]["image"] == ["agentscd", "embassy"]
     assert workflow["env"]["IMAGE_PREFIX"] == "ghcr.io/f8fvwgzc/agent-sidecar"
     push = next(s for s in job["steps"] if s.get("uses", "").startswith("docker/build-push-action@"))
@@ -255,6 +260,13 @@ def test_images_are_multi_arch_on_ghcr(workflow: dict) -> None:
     assert w["push"] is True
     meta = next(s for s in job["steps"] if s.get("id") == "meta")
     assert meta["with"]["images"] == "${{ env.IMAGE_PREFIX }}/${{ matrix.image }}"
+    # each pushed image gets a signed provenance attestation in the registry
+    attest = next(s for s in job["steps"] if s.get("uses", "").startswith("actions/attest-build-provenance@"))
+    assert attest["with"] == {
+        "subject-name": "${{ env.IMAGE_PREFIX }}/${{ matrix.image }}",
+        "subject-digest": "${{ steps.push.outputs.digest }}",
+        "push-to-registry": True,
+    }
 
 
 def test_release_builds_nothing_before_the_packaging_checks_pass(workflow: dict) -> None:
@@ -277,8 +289,10 @@ def test_release_builds_nothing_before_the_packaging_checks_pass(workflow: dict)
 
 def test_release_publishes_binaries_and_checksums(workflow: dict) -> None:
     job = workflow["jobs"]["release"]
-    assert job["permissions"] == {"contents": "write"}
+    assert job["permissions"] == {"contents": "write", "id-token": "write", "attestations": "write"}
     assert set(job["needs"]) == {"version", "binaries", "images"}
+    attest = next(s for s in job["steps"] if s.get("uses", "").startswith("actions/attest-build-provenance@"))
+    assert attest["with"] == {"subject-checksums": "dist/SHA256SUMS"}
     run = "\n".join(s.get("run", "") for s in job["steps"])
     assert "sha256sum -- *.tar.gz >SHA256SUMS" in run
     assert "gh release create" in run and "dist/SHA256SUMS" in run

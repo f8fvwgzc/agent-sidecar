@@ -666,6 +666,10 @@ def test_injection_defaults_reach_embassy_ca_as_one_container_template(default: 
     t = inject_template(custom)
     assert t["resources"]["limits"] == {"memory": "1Gi"}
     assert t["env"] == [{"name": "OTEL_EXPORTER_OTLP_ENDPOINT", "value": "http://c:4318"}]
+    # Off by default: without ANTHROPIC_API_KEY the runtime refuses a Claude model
+    assert inject_template(render("--set", "injection.mockFallback=true"))["env"] == [
+        {"name": "AGENTSC_MOCK_FALLBACK", "value": "1"}
+    ]
 
 
 @needs_helm

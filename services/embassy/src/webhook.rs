@@ -147,12 +147,14 @@ pub const STARTUP_PROBE_SECONDS: i32 = STARTUP_PROBE_PERIOD * STARTUP_PROBE_FAIL
 pub const CONTROL_PLANE_PORT: u16 = 15012;
 /// The env var with the chart → injector template.
 pub const TEMPLATE_ENV: &str = "AGENTSC_INJECT_TEMPLATE";
-/// The only env names the template may set (the sidecar's own telemetry settings, and the
-/// cluster DNS domain of its peer addresses).
-pub const TEMPLATE_ENV_ALLOWED: [&str; 3] = [
+/// The only env names the template may set (the sidecar's own telemetry settings, the cluster DNS
+/// domain of its peer addresses, and the agent runtime's opt-in to the mock model without
+/// `ANTHROPIC_API_KEY`).
+pub const TEMPLATE_ENV_ALLOWED: [&str; 4] = [
     "OTEL_EXPORTER_OTLP_ENDPOINT",
     "AGENTSC_OTLP_ENDPOINT_ALLOW",
     "AGENTSC_CLUSTER_DOMAIN",
+    "AGENTSC_MOCK_FALLBACK",
 ];
 
 // ---- the chart → injector template -----------------------------------------------------------------

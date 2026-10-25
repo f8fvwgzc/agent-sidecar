@@ -332,7 +332,7 @@ kubectl --context minikube -n agentsc-demo rollout restart deployment/orders dep
 
 ## Use real Claude
 
-Without `ANTHROPIC_API_KEY`, the runtime uses a deterministic mock model for every agent (`runtime/src/agentsc_runtime/models.py`). The mock model needs no network and costs nothing. With the key set, every agent whose `model` is not `mock` calls the Anthropic API. The demo charters use `model: claude-opus-5-5`. An agent with `model: mock` always uses the mock model.
+Without `ANTHROPIC_API_KEY`, the demos run every agent on a deterministic mock model (`runtime/src/agentsc_runtime/models.py`): they set `AGENTSC_MOCK_FALLBACK=1`. Outside the demos a missing key refuses every agent whose `model` is not `mock`. The mock model needs no network and costs nothing. With the key set, every agent whose `model` is not `mock` calls the Anthropic API. The demo charters use `model: claude-opus-5-5`. An agent with `model: mock` always uses the mock model.
 
 ### Local demo
 

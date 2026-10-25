@@ -42,6 +42,9 @@ spec:
               value: /etc/agentsc/tls
             - name: RUST_LOG
               value: info
+            # Without the Secret's key, run the demo agents on the mock model instead of refusing them.
+            - name: AGENTSC_MOCK_FALLBACK
+              value: "1"
             - name: ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef:

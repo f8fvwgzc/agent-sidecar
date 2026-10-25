@@ -129,12 +129,17 @@ def test_the_gateway_address_defaults_next_to_the_sidecar_socket():
     assert models.gateway_for_sidecar("unix:.local/sock-orders/sidecar.sock") == "unix:.local/sock-orders/model.sock"
 
 
-def test_the_provider_list_comes_from_the_gateway(gateway):
+def test_the_provider_list_comes_from_the_gateway(gateway, monkeypatch):
+    monkeypatch.delenv("AGENTSC_MOCK_FALLBACK", raising=False)
     gateway(providers=["anthropic"])
     assert models.anthropic_available() and isinstance(models.model_for("claude-opus-5-5"), AnthropicModel)
+    assert models.provider() == "anthropic"
     gateway(providers=[])
-    assert not models.anthropic_available(), "no key in the sidecar: the mock runs every agent"
-    assert models.model_for("claude-opus-5-5").provider == "mock"
+    assert not models.anthropic_available(), "no key in the sidecar"
+    with pytest.raises(models.ModelUnavailable):
+        models.model_for("claude-opus-5-5")
+    monkeypatch.setenv("AGENTSC_MOCK_FALLBACK", "1")
+    assert models.model_for("claude-opus-5-5").provider == "mock", "only with the fallback asked for"
     models.configure_gateway("unix:/nonexistent/model.sock")
     assert not models.anthropic_available(), "no gateway, no provider"
 

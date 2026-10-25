@@ -91,6 +91,8 @@ services:
     environment: &sidecar-env
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Without a key, the demo agents run on the mock model instead of being refused.
+      AGENTSC_MOCK_FALLBACK: ${AGENTSC_MOCK_FALLBACK:-1}
       RUST_LOG: ${RUST_LOG:-info}
     secrets:
       - orders-join-token

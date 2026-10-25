@@ -1,11 +1,14 @@
 """Model providers (CONTRACT.md §4.4, §9): the Anthropic API through the sidecar's model gateway
-when the sidecar has a key for it, else a deterministic mock.
+when the sidecar has a key for it, or a deterministic mock for `model: mock`.
 
 The runtime never holds a provider key. Every model call goes to the gateway on the sidecar's
 unix socket (`AGENTSC_MODEL_GATEWAY`, by default `model.sock` next to the sidecar's socket),
 which checks it against the agent's charter and budgets, adds the key, sends it on and counts
 the usage the provider reports. The SDK talks to the gateway as it would to the API, so its
 errors, retry-after headers and streaming are the provider's own.
+
+When the sidecar holds no key, a Claude model fails closed, unless AGENTSC_MOCK_FALLBACK=1 lets it
+run on the mock.
 """
 
 from __future__ import annotations
@@ -514,7 +517,30 @@ def anthropic_available() -> bool:
     return "anthropic" in gateway_providers()
 
 
+def mock_fallback() -> bool:
+    """AGENTSC_MOCK_FALLBACK=1: when the sidecar holds no key, run every agent on the mock (demos, CI)."""
+    return os.environ.get("AGENTSC_MOCK_FALLBACK") == "1"
+
+
+def provider() -> str:
+    """What a non-mock agent runs on: `anthropic`, `mock` (the fallback), or `none` (it is refused)."""
+    if anthropic_available():
+        return "anthropic"
+    return "mock" if mock_fallback() else "none"
+
+
+class ModelUnavailable(Exception):
+    """A Claude model was asked for, the sidecar holds no ANTHROPIC_API_KEY, and there is no mock fallback."""
+
+
 def model_for(name: str) -> Model:
-    if name == "mock" or not anthropic_available():
-        return MockModel(name if name == "mock" else "mock")
-    return AnthropicModel(name)
+    if name == "mock":
+        return MockModel("mock")
+    if anthropic_available():
+        return AnthropicModel(name)
+    if mock_fallback():
+        return MockModel("mock")
+    raise ModelUnavailable(
+        f"model {name!r} needs ANTHROPIC_API_KEY in the sidecar; set it there, use `model: mock`, "
+        "or set AGENTSC_MOCK_FALLBACK=1 to run on the deterministic mock"
+    )

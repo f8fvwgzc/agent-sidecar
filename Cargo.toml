@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*", "services/*"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/f8fvwgzc/agent-sidecar"
@@ -43,7 +43,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rustls-pki-types = { version = "1", features = ["std"] }
 rcgen = { version = "0.14", default-features = false, features = ["pem", "ring", "x509-parser"] }
 x509-parser = "0.18"
-pem = "3"
+pem = "4"
 
 # Data
 serde = { version = "1", features = ["derive"] }
@@ -53,10 +53,10 @@ schemars = { version = "1", features = ["preserve_order"] }
 regex = "1"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
-base64 = "0.22"
-rand = "0.9"
+base64 = "0.23"
+rand = "0.10"
 url = "2"
 
 # CLI

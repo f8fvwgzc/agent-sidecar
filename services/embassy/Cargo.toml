@@ -25,7 +25,7 @@ uuid.workspace = true
 # configuration (the tokio-rustls tonic uses, so client certificates reach the requests).
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 # Session cookies (HMAC-SHA256, design §8.3) and constant-time token and MAC comparison.
-hmac = "0.12"
+hmac = "0.13"
 subtle = "2"
 tokio.workspace = true
 reqwest.workspace = true
@@ -63,7 +63,7 @@ http-body-util = "0.1"
 # `--store sqlite:<path>` (docs/adr/0003-sqlite-store-schema.md): one embedded database with the
 # schema in src/store/schema.sql. `bundled` compiles SQLite in, so the image needs no system
 # library.
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 # `--http3` (docs/adr/0001-http3-for-the-console.md): QUIC with the serving certificate's rustls
 # configuration (ring), HTTP/3 framing by h3. Optional: `--no-default-features` builds without.
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"], optional = true }

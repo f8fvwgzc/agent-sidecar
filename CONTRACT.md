@@ -98,8 +98,9 @@ Flags / environment of `agentscd` (flag wins over env):
 | `--trust-domain`  | `AGENTSC_TRUST_DOMAIN`   | `agentsc`. The SPIFFE trust domain of this pod's identity, of the peers it accepts and calls, and of the control plane (§5); must be embassy's |
 | `--cluster-domain` | `AGENTSC_CLUSTER_DOMAIN` | `cluster.local`. `{cluster_domain}` of `--peer-address-template` (default `{service}.{namespace}.svc.{cluster_domain}:{port}`) |
 | `--anthropic-api-key-file` | `AGENTSC_ANTHROPIC_API_KEY_FILE` | unset. The Anthropic API key, read by the sidecar's model gateway only (§4.4) |
-| —                 | `ANTHROPIC_API_KEY`      | the same key as text (env only, never a flag). Neither set → the gateway has no provider and the runtime runs every agent on the `mock` model. The runtime the sidecar starts never gets either, nor `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY` or `AGENTSC_APP_TOKEN` |
+| —                 | `ANTHROPIC_API_KEY`      | the same key as text (env only, never a flag). Neither set → the gateway has no provider, and an agent whose `model` is not `mock` is refused (`FAILED_PRECONDITION`), unless `AGENTSC_MOCK_FALLBACK=1`. The runtime the sidecar starts never gets either, nor `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY` or `AGENTSC_APP_TOKEN` |
 | `--anthropic-base-url` | `AGENTSC_ANTHROPIC_BASE_URL` | `https://api.anthropic.com` |
+| —                 | `AGENTSC_MOCK_FALLBACK`  | unset. `1` = when the sidecar holds no key, every agent runs on the `mock` model (demos, CI); the runtime the sidecar starts inherits it |
 
 ## 3. `charter.yaml`
 
@@ -1083,9 +1084,12 @@ reads records from a file instead of kubectl.
   less 500 ms, as its SDK timeout (which bounds the connect and each wait for
   the next streamed chunk, not the whole stream). With 500 ms or less left, no
   new step starts: status `error`, rule `deadline.exceeded`.
-- Provider selection: the gateway lists `anthropic` (the sidecar holds a key)
-  and `model != mock` → the Anthropic SDK, pointed at the gateway (§4.4), else
-  the deterministic mock. Requests are streamed and collected
+- Provider selection: `model: mock` → the deterministic mock. Otherwise, when
+  the gateway lists `anthropic` (the sidecar holds a key) → the Anthropic SDK,
+  pointed at the gateway (§4.4); when it lists none → the mock only with
+  `AGENTSC_MOCK_FALLBACK=1`, else Execute fails with `FAILED_PRECONDITION`
+  (fail closed: a missing key never silently becomes a mock). `Health`
+  reports `model_provider` `anthropic`, `mock` (the fallback) or `none`. Requests are streamed and collected
   (`messages.stream(...).get_final_message()`), so large `max_tokens` never
   trip the SDK's non-streaming limit; `output_config.effort: low` is sent to
   every model that accepts it (not `claude-haiku-4-5`, `claude-sonnet-4-5` or
