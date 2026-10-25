@@ -4,6 +4,7 @@ pub mod authz;
 pub mod budget;
 pub mod guardrails;
 pub mod identity;
+pub mod pricing;
 pub mod trace;
 
 pub use audit::{AuditRecord, AuditWriter, Direction, Kind};

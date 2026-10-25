@@ -72,9 +72,9 @@ One `Execute` call is one agent loop:
 3. If the model asks for tools, the runtime sends each tool call to the sidecar, one after another, and gives the results back to the model. Tool results longer than 20,000 characters are cut before the model sees them.
 4. The loop ends when the model stops (`end_turn`), refuses (`model.refusal`), runs out of steps (`budget.max_steps`), is cut off by `max_tokens` (see [Budgets](#budgets)), or the model call fails (`model.error`).
 
-Model selection: if `ANTHROPIC_API_KEY` is set and the agent's `model` is not `mock`, the runtime uses the Anthropic API. Otherwise it uses a deterministic mock model. The mock picks a tool by matching words in the input against tool names and descriptions, so the demo runs offline. `Health` reports `model_provider: "anthropic"` or `"mock"`, based only on whether `ANTHROPIC_API_KEY` is set.
+Model selection: if the sidecar holds `ANTHROPIC_API_KEY` and the agent's `model` is not `mock`, the runtime uses the Anthropic API through the sidecar's model gateway. Otherwise it uses a deterministic mock model. The mock picks a tool by matching words in the input against tool names and descriptions, so the demo runs offline. `Health` reports `model_provider: "anthropic"` or `"mock"`, from the providers the gateway lists.
 
-The runtime calls the model API itself. The sidecar does not proxy that call. The runtime reports each model call with `ReportEvent`, and the sidecar writes the record.
+The runtime never calls the model API itself and never holds the key. Its Anthropic SDK talks to the sidecar's model gateway on `unix:/run/agentsc/model.sock` (CONTRACT.md §4.4). The gateway checks each call against the run and the agent's charter (`model`, `max_tokens_per_call`, `max_steps`, the daily cost budget), adds the key, streams the provider's answer back unchanged, counts the usage the provider reported and writes the `model_call` record.
 
 ### embassy (the CA)
 
@@ -185,8 +185,8 @@ flowchart LR
   E["embassy-bootstrap Job (CA)"]
   E -.->|"Secret agentsc-cert-orders"| OS
   E -.->|"Secret agentsc-cert-inventory"| IS
-  OR -.->|"HTTPS, only with ANTHROPIC_API_KEY"| M["Anthropic API"]
-  IR -.->|"HTTPS, only with ANTHROPIC_API_KEY"| M
+  OS -.->|"HTTPS model gateway, only with ANTHROPIC_API_KEY"| M["Anthropic API"]
+  IS -.->|"HTTPS model gateway, only with ANTHROPIC_API_KEY"| M
 ```
 
 ## One request, end to end
@@ -239,7 +239,7 @@ Step by step:
 1. **The app calls its sidecar.** The caller identity is `local`. The sidecar makes a new `request_id`. It takes the trace id from the app's `traceparent` header, or starts a new trace if there is none.
 2. **The orders sidecar runs the invocation pipeline** (next section). If a check fails, the app gets 403, 404 or 429 and no model is called.
 3. **The sidecar calls `Runtime.Execute`** over the unix socket. It sends the agent's charter entry with only the tools the agent may use. The model never sees a tool it may not call.
-4. **The runtime calls the model** and reports a `model_call` record with `ReportEvent`. The sidecar adds the cost to the agent's daily total.
+4. **The runtime calls the model through the sidecar's model gateway.** The gateway checks the call against the run and the charter, adds the key, and counts the cost the provider's usage implies in the agent's daily total. It writes the `model_call` record.
 5. **The model asks for `stock_analyst`.** The runtime sends `SidecarTools.InvokeAgent`. The sidecar checks that `ops-assistant` declares this tool, may use it, and names the same target (`inventory/stock-analyst`).
 6. **The orders sidecar calls the inventory sidecar** with `Mesh.InvokeAgent` over mTLS. It sends `traceparent`, `x-agentsc-request-id` and `x-agentsc-agent: ops-assistant` as metadata. An agent tool sends only the `input` string. The caller's `context` is not passed on.
 7. **The inventory sidecar reads the caller identity from the client certificate**: `spiffe://agentsc/ns/agentsc-demo/svc/orders`. It runs the same pipeline with that identity and calling agent `ops-assistant`. The inventory charter allows exactly this pair.
@@ -381,9 +381,9 @@ Details:
 
 - Budgets are kept **in memory** in each sidecar replica. They are not shared between replicas. They reset when the sidecar restarts.
 - The rate counter counts every invocation that passes the rate check, even one that a later check (cost, guardrail) denies. A call refused by the rate check is not counted.
-- The cost check runs at the start of an invocation. The cost of a running invocation is added as its model calls are reported. One invocation can go over the limit. The next one is refused.
+- The cost check runs at the start of an invocation and again before every model call: the gateway holds the most the call can cost and refuses it when the day's spend, the holds of calls in flight and this hold would pass the limit. When the call ends, its hold is replaced by its real cost. So the limit is not passed, also by calls running at the same time.
 - The cost of an agent called over the mesh is counted in the callee's sidecar, where its runtime runs.
-- Cost comes from the price table in `runtime/src/agentsc_runtime/pricing.py`, in USD per million tokens. An unknown model id is priced like the most expensive tier. `mock` costs 0.
+- Cost comes from the sidecar's price table in `crates/agentsc-common/src/pricing.rs`, in USD per million tokens, applied to the usage the provider reported (cache reads and writes at their own rates). An unknown model id is priced like the most expensive tier. `mock` costs 0. The runtime prices nothing.
 - If `max_tokens` cuts a turn that has text and no tool call, the result is `ok` with the cut text. If the cut turn has a tool call or no text, the result is an error and the tool call never runs.
 
 ## Audit records
@@ -540,7 +540,7 @@ The `agentscd` image holds the sidecar binary, the Python runtime, the `agentsc`
 | `services/agentscd/tests/mesh_mtls.rs` | In-process test with two sidecars over mTLS |
 | `services/embassy` | The CA: `ca-init`, `cert-issue`, `bootstrap` |
 | `services/agentsc-cli` | The `agentsc` CLI |
-| `runtime/src/agentsc_runtime/` | `agent.py` (agent loop), `models.py` (Anthropic and mock), `tools.py` (tool dispatch), `sidecar.py` (gRPC client to the sidecar), `server.py` (Runtime gRPC server), `pricing.py`, `spec.py`, `pb/` (generated code) |
+| `runtime/src/agentsc_runtime/` | `agent.py` (agent loop), `models.py` (Anthropic and mock), `tools.py` (tool dispatch), `sidecar.py` (gRPC client to the sidecar), `server.py` (Runtime gRPC server), `spec.py`, `pb/` (generated code) |
 | `schemas/charter.schema.json` | JSON Schema of the charter, generated from the Rust types |
 | `examples/charters/` | The two demo charters and one invalid one |
 | `examples/orders/`, `examples/inventory/` | Demo apps in Go and FastAPI, no SDK |

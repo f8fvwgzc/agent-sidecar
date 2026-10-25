@@ -14,7 +14,7 @@ import anthropic
 import httpx2
 import pytest
 
-from agentsc_runtime import agent, harness, models, pricing
+from agentsc_runtime import agent, harness, models
 from agentsc_runtime.agent import run_agent
 from agentsc_runtime.models import AnthropicModel, ModelError, ModelResponse
 from agentsc_runtime.tools import HOP_MARGIN
@@ -44,9 +44,11 @@ class Scripted:
 
     def __init__(self, name: str, script: list[Any]) -> None:
         self.name, self.script, self.timeouts = name, list(script), []
+        self.headers: list[dict[str, str]] = []  # the run binding each call carried to the gateway
 
-    def complete(self, system, messages, tools, max_tokens, timeout=None):
+    def complete(self, system, messages, tools, max_tokens, timeout=None, headers=None):
         self.timeouts.append(timeout)
+        self.headers.append(dict(headers or {}))
         item = self.script.pop(0)
         if isinstance(item, BaseException):
             raise ModelError(item, 7, 0)
@@ -152,13 +154,13 @@ def test_a_retryable_failure_is_retried_and_every_attempt_reported(ops_assistant
         ("model_call", "claude-opus-5-5", "attempt 1/3: error RateLimitError"),
         ("model_call", "claude-opus-5-5", "attempt 2/3: stop=end_turn"),
     ]
-    first, second = sidecar.events
-    assert first["kind"] == second["kind"] == "model_call"
-    assert first["error"] == "boom" and first["tokens"] == {"input": 7, "output": 0}
-    assert second["error"] is None and second["tokens"] == {"input": 10, "output": 2}
-    assert first["span_id"] != second["span_id"] and first["parent_span_id"] == second["parent_span_id"] == ctx.span_id
+    assert sidecar.events == [], "the gateway records a provider's calls, not the runtime"
+    assert [h["x-agentsc-attempt"] for h in model.headers] == ["1", "2"]
+    assert all(
+        h["x-agentsc-request-id"] == ctx.request_id and h["x-agentsc-agent"] == ops_assistant.name
+        for h in model.headers
+    ), "every attempt is bound to the run"
     assert (res.input_tokens, res.output_tokens) == (17, 2), "the failed attempt's usage counts too"
-    assert res.cost_usd == round(first["cost_usd"] + second["cost_usd"], 6) > 0
 
 
 def test_backoff_between_retries_without_retry_after(ops_assistant, sidecar, ctx, waits):
@@ -180,7 +182,7 @@ def test_a_final_error_is_not_retried_and_skips_the_fallback(ops_assistant, side
     fallback = Scripted("claude-haiku-5-5", [ok()])
     res = asyncio.run(run_agent(ops_assistant, "hi", "", ctx, model, sidecar, fallback=fallback))
     assert res.status == "error" and res.rule == "model.error" and res.reason == "BadRequestError: boom"
-    assert len(res.steps) == len(sidecar.events) == 1 and waits == [] and fallback.timeouts == []
+    assert len(res.steps) == len(model.headers) == 1 and waits == [] and fallback.timeouts == []
 
 
 def test_after_the_last_retry_the_fallback_model_gets_one_attempt(ops_assistant, sidecar, ctx, waits):
@@ -200,12 +202,8 @@ def test_after_the_last_retry_the_fallback_model_gets_one_attempt(ops_assistant,
         ("claude-opus-5-5", "attempt 3/3: error APITimeoutError"),
         ("claude-haiku-5-5", "fallback: stop=end_turn"),
     ]
-    assert [e["callee"] for e in sidecar.events] == ["anthropic:claude-opus-5-5"] * 3 + ["anthropic:claude-haiku-5-5"]
-    assert sidecar.events[-1]["cost_usd"] == pricing.cost_usd("claude-haiku-5-5", 1000, 100)
-    expected = sum(pricing.cost_usd("claude-opus-5-5", 7, 0) for _ in range(3)) + pricing.cost_usd(
-        "claude-haiku-5-5", 1000, 100
-    )
-    assert res.cost_usd == round(expected, 6)
+    assert [h["x-agentsc-attempt"] for h in model.headers + fallback.headers] == ["1", "2", "3", "fallback"]
+    assert (res.input_tokens, res.output_tokens) == (3 * 7 + 1000, 100)
 
 
 def test_a_failed_fallback_ends_the_step(ops_assistant, sidecar, ctx, waits):
@@ -329,18 +327,15 @@ def test_sdk_errors_from_the_wire_are_classified_and_retried(ops_assistant, side
         "attempt 2/3: error APIStatusError",
         "attempt 3/3: stop=end_turn",
     ]
-    assert [e["tokens"] for e in sidecar.events] == [
-        {"input": 0, "output": 0},
-        {"input": 11, "output": 1},  # billed from message_start on
-        {"input": 11, "output": 5},
-    ]
+    # 0 before the 529's answer, 11 + 1 from message_start on, then 11 + 5
+    assert (res.input_tokens, res.output_tokens) == (22, 6)
 
 
 def test_a_400_from_the_wire_is_final(ops_assistant, sidecar, ctx, waits):
     bad = {"type": "error", "error": {"type": "invalid_request_error", "message": "bad"}}
     model = AnthropicModel("claude-opus-5-5", client=sdk_client([httpx2.Response(400, json=bad)]))
     res = asyncio.run(run_agent(ops_assistant, "hi", "", ctx, model, sidecar))
-    assert res.status == "error" and res.reason.startswith("BadRequestError") and len(sidecar.events) == 1
+    assert res.status == "error" and res.reason.startswith("BadRequestError") and len(res.steps) == 1
 
 
 def slow_sse(events: list[tuple[str, Any]], then: list[tuple[str, Any]], gap: float, fail: Exception | None = None):
@@ -399,19 +394,22 @@ def test_a_stream_broken_by_the_network_is_retried(ops_assistant, sidecar, ctx, 
     )
     assert res.status == "ok" and res.output == "hi" and waits == [0.5]
     assert [s.summary for s in res.steps] == [f"attempt 1/3: error {expected.__name__}", "attempt 2/3: stop=end_turn"]
-    assert sidecar.events[0]["tokens"] == {"input": 11, "output": 1}
+    assert (res.input_tokens, res.output_tokens) == (22, 6), "the broken attempt's 11 + 1 count too"
 
 
 # --- one client per process ---------------------------------------------------------------------
 
 
 def test_one_client_per_process_without_sdk_retries(monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(models, "anthropic_available", lambda: True)
     previous = models.set_anthropic_client(None)
     try:
         first = models.anthropic_client()
         assert models.anthropic_client() is first, "created once, then reused"
         assert isinstance(first, anthropic.Anthropic) and first.max_retries == 0, "the harness owns retries"
+        assert str(first.base_url).rstrip("/") == models.GATEWAY_BASE_URL, "every call goes to the gateway"
+        assert first.api_key == models.GATEWAY_API_KEY, "the runtime holds no key"
         a, b = models.model_for("claude-opus-5-5"), models.model_for("claude-sonnet-5-5")
         assert isinstance(a, AnthropicModel) and isinstance(b, AnthropicModel)
         assert a.client() is b.client() is first, "every Execute shares it"

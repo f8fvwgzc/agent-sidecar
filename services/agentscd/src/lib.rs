@@ -6,6 +6,7 @@ pub mod cache;
 pub mod config;
 pub mod control;
 pub mod deadline;
+pub mod gateway;
 pub mod grpc_app;
 pub mod http_api;
 pub mod identity;
@@ -134,6 +135,8 @@ pub async fn start(config: Config) -> anyhow::Result<Sidecar> {
         .with_context(|| format!("create {}", config.socket_dir.display()))?;
     let sidecar_sock = config.socket_dir.join("sidecar.sock");
     tasks.push(tools::serve(state.clone(), sidecar_sock.clone()).await?);
+    // Every model call of the runtime goes out through the sidecar (gateway.rs).
+    tasks.push(gateway::serve(state.clone(), config.socket_dir.join(gateway::SOCKET)).await?);
     if config.no_runtime {
         // Someone else runs the runtime on runtime.sock; readiness still follows its Health.
         tasks.push(tokio::spawn(runtime::health_loop(state.clone())));

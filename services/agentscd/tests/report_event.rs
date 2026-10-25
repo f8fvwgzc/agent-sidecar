@@ -1,8 +1,9 @@
 //! `SidecarTools.ReportEvent` tightened (design §6.5): only `model_call` records, and `tool_call`
 //! records for `load_skill:<skill>` of the agent's skills while its Execute runs, for an
 //! (agent, request id) whose Execute is in flight or returned less than the run window ago;
-//! anything else is `INVALID_ARGUMENT` plus an `authz` record `runtime.report_rejected`. Once the
-//! agent's daily cost budget is spent, every answer carries `x-agentsc-rule`.
+//! anything else is `INVALID_ARGUMENT` plus an `authz` record `runtime.report_rejected`. Only the
+//! `mock` model's calls are reported, at no cost: a provider's go through the model gateway
+//! (tests/model_gateway.rs).
 mod common;
 
 use std::time::Duration;
@@ -237,7 +238,9 @@ async fn reports_close_when_the_run_window_has_passed() {
 }
 
 #[tokio::test]
-async fn every_report_carries_the_budget_rule_once_the_daily_cost_is_spent() {
+async fn a_reported_cost_is_never_counted() {
+    // The runtime used to say what its model calls cost, and the budget believed it. Now only
+    // the mock model's calls are reported, and they cost what the price table says: nothing.
     let rig = rig(
         FakeRuntime::answering("done"),
         |c| c.agents[0].budgets.max_cost_usd_per_day = 0.05,
@@ -247,35 +250,34 @@ async fn every_report_carries_the_budget_rule_once_the_daily_cost_is_spent() {
     let mut tools = tools(&rig.sock).await;
     let (_, body) = rig.invoke("ops-assistant", "hello").await;
     let id = body["request_id"].as_str().unwrap().to_string();
-    let budget = Ok(Some("budget.max_cost_usd_per_day".to_string()));
     assert_eq!(
         report(
             &mut tools,
-            record(Kind::ModelCall, &id, Some("ops-assistant"), "mock", 0.02)
+            record(Kind::ModelCall, &id, Some("ops-assistant"), "mock", 9.99)
         )
         .await,
-        Ok(None)
+        Ok(None),
+        "accepted, and the budget is untouched"
     );
     assert_eq!(
         report(
             &mut tools,
-            record(Kind::ModelCall, &id, Some("ops-assistant"), "mock", 0.04)
+            record(
+                Kind::ModelCall,
+                &id,
+                Some("ops-assistant"),
+                "anthropic:claude-opus-5-5",
+                0.0
+            )
         )
         .await,
-        budget,
-        "the cost of this record is counted before answering"
+        rejected(),
+        "a provider's calls are the gateway's to record"
     );
-    assert_eq!(
-        report(
-            &mut tools,
-            record(Kind::ModelCall, &id, Some("ops-assistant"), "mock", 0.0)
-        )
-        .await,
-        budget,
-        "and every later answer for the agent says so"
-    );
-    let (status, body) = rig.invoke("ops-assistant", "again").await;
-    assert_eq!(status, 429);
-    assert_eq!(body["rule"], "budget.max_cost_usd_per_day");
+    let recs = rig.records(|v| v["request_id"] == id.as_str() && v["kind"] == "model_call");
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0]["cost_usd"], 0.0);
+    let (status, _) = rig.invoke("ops-assistant", "again").await;
+    assert_eq!(status, 200);
     rig.sidecar.abort();
 }

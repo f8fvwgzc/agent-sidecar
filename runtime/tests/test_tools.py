@@ -2,17 +2,8 @@ import asyncio
 
 import pytest
 
-from agentsc_runtime import pricing
 from agentsc_runtime.spec import ToolSpec
 from agentsc_runtime.tools import ToolDenied, fill_path, run_tool, with_query
-
-
-def test_pricing():
-    assert pricing.cost_usd("mock", 1000, 1000) == 0.0
-    assert pricing.cost_usd("claude-opus-5-5", 1_000_000, 0) == 4.0
-    assert pricing.cost_usd("claude-opus-5-5", 0, 1_000_000) == 20.0
-    assert pricing.cost_usd("claude-haiku-5-5", 100_000, 100_000) == 0.06
-    assert pricing.cost_usd("unknown-model", 1_000_000, 0) == 10.0, "unknown models are priced at the top tier"
 
 
 def test_fill_path():
@@ -79,8 +70,3 @@ def test_fill_path_encodes_values_so_they_cannot_add_segments():
     assert fill_path("/q/{term}", {"term": "a b?c#d"}) == ("/q/a%20b%3Fc%23d", {})
     # a literal `;` would be a path parameter, which the sidecar refuses (CONTRACT.md §5.1)
     assert fill_path("/stock/{sku}", {"sku": "W;x=1"}) == ("/stock/W%3Bx%3D1", {})
-
-
-def test_haiku_long_prompt_tier():
-    assert pricing.cost_usd("claude-haiku-5-5", 100_000, 0) == 0.01
-    assert pricing.cost_usd("claude-haiku-5-5", 200_000, 0) == 0.1

@@ -13,7 +13,7 @@ from pydantic import ValidationError
 from . import __version__
 from .agent import run_agent
 from .learning import LEARNER, Learner, Reflection
-from .models import Model, anthropic_available, model_for
+from .models import Model, anthropic_available, configure_gateway, gateway_address, model_for
 from .pb.agentsc.v1alpha1 import common_pb2, runtime_pb2, runtime_pb2_grpc
 from .sidecar import GrpcSidecar
 from .spec import AgentSpec
@@ -69,9 +69,9 @@ class RuntimeServicer(runtime_pb2_grpc.RuntimeServicer):
         response = runtime_pb2.ExecuteResponse(
             status=result.status,
             output=result.output,
-            usage=common_pb2.Usage(
-                input_tokens=result.input_tokens, output_tokens=result.output_tokens, cost_usd=result.cost_usd
-            ),
+            # Tokens as the runtime counted them; the sidecar answers with what its gateway measured,
+            # and the runtime never prices anything (cost_usd stays 0).
+            usage=common_pb2.Usage(input_tokens=result.input_tokens, output_tokens=result.output_tokens),
             steps=[
                 common_pb2.Step(
                     kind=s.kind,
@@ -93,17 +93,18 @@ class RuntimeServicer(runtime_pb2_grpc.RuntimeServicer):
         return response
 
 
-async def serve(listen: str, sidecar_address: str) -> None:
+async def serve(listen: str, sidecar_address: str, model_gateway: str | None = None) -> None:
+    configure_gateway(model_gateway)
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     server = grpc.aio.server()
     runtime_pb2_grpc.add_RuntimeServicer_to_server(RuntimeServicer(GrpcSidecar(sidecar_address)), server)
     server.add_insecure_port(listen)
     await server.start()
     log.info(
-        "agentsc-runtime %s listening on %s, sidecar at %s, provider=%s",
+        "agentsc-runtime %s listening on %s, sidecar at %s, model gateway at %s",
         __version__,
         listen,
         sidecar_address,
-        "anthropic" if anthropic_available() else "mock",
+        gateway_address(),
     )
     await server.wait_for_termination()

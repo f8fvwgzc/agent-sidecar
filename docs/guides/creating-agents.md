@@ -1127,13 +1127,13 @@ Test denials the same way. Check for a step with `"decision": "deny"` and the `r
 ## Switching to Claude
 
 1. Set `model` to a Claude model id, for example `claude-opus-5-5`. Validation accepts any non-empty id. A wrong id fails at call time with rule `model.error` (HTTP 502).
-2. Set `ANTHROPIC_API_KEY` in the sidecar's environment before it starts. The runtime is a child process and gets the same environment. On minikube, `make secret-anthropic` puts the key into the Secret `agentsc-anthropic` and restarts the demo pods.
+2. Set `ANTHROPIC_API_KEY` in the sidecar's environment before it starts (or point `--anthropic-api-key-file` at a file). Only the sidecar holds it: the runtime is started without it and sends its model calls through the sidecar's model gateway. On minikube, `make secret-anthropic` puts the key into the Secret `agentsc-anthropic` and restarts the demo pods.
 3. Check `GET /readyz`. It shows `"model_provider": "anthropic"`.
 4. Raise `max_tokens_per_call` if you see `budget.max_tokens_per_call` errors. Thinking counts against this limit. The demo `ops-assistant` uses 2048.
 
 The runtime streams every request to the model API. It sends `output_config.effort: low` to every model except ids that start with `claude-haiku-4-5`, `claude-sonnet-4-5`, `claude-opus-4-1`, `claude-opus-4-0`, `claude-sonnet-4-0` or `claude-3`.
 
-The cost budget uses the price table in [runtime/src/agentsc_runtime/pricing.py](../../runtime/src/agentsc_runtime/pricing.py). The prices are USD per 1 million tokens, as written in that file:
+The cost budget uses the sidecar's price table in [crates/agentsc-common/src/pricing.rs](../../crates/agentsc-common/src/pricing.rs), applied to the usage the provider reports. The prices are USD per 1 million tokens, as written in that file:
 
 | Model id | Input | Output |
 | --- | --- | --- |

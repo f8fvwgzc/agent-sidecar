@@ -64,3 +64,6 @@ tempfile.workspace = true
 serde_yaml_ng.workspace = true
 rcgen.workspace = true
 time = "0.3"
+# A plain HTTP/1 client over the model gateway's unix socket (tests/model_gateway.rs).
+hyper = { version = "1", features = ["client", "http1"] }
+http-body-util = "0.1"

@@ -64,6 +64,7 @@ Principles every component honours:
 | `agentscd` app gRPC  | `127.0.0.1:50001`                        | the app container                 | gRPC plaintext  |
 | `agentscd` mesh      | `0.0.0.0:50002` (pod IP, via Service)    | other pods' sidecars              | gRPC **mTLS**   |
 | `agentscd` tools     | `unix:/run/agentsc/sidecar.sock`         | the local agent runtime           | gRPC            |
+| `agentscd` model gateway | `unix:/run/agentsc/model.sock`       | the local agent runtime (every model call, §4.4) | HTTP/1.1 (Anthropic Messages API) |
 | `agentsc-runtime`    | `unix:/run/agentsc/runtime.sock`         | the local sidecar                 | gRPC            |
 | `embassy`            | none (Job) — see §7                      | —                                 | Kubernetes API  |
 
@@ -86,7 +87,9 @@ Flags / environment of `agentscd` (flag wins over env):
 | `--no-runtime`    | `AGENTSC_NO_RUNTIME`     | off. `1/true/yes/on` = do not spawn the runtime; something else serves `runtime.sock`, and readiness still follows its `Health` |
 | `--mesh-cache-bytes` | `AGENTSC_MESH_CACHE_BYTES` | `16777216`. Bytes of service-call responses the response cache keeps (`GET`/`HEAD` the app marked with `Cache-Control: max-age`; docs/adr/0002-response-caching.md); `0` disables it |
 | `--mesh-cache-max-age` | `AGENTSC_MESH_CACHE_MAX_AGE` | `300`. The longest, in seconds, a cached service-call response is served, whatever the app's `max-age` says |
-| —                 | `ANTHROPIC_API_KEY`      | unset → the runtime uses the `mock` model for every agent |
+| `--anthropic-api-key-file` | `AGENTSC_ANTHROPIC_API_KEY_FILE` | unset. The Anthropic API key, read by the sidecar's model gateway only (§4.4) |
+| —                 | `ANTHROPIC_API_KEY`      | the same key as text (env only, never a flag). Neither set → the gateway has no provider and the runtime runs every agent on the `mock` model. The runtime the sidecar starts never gets either, nor `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY` or `AGENTSC_APP_TOKEN` |
+| `--anthropic-base-url` | `AGENTSC_ANTHROPIC_BASE_URL` | `https://api.anthropic.com` |
 
 ## 3. `charter.yaml`
 
@@ -129,8 +132,8 @@ agents:
     budgets:
       max_tokens_per_call: 2048      # max_tokens for each model call, 1..=128000 (thinking counts against it)
       max_calls_per_minute: 30       # inbound invocations of this agent, sliding window
-      max_cost_usd_per_day: 5.0      # sum of model_call cost_usd per UTC day
-      max_steps: 6                   # model-call iterations per invocation
+      max_cost_usd_per_day: 5.0      # model spend per UTC day, as the sidecar measures it (§4.4)
+      max_steps: 6                   # model-call iterations per invocation (held by the sidecar, §4.4)
     skills: [refund-policy]          # v0.2: names from the top-level `skills`, each once
     harness:                         # v0.2, optional; absent = these defaults
       max_retries: 2                 # 0..=10
@@ -499,8 +502,12 @@ declared path or URL template (§3.1) — else `guardrail.tool_spec`.
   (§5.1, `guardrail.path`), the template check against the declared URL's
   path (`guardrail.tool_spec`), then plain HTTP egress of the canonical URL,
   audited as `http_call`.
-- `ReportEvent(AuditEvent{json}) → Empty` — the runtime's `model_call` records;
-  the sidecar stamps `service`, `namespace`, redacts, and writes them.
+- `ReportEvent(AuditEvent{json}) → Empty` — the runtime's `model_call` records
+  of the `mock` model (a provider's calls go through the model gateway, §4.4,
+  which writes their records itself; a `model_call` record with any other
+  callee is refused) and its `load_skill:<skill>` `tool_call` records. The
+  sidecar stamps `service`, `namespace`, sets `cost_usd` from its price table
+  (`mock` = 0, whatever the record said), redacts, and writes them.
 - `ProposeLesson(LessonRequest) → LessonResponse` (v0.2) — a lesson the runtime
   drew from a finished run, for the agent's memory:
   `LessonRequest {ToolContext ctx = 1; string note = 2; string rationale = 3; string run_request_id = 4;}`,
@@ -554,6 +561,68 @@ Clients of the unix sockets must send a plain `:authority` (the runtime sets
 `grpc.default_authority=localhost`): grpc-python's default for `unix:` targets
 is the percent-encoded socket path, which the sidecar's HTTP/2 stack rejects
 with `PROTOCOL_ERROR`.
+
+### 4.4 Runtime → model gateway (HTTP over `unix:/run/agentsc/model.sock`)
+
+Every model call of the runtime goes out through the sidecar. The runtime is
+driven by a model and is not trusted with spend: it holds no provider key and
+reports no cost. The runtime's Anthropic SDK is pointed at the socket
+(`AGENTSC_MODEL_GATEWAY`, which the sidecar sets for the runtime it starts;
+default `model.sock` next to `--sidecar`) with a placeholder key.
+
+- `GET /v1/agentsc/providers` → `{"providers": ["anthropic"]}`: the providers
+  the sidecar holds a key for. Empty → the runtime runs every agent on `mock`.
+- `POST /v1/messages` — the Anthropic Messages API. The call names its run with
+  `x-agentsc-request-id` and `x-agentsc-agent`; `x-agentsc-attempt` (`1`, `2`,
+  …, `fallback`) and `x-agentsc-purpose: reflection` only label its record. The
+  sidecar refuses, before anything leaves the pod:
+  - a call of no run: no Execute of that agent for that request in flight, and
+    not the one reflection after it returned (in the run window, when the agent
+    learns from the run's caller) — `model.unbound`;
+  - a `model` other than the agent's `model` or `harness.fallback_model` —
+    `model.not_allowed`;
+  - `max_tokens` above `budgets.max_tokens_per_call` — `budget.max_tokens_per_call`;
+  - more than `max_steps × (1 + max_retries + 1 if a fallback)` calls in the run,
+    or a request that already has `max_steps` assistant turns — `budget.max_steps`;
+  - a request field outside `model, max_tokens, messages, system, tools,
+    tool_choice, stream, stop_sequences, metadata, thinking, output_config`, or a
+    server tool (a `tools[]` entry with a `type` other than `custom`, billed
+    outside the token price) — `model.request_invalid` (HTTP 400);
+  - with less than 500 ms left of the Execute's deadline — `deadline.exceeded`;
+  - when the agent's spend today, plus what its calls in flight hold, plus the
+    most this call can cost (its request bytes + 4096 input tokens, priced as
+    1-hour cache writes, and `max_tokens` output tokens) would exceed
+    `max_cost_usd_per_day` — `budget.max_cost_usd_per_day`.
+
+  A refusal is HTTP 403 (400 for a request it cannot take) with the provider's
+  error body (`permission_error` / `invalid_request_error`, message
+  `<rule>: <reason>`) and `x-agentsc-rule`, and an `authz` record (`budget` for
+  a `budget.*` rule). Otherwise the sidecar sends the body unchanged to
+  `--anthropic-base-url` with its own `x-api-key` (the runtime's `x-api-key`,
+  `authorization` and `anthropic-beta` are dropped), at most until the
+  Execute's deadline less 500 ms (600 s at most), and streams the answer back as
+  it arrives: status, headers (`retry-after` included) and body, so the
+  runtime's SDK and harness see exactly what the provider sent. A successful
+  answer carries `x-agentsc-rule: budget.max_cost_usd_per_day` once the day's
+  budget is spent.
+- The sidecar reads the answer for its usage (`message_start`, `message_delta`;
+  input, output, cache read and cache write tokens) and content, prices it
+  from the one table in `crates/agentsc-common/src/pricing.rs` (per 1M tokens;
+  cache reads and writes at their own rates; unknown model ids at the top tier),
+  replaces the call's hold with that cost, and writes its `model_call` record
+  (§9 shape; `callee: anthropic:<model>`, `parent_span_id` = the invocation's
+  span). A call whose runtime went away is read to the end and counted (the
+  provider bills it), with `error: "cancelled: …"`. A failed call counts what
+  the provider had reported.
+- The invocation's answer and its `agent_invocation` record carry the usage and
+  cost the gateway measured, never the runtime's. When the gateway refused one
+  of the run's calls for a budget and the run did not end `ok`, that budget is
+  the outcome: `budget.max_cost_usd_per_day` → `denied` (429),
+  `budget.max_steps` / `budget.max_tokens_per_call` → `error` (502).
+
+Provider adapters implement one interface (`services/agentscd/src/gateway`:
+request check, upstream request, usage meter). Anthropic is the one shipped;
+an OpenAI-compatible adapter (`POST /v1/chat/completions`) is the next.
 
 ## 5. Identity, mTLS, authz
 
@@ -895,22 +964,24 @@ reads records from a file instead of kubectl.
   rule `model.refusal`).
 - Every tool call goes to the sidecar (§4.3). Multiple `tool_use` blocks in one
   turn are executed sequentially and returned in one user message.
-- `model_call` events are reported through `ReportEvent` with
-  `input = {system, messages, tools}` and `output = content blocks`; tokens
-  from the API `usage`; `cost_usd` from the pricing table in
-  `runtime/src/agentsc_runtime/pricing.py` (per 1M tokens; `mock` = 0).
-  Every model call that ran is reported, because the provider bills it: a
-  failed call carries the usage the API had reported before it failed (its
-  input tokens once `message_start` arrived) and `error`; a call still running
-  when its `Execute` is cancelled finishes in the background and is reported
-  with `error: "cancelled: …"`, so its cost still counts toward
-  `max_cost_usd_per_day`.
+- Every model call leaves a `model_call` record with
+  `input = {system, messages, tools}` and `output = content blocks`: the model
+  gateway writes it for a provider's calls (§4.4), with tokens from the
+  provider's `usage` and `cost_usd` from the sidecar's price table; the runtime
+  reports it through `ReportEvent` for the `mock` model (`cost_usd` 0). Every
+  model call that ran is recorded, because the provider bills it: a failed call
+  carries the usage the API had reported before it failed (its input tokens
+  once `message_start` arrived) and `error`; a call still running when its
+  `Execute` is cancelled finishes in the background and is recorded with
+  `error: "cancelled: …"`, so its cost still counts toward
+  `max_cost_usd_per_day`. The runtime prices nothing.
 - Deadline: each model request gets what is left of the `Execute` deadline,
   less 500 ms, as its SDK timeout (which bounds the connect and each wait for
   the next streamed chunk, not the whole stream). With 500 ms or less left, no
   new step starts: status `error`, rule `deadline.exceeded`.
-- Provider selection: `ANTHROPIC_API_KEY` set and `model != mock` → Anthropic
-  SDK, else the deterministic mock. Requests are streamed and collected
+- Provider selection: the gateway lists `anthropic` (the sidecar holds a key)
+  and `model != mock` → the Anthropic SDK, pointed at the gateway (§4.4), else
+  the deterministic mock. Requests are streamed and collected
   (`messages.stream(...).get_final_message()`), so large `max_tokens` never
   trip the SDK's non-streaming limit; `output_config.effort: low` is sent to
   every model that accepts it (not `claude-haiku-4-5`, `claude-sonnet-4-5` or
@@ -936,10 +1007,18 @@ reads records from a file instead of kubectl.
   their templates, wrong identity rejected), and a sidecar with a fake runtime and
   app (redirects returned unfollowed, guardrail-denied payloads withheld from
   the audit log, dropped and timed-out calls still audited, deadlines
-  propagated).
+  propagated), and the model gateway against a fake provider (a runtime that
+  reports no cost still cannot spend past the budget, concurrent calls cannot
+  overshoot it, `max_tokens_per_call` and `max_steps` held, calls bound to runs,
+  the key never the runtime's, answers streamed through unchanged and recorded).
 - `cd runtime && uv run pytest` — mock model routing, agent loop with a fake
-  sidecar, pricing, event shape, model calls reported after a cancel or a
-  failure, deadlines.
+  sidecar, the gateway client on a unix socket, event shape, model calls
+  reported after a cancel or a failure, deadlines.
+- `make test-live` (CI: `.github/workflows/real-model.yml`, nightly and by hand,
+  when the secret `ANTHROPIC_API_KEY` exists) — the real model path: agentscd,
+  the runtime and the Anthropic API through the gateway; streaming, `tool_use`,
+  429 / 529 / a mid-stream overload retried, a refusal, a stalled stream ended
+  at the deadline, no key in the runtime process.
 - `services/agentsc-cli/tests/cli.rs` — `charter validate` accepts the demo
   charters and rejects `examples/charters/invalid-unknown-field.charter.yaml`;
   `logs --file` filters and sorts.
@@ -952,9 +1031,12 @@ reads records from a file instead of kubectl.
 - Per-pod certificates and rotation; webhook injection; `embassy` as a
   long-running CA server.
 - Budgets are in-memory per sidecar replica (not shared across replicas).
-- Model egress (the HTTPS call to Anthropic) is made by the runtime, not
-  proxied by the sidecar; it is audited via `ReportEvent`, not intercepted.
+- The `mock` model runs in the runtime: its calls cost nothing, and its step
+  limit is the runtime's own (`max_steps`); provider calls are held by the
+  gateway (§4.4).
+- The gateway has one provider adapter (Anthropic Messages); an
+  OpenAI-compatible one is not shipped yet.
 - Server-side refusal fallbacks (`fallbacks: "default"`) are not enabled; a
   refusal is surfaced as `model.refusal`.
-- An `output_deny` match cannot retract the `model_call` record the runtime
-  already reported for the turn that produced the output.
+- An `output_deny` match cannot retract the `model_call` record already
+  written for the turn that produced the output.

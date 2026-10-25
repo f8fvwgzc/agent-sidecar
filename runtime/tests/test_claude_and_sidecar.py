@@ -80,14 +80,14 @@ def test_anthropic_model_reports_the_usage_of_a_stream_that_broke():
 
 def test_max_tokens_without_text_is_an_error_not_an_empty_answer(ops_assistant, sidecar, ctx):
     class Truncating(MockModel):
-        def complete(self, system, messages, tools, max_tokens, timeout=None):
+        def complete(self, system, messages, tools, max_tokens, timeout=None, headers=None):
             return ModelResponse([{"type": "thinking", "thinking": "", "signature": "s"}], "max_tokens", 50, max_tokens)
 
     res = asyncio.run(run_agent(ops_assistant, "stock?", "", ctx, Truncating(), sidecar))
     assert res.status == "error" and res.rule == "budget.max_tokens_per_call"
 
     class TruncatedToolCall(MockModel):
-        def complete(self, system, messages, tools, max_tokens, timeout=None):
+        def complete(self, system, messages, tools, max_tokens, timeout=None, headers=None):
             return ModelResponse(
                 [{"type": "tool_use", "id": "t", "name": "stock_analyst", "input": {}}], "max_tokens", 5, 5
             )
@@ -96,7 +96,7 @@ def test_max_tokens_without_text_is_an_error_not_an_empty_answer(ops_assistant, 
     assert res.status == "error" and sidecar.calls == [], "a cut-off tool call must not run"
 
     class TruncatedText(MockModel):
-        def complete(self, system, messages, tools, max_tokens, timeout=None):
+        def complete(self, system, messages, tools, max_tokens, timeout=None, headers=None):
             return ModelResponse([{"type": "text", "text": "partial answ"}], "max_tokens", 5, 5)
 
     res = asyncio.run(run_agent(ops_assistant, "stock?", "", ctx, TruncatedText(), sidecar))
@@ -180,7 +180,7 @@ def test_model_calls_fit_inside_the_execute_deadline(ops_assistant, sidecar, ctx
     timeouts = []
 
     class Timed(MockModel):
-        def complete(self, system, messages, tools, max_tokens, timeout=None):
+        def complete(self, system, messages, tools, max_tokens, timeout=None, headers=None):
             timeouts.append(timeout)
             return super().complete(system, messages, tools, max_tokens)
 

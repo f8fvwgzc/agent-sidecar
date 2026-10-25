@@ -60,8 +60,10 @@ pub struct AppState {
     /// Trust roots for the control plane and its CA (managed mode).
     pub trust_roots: Option<Arc<RootCertStore>>,
     pub trust_pem: Option<String>,
-    pub budgets: Budgets,
+    pub budgets: Arc<Budgets>,
     pub audit: Audit,
+    /// The model gateway's providers (gateway.rs): the keys live here, never in the runtime.
+    pub providers: crate::gateway::Providers,
     /// Toward this pod's app on loopback: no proxy, no redirects.
     pub http: reqwest::Client,
     /// Http tools: no redirects (the charter pins the origin), the environment's proxy if any.
@@ -263,8 +265,10 @@ impl AppState {
             tls_generation: tokio::sync::watch::channel(0).0,
             trust_roots,
             trust_pem,
-            budgets: Budgets::new(),
+            budgets: Arc::new(Budgets::new()),
             audit,
+            providers: crate::gateway::Providers::from_config(&config)
+                .context("model gateway providers")?,
             // A followed redirect would reach what authz and the origin check never saw (another
             // host, the metadata IP, this sidecar's own API); a 3xx goes back to the caller as is.
             http: reqwest::Client::builder()

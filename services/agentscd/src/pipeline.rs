@@ -6,11 +6,12 @@ use agentsc_common::audit::{AuditRecord, Direction, Kind, Tokens};
 use agentsc_common::authz::{self, Verdict};
 use agentsc_common::guardrails::INPUT_DENY;
 use agentsc_common::trace::TraceContext;
-use agentsc_proto::{ExecuteRequest, InvokeAgentResponse, Step, Usage};
+use agentsc_proto::{ExecuteRequest, ExecuteResponse, InvokeAgentResponse, Step, Usage};
 use serde_json::{Value, json};
 
 use crate::deadline;
 use crate::outbox;
+use crate::runs::{Meter, RunInfo};
 use crate::state::{AppState, MAX_DEPTH};
 
 /// One inbound request to run an agent, from the app, a peer sidecar or a local agent tool.
@@ -137,6 +138,23 @@ pub fn response_json(resp: &InvokeAgentResponse) -> Value {
         v["reason"] = json!(resp.reason);
     }
     v
+}
+
+/// What the run used. Cost is always what the model gateway measured (the runtime's figure is
+/// never used); tokens too once the gateway saw a call, else the runtime's count (the `mock`
+/// model, which runs in the runtime and costs nothing).
+pub fn metered_usage(meter: &Meter, reported: Usage) -> Usage {
+    let clamp = |n: u64| u32::try_from(n).unwrap_or(u32::MAX);
+    let (input_tokens, output_tokens) = if meter.calls + meter.reflections > 0 {
+        (clamp(meter.input_tokens), clamp(meter.output_tokens))
+    } else {
+        (reported.input_tokens, reported.output_tokens)
+    };
+    Usage {
+        input_tokens,
+        output_tokens,
+        cost_usd: (meter.cost_usd * 1_000_000.0).round() / 1_000_000.0,
+    }
 }
 
 /// Run the full pipeline for one invocation. Always writes exactly one `agent_invocation` record,
@@ -307,12 +325,20 @@ pub async fn invoke(state: &Arc<AppState>, inv: Invocation) -> InvokeAgentRespon
     // From here the runtime acts (model calls, tools). If the caller drops this future — client
     // gone, deadline passed — the record is still written, as cancelled.
     let pending = state.audit.on_cancel(vec![record(Value::Null)], started);
-    // ReportEvent and ProposeLesson are taken for this run while it runs and for a while after.
-    let run = state.runs.start(
+    // ReportEvent, ProposeLesson and model calls are taken for this run while it runs (and the
+    // last two for a while after); model calls nest under the invocation's span.
+    let run = state.runs.start_run(
         &inv.request_id,
         &inv.agent,
-        &inv.caller,
-        &inv.trace.trace_id,
+        RunInfo {
+            caller: inv.caller.clone(),
+            caller_agent: inv.caller_agent.clone(),
+            trace_id: inv.trace.trace_id.clone(),
+            span_id: inv.trace.span_id.clone(),
+            // What the runtime is given: the caller's deadline, else the run timeout.
+            deadline: Instant::now()
+                .checked_add(deadline::budget(inv.deadline, deadline::RUN_TIMEOUT)),
+        },
     );
     if let Some(t) = &agent.taint {
         state.taint.add(&inv.request_id, t.input, "input");
@@ -332,14 +358,33 @@ pub async fn invoke(state: &Arc<AppState>, inv: Invocation) -> InvokeAgentRespon
         }
     };
     let mut steps = exec.steps.clone();
-    // Cost is accounted per model_call through ReportEvent; the envelope only echoes the sum.
-    let usage = exec.usage.unwrap_or_default();
+    let meter = state
+        .runs
+        .lookup(&inv.request_id, &inv.agent)
+        .map(|r| r.meter)
+        .unwrap_or_default();
+    let usage = metered_usage(&meter, exec.usage.unwrap_or_default());
     let tokens = Some(Tokens {
         input: usage.input_tokens,
         output: usage.output_tokens,
     });
 
     if exec.status != "ok" {
+        // A model call the gateway refused for a budget decides the outcome, whatever the
+        // runtime made of the refusal.
+        let (status, rule, reason) = match &meter.denial {
+            Some(d) if d.rule == agentsc_common::budget::RULE_COST => {
+                ("denied", d.rule.clone(), d.reason.clone())
+            }
+            Some(d) => ("error", d.rule.clone(), d.reason.clone()),
+            None => (exec.status.as_str(), exec.rule.clone(), exec.reason.clone()),
+        };
+        let exec = ExecuteResponse {
+            status: status.to_string(),
+            rule,
+            reason,
+            ..exec
+        };
         let v = Verdict::deny(exec.rule.clone(), exec.reason.clone());
         let mut rec = record(Value::Null).latency(started);
         rec.tokens = tokens;

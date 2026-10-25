@@ -52,7 +52,7 @@ class Answer(MockModel):
         self.answer, self.stop = answer, stop
         self.systems: list[str] = []
 
-    def complete(self, system, messages, tools, max_tokens, timeout=None):
+    def complete(self, system, messages, tools, max_tokens, timeout=None, headers=None):
         if not system.startswith(REFLECTION_MARKER):
             return super().complete(system, messages, tools, max_tokens, timeout)
         self.systems.append(system)
@@ -231,7 +231,7 @@ class Gate(MockModel):
         self.release = threading.Event()
         self.started = threading.Semaphore(0)
 
-    def complete(self, system, messages, tools, max_tokens, timeout=None):
+    def complete(self, system, messages, tools, max_tokens, timeout=None, headers=None):
         if system.startswith(REFLECTION_MARKER):
             self.started.release()
             self.release.wait(5)

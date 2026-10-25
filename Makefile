@@ -18,7 +18,7 @@ COMPOSE := docker compose -f deploy/compose/docker-compose.yml
 COMPOSE_ENV := deploy/compose/.env
 # Tests of the chart, the Compose stack, the Dockerfile and the release workflow (throwaway uv env).
 PACKAGING_PYTEST := uv run --no-project --with pytest==8.4.2 --with pyyaml==6.0.2 python -m pytest -q
-.PHONY: local-demo platform-demo e2e-helm all build-host test test-rust test-python fmt lint proto schema validate \
+.PHONY: local-demo platform-demo e2e-helm all build-host test test-rust test-python test-live fmt lint proto schema validate \
         minikube-up minikube-down build deploy charters undeploy demo logs logs-denied secret-anthropic clean dev-certs \
         compose-up compose-down helm-lint helm-template demo-helm packaging-test
 
@@ -36,6 +36,12 @@ test-rust:
 
 test-python:
 	cd runtime && uv run pytest -q
+
+# The real model path (needs ANTHROPIC_API_KEY; spends a few cents): agentscd, the runtime and the
+# Anthropic API through the sidecar's model gateway. CI runs it nightly (.github/workflows/real-model.yml).
+test-live:
+	cargo build -p agentscd
+	cd runtime && AGENTSC_LIVE=1 uv run pytest -v tests/live
 
 fmt:
 	cargo fmt --all

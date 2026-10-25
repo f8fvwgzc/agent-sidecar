@@ -1,4 +1,12 @@
-"""Model providers: the Anthropic API when ANTHROPIC_API_KEY is set, else a deterministic mock (CONTRACT.md §9)."""
+"""Model providers (CONTRACT.md §4.4, §9): the Anthropic API through the sidecar's model gateway
+when the sidecar has a key for it, else a deterministic mock.
+
+The runtime never holds a provider key. Every model call goes to the gateway on the sidecar's
+unix socket (`AGENTSC_MODEL_GATEWAY`, by default `model.sock` next to the sidecar's socket),
+which checks it against the agent's charter and budgets, adds the key, sends it on and counts
+the usage the provider reports. The SDK talks to the gateway as it would to the API, so its
+errors, retry-after headers and streaming are the provider's own.
+"""
 
 from __future__ import annotations
 
@@ -64,6 +72,9 @@ class ModelResponse:
     input_tokens: int
     output_tokens: int
     raw: Any = field(default=None, repr=False)
+    # The rule the gateway named in `x-agentsc-rule` (e.g. `budget.max_cost_usd_per_day` once the
+    # agent's daily budget is spent), if any.
+    rule: str | None = None
 
     def text(self) -> str:
         return "".join(b.get("text", "") for b in self.content if b.get("type") == "text")
@@ -75,18 +86,20 @@ class ModelResponse:
 class ModelError(Exception):
     """A failed model call, with the usage the provider had reported when it failed (and may bill)."""
 
-    def __init__(self, cause: Exception, input_tokens: int, output_tokens: int) -> None:
+    def __init__(self, cause: Exception, input_tokens: int, output_tokens: int, rule: str | None = None) -> None:
         super().__init__(str(cause))
         self.cause = cause
         self.input_tokens = input_tokens
         self.output_tokens = output_tokens
+        self.rule = rule  # the gateway's `x-agentsc-rule`, when it refused the call
 
 
 class Model(Protocol):
     name: str
     provider: str
 
-    # `timeout`: seconds left for this call (None: the provider's default).
+    # `timeout`: seconds left for this call (None: the provider's default). `headers`: the run
+    # binding the gateway checks (`x-agentsc-request-id`, `x-agentsc-agent`, …); the mock ignores it.
     def complete(
         self,
         system: str,
@@ -94,6 +107,7 @@ class Model(Protocol):
         tools: list[dict[str, Any]],
         max_tokens: int,
         timeout: float | None = None,
+        headers: dict[str, str] | None = None,
     ) -> ModelResponse: ...
 
 
@@ -197,6 +211,7 @@ class MockModel:
         tools: list[dict[str, Any]],
         max_tokens: int,
         timeout: float | None = None,
+        headers: dict[str, str] | None = None,
     ) -> ModelResponse:
         user_input = ""
         tool_results: list[tuple[str, str]] = []
@@ -259,19 +274,86 @@ class MockModel:
         return ModelResponse([block], "tool_use", prompt_tokens, _estimate_tokens(str(args)) + 8)
 
 
+# Where the gateway listens: set by `configure_gateway` (main.py), else the env the sidecar sets.
+GATEWAY_ENV = "AGENTSC_MODEL_GATEWAY"
+DEFAULT_GATEWAY = "unix:/run/agentsc/model.sock"
+# The SDK needs a key to send; the gateway drops it and adds the sidecar's. It is not a secret.
+GATEWAY_API_KEY = "agentsc-model-gateway"
+GATEWAY_BASE_URL = "http://agentsc-model-gateway"
+# How long the gateway's provider list is trusted before it is asked again.
+PROVIDERS_TTL = 10.0
+
+_gateway: str | None = None
+_providers: tuple[float, frozenset[str]] | None = None
 _client: Any = None
 _client_lock = threading.Lock()
 
 
+def configure_gateway(address: str | None) -> None:
+    """Use `address` (`unix:/path/model.sock`) for the model gateway; None: the env or the default."""
+    global _gateway, _providers
+    with _client_lock:
+        _gateway, _providers = address, None
+
+
+def gateway_for_sidecar(sidecar_address: str) -> str:
+    """The gateway's default address: `model.sock` next to the sidecar's `unix:` socket."""
+    path = sidecar_address.removeprefix("unix:")
+    return "unix:" + os.path.join(os.path.dirname(path) or ".", "model.sock")
+
+
+def gateway_address() -> str:
+    return _gateway or os.environ.get(GATEWAY_ENV) or DEFAULT_GATEWAY
+
+
+def _socket_path(address: str) -> str:
+    if not address.startswith("unix:"):
+        raise ValueError(f"the model gateway address must be unix:<path>, not {address!r}")
+    return address.removeprefix("unix:")
+
+
+def _http_client(timeout: float | None) -> Any:
+    import httpx2
+
+    transport = httpx2.HTTPTransport(uds=_socket_path(gateway_address()))
+    # No redirects and no proxy: the gateway is a local socket.
+    return httpx2.Client(transport=transport, timeout=timeout, follow_redirects=False, trust_env=False)
+
+
+def gateway_providers() -> frozenset[str]:
+    """The providers the sidecar holds keys for (`GET /v1/agentsc/providers`), cached briefly. A
+    gateway that does not answer has none: every agent then runs on the mock."""
+    global _providers
+    now = time.monotonic()
+    with _client_lock:
+        if _providers is not None and now - _providers[0] < PROVIDERS_TTL:
+            return _providers[1]
+    try:
+        with _http_client(2.0) as client:
+            resp = client.get(f"{GATEWAY_BASE_URL}/v1/agentsc/providers")
+            names = frozenset(str(p) for p in resp.json().get("providers", []))
+    except Exception:  # noqa: BLE001 — no gateway (an old sidecar, a test): no providers
+        names = frozenset()
+    with _client_lock:
+        _providers = (now, names)
+    return names
+
+
 def anthropic_client() -> Any:
     """The one Anthropic client of this process, created on first use and reused by every Execute
-    (connection pool included). `max_retries=0`: the harness owns retries (design §12)."""
+    (connection pool included): the SDK pointed at the sidecar's model gateway. `max_retries=0`:
+    the harness owns retries (design §12)."""
     global _client
     with _client_lock:
         if _client is None:
             import anthropic
 
-            _client = anthropic.Anthropic(max_retries=0)
+            _client = anthropic.Anthropic(
+                api_key=GATEWAY_API_KEY,
+                base_url=GATEWAY_BASE_URL,
+                max_retries=0,
+                http_client=_http_client(None),
+            )
         return _client
 
 
@@ -302,8 +384,11 @@ class AnthropicModel:
         tools: list[dict[str, Any]],
         max_tokens: int,
         timeout: float | None = None,
+        headers: dict[str, str] | None = None,
     ) -> ModelResponse:
         kwargs: dict[str, Any] = {"model": self.name, "max_tokens": max_tokens, "messages": messages}
+        if headers:
+            kwargs["extra_headers"] = headers
         if system:
             kwargs["system"] = system
         if tools:
@@ -327,11 +412,41 @@ class AnthropicModel:
                         raise _timed_out(stream)
                 resp = stream.get_final_message()
         except Exception as e:
-            raise ModelError(_sdk_error(e, stream), *_usage_so_far(stream)) from e
+            raise ModelError(_sdk_error(e, stream), *_usage_so_far(stream), rule=_rule_of(e)) from e
         content = [b.model_dump(exclude_none=True) for b in resp.content]
         return ModelResponse(
-            content, resp.stop_reason or "end_turn", resp.usage.input_tokens, resp.usage.output_tokens, raw=resp
+            content,
+            resp.stop_reason or "end_turn",
+            resp.usage.input_tokens,
+            resp.usage.output_tokens,
+            raw=resp,
+            rule=_header(_response_of(stream), "x-agentsc-rule"),
         )
+
+
+def _response_of(stream: Any) -> Any:
+    try:
+        return stream.response
+    except (AttributeError, RuntimeError):
+        return None
+
+
+def _header(response: Any, name: str) -> str | None:
+    try:
+        value = response.headers.get(name)
+    except AttributeError:
+        return None
+    return value if isinstance(value, str) and value else None
+
+
+def _rule_of(err: Exception) -> str | None:
+    """The gateway's `x-agentsc-rule` on a refused call (an SDK status error)."""
+    rule = _header(getattr(err, "response", None), "x-agentsc-rule")
+    if rule is None and isinstance(getattr(err, "body", None), dict):
+        message = str((err.body.get("error") or {}).get("message", ""))  # type: ignore[union-attr]
+        if re.match(r"^(budget|model|deadline)\.[a-z_.]+: ", message):
+            rule = message.split(":", 1)[0]
+    return rule
 
 
 def _request_of(stream: Any) -> Any:
@@ -395,7 +510,8 @@ def supports_effort(model: str) -> bool:
 
 
 def anthropic_available() -> bool:
-    return bool(os.environ.get("ANTHROPIC_API_KEY"))
+    """The sidecar's gateway can call Anthropic (it holds a key)."""
+    return "anthropic" in gateway_providers()
 
 
 def model_for(name: str) -> Model:
