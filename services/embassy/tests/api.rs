@@ -264,6 +264,13 @@ async fn health_and_readiness() {
     }
     let r = Env::send(env.req("GET", "/api/v1/readyz", None)).await;
     assert_eq!(r.body["ready"], true);
+    // control-plane audit persistence is reported, without changing readiness
+    assert_eq!(
+        r.body["cp_audit"],
+        json!({"persisted": true, "append_failures": 0, "last_error": null}),
+        "{}",
+        r.text
+    );
     env.stop().await;
 }
 

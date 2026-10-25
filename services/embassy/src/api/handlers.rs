@@ -467,5 +467,14 @@ pub async fn readyz(State(hub): State<Arc<Hub>>) -> Response {
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
-    (status, Json(ReadyStatus { ready, components })).into_response()
+    let cp_audit = Some(hub.cp_audit.health());
+    (
+        status,
+        Json(ReadyStatus {
+            ready,
+            components,
+            cp_audit,
+        }),
+    )
+        .into_response()
 }

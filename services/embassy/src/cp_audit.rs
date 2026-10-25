@@ -1,21 +1,28 @@
 //! Control-plane audit (docs/design/agent-platform.md §8.5).
 //!
 //! [`CpAudit::record`] writes every control-plane action three ways: one JSON line on stdout,
-//! [`Store::append_cp_audit`] (the file store's `.audit.jsonl`), and a broadcast that the API
-//! turns into the admin-only SSE event `cp_audit` ([`CpAudit::subscribe`]). Records a store
-//! produces by itself (`cr_external_edit`) reach subscribers of the store as
+//! [`Store::append_cp_audit`] (the file store's `.audit.jsonl`, the SQLite store's `cp_audit`
+//! table, the Kubernetes store's ConfigMap segments), and a broadcast that the API turns into
+//! the admin-only SSE event `cp_audit` ([`CpAudit::subscribe`]). Records a store produces by
+//! itself (`cr_external_edit`) reach subscribers of the store as
 //! [`crate::store::StoreEvent::CpAudit`] instead.
+//!
+//! A store that refuses a record never stops the line, the broadcast or the action audited: the
+//! refusal is logged, counted and reported on `GET /readyz` as `cp_audit` ([`CpAudit::health`]),
+//! so a lost record is visible. Every store implements `append_cp_audit` (the trait has no
+//! default); a process without a store writes stdout only and says so (`persisted: false`).
 //!
 //! The record type is [`CpAuditRecord`] of the API types (its JSON shape is the OpenAPI
 //! `CpAuditRecord`), re-exported here with its enums.
 use std::fmt;
 use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chrono::{SecondsFormat, Utc};
 use tokio::sync::broadcast;
 
-pub use crate::api::types::{CpAction, CpAuditRecord, CpResult};
+pub use crate::api::types::{CpAction, CpAuditHealth, CpAuditRecord, CpResult};
 use crate::store::{Actor, Store};
 
 /// Records a slow SSE subscriber may fall behind before it loses some (`RecvError::Lagged`).
@@ -26,6 +33,9 @@ pub struct CpAudit {
     store: Option<Arc<dyn Store>>,
     out: Mutex<Box<dyn Write + Send>>,
     tx: broadcast::Sender<Arc<CpAuditRecord>>,
+    /// Records the store refused, and the last refusal.
+    append_failures: AtomicU64,
+    last_error: Mutex<Option<String>>,
 }
 
 impl fmt::Debug for CpAudit {
@@ -33,6 +43,10 @@ impl fmt::Debug for CpAudit {
         f.debug_struct("CpAudit")
             .field("store", &self.store.is_some())
             .field("subscribers", &self.tx.receiver_count())
+            .field(
+                "append_failures",
+                &self.append_failures.load(Ordering::Relaxed),
+            )
             .finish()
     }
 }
@@ -55,6 +69,21 @@ impl CpAudit {
             store,
             out: Mutex::new(out),
             tx,
+            append_failures: AtomicU64::new(0),
+            last_error: Mutex::new(None),
+        }
+    }
+
+    /// Whether records are persisted, and the store's refusals so far (`GET /readyz`).
+    pub fn health(&self) -> CpAuditHealth {
+        CpAuditHealth {
+            persisted: self.store.is_some(),
+            append_failures: self.append_failures.load(Ordering::Relaxed),
+            last_error: self
+                .last_error
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone(),
         }
     }
 
@@ -80,7 +109,8 @@ impl CpAudit {
     }
 
     /// Write `record`: one JSON line on stdout, then the store, then subscribers. A failure of
-    /// one is logged and never stops the others or the caller.
+    /// one is logged (a store's also counted, [`CpAudit::health`]) and never stops the others or
+    /// the caller.
     pub async fn record(&self, record: CpAuditRecord) {
         let record = Arc::new(record);
         match serde_json::to_string(&*record) {
@@ -99,10 +129,13 @@ impl CpAudit {
         if let Some(store) = &self.store
             && let Err(e) = store.append_cp_audit(&record).await
         {
+            let failures = self.append_failures.fetch_add(1, Ordering::Relaxed) + 1;
+            *self.last_error.lock().unwrap_or_else(|p| p.into_inner()) = Some(e.to_string());
             tracing::error!(
                 error = %e,
                 action = ?record.action,
-                "persisting a control-plane audit record failed"
+                failures,
+                "persisting a control-plane audit record failed; it is only on stdout"
             );
         }
         // no subscriber is not an error
@@ -261,6 +294,10 @@ mod tests {
             self.records.lock().unwrap().push(record.clone());
             Ok(())
         }
+        async fn cp_audit(&self, limit: usize) -> Result<Vec<CpAuditRecord>, StoreError> {
+            let all = self.records.lock().unwrap();
+            Ok(all[all.len().saturating_sub(limit)..].to_vec())
+        }
         fn subscribe(&self) -> broadcast::Receiver<StoreEvent> {
             self.tx.subscribe()
         }
@@ -350,9 +387,23 @@ mod tests {
         let out = Capture::default();
         let audit = CpAudit::with_writer(Some(AuditOnly::new(true)), Box::new(out.clone()));
         let mut rx = audit.subscribe();
+        assert_eq!(
+            audit.health(),
+            CpAuditHealth {
+                persisted: true,
+                append_failures: 0,
+                last_error: None
+            }
+        );
         audit.record(charter_put()).await;
-        assert_eq!(out.lines().len(), 1);
+        audit.record(charter_put()).await;
+        assert_eq!(out.lines().len(), 2);
         assert_eq!(rx.recv().await.unwrap().action, CpAction::CharterPut);
+        // the refusals are surfaced, not dropped
+        let h = audit.health();
+        assert_eq!(h.append_failures, 2);
+        assert_eq!(h.last_error.as_deref(), Some("store: disk full"));
+        assert!(format!("{audit:?}").contains("append_failures: 2"));
     }
 
     #[tokio::test]
@@ -363,6 +414,8 @@ mod tests {
         let late = audit.subscribe();
         assert_eq!(out.lines().len(), 1);
         assert!(late.is_empty());
+        // stdout only, and it says so
+        assert!(!audit.health().persisted);
         // the stdout constructor builds
         let _ = CpAudit::new(None);
     }

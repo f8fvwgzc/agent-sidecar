@@ -205,6 +205,13 @@ impl Store for NoStore {
     ) -> Result<crate::store::PendingAdoption, StoreError> {
         Err(StoreError::NotFound)
     }
+    // nothing is kept: say so (CpAudit logs and counts it) instead of pretending
+    async fn append_cp_audit(&self, _: &crate::cp_audit::CpAuditRecord) -> Result<(), StoreError> {
+        Err(StoreError::Io("this process has no store".into()))
+    }
+    async fn cp_audit(&self, _: usize) -> Result<Vec<crate::cp_audit::CpAuditRecord>, StoreError> {
+        Ok(Vec::new())
+    }
     fn subscribe(&self) -> broadcast::Receiver<StoreEvent> {
         self.tx.subscribe()
     }

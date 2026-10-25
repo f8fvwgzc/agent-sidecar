@@ -1459,3 +1459,242 @@ fn the_last_manager_skips_embassy_and_status_writers() {
         "orders-0f1e2d3c-7"
     );
 }
+
+// ---- control-plane audit (cp_audit_log.rs) -------------------------------------------------------
+
+use crate::k8s::cp_audit_log::{
+    RECORDS_KEY, SEGMENT_BYTES, SEGMENT_LABEL, SEGMENTS, SEQ_ANNOTATION, segment_name,
+};
+
+const CP_NS: &str = "agentsc-cp";
+
+fn cp_store(cluster: &Arc<FakeCluster>) -> KubeStore {
+    KubeStore::with_writer(cluster.clone(), Box::new(std::io::sink())).with_cp_namespace(CP_NS)
+}
+
+fn cp_record(action: CpAction, reason: &str) -> CpAuditRecord {
+    let mut r = CpAudit::entry(action, &alice(), CpResult::Ok);
+    r.namespace = Some("shop".into());
+    r.service = Some("support".into());
+    r.reason = Some(reason.into());
+    r
+}
+
+fn segment_lines(cluster: &FakeCluster, slot: u64) -> Vec<CpAuditRecord> {
+    let cm = cluster.config_map(CP_NS, &segment_name(slot)).unwrap();
+    cm.data.unwrap()[RECORDS_KEY]
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+fn seq(cluster: &FakeCluster, slot: u64) -> u64 {
+    let cm = cluster.config_map(CP_NS, &segment_name(slot)).unwrap();
+    cm.metadata.annotations.unwrap()[SEQ_ANNOTATION]
+        .parse()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn control_plane_audit_is_persisted_in_the_cp_namespace_and_read_back() {
+    let cluster = Arc::new(FakeCluster::new());
+    let store = cp_store(&cluster);
+    assert_eq!(store.cp_namespace(), CP_NS);
+    store.check_cp_audit().await.unwrap();
+    assert!(store.cp_audit(10).await.unwrap().is_empty());
+
+    let a = cp_record(CpAction::CharterPut, "version 1 to 2");
+    let b = cp_record(CpAction::ProposalApprove, "approved");
+    store.append_cp_audit(&a).await.unwrap();
+    store.append_cp_audit(&b).await.unwrap();
+    // one segment, in the control-plane namespace and nowhere else
+    assert_eq!(cluster.config_map_names(CP_NS), [segment_name(0)]);
+    assert!(cluster.config_map_names("shop").is_empty());
+    let cm = cluster.config_map(CP_NS, &segment_name(0)).unwrap();
+    let labels = cm.metadata.labels.clone().unwrap();
+    assert_eq!(labels[SEGMENT_LABEL], "segment");
+    assert_eq!(labels["app.kubernetes.io/managed-by"], "embassy");
+    assert_eq!(seq(&cluster, 0), 0);
+    assert_eq!(segment_lines(&cluster, 0), [a.clone(), b.clone()]);
+
+    // read back by this process, and by another one that never wrote (no cache)
+    assert_eq!(store.cp_audit(10).await.unwrap(), [a.clone(), b.clone()]);
+    let other: Arc<dyn Store> = Arc::new(cp_store(&cluster));
+    assert_eq!(
+        other.cp_audit(1).await.unwrap(),
+        std::slice::from_ref(&b),
+        "the newest"
+    );
+
+    // the way the control plane writes: CpAudit over the dyn Store
+    let out = Capture::default();
+    let audit = CpAudit::with_writer(Some(other.clone()), Box::new(out.clone()));
+    let c = cp_record(CpAction::CertIssue, "issued");
+    audit.record(c.clone()).await;
+    assert_eq!(other.cp_audit(10).await.unwrap(), [a, b, c.clone()]);
+    assert_eq!(out.records(), [c]);
+    assert_eq!(audit.health().append_failures, 0);
+}
+
+#[tokio::test]
+async fn the_audit_ring_rotates_within_its_bounds_and_keeps_the_newest() {
+    let cluster = Arc::new(FakeCluster::new());
+    let store = cp_store(&cluster);
+    // three of these fit in a segment, a fourth does not
+    let big = "x".repeat(SEGMENT_BYTES / 4);
+    let per_segment = 3;
+    let total = (SEGMENTS as usize + 3) * per_segment + 1;
+    for i in 0..total {
+        store
+            .append_cp_audit(&cp_record(CpAction::Connect, &format!("{i:04} {big}")))
+            .await
+            .unwrap();
+    }
+    // exactly SEGMENTS objects, never more; each within the bound; sequence n in slot n % SEGMENTS
+    assert_eq!(cluster.config_map_names(CP_NS).len(), SEGMENTS as usize);
+    let mut seqs: Vec<u64> = (0..SEGMENTS).map(|slot| seq(&cluster, slot)).collect();
+    for slot in 0..SEGMENTS {
+        assert_eq!(seq(&cluster, slot) % SEGMENTS, slot);
+        let cm = cluster.config_map(CP_NS, &segment_name(slot)).unwrap();
+        assert!(cm.data.unwrap()[RECORDS_KEY].len() <= SEGMENT_BYTES);
+    }
+    seqs.sort();
+    let newest = (total as u64).div_ceil(per_segment as u64) - 1;
+    assert_eq!(seqs, (newest + 1 - SEGMENTS..=newest).collect::<Vec<_>>());
+    // what is kept is the newest records, oldest first, none twice
+    let kept: Vec<usize> = store
+        .cp_audit(usize::MAX)
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.reason.as_deref().unwrap()[..4].parse().unwrap())
+        .collect();
+    assert_eq!(kept, (total - kept.len()..total).collect::<Vec<_>>());
+    assert!(
+        kept.len() >= (SEGMENTS as usize - 1) * per_segment,
+        "{}",
+        kept.len()
+    );
+    assert_eq!(store.cp_audit(2).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn two_processes_share_the_ring_without_losing_or_repeating_a_line() {
+    // embassy and embassy-ca both append; each caches the head it last wrote
+    let cluster = Arc::new(FakeCluster::new());
+    let (a, b) = (cp_store(&cluster), cp_store(&cluster));
+    // two of these fit in a segment: the writers keep rotating past each other's cached head
+    let big = "y".repeat(SEGMENT_BYTES / 3);
+    for i in 0..12 {
+        if i == 5 {
+            // and someone else writes in between, twice
+            cluster.fail_config_map_replaces_with_conflict(2);
+        }
+        let store = if i % 2 == 0 { &a } else { &b };
+        store
+            .append_cp_audit(&cp_record(CpAction::Connect, &format!("{i:02} {big}")))
+            .await
+            .unwrap();
+    }
+    let got: Vec<usize> = b
+        .cp_audit(usize::MAX)
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.reason.as_deref().unwrap()[..2].parse().unwrap())
+        .collect();
+    assert_eq!(got, (0..12).collect::<Vec<_>>());
+    for slot in 0..6 {
+        assert_eq!(seq(&cluster, slot), slot);
+        assert_eq!(segment_lines(&cluster, slot).len(), 2, "slot {slot}");
+    }
+    // a hand edit of a segment is a conflict for the next append, which reads again
+    cluster.edit_config_map(CP_NS, &segment_name(5), |cm| {
+        cm.data
+            .as_mut()
+            .unwrap()
+            .get_mut(RECORDS_KEY)
+            .unwrap()
+            .push_str("not a record\n");
+    });
+    a.append_cp_audit(&cp_record(CpAction::Logout, "last"))
+        .await
+        .unwrap();
+    let all = a.cp_audit(usize::MAX).await.unwrap();
+    assert_eq!(
+        all.len(),
+        13,
+        "the unreadable line is skipped, not the segment"
+    );
+    assert_eq!(all.last().unwrap().action, CpAction::Logout);
+}
+
+#[tokio::test]
+async fn a_refused_append_is_an_error_that_cp_audit_counts_never_a_silent_drop() {
+    let cluster = Arc::new(FakeCluster::new());
+    let store: Arc<dyn Store> = Arc::new(cp_store(&cluster));
+    let forbidden = "configmaps is forbidden: User \"system:serviceaccount:agentsc-system:embassy\" \
+                     cannot create resource \"configmaps\"";
+    cluster.refuse_config_maps(Some(forbidden));
+    let e = store
+        .append_cp_audit(&cp_record(CpAction::CharterPut, "lost?"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&e, StoreError::Invalid(m) if m[0].contains("forbidden")),
+        "{e:?}"
+    );
+
+    let out = Capture::default();
+    let audit = CpAudit::with_writer(Some(store.clone()), Box::new(out.clone()));
+    let mut rx = audit.subscribe();
+    let rec = cp_record(CpAction::DeleteService, "deleted");
+    audit.record(rec.clone()).await;
+    let h = audit.health();
+    assert_eq!(h.append_failures, 1);
+    assert!(h.last_error.unwrap().contains("forbidden"));
+    // the line and the SSE event still went out
+    assert_eq!(out.records(), std::slice::from_ref(&rec));
+    assert_eq!(*rx.recv().await.unwrap(), rec);
+
+    // access restored: the next record is kept, the count stays
+    cluster.refuse_config_maps(None);
+    let next = cp_record(CpAction::Rollback, "kept");
+    audit.record(next.clone()).await;
+    assert_eq!(store.cp_audit(10).await.unwrap(), [next]);
+    assert_eq!(audit.health().append_failures, 1);
+}
+
+#[tokio::test]
+async fn a_kubectl_edit_is_audited_in_the_ring_too() {
+    let cluster = Arc::new(FakeCluster::new());
+    let out = Capture::default();
+    let store =
+        KubeStore::with_writer(cluster.clone(), Box::new(out.clone())).with_cp_namespace(CP_NS);
+    put(&store, Precondition::NotExists, "claude-opus-5-5").await;
+    cluster.kubectl("shop", "support", "kubectl-edit", |o| {
+        o["spec"]["agents"][0]["model"] = json!("claude-sonnet-5-5");
+    });
+    store
+        .observe(&cluster.charter("shop", "support").unwrap())
+        .await;
+    // an invalid one as well
+    cluster.kubectl("shop", "support", "kubectl-edit", |o| {
+        o["spec"]["agents"][0]["modle"] = json!("typo");
+    });
+    store
+        .observe(&cluster.charter("shop", "support").unwrap())
+        .await;
+    let kept = store.cp_audit(10).await.unwrap();
+    assert_eq!(
+        kept.iter()
+            .map(|r| (r.action, r.result))
+            .collect::<Vec<_>>(),
+        [
+            (CpAction::CrExternalEdit, CpResult::Ok),
+            (CpAction::CrExternalEdit, CpResult::Invalid)
+        ]
+    );
+    assert_eq!(kept[0].actor, "k8s:kubectl-edit");
+    assert_eq!(kept, out.records(), "the same records as on stdout");
+}

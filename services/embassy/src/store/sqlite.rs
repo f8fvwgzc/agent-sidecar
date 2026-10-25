@@ -981,6 +981,23 @@ impl Store for SqliteStore {
         .await
     }
 
+    async fn cp_audit(&self, limit: usize) -> Result<Vec<CpAuditRecord>, StoreError> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.run(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT record FROM (SELECT seq, record FROM cp_audit ORDER BY seq DESC LIMIT ?1) \
+                 ORDER BY seq",
+            )?;
+            let rows = stmt
+                .query_map(params![limit], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows.iter()
+                .map(|json| serde_json::from_str(json).map_err(|e| io_err("cp_audit record", e)))
+                .collect()
+        })
+        .await
+    }
+
     fn subscribe(&self) -> broadcast::Receiver<StoreEvent> {
         self.tx.subscribe()
     }

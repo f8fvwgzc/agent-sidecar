@@ -4,16 +4,18 @@
 //! - [`KubeApi`]: TokenReview and pod lookups for `IssueCertificate` (design §7), the CA and
 //!   serving-certificate Secrets, and the two webhook configurations whose `caBundle` is kept
 //!   current (design §13);
-//! - [`CharterApi`]: `Charter` custom resources (with their `status` subresource) and the
-//!   `apps/v1 ControllerRevision`s that hold their history (design §8.4).
+//! - [`CharterApi`]: `Charter` custom resources (with their `status` subresource), the
+//!   `apps/v1 ControllerRevision`s that hold their history (design §8.4), and the ConfigMaps
+//!   that hold the control-plane audit (design §8.5, [`super::cp_audit_log`]).
 //!
 //! [`KubeClient`] implements both over a `kube::Client`; the RBAC it needs is exactly the chart's
 //! (`deploy/helm/agent-sidecar/templates/rbac.yaml`): no `list` on Secrets or webhook
-//! configurations, `get`/`update` on Secrets by name.
+//! configurations, `get`/`update` on Secrets by name, and on ConfigMaps only `get`/`update` of
+//! the audit segments by name plus `create`, in the control-plane namespace.
 use async_trait::async_trait;
 use k8s_openapi::api::apps::v1::ControllerRevision;
 use k8s_openapi::api::authentication::v1::{TokenReview, TokenReviewSpec, TokenReviewStatus};
-use k8s_openapi::api::core::v1::{Pod, Secret};
+use k8s_openapi::api::core::v1::{ConfigMap, Pod, Secret};
 use kube::api::{
     Api, ApiResource, DeleteParams, DynamicObject, GroupVersionKind, ListParams, Patch,
     PatchParams, PostParams, Preconditions,
@@ -112,8 +114,8 @@ pub trait KubeApi: Send + Sync {
     ) -> Result<(), ApiError>;
 }
 
-/// `Charter` resources (as JSON: the store keeps every field it does not know) and their
-/// `ControllerRevision`s.
+/// `Charter` resources (as JSON: the store keeps every field it does not know), their
+/// `ControllerRevision`s, and the control-plane audit ConfigMaps.
 #[async_trait]
 pub trait CharterApi: Send + Sync {
     async fn get(&self, namespace: &str, name: &str) -> Result<Option<Value>, ApiError>;
@@ -155,6 +157,23 @@ pub trait CharterApi: Send + Sync {
         revision: &ControllerRevision,
     ) -> Result<ControllerRevision, ApiError>;
     async fn delete_revision(&self, namespace: &str, name: &str) -> Result<(), ApiError>;
+    /// `GET configmaps/<name>`; `None` when there is none.
+    async fn get_config_map(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<Option<ConfigMap>, ApiError>;
+    async fn create_config_map(
+        &self,
+        namespace: &str,
+        config_map: &ConfigMap,
+    ) -> Result<ConfigMap, ApiError>;
+    /// `PUT` with the `resourceVersion` in `config_map.metadata` (a stale one is a conflict).
+    async fn replace_config_map(
+        &self,
+        namespace: &str,
+        config_map: &ConfigMap,
+    ) -> Result<ConfigMap, ApiError>;
 }
 
 /// The `ApiResource` of `charters.agentsc.io/v1alpha1`.
@@ -208,6 +227,10 @@ impl KubeClient {
     }
 
     fn revisions(&self, namespace: &str) -> Api<ControllerRevision> {
+        Api::namespaced(self.client.clone(), namespace)
+    }
+
+    fn config_maps(&self, namespace: &str) -> Api<ConfigMap> {
         Api::namespaced(self.client.clone(), namespace)
     }
 
@@ -432,6 +455,37 @@ impl CharterApi for KubeClient {
                 e => Err(e),
             },
         }
+    }
+
+    async fn get_config_map(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<Option<ConfigMap>, ApiError> {
+        Ok(self.config_maps(namespace).get_opt(name).await?)
+    }
+
+    async fn create_config_map(
+        &self,
+        namespace: &str,
+        config_map: &ConfigMap,
+    ) -> Result<ConfigMap, ApiError> {
+        Ok(self
+            .config_maps(namespace)
+            .create(&Self::post_params(), config_map)
+            .await?)
+    }
+
+    async fn replace_config_map(
+        &self,
+        namespace: &str,
+        config_map: &ConfigMap,
+    ) -> Result<ConfigMap, ApiError> {
+        let name = config_map.metadata.name.clone().unwrap_or_default();
+        Ok(self
+            .config_maps(namespace)
+            .replace(&name, &Self::post_params(), config_map)
+            .await?)
     }
 }
 

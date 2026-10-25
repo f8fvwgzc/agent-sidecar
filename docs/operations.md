@@ -853,6 +853,18 @@ Two caches, both revalidating, neither ever serving something the origin would n
 - **Console ↔ control plane.** Every API `GET` carries an `ETag` and answers `304 Not Modified` to a matching `If-None-Match`; the console keeps the last body per URL and revalidates. An unchanged graph or trace list costs a round trip and no payload. Console files are `no-cache` (revalidated on every load); `vendor/` files, versioned in their names, are immutable for a year.
 - **Service to service.** A `GET`/`HEAD` the app answers with `Cache-Control: max-age=N` is kept for `N` seconds (at most `--mesh-cache-max-age`, default 300) by the sidecars on both ends of the call, keyed by service, caller, agent, method, path and the response's `Vary` headers. A hit carries `Age` and `x-agentsc-cache: hit` and still writes its `service_call` record. A write through a sidecar empties that service's entries in it. Nothing is kept without `Cache-Control`, with `no-store`, `no-cache` or `private`, or for anything but a `200`. `--mesh-cache-bytes 0` turns it off. `InvokeAgent` and `http` tools are never cached.
 
+### Control-plane audit in the stores
+
+Every store keeps the control-plane audit (who changed which charter, approvals, issuance, connections; design §8.5) as well as writing it to embassy's stdout:
+
+| Store | Where | Read it |
+| --- | --- | --- |
+| `file:<dir>` | `<dir>/.audit.jsonl` | `tail <dir>/.audit.jsonl` |
+| `sqlite:<path>` | table `cp_audit` (append-only) | `sqlite3 -readonly` (below) |
+| `kubernetes` | ConfigMaps `agentsc-cp-audit-0` … `agentsc-cp-audit-15` in the control-plane namespace, JSON lines in `records.jsonl`, about 256 KiB each; the newest ~4 MiB are kept, the oldest segment is reused | `kubectl -n agentsc-system get cm -l agentsc.io/cp-audit -o jsonpath='{range .items[*]}{.data.records\.jsonl}{end}' \| jq -c -s 'sort_by(.ts)[]'` (the segments come in name order, so sort by `ts`) |
+
+The kubernetes store needs the chart's Role `agentsc-embassy-cp-audit` (`get`/`update` on those 16 names, `create`). If a record cannot be stored (RBAC, quota, the API server), the action still happens and its line is still on stdout; embassy logs `persisting a control-plane audit record failed` and counts it: `GET /api/v1/readyz` answers `"cp_audit": {"persisted": true, "append_failures": 1, "last_error": "..."}`. Alert on `append_failures` above 0. The ring is bounded: ship embassy's stdout to append-only storage for longer retention.
+
 ### The SQLite store
 
 `embassy serve --store sqlite:<path>` keeps charters, their history, memory, proposals and the control-plane audit in one database file (WAL mode; the schema is `services/embassy/src/store/schema.sql`). Compared with `file:<dir>` it adds integrity the file layout cannot: foreign keys with cascades, unique and partial indexes on every query path, and triggers that keep versions monotonic, refuse a second decision on a proposal and refuse `UPDATE`/`DELETE` on the audit ([ADR 0003](adr/0003-sqlite-store-schema.md)). There is no external editor for it (edit charters through the API, the console or `kubectl`), so there is no poll. Back it up by copying the file while embassy is stopped, or with `sqlite3 <path> ".backup <copy>"` while it runs; query it read-only with `sqlite3 -readonly <path>`, for example:

@@ -1017,6 +1017,34 @@ impl Store for FileStore {
         Ok(())
     }
 
+    async fn cp_audit(&self, limit: usize) -> Result<Vec<CpAuditRecord>, StoreError> {
+        let path = self.audit_path();
+        let text = {
+            let _guard = self.audit_lock.lock().await;
+            match tokio::fs::read_to_string(&path).await {
+                Ok(t) => t,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+                Err(e) => return Err(io_err(path.display(), e)),
+            }
+        };
+        let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+        let mut out = Vec::new();
+        for (i, line) in lines
+            .iter()
+            .enumerate()
+            .skip(lines.len().saturating_sub(limit))
+        {
+            match serde_json::from_str(line) {
+                Ok(r) => out.push(r),
+                // a line edited by hand is skipped, not the whole log
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), line = i + 1, error = %e, "unreadable control-plane audit line")
+                }
+            }
+        }
+        Ok(out)
+    }
+
     fn subscribe(&self) -> broadcast::Receiver<StoreEvent> {
         self.tx.subscribe()
     }

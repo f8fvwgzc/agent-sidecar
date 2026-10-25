@@ -11,7 +11,7 @@ The agent-sidecar control plane for Kubernetes 1.29 or newer (design: `docs/desi
 | `agentsc-sidecar-injector`, `agentsc-charter-validator` | Mutating webhook for pods labelled `agentsc.io/inject: "true"` in namespaces labelled `agentsc.io/injection=enabled`; validating webhook for Charters. The chart never renders a `caBundle`. |
 | ValidatingAdmissionPolicy and Binding `agentsc-sidecar-integrity` | Only where the cluster serves `admissionregistration.k8s.io/v1` ValidatingAdmissionPolicy (Kubernetes 1.30+). The API server's own check of agent pods after every webhook; see [Sidecar integrity](#sidecar-integrity). |
 | Secrets `embassy-config`, `agentsc-session-key` | The ControlPlaneConfig (API tokens as SHA-256 only, the sidecar image allow-list) and the session-cookie key. |
-| RBAC | ClusterRole `agentsc-embassy` (both service accounts; the design's rules plus `delete` on `charters`, see below), Role `agentsc-embassy-secrets` (embassy-ca only), user ClusterRoles `agentsc-charter-view` and `agentsc-charter-edit`. |
+| RBAC | ClusterRole `agentsc-embassy` (both service accounts; the design's rules plus `delete` on `charters`, see below), Role `agentsc-embassy-secrets` (embassy-ca only), Role `agentsc-embassy-cp-audit` (both service accounts; the control-plane audit, see below), user ClusterRoles `agentsc-charter-view` and `agentsc-charter-edit`. |
 | NetworkPolicy `embassy` (optional) | Port 15012 open to sidecars, port 8080 only for `networkPolicy.httpFrom`. |
 
 ## Install
@@ -90,11 +90,13 @@ name them yet, so they are listed here; integration folds them into design §13.
 | Control-plane and CA addresses | Not passed: the injector sets `AGENTSC_CONTROL_PLANE=embassy.<cp-namespace>.svc:15012` and `AGENTSC_CA_ADDRESS=embassy-ca.<cp-namespace>.svc:15012` from `--cp-namespace` and the Service names of §13, which the chart fixes. |
 | Webhook entry names | `agentsc-sidecar-injector` has one entry `sidecar-injector.agentsc.io`; `agentsc-charter-validator` has one entry `charter-validator.agentsc.io`. The caBundle reconciler sets `clientConfig.caBundle` on every entry it reads from the live object. |
 | `delete` on `charters` | ClusterRole `agentsc-embassy` has the §13 verbs plus `delete`: `DELETE /api/v1/services/{ns}/{svc}` (§10, admin) deletes the service's Charter in the kubernetes store. |
+| Control-plane audit | The kubernetes store keeps the control-plane audit (§8.5: who changed which charter, approvals, issuance, connections) in a ring of 16 ConfigMaps `agentsc-cp-audit-0` .. `agentsc-cp-audit-15` in the release namespace, about 256 KiB of JSON lines each (the newest ~4 MiB are kept; `kubectl get cm -l agentsc.io/cp-audit`). Role `agentsc-embassy-cp-audit` grants `get`/`update` on exactly those names and `create` in the release namespace, nothing else on ConfigMaps. They are not part of the release, so `helm uninstall` keeps them. `GET /api/v1/readyz` reports `cp_audit.append_failures`. |
 
 ## Security notes
 
 - Writing a `Charter` is equivalent to the agentsc **admin** role for that service: the validating webhook checks the charter and the policy, but no role-on-diff check applies to kubectl. Grant `agentsc-charter-edit` accordingly (`rbac.charterEditAggregatesTo`, default: the built-in `admin` role only).
 - Kubernetes cannot restrict `create` by resource name, so embassy-ca may create any Secret in the release namespace; it can read and update only `agentsc-ca`, `embassy-tls` and `agentsc-session-key`.
+- For the same reason embassy and embassy-ca may create any ConfigMap in the release namespace; they can read and update only the 16 `agentsc-cp-audit-<n>` segments. Whoever may update ConfigMaps in that namespace can edit the control-plane audit: keep that namespace to control-plane admins, and ship embassy's stdout (every record is also a JSON line there) to append-only storage.
 
 ## Upgrading from v0.1 (explicit sidecars)
 
