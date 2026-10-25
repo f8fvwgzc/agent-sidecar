@@ -128,7 +128,7 @@
           "additionalProperties": {
             "type": "string"
           },
-          "description": "service name → `host:port` override of `<service>.<namespace>.svc.cluster.local:50002`.",
+          "description": "peer (`<service>`, or `<service>.<namespace>` for another namespace, as the tools name it)\n→ `host:port` override of `<service>.<namespace>.svc.<cluster domain>:<port>`. The peer\nis still verified by its SPIFFE ID, whatever the address.",
           "default": {}
         }
       }
@@ -289,7 +289,7 @@
             "string",
             "null"
           ],
-          "description": "`service` tools: target service. `agent` tools: remote service (omit for local)."
+          "description": "`service` tools: target service. `agent` tools: remote service (omit for local). A service\nof this charter's namespace is `<service>`; one in another namespace is\n`<service>.<namespace>` (charter schema level 5)."
         },
         "method": {
           "type": [

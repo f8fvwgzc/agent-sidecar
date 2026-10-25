@@ -324,7 +324,7 @@ async fn mesh_mtls_end_to_end() {
     let channel = agentscd::tls::client_channel(
         &billing,
         &inv_mesh.to_string(),
-        "inventory.agentsc-demo.svc.cluster.local",
+        "spiffe://agentsc/ns/agentsc-demo/svc/inventory",
     )
     .unwrap();
     let mut mesh = MeshClient::new(channel);
@@ -348,7 +348,7 @@ async fn mesh_mtls_end_to_end() {
     let channel = agentscd::tls::client_channel(
         &orders_tls.material,
         &inv_mesh.to_string(),
-        "inventory.agentsc-demo.svc.cluster.local",
+        "spiffe://agentsc/ns/agentsc-demo/svc/inventory",
     )
     .unwrap();
     let mut mesh = MeshClient::new(channel);
@@ -746,7 +746,7 @@ async fn a_peer_run_that_read_untrusted_data_cannot_write_with_authz_taint() {
     let channel = agentscd::tls::client_channel(
         &orders,
         &inventory.mesh_addr.unwrap().to_string(),
-        "inventory.agentsc-demo.svc.cluster.local",
+        "spiffe://agentsc/ns/agentsc-demo/svc/inventory",
     )
     .unwrap();
     let mut mesh = MeshClient::new(channel);
@@ -872,6 +872,18 @@ async fn a_configured_trust_domain_end_to_end() {
     )
     .await;
     let mut tools = tools_client(&root.join("sock-orders")).await;
+    // the runs these tool calls belong to (tool calls of no run are refused)
+    let _runs: Vec<_> = ["req-td"]
+        .into_iter()
+        .map(|id| {
+            orders.state.runs.start(
+                id,
+                "ops-assistant",
+                "local",
+                "4bf92f3577b34da6a3ce929d0e0e4736",
+            )
+        })
+        .collect();
     let ok = tools
         .invoke_service(stock_request("inventory", "req-td"))
         .await
@@ -894,7 +906,7 @@ async fn a_configured_trust_domain_end_to_end() {
     let channel = agentscd::tls::client_channel(
         &foreign,
         &inv_mesh,
-        "inventory.agentsc-demo.svc.cluster.local",
+        "spiffe://prod.example/ns/agentsc-demo/svc/inventory",
     )
     .unwrap();
     let mut req = tonic::Request::new(agentsc_proto::ServiceRequest {
@@ -921,6 +933,22 @@ async fn a_configured_trust_domain_end_to_end() {
         .expect("the refusal is audited");
     assert_eq!(refused["rule"], "authz.identity.invalid");
 
+    // 2b. and the other way round: a server is held to the caller's trust domain too — the
+    //     prod.example inventory is not spiffe://agentsc/ns/agentsc-demo/svc/inventory
+    let ours =
+        agentsc_pki::TlsMaterial::load(pki.tls_dir_in(root, TD, "agentsc-demo", "orders")).unwrap();
+    let channel = agentscd::tls::client_channel(
+        &ours,
+        &inv_mesh,
+        "spiffe://agentsc/ns/agentsc-demo/svc/inventory",
+    )
+    .unwrap();
+    let err = MeshClient::new(channel)
+        .invoke_service(agentsc_proto::ServiceRequest::default())
+        .await
+        .expect_err("refused in the handshake");
+    assert_eq!(err.code(), tonic::Code::Unavailable, "{err:?}");
+
     // 3. a sidecar does not start with a --tls-dir certificate of another trust domain
     let sock = root.join("sock-mismatch");
     let mut cfg = Config::for_test(
@@ -934,6 +962,152 @@ async fn a_configured_trust_domain_end_to_end() {
         format!("{err:#}").contains("does not match charter identity spiffe://prod.example/"),
         "{err:#}"
     );
+
+    orders.abort();
+    inventory.abort();
+}
+
+#[tokio::test]
+async fn a_peer_in_another_namespace_is_verified_by_its_spiffe_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let pki = Pki {
+        ca: agentsc_pki::ca_init().unwrap(),
+    };
+    let app = fake_inventory_app().await;
+
+    // inventory runs in namespace warehouse; its rules admit orders of agentsc-demo
+    let inv = inventory_in(root, "warehouse", "agentsc", "warehouse", app.port());
+    let inventory = start(
+        root,
+        "warehouse",
+        write_charter(root, "warehouse", &inv),
+        pki.tls_dir_in(root, "agentsc", "warehouse", "inventory"),
+    )
+    .await;
+    let addr = inventory.mesh_addr.unwrap().to_string();
+
+    // orders in agentsc-demo names it inventory.warehouse; a second tool names the same
+    // address plain `inventory`, i.e. inventory of orders' own namespace
+    let mut ord = orders_calling(root, "orders", "inventory.warehouse", &addr);
+    ord.mesh.peers.insert("inventory".into(), addr.clone());
+    let ops = ord
+        .agents
+        .iter_mut()
+        .find(|a| a.name == "ops-assistant")
+        .unwrap();
+    let mut here = ops
+        .tools
+        .iter()
+        .find(|t| t.name == "check_stock")
+        .unwrap()
+        .clone();
+    here.name = "check_stock_here".into();
+    here.service = Some("inventory".into());
+    ops.tools.push(here);
+    ord.guardrails
+        .allowed_tools
+        .get_mut("ops-assistant")
+        .unwrap()
+        .push("check_stock_here".into());
+    assert_eq!(ord.schema_level(), 5);
+    let orders = start(
+        root,
+        "orders",
+        write_charter(root, "orders", &ord),
+        pki.tls_dir(root, "orders"),
+    )
+    .await;
+    let mut tools = tools_client(&root.join("sock-orders")).await;
+    // the runs these tool calls belong to (tool calls of no run are refused)
+    let _runs: Vec<_> = ["req-xns", "req-wrong-id"]
+        .into_iter()
+        .map(|id| {
+            orders.state.runs.start(
+                id,
+                "ops-assistant",
+                "local",
+                "4bf92f3577b34da6a3ce929d0e0e4736",
+            )
+        })
+        .collect();
+
+    // 1. the cross-namespace call: the server is spiffe://agentsc/ns/warehouse/svc/inventory,
+    //    as the charter names it, and the callee sees the caller's identity
+    let ok = tools
+        .invoke_service(stock_request("inventory.warehouse", "req-xns"))
+        .await
+        .expect("a call to another namespace")
+        .into_inner();
+    assert_eq!(ok.status, 200);
+    let body: serde_json::Value = serde_json::from_slice(&ok.body).unwrap();
+    assert_eq!(body["sku"], "WIDGET-1");
+    let rec = audit_of(root, "warehouse")
+        .into_iter()
+        .find(|v| v["request_id"] == "req-xns")
+        .unwrap();
+    assert_eq!(rec["caller"], "spiffe://agentsc/ns/agentsc-demo/svc/orders");
+    assert_eq!(rec["decision"], "allow");
+    let out = audit_of(root, "orders")
+        .into_iter()
+        .find(|v| v["request_id"] == "req-xns" && v["kind"] == "service_call")
+        .unwrap();
+    assert_eq!(out["callee"], "inventory.warehouse GET /stock/WIDGET-1");
+
+    // 2. the same server under the name `inventory` is the wrong workload: the handshake fails
+    //    on the SPIFFE ID (a DNS name check never decides), and the callee never sees the call
+    let mut wrong = stock_request("inventory", "req-wrong-id");
+    wrong.ctx = ctx("check_stock_here", "req-wrong-id");
+    let err = tools
+        .invoke_service(wrong)
+        .await
+        .expect_err("not spiffe://agentsc/ns/agentsc-demo/svc/inventory");
+    assert_eq!(err.code(), tonic::Code::Unavailable, "{err:?}");
+    assert_eq!(
+        err.metadata().get("x-agentsc-rule").unwrap(),
+        "mesh.unavailable"
+    );
+    assert!(
+        err.message()
+            .contains("spiffe://agentsc/ns/warehouse/svc/inventory"),
+        "the error names what the peer presented: {err:?}"
+    );
+    assert!(
+        !audit_of(root, "warehouse")
+            .iter()
+            .any(|v| v["request_id"] == "req-wrong-id"),
+        "refused before any request"
+    );
+
+    // 3. with fixed material: the right SPIFFE ID passes, any other is refused
+    let mine = orders.state.tls().unwrap();
+    for (peer, ok) in [
+        ("spiffe://agentsc/ns/warehouse/svc/inventory", true),
+        ("spiffe://agentsc/ns/agentsc-demo/svc/inventory", false),
+        ("spiffe://prod.example/ns/warehouse/svc/inventory", false),
+    ] {
+        let channel = agentscd::tls::client_channel(&mine.material, &addr, peer).unwrap();
+        let mut req = tonic::Request::new(agentsc_proto::ServiceRequest {
+            method: "GET".into(),
+            path: "/stock/WIDGET-1".into(),
+            ..Default::default()
+        });
+        req.metadata_mut()
+            .insert("x-agentsc-agent", "ops-assistant".parse().unwrap());
+        let r = MeshClient::new(channel).invoke_service(req).await;
+        assert_eq!(r.is_ok(), ok, "{peer}: {r:?}");
+    }
+
+    // 4. default addresses use the peer's namespace and the cluster domain
+    let snap = orders.state.loaded().unwrap();
+    let mut no_peers = snap.charter.clone();
+    no_peers.mesh.peers.clear();
+    let p = orders.state.peer(&no_peers, "inventory.warehouse");
+    assert_eq!(p.address, "inventory.warehouse.svc.cluster.local:50002");
+    assert_eq!(p.identity, "spiffe://agentsc/ns/warehouse/svc/inventory");
+    let p = orders.state.peer(&no_peers, "inventory");
+    assert_eq!(p.address, "inventory.agentsc-demo.svc.cluster.local:50002");
+    assert_eq!(p.identity, "spiffe://agentsc/ns/agentsc-demo/svc/inventory");
 
     orders.abort();
     inventory.abort();

@@ -56,13 +56,23 @@ pub fn agent_call_target(namespace: &str, own_service: &str, callee: &str) -> Op
         Some((_, a)) => (own_service, a),
         None => (own_service, callee),
     };
-    (!agent.is_empty()).then(|| ids::agent(namespace, svc, agent))
+    let (svc, ns) = peer_in(namespace, svc);
+    (!agent.is_empty()).then(|| ids::agent(ns, svc, agent))
 }
 
 /// The app a `service_call` reaches: `callee` is `<service> <METHOD> <path>`.
 pub fn service_call_target(namespace: &str, callee: &str) -> Option<String> {
-    let svc = callee.split_whitespace().next()?;
-    Some(ids::app(namespace, svc))
+    let (svc, ns) = peer_in(namespace, callee.split_whitespace().next()?);
+    Some(ids::app(ns, svc))
+}
+
+/// A peer as charters and records name it, from `namespace`: `<service>`, or
+/// `<service>.<namespace>` in another namespace (CONTRACT.md §2). `(service, namespace)`.
+fn peer_in<'a>(namespace: &'a str, name: &'a str) -> (&'a str, &'a str) {
+    match agentsc_charter::split_peer(name) {
+        (svc, Some(ns)) => (svc, ns),
+        (svc, None) => (svc, namespace),
+    }
 }
 
 /// `scheme://host[:port]` of a URL (default ports left out), http and https only.
@@ -634,19 +644,22 @@ fn admitted_locally(c: &Charter, agent: &str) -> bool {
         .any(|r| r.identity == LOCAL_IDENTITY && r.agents.iter().any(|a| a == "*" || a == agent))
 }
 
-/// The node a declared tool reaches (design §10.1).
+/// The node a declared tool reaches (design §10.1). A `service` of the form
+/// `<service>.<namespace>` is in that namespace (CONTRACT.md §2).
 pub fn tool_target(
     namespace: &str,
     service: &str,
     t: &agentsc_charter::ToolSpec,
 ) -> Option<String> {
     match t.tool_type {
-        CharterToolType::Agent => Some(ids::agent(
-            namespace,
-            t.service.as_deref().unwrap_or(service),
-            t.agent.as_deref()?,
-        )),
-        CharterToolType::Service => Some(ids::app(namespace, t.service.as_deref()?)),
+        CharterToolType::Agent => {
+            let (svc, ns) = peer_in(namespace, t.service.as_deref().unwrap_or(service));
+            Some(ids::agent(ns, svc, t.agent.as_deref()?))
+        }
+        CharterToolType::Service => {
+            let (svc, ns) = peer_in(namespace, t.service.as_deref()?);
+            Some(ids::app(ns, svc))
+        }
         CharterToolType::Http => t
             .url
             .as_deref()
@@ -1095,6 +1108,36 @@ mod tests {
         assert_eq!(
             service_call_target("shop", "inventory GET /stock/1").as_deref(),
             Some("app:shop/inventory")
+        );
+        // a peer in another namespace is drawn there
+        assert_eq!(
+            service_call_target("shop", "inventory.warehouse GET /stock/1").as_deref(),
+            Some("app:warehouse/inventory")
+        );
+        assert_eq!(
+            agent_call_target("shop", "orders", "inventory.warehouse/stock-analyst").as_deref(),
+            Some("agent:warehouse/inventory/stock-analyst")
+        );
+        let tool = |service: &str| agentsc_charter::ToolSpec {
+            name: "t".into(),
+            description: "d".into(),
+            tool_type: CharterToolType::Service,
+            parameters: None,
+            service: Some(service.into()),
+            method: Some("GET".into()),
+            path: Some("/x".into()),
+            agent: None,
+            url: None,
+            label: None,
+            effect: None,
+        };
+        assert_eq!(
+            tool_target("shop", "orders", &tool("billing.finance")).as_deref(),
+            Some("app:finance/billing")
+        );
+        assert_eq!(
+            tool_target("shop", "orders", &tool("billing")).as_deref(),
+            Some("app:shop/billing")
         );
         assert_eq!(
             http_call_target("GET https://api.partner.example:443/eta?x=1").as_deref(),

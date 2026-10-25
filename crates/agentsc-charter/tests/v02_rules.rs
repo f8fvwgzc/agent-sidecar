@@ -627,7 +627,7 @@ fn rule8_service_accounts_are_dns_labels() {
 
 #[test]
 fn schema_level_is_1_without_v02_fields_and_2_with_any() {
-    assert_eq!(CHARTER_SCHEMA_LEVEL, 4);
+    assert_eq!(CHARTER_SCHEMA_LEVEL, 5);
     assert_eq!(orders().schema_level(), 1);
     assert_eq!(Charter::from_yaml(INVENTORY).unwrap().schema_level(), 1);
     assert_eq!(v02().schema_level(), 2);
@@ -691,6 +691,29 @@ fn schema_level_is_1_without_v02_fields_and_2_with_any() {
     accepts(&c);
     assert_eq!(c.schema_level(), 4);
     assert_eq!(c.level_fields(), vec![("authz.taint".to_string(), 4)]);
+    // a peer in another namespace is level 5, the tool listed once at its highest level
+    let mut c = orders();
+    c.agents[0].tools[0].label = Some(TaintLabel::Untrusted);
+    c.agents[0].tools[0].service = Some("orders.billing".into());
+    c.guardrails.allowed_services.clear();
+    c.mesh
+        .peers
+        .insert("inventory.warehouse".into(), "10.0.0.9:50002".into());
+    accepts(&c);
+    assert_eq!(c.schema_level(), 5);
+    assert_eq!(
+        c.level_fields(),
+        vec![
+            (
+                format!(
+                    "agents.{}.tools.{}",
+                    c.agents[0].name, c.agents[0].tools[0].name
+                ),
+                5
+            ),
+            ("mesh.peers.inventory.warehouse".to_string(), 5),
+        ]
+    );
     // empty v0.2 lists are not "used": they are not even serialized
     let c = Charter::from_yaml(&format!("{ORDERS}\nskills: []\n")).unwrap();
     assert_eq!(c.schema_level(), 1);

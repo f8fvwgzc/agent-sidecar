@@ -69,11 +69,15 @@ Principles every component honours:
 | `agentsc-runtime`    | `unix:/run/agentsc/runtime.sock`         | the local sidecar                 | gRPC            |
 | `embassy`            | none (Job) — see §7                      | —                                 | Kubernetes API  |
 
-Peer discovery: the mesh address of service `S` in namespace `N` is
+Peer discovery: a charter names a peer `S` (a service of its own namespace) or
+`S.N` (service `S` in namespace `N`, charter schema level 5) in `tools[].service`
+and `mesh.peers`. The mesh address of service `S` in namespace `N` is
 `S.N.svc.<cluster domain>:50002` (`--peer-address-template`, cluster domain
-`cluster.local` unless `--cluster-domain` says otherwise) unless `mesh.peers.S`
-in the charter overrides it. Every demo Service therefore exposes port `50002`
-(`mesh`) next to the app port.
+`cluster.local` unless `--cluster-domain` says otherwise) unless `mesh.peers`
+in the charter overrides it under the name the tools use. Whatever the address,
+the caller accepts only the peer's identity `spiffe://<trust domain>/ns/N/svc/S`
+(§5). Every demo Service therefore exposes port `50002` (`mesh`) next to the
+app port.
 
 Flags / environment of `agentscd` (flag wins over env):
 
@@ -116,7 +120,7 @@ service:
   service_accounts: [orders]   # v0.2: Kubernetes service accounts allowed to obtain this identity (default: [<service.name>])
 mesh:                          # optional
   port: 50002
-  peers: {}                    # service name → host:port override
+  peers: {}                    # peer (`inventory`, or `inventory.warehouse` for another namespace) → host:port override
 skills:                        # v0.2, at most 64
   - name: refund-policy        # DNS-1123 label, unique
     description: How to decide whether a refund is allowed.   # 1..=1024 characters
@@ -201,7 +205,8 @@ audit:
     properties: { order_id: { type: string } }
     required: [order_id]
   # type: service — call another (or this) service's HTTP API through the sidecar
-  service: orders              # target service name; this service's own name = local app
+  service: orders              # target service name; this service's own name = local app;
+                               # `<service>.<namespace>` = a service in another namespace (level 5)
   method: GET
   path: /orders/{order_id}     # `{param}` is substituted from the tool input; leftovers become the JSON body (POST/PUT/PATCH) or query (GET/DELETE)
                                # `{param?}` as the whole last segment is optional: /stock/{sku?} → /stock
@@ -241,6 +246,11 @@ literal segments, and one segment of one or more characters for each
 
 - `apiVersion` must be `agentsc.io/v1alpha1`, `kind` must be `Charter`.
 - Names (`service.name`, `service.namespace`, agent names) are DNS-1123 labels.
+- A peer named with a namespace (`tools[].service` of `service` and `agent`
+  tools, `mesh.peers` keys) is `<service>.<namespace>`, two DNS-1123 labels, and
+  never the charter's own namespace (that peer is written `<service>`, so every
+  rule names it one way). The rest of the charter names it the same way:
+  `guardrails.allowed_services` and the caller's `authz.services[].service`.
 - Agent names unique; tool names unique per agent.
 - `agent` tools only on orchestrators; a local `agent` tool (no `service`, or this service) must name an agent in this charter; an agent may not call itself.
 - `http` tool `url` is `http(s)://host[:port]/…` with no `{param}` and no userinfo before the path.
@@ -357,11 +367,14 @@ an oversized plain charter before it is parsed.
 
 - `Charter::schema_level()` is 1 for a charter that uses only v0.1 fields, 2 when it uses any
   v0.2 field (`skills`, `telemetry`, `service.service_accounts`, `agents[].skills`, `harness`,
-  `learning`; empty lists count as unused) and 3 when it uses a taint field (`agents[].taint`,
-  `tools[].label`, `tools[].effect`). `Charter::level_fields()` lists each such field with its
-  level. `CHARTER_SCHEMA_LEVEL` = 3 is the level this build understands (sent as
-  `Hello.charter_schema_level`); the control plane refuses to push a field to a connected
-  instance below its level, naming the field and the instances.
+  `learning`; empty lists count as unused), 3 when it uses a taint field (`agents[].taint`,
+  `tools[].label`, `tools[].effect`), 4 when it uses `authz.taint`, and 5 when it names a peer
+  in another namespace (`<service>.<namespace>` as a tool's `service` or a `mesh.peers` key: no
+  new field, but an older sidecar would take it for a service of its own namespace).
+  `Charter::level_fields()` lists each such field with its level (a tool once, at the highest).
+  `CHARTER_SCHEMA_LEVEL` = 5 is the level this build understands (sent as `Hello.charter_schema_level`); the control
+  plane refuses to push a field to a connected instance below its level, naming the field and
+  the instances.
 - **Restart-only fields**: a hot reload may not change `service.name`, `service.namespace`,
   `service.app_port`, `mesh.port`, `audit.sink`, `audit.file` or `telemetry.otlp_endpoint`
   (`agentsc_charter::diff::restart_required` lists the ones that differ). A sidecar refuses such

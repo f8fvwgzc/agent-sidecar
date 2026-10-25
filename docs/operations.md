@@ -690,6 +690,18 @@ The value is a SPIFFE trust domain name: `a-z`, `0-9`, `.`, `-` and `_`. Charter
 
 The cluster DNS domain (`cluster.local` unless set) is the last part of the `<svc>.<ns>.svc.<cluster domain>` DNS SAN of workload certificates (embassy `--cluster-domain` / `AGENTSC_CLUSTER_DOMAIN`) and of the sidecar's default peer address `{service}.{namespace}.svc.{cluster_domain}:{port}` (agentscd `--cluster-domain`). The chart sets both from `clusterDomain`.
 
+## Control-plane rate limits
+
+`embassy serve` limits two surfaces with token buckets, per process:
+
+| Surface | Key | Flags (env) | Default | Refusal |
+| --- | --- | --- | --- | --- |
+| `IssueCertificate` | the peer address, and a digest of the credential (each its own bucket; both must have a token) | `--issuance-rate-limit` (`AGENTSC_ISSUANCE_RATE_LIMIT`), `--issuance-burst` (`AGENTSC_ISSUANCE_BURST`) | 12 a minute, burst 20 | `RESOURCE_EXHAUSTED` with `retry-after` metadata; the first refusal of a run is a `cert_denied` control-plane audit record |
+| REST API (`/api/v1`) | the client's token name (or the remote address for the anonymous viewer) | `--api-rate-limit` (`AGENTSC_API_RATE_LIMIT`), `--api-burst` (`AGENTSC_API_BURST`) | 1200 a minute, burst 300 | HTTP 429 `rate_limited` with `Retry-After`; the first refusal of a run is logged as a warning |
+
+`0` turns a surface's limit off. The limit is checked before any other work, so a flood of bad
+credentials costs no TokenReview calls. With several embassy replicas each keeps its own buckets.
+
 ## Budgets on restart and with replicas
 
 Budgets live in the memory of each `agentscd` process. They are counted per agent name.
@@ -697,7 +709,7 @@ Budgets live in the memory of each `agentscd` process. They are counted per agen
 | Budget | How it is counted |
 | --- | --- |
 | `max_calls_per_minute` | A sliding 60-second window. It counts invocations of the agent on this replica that passed `authz.callers`, the agent lookup and the depth check. A call that a guardrail denies later still counts. Calls from a local orchestrator's `agent` tool count too. |
-| `max_cost_usd_per_day` | The sum of `cost_usd` of the agent's `model_call` records on this replica, per UTC day. It is checked once, at the start of an invocation. A running invocation can go over the limit. The `mock` model costs 0, so this budget never triggers with the mock. |
+| `max_cost_usd_per_day` | The cost of the agent's model calls on this replica, per UTC day, as the model gateway measured it from the provider's usage. It is checked at the start of an invocation and before every model call, which holds the most it can cost until it ends, so the limit is not passed. The `mock` model costs 0, so this budget never triggers with the mock. |
 | `max_steps` | Model calls per invocation. The runtime enforces it. No state is kept. |
 | `max_tokens_per_call` | `max_tokens` of each model call. The runtime enforces it. No state is kept. |
 | Agent-call depth | More than 4 nested agent calls are denied with `budget.max_depth`. Fixed, not configurable. |

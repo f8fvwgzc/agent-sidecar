@@ -262,9 +262,39 @@ pub struct ServeArgs {
         default_value = agentsc_common::identity::DEFAULT_CLUSTER_DOMAIN
     )]
     pub cluster_domain: String,
+    /// `IssueCertificate` requests per minute, per peer address and per credential (0 = no
+    /// limit; ratelimit.rs).
+    #[arg(long, env = "AGENTSC_ISSUANCE_RATE_LIMIT", default_value_t = crate::ratelimit::ISSUANCE_DEFAULT.per_minute)]
+    pub issuance_rate_limit: u32,
+    /// The burst of `--issuance-rate-limit`.
+    #[arg(long, env = "AGENTSC_ISSUANCE_BURST", default_value_t = crate::ratelimit::ISSUANCE_DEFAULT.burst)]
+    pub issuance_burst: u32,
+    /// REST API requests per minute, per client identity (or remote address when anonymous;
+    /// 0 = no limit; ratelimit.rs).
+    #[arg(long, env = "AGENTSC_API_RATE_LIMIT", default_value_t = crate::ratelimit::API_DEFAULT.per_minute)]
+    pub api_rate_limit: u32,
+    /// The burst of `--api-rate-limit`.
+    #[arg(long, env = "AGENTSC_API_BURST", default_value_t = crate::ratelimit::API_DEFAULT.burst)]
+    pub api_burst: u32,
 }
 
 impl ServeArgs {
+    /// `--issuance-rate-limit` and `--issuance-burst`.
+    pub fn issuance_limit(&self) -> crate::ratelimit::RateLimit {
+        crate::ratelimit::RateLimit {
+            per_minute: self.issuance_rate_limit,
+            burst: self.issuance_burst,
+        }
+    }
+
+    /// `--api-rate-limit` and `--api-burst`.
+    pub fn api_limit(&self) -> crate::ratelimit::RateLimit {
+        crate::ratelimit::RateLimit {
+            per_minute: self.api_rate_limit,
+            burst: self.api_burst,
+        }
+    }
+
     pub fn has(&self, c: Component) -> bool {
         self.components.has(c)
     }
@@ -296,6 +326,15 @@ impl ServeArgs {
         }
         if let Err(e) = agentsc_common::identity::check_cluster_domain(&self.cluster_domain) {
             errs.push(format!("--cluster-domain: {e}"));
+        }
+        for p in [
+            self.issuance_limit().problem("--issuance-burst"),
+            self.api_limit().problem("--api-burst"),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            errs.push(p);
         }
 
         let ca_material = self.ca_dir.is_some() || self.ca_secret.is_some();
@@ -734,6 +773,7 @@ pub async fn start(
                 dns_names: args.dns_names.clone(),
                 auto_adopt: args.auto_adopt,
                 trust_domain: args.trust_domain.clone(),
+                api_rate_limit: args.api_limit(),
                 ..Default::default()
             },
             shutdown.clone(),

@@ -25,6 +25,17 @@ use crate::tls::{CurrentCert, TlsCell, WorkloadTls};
 
 pub const MAX_DEPTH: u32 = 4;
 
+/// A mesh peer as [`AppState::peer`] resolves it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Peer {
+    pub service: String,
+    pub namespace: String,
+    /// Where its sidecar is dialled.
+    pub address: String,
+    /// `spiffe://<trust domain>/ns/<namespace>/svc/<service>`: what its certificate must be.
+    pub identity: String,
+}
+
 /// The charter the sidecar starts with, before any reload (design §6.1, §6.3.5).
 pub struct StartupCharter {
     pub charter: Charter,
@@ -348,17 +359,34 @@ impl AppState {
         format!("http://127.0.0.1:{}", self.app_port(l))
     }
 
-    /// A peer's mesh address: `mesh.peers`, else `--peer-address-template` (`{service}`,
-    /// `{namespace}`, `{cluster_domain}`, `{port}`).
-    pub fn peer_address(&self, charter: &Charter, service: &str) -> String {
-        charter.mesh.peers.get(service).cloned().unwrap_or_else(|| {
+    /// The peer the charter names `name` (`<service>`, or `<service>.<namespace>` in another
+    /// namespace, CONTRACT.md §2): its address — `mesh.peers[name]`, else
+    /// `--peer-address-template` with `{service}`, `{namespace}` (the peer's), `{cluster_domain}`
+    /// and `{port}` — and the SPIFFE ID its certificate must carry.
+    pub fn peer(&self, charter: &Charter, name: &str) -> Peer {
+        let (service, namespace) = match agentsc_charter::split_peer(name) {
+            (s, Some(ns)) => (s, ns),
+            (s, None) => (s, self.namespace.as_str()),
+        };
+        let address = charter.mesh.peers.get(name).cloned().unwrap_or_else(|| {
             self.config
                 .peer_address_template
                 .replace("{service}", service)
-                .replace("{namespace}", &self.namespace)
+                .replace("{namespace}", namespace)
                 .replace("{cluster_domain}", &self.config.cluster_domain)
                 .replace("{port}", &charter.mesh.port.to_string())
-        })
+        });
+        Peer {
+            service: service.to_string(),
+            namespace: namespace.to_string(),
+            identity: agentsc_charter::spiffe_id_in(&self.trust_domain, namespace, service),
+            address,
+        }
+    }
+
+    /// A peer's mesh address ([`AppState::peer`]).
+    pub fn peer_address(&self, charter: &Charter, name: &str) -> String {
+        self.peer(charter, name).address
     }
 
     /// Forget every cached peer channel (after `mesh.peers` changed or a renewal).
@@ -370,7 +398,10 @@ impl AppState {
         lock(&self.mesh_clients).len()
     }
 
-    /// A (cached, lazily connected) mTLS client for a peer service's sidecar.
+    /// A (cached, lazily connected) mTLS client for the sidecar of the peer the charter names
+    /// `service`: the server must chain to the mesh CA and be that peer's SPIFFE ID
+    /// ([`AppState::peer`]); the DNS name sent for SNI (`<svc>.<ns>.svc.<cluster domain>`) is
+    /// not checked.
     pub fn mesh_client(&self, l: &Loaded, service: &str) -> anyhow::Result<MeshClient<Channel>> {
         if let Some(c) = lock(&self.mesh_clients).get(service) {
             return Ok(c.clone());
@@ -378,15 +409,19 @@ impl AppState {
         let tls = self
             .tls()
             .ok_or_else(|| anyhow::anyhow!("mesh disabled: no TLS material loaded"))?;
-        let addr = self.peer_address(&l.charter, service);
-        let server_name = format!("{service}.{}.svc.cluster.local", self.namespace);
+        let peer = self.peer(&l.charter, service);
+        let sni = format!(
+            "{}.{}.svc.{}",
+            peer.service, peer.namespace, self.config.cluster_domain
+        );
         let cfg = crate::tls::mesh_client_config(
             tls.roots.clone(),
             Arc::new(CurrentCert(self.tls.clone())),
+            &peer.identity,
         )?;
         let channel = crate::tls::tls_channel(
-            &addr,
-            ServerName::try_from(server_name)?,
+            &peer.address,
+            ServerName::try_from(sni)?,
             cfg,
             // A backstop only: every mesh call carries the caller's own deadline (grpc-timeout),
             // which is never longer than what the callee lets its runtime run.

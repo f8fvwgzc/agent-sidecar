@@ -32,8 +32,10 @@ pub const MAX_TOKENS_PER_CALL_LIMIT: u32 = 128_000;
 /// The charter schema level this build understands: 1 = v0.1 fields only, 2 = v0.2
 /// (`skills`, `telemetry`, `service.service_accounts`, `agents[].skills/harness/learning`),
 /// 3 = taint policy (`agents[].taint`, `tools[].label`, `tools[].effect`), 4 = the taint rule
-/// for inbound service calls (`authz.taint`).
-pub const CHARTER_SCHEMA_LEVEL: u32 = 4;
+/// for inbound service calls (`authz.taint`), 5 = peers in another namespace
+/// (`<service>.<namespace>` in `tools[].service` or as a `mesh.peers` key, which an older
+/// sidecar would take for a service of its own namespace).
+pub const CHARTER_SCHEMA_LEVEL: u32 = 5;
 /// A charter is at most this many bytes, measured the same way whatever form it arrived in
 /// ([`Charter::validate`]): its JSON serialization and its plain YAML ([`Charter::to_yaml`], the
 /// text `CharterUpdate.charter_yaml` and the file store carry) are each at most this size, so a
@@ -311,7 +313,9 @@ pub struct RuntimeNote {
 pub struct MeshSpec {
     #[serde(default = "default_mesh_port")]
     pub port: u16,
-    /// service name → `host:port` override of `<service>.<namespace>.svc.cluster.local:50002`.
+    /// peer (`<service>`, or `<service>.<namespace>` for another namespace, as the tools name it)
+    /// → `host:port` override of `<service>.<namespace>.svc.<cluster domain>:<port>`. The peer
+    /// is still verified by its SPIFFE ID, whatever the address.
     #[serde(default)]
     pub peers: BTreeMap<String, String>,
 }
@@ -471,7 +475,9 @@ pub struct ToolSpec {
     /// JSON Schema object describing the tool input. Defaults per CONTRACT.md §3.1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parameters: Option<serde_json::Value>,
-    /// `service` tools: target service. `agent` tools: remote service (omit for local).
+    /// `service` tools: target service. `agent` tools: remote service (omit for local). A service
+    /// of this charter's namespace is `<service>`; one in another namespace is
+    /// `<service>.<namespace>` (charter schema level 5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -771,7 +777,9 @@ impl Charter {
     /// The fields above v0.1 the charter uses, as `(path, level)`: level 2 for the v0.2 fields
     /// (`skills`, `telemetry`, `service.service_accounts`, `agents[].skills`, `harness`,
     /// `learning`), 3 for the taint fields (`agents[].taint`, `tools[].label`, `tools[].effect`),
-    /// 4 for `authz.taint`. Empty lists count as unused: they are left out when the charter is
+    /// 4 for `authz.taint`, 5 for a peer in another namespace (a tool whose `service` is
+    /// `<service>.<namespace>`, a `mesh.peers` key of that form). A tool is listed once, at the
+    /// highest level it needs. Empty lists count as unused: they are left out when the charter is
     /// serialized.
     pub fn level_fields(&self) -> Vec<(String, u32)> {
         let mut out = Vec::new();
@@ -801,12 +809,49 @@ impl Charter {
                 out.push((format!("agents.{}.taint", a.name), 3));
             }
             for t in &a.tools {
-                if t.label.is_some() || t.effect.is_some() {
-                    out.push((format!("agents.{}.tools.{}", a.name, t.name), 3));
-                }
+                let level = if t.service.as_deref().is_some_and(is_qualified_peer) {
+                    5
+                } else if t.label.is_some() || t.effect.is_some() {
+                    3
+                } else {
+                    continue;
+                };
+                out.push((format!("agents.{}.tools.{}", a.name, t.name), level));
             }
         }
+        for key in self.mesh.peers.keys().filter(|k| is_qualified_peer(k)) {
+            out.push((format!("mesh.peers.{key}"), 5));
+        }
         out
+    }
+
+    /// The service and namespace of the peer a charter names `name` ([`split_peer`]): another
+    /// namespace's for `<service>.<namespace>`, this charter's for `<service>`.
+    pub fn peer_of<'a>(&'a self, name: &'a str) -> (&'a str, &'a str) {
+        match split_peer(name) {
+            (service, Some(namespace)) => (service, namespace),
+            (service, None) => (service, &self.service.namespace),
+        }
+    }
+
+    /// A peer name with a namespace (`tools[].service`, a `mesh.peers` key): two DNS-1123
+    /// labels, and not this charter's own namespace (that peer is plain `<service>`, so every
+    /// rule names it one way).
+    fn check_peer_name(&self, name: &str) -> Result<(), String> {
+        let (service, Some(namespace)) = split_peer(name) else {
+            return Ok(());
+        };
+        if !is_dns_label(service) || !is_dns_label(namespace) {
+            return Err(format!(
+                "{name:?} is not <service> or <service>.<namespace> (DNS-1123 labels)"
+            ));
+        }
+        if namespace == self.service.namespace {
+            return Err(format!(
+                "{name:?} is in this charter's own namespace: name it {service:?}"
+            ));
+        }
+        Ok(())
     }
 
     /// The lowest `charter_schema_level` that can load this charter: the highest level in
@@ -886,13 +931,12 @@ impl Charter {
         spiffe_id_in(trust_domain, &self.service.namespace, &self.service.name)
     }
 
-    /// Mesh address of a peer service (CONTRACT.md §2).
+    /// Mesh address of a peer service (CONTRACT.md §2) in the default cluster domain: `mesh.peers`,
+    /// else `<service>.<namespace>.svc.cluster.local:<mesh.port>` with the peer's namespace.
     pub fn peer_address(&self, service: &str) -> String {
         self.mesh.peers.get(service).cloned().unwrap_or_else(|| {
-            format!(
-                "{service}.{}.svc.cluster.local:{}",
-                self.service.namespace, self.mesh.port
-            )
+            let (svc, ns) = self.peer_of(service);
+            format!("{svc}.{ns}.svc.{DEFAULT_CLUSTER_DOMAIN}:{}", self.mesh.port)
         })
     }
 
@@ -1085,11 +1129,22 @@ impl Charter {
                         }
                     }
                 }
+                if let Some(s) = &tool.service
+                    && tool.tool_type != ToolType::Http
+                    && let Err(e) = self.check_peer_name(s)
+                {
+                    errs.push(format!("{tt}: service {e}"));
+                }
                 if let Some(m) = &tool.method
                     && !is_method(m)
                 {
                     errs.push(format!("{tt}: method {m:?} is not an HTTP method"));
                 }
+            }
+        }
+        for key in self.mesh.peers.keys() {
+            if let Err(e) = self.check_peer_name(key) {
+                errs.push(format!("mesh.peers: {e}"));
             }
         }
         for (agent_name, tools) in &self.guardrails.allowed_tools {
@@ -1394,6 +1449,22 @@ pub fn check_otlp_endpoint(endpoint: &str) -> Result<(), String> {
         return Err("may not have a path (other than /)".into());
     }
     Ok(())
+}
+
+/// A peer as a charter names it (`tools[].service`, `mesh.peers` keys, and the targets of
+/// `guardrails.allowed_services` and the caller's `authz.services`): `<service>` is in the
+/// charter's own namespace, `<service>.<namespace>` in another (CONTRACT.md §2). Returns the
+/// service and, for the second form, the namespace.
+pub fn split_peer(name: &str) -> (&str, Option<&str>) {
+    match name.split_once('.') {
+        Some((service, namespace)) => (service, Some(namespace)),
+        None => (name, None),
+    }
+}
+
+/// `<service>.<namespace>`: a peer in another namespace ([`split_peer`]).
+pub fn is_qualified_peer(name: &str) -> bool {
+    name.contains('.')
 }
 
 /// The workload identity of `namespace/service` in the [`DEFAULT_TRUST_DOMAIN`]; an install with
@@ -1774,6 +1845,66 @@ mod tests {
         );
         let inv = Charter::from_yaml(INVENTORY).expect("inventory charter valid");
         assert!(inv.agent("stock-analyst").is_some());
+    }
+
+    #[test]
+    fn peers_in_another_namespace_are_service_dot_namespace() {
+        let mut c = Charter::from_yaml(ORDERS).unwrap();
+        assert_eq!(split_peer("inventory"), ("inventory", None));
+        assert_eq!(
+            split_peer("inventory.warehouse"),
+            ("inventory", Some("warehouse"))
+        );
+        assert_eq!(c.peer_of("inventory"), ("inventory", "agentsc-demo"));
+        assert_eq!(c.peer_of("inventory.warehouse"), ("inventory", "warehouse"));
+        assert_eq!(
+            c.peer_address("inventory.warehouse"),
+            "inventory.warehouse.svc.cluster.local:50002"
+        );
+        // a stock tool to inventory in namespace warehouse, with an address override
+        let stock = |service: &str| ToolSpec {
+            name: "remote_stock".into(),
+            description: "stock elsewhere".into(),
+            tool_type: ToolType::Service,
+            parameters: None,
+            service: Some(service.into()),
+            method: Some("GET".into()),
+            path: Some("/stock".into()),
+            agent: None,
+            url: None,
+            label: None,
+            effect: None,
+        };
+        c.agents[0].tools.push(stock("inventory.warehouse"));
+        c.mesh
+            .peers
+            .insert("inventory.warehouse".into(), "10.0.0.9:50002".into());
+        c.validate().expect("a qualified peer validates");
+        assert_eq!(c.schema_level(), 5);
+        for (bad, why) in [
+            (
+                "inventory.Warehouse",
+                "is not <service> or <service>.<namespace>",
+            ),
+            (
+                "inventory.warehouse.svc",
+                "is not <service> or <service>.<namespace>",
+            ),
+            (".warehouse", "is not <service> or <service>.<namespace>"),
+            (
+                "inventory.agentsc-demo",
+                "own namespace: name it \"inventory\"",
+            ),
+        ] {
+            let mut b = c.clone();
+            b.agents[0].tools.last_mut().unwrap().service = Some(bad.into());
+            let e = b.validate().unwrap_err().to_string();
+            assert!(e.contains(why), "{bad}: {e}");
+            let mut p = Charter::from_yaml(ORDERS).unwrap();
+            p.mesh.peers.insert(bad.into(), "10.0.0.9:50002".into());
+            let e = p.validate().unwrap_err().to_string();
+            assert!(e.contains("mesh.peers") && e.contains(why), "{bad}: {e}");
+        }
     }
 
     #[test]

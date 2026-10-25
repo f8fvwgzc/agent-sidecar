@@ -44,6 +44,8 @@ pub struct HubOptions {
     /// `--trust-domain`: the only trust domain `Connect` accepts sidecar identities in, and the
     /// one the API writes peer identities in.
     pub trust_domain: String,
+    /// `--api-rate-limit` / `--api-burst` (ratelimit.rs).
+    pub api_rate_limit: crate::ratelimit::RateLimit,
 }
 
 impl Default for HubOptions {
@@ -53,6 +55,7 @@ impl Default for HubOptions {
             auto_adopt: false,
             keepalive: crate::api::KEEPALIVE,
             trust_domain: agentsc_common::identity::DEFAULT_TRUST_DOMAIN.into(),
+            api_rate_limit: crate::ratelimit::API_DEFAULT,
         }
     }
 }
@@ -90,6 +93,8 @@ pub struct Hub {
     pub registry: Registry,
     pub opts: HubOptions,
     pub ready: Readiness,
+    /// The REST API's rate limit, one bucket per client (ratelimit.rs).
+    pub api_limiter: crate::ratelimit::RateLimiter,
     /// Cancelled on shutdown: live streams end.
     pub shutdown: CancellationToken,
 }
@@ -249,6 +254,7 @@ impl Hub {
             graph: GraphState::default(),
             traces: TraceStore::default(),
             registry: Registry::default(),
+            api_limiter: crate::ratelimit::RateLimiter::new(opts.api_rate_limit),
             opts,
             ready: Readiness::default(),
             shutdown,

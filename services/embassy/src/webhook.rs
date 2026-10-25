@@ -1447,8 +1447,10 @@ mod tests {
     fn the_sidecar_gets_embassys_trust_domain() {
         let mut inj = injector(InjectTemplate::default());
         inj.trust_domain = "prod.example".into();
-        let d = mutate(&inj, &create(pod(annotated())));
-        let env = d.patch[1]["value"][0]["env"].as_array().unwrap().clone();
+        let d = mutate(&inj, &OFF, &create(pod(annotated())));
+        // the init containers are agentsc-runtime, then agentscd (which alone has env)
+        let env = d.patch[1]["value"][1]["env"].as_array().unwrap().clone();
+        assert_eq!(d.patch[1]["value"][1]["name"], SIDECAR_CONTAINER);
         let td: Vec<&Value> = env
             .iter()
             .filter(|e| e["name"] == "AGENTSC_TRUST_DOMAIN")

@@ -90,6 +90,8 @@ pub struct Issuer {
     cp_audit: Arc<CpAudit>,
     cp_namespace: String,
     kube: KubeSource,
+    /// Requests per peer address and per credential (ratelimit.rs).
+    limiter: crate::ratelimit::RateLimiter,
 }
 
 impl std::fmt::Debug for Issuer {
@@ -113,7 +115,8 @@ pub fn issuance_service(ctx: &ServeContext) -> anyhow::Result<CertificateAuthori
         ctx.cp_audit.clone(),
         ctx.args.cp_namespace.clone(),
         None,
-    );
+    )
+    .with_rate_limit(ctx.args.issuance_limit());
     Ok(issuer.into_server())
 }
 
@@ -216,6 +219,12 @@ pub fn pod_service(pod: &Pod) -> Option<String> {
 }
 
 impl Issuer {
+    /// Replace the default `IssueCertificate` rate limit (`--issuance-rate-limit`).
+    pub fn with_rate_limit(mut self, limit: crate::ratelimit::RateLimit) -> Self {
+        self.limiter = crate::ratelimit::RateLimiter::new(limit);
+        self
+    }
+
     /// `kube`: the Kubernetes API to use; `None` = the in-cluster client, created when the
     /// first Kubernetes token arrives.
     pub fn new(
@@ -236,6 +245,7 @@ impl Issuer {
                 Some(k) => KubeSource::Fixed(k),
                 None => KubeSource::Lazy(tokio::sync::OnceCell::new()),
             },
+            limiter: crate::ratelimit::RateLimiter::new(crate::ratelimit::ISSUANCE_DEFAULT),
         }
     }
 
@@ -633,6 +643,27 @@ impl CertificateAuthority for Issuer {
         &self,
         request: Request<CertificateRequest>,
     ) -> Result<Response<CertificateResponse>, Status> {
+        // Before any work (a TokenReview, a pod read): the request's address and credential
+        // each have a budget (ratelimit.rs). A key's first refusal is audited, later ones counted.
+        let keys = crate::ratelimit::issuance_keys(request.remote_addr(), request.get_ref());
+        if let Err(l) = self.limiter.check(&keys) {
+            if l.first {
+                let d = Denial {
+                    code: Code::ResourceExhausted,
+                    message: format!(
+                        "rate limited ({}): too many certificate requests; retry in {} s",
+                        l.key,
+                        l.retry_after_secs()
+                    ),
+                    who: None,
+                };
+                self.audit(request.get_ref(), None, None, Err(&d)).await;
+            }
+            return Err(crate::ratelimit::resource_exhausted(
+                "certificate requests",
+                &l,
+            ));
+        }
         self.issue(request.into_inner()).await.map(Response::new)
     }
 }
@@ -774,6 +805,59 @@ mod tests {
             namespace: ns.into(),
             service: svc.into(),
         }
+    }
+
+    /// The audit finding: IssueCertificate had no rate limit. A credential's (and an address's)
+    /// budget runs out before any verification work; the refusal is RESOURCE_EXHAUSTED with
+    /// `retry-after`, audited once per run of refusals, and another credential is not affected.
+    #[tokio::test]
+    async fn issue_certificate_is_rate_limited_before_any_verification() {
+        let mut r = rig(vec![]);
+        r.issuer = r.issuer.with_rate_limit(crate::ratelimit::RateLimit {
+            per_minute: 1,
+            burst: 2,
+        });
+        let call = |token: &str| Request::new(k8s_request("shop", "orders", token));
+        for _ in 0..2 {
+            let e = r.issuer.issue_certificate(call("tok")).await.unwrap_err();
+            assert_ne!(e.code(), Code::ResourceExhausted, "within the burst: {e:?}");
+        }
+        for _ in 0..3 {
+            let e = r.issuer.issue_certificate(call("tok")).await.unwrap_err();
+            assert_eq!(e.code(), Code::ResourceExhausted, "{e:?}");
+            let secs: u64 = e
+                .metadata()
+                .get("retry-after")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!((1..=60).contains(&secs), "{secs}");
+        }
+        let e = r
+            .issuer
+            .issue_certificate(call("another"))
+            .await
+            .unwrap_err();
+        assert_ne!(
+            e.code(),
+            Code::ResourceExhausted,
+            "another credential has its own budget"
+        );
+
+        let mut limited = 0;
+        while let Ok(rec) = r.audit.try_recv() {
+            if rec
+                .reason
+                .as_deref()
+                .is_some_and(|x| x.starts_with("rate limited"))
+            {
+                assert_eq!(rec.action, CpAction::CertDenied);
+                limited += 1;
+            }
+        }
+        assert_eq!(limited, 1, "the first refusal is audited, the rest counted");
     }
 
     fn k8s_request(ns: &str, svc: &str, token: &str) -> CertificateRequest {

@@ -40,6 +40,7 @@ pub mod hub;
 pub mod issuance;
 pub mod k8s;
 pub mod names;
+pub mod ratelimit;
 pub mod registry;
 pub mod serve;
 pub mod servingcert;

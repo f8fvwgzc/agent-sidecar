@@ -261,7 +261,14 @@ pub fn router(hub: Arc<Hub>, api: bool, ui: Option<crate::ui_assets::UiFiles>) -
         .route("/healthz", get(handlers::healthz))
         .route("/readyz", get(handlers::readyz));
     if api {
-        app = app.nest("/api/v1", api_routes());
+        // every client's requests are rate limited (ratelimit.rs), probes excepted
+        app = app.nest(
+            "/api/v1",
+            api_routes().route_layer(axum::middleware::from_fn_with_state(
+                hub.clone(),
+                crate::ratelimit::api_layer,
+            )),
+        );
     } else {
         app = app.nest("/api/v1", Router::new().fallback(api_not_found));
     }
