@@ -320,7 +320,8 @@ impl Mesh for MeshService {
         };
         let cacheable = crate::cache::cacheable_method(&method);
         if cacheable && let Some(hit) = self.state.response_cache.get(&cache_key, &req.headers) {
-            let out = json!({ "status": hit.response.status, "body": body_value(&hit.response.body) });
+            let out =
+                json!({ "status": hit.response.status, "body": body_value(&hit.response.body) });
             self.state
                 .audit
                 .write(record(&callee, &input, out).verdict(&v));

@@ -166,7 +166,10 @@ mod tests {
         assert_eq!(cache_control("index.html"), "no-cache");
         assert_eq!(cache_control("js/main.js"), "no-cache");
         assert_eq!(cache_control("vendor/SHA256SUMS"), "no-cache");
-        assert_eq!(cache_control("vendor/d3.v7.9.0.min.js"), VENDOR_CACHE_CONTROL);
+        assert_eq!(
+            cache_control("vendor/d3.v7.9.0.min.js"),
+            VENDOR_CACHE_CONTROL
+        );
     }
 
     #[test]

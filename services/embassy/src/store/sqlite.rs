@@ -265,7 +265,10 @@ fn memory_of(conn: &Connection, row: &ServiceRow) -> Result<MemoryDoc, StoreErro
 
 /// Replace the notes of a service with `doc`'s and set its memory version.
 fn write_notes(conn: &Connection, service_id: i64, doc: &MemoryDoc) -> Result<(), StoreError> {
-    conn.execute("DELETE FROM notes WHERE service_id = ?1", params![service_id])?;
+    conn.execute(
+        "DELETE FROM notes WHERE service_id = ?1",
+        params![service_id],
+    )?;
     let mut insert = conn.prepare_cached(
         "INSERT INTO notes (service_id, agent, seq, id, text, source, request_id, trace_id, \
          approved_by, ts, expires_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
@@ -775,7 +778,8 @@ impl Store for SqliteStore {
             }
             sql.push_str(" ORDER BY p.ts DESC, p.id DESC");
             let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query_map(rusqlite::params_from_iter(args.iter()), proposal_from_row)?;
+            let rows =
+                stmt.query_map(rusqlite::params_from_iter(args.iter()), proposal_from_row)?;
             Ok(rows.collect::<Result<Vec<_>, _>>()?)
         })
         .await
@@ -802,11 +806,7 @@ impl Store for SqliteStore {
     ) -> Result<ProposalPut, StoreError> {
         let key = ServiceKey::new(&proposal.namespace, &proposal.service);
         checked_key(&key)?;
-        let (k, p, dedup_key) = (
-            key.clone(),
-            proposal.clone(),
-            dedup_key.map(str::to_string),
-        );
+        let (k, p, dedup_key) = (key.clone(), proposal.clone(), dedup_key.map(str::to_string));
         let put = self
             .run(move |conn| {
                 let tx = conn.transaction()?;
@@ -1013,7 +1013,13 @@ mod tests {
             .unwrap();
         assert_eq!(
             tables,
-            ["charter_versions", "cp_audit", "notes", "proposals", "services"]
+            [
+                "charter_versions",
+                "cp_audit",
+                "notes",
+                "proposals",
+                "services"
+            ]
         );
         // a newer file is refused
         conn.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
@@ -1043,14 +1049,19 @@ mod tests {
         insert(1).unwrap();
         insert(2).unwrap();
         let (version, epoch): (i64, Option<String>) = conn
-            .query_row("SELECT version, epoch FROM services WHERE id = 1", [], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
+            .query_row(
+                "SELECT version, epoch FROM services WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .unwrap();
         assert_eq!((version, epoch.as_deref()), (2, Some("e1")));
         assert!(
-            conn.execute("UPDATE charter_versions SET yaml = 'b: 2' WHERE version = 1", [])
-                .is_err(),
+            conn.execute(
+                "UPDATE charter_versions SET yaml = 'b: 2' WHERE version = 1",
+                []
+            )
+            .is_err(),
             "stored versions are immutable"
         );
         assert!(
@@ -1066,7 +1077,9 @@ mod tests {
             .unwrap();
         assert_eq!(left, 0);
         let version: i64 = conn
-            .query_row("SELECT version FROM services WHERE id = 1", [], |r| r.get(0))
+            .query_row("SELECT version FROM services WHERE id = 1", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(version, 2);
 
@@ -1076,7 +1089,10 @@ mod tests {
             [],
         )
         .unwrap();
-        assert!(conn.execute("UPDATE cp_audit SET actor = 'bob'", []).is_err());
+        assert!(
+            conn.execute("UPDATE cp_audit SET actor = 'bob'", [])
+                .is_err()
+        );
         assert!(conn.execute("DELETE FROM cp_audit", []).is_err());
 
         // a decided proposal stays decided
@@ -1122,6 +1138,9 @@ mod tests {
             assert_eq!(status_of(status_str(s)), s);
         }
         assert_eq!(enum_text(&crate::api::types::CpResult::Denied), "denied");
-        assert_eq!(enum_text(&crate::api::types::CpAction::CharterPut), "charter_put");
+        assert_eq!(
+            enum_text(&crate::api::types::CpAction::CharterPut),
+            "charter_put"
+        );
     }
 }

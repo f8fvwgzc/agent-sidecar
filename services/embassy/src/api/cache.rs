@@ -119,7 +119,15 @@ pub async fn conditional(req: Request, next: Next) -> Response {
     }
     if none_match(&if_none_match, &etag) {
         parts.status = StatusCode::NOT_MODIFIED;
-        parts.headers.remove(header::CONTENT_LENGTH);
+        // A 304 carries no body; its Content-Length, if any, is the selected representation's
+        // (RFC 9110 §8.6). axum would otherwise write the empty body's `0`, which is wrong.
+        match body.size_hint().exact() {
+            Some(n) => parts.headers.insert(
+                header::CONTENT_LENGTH,
+                HeaderValue::from_str(&n.to_string()).expect("digits are ASCII"),
+            ),
+            None => parts.headers.remove(header::CONTENT_LENGTH),
+        };
         return Response::from_parts(parts, Body::empty());
     }
     Response::from_parts(parts, body)
@@ -209,15 +217,9 @@ mod tests {
         let r = app().oneshot(req("/json", Some(&tag))).await.unwrap();
         assert_eq!(r.status(), 304);
         assert_eq!(r.headers()[header::ETAG], tag);
-        assert!(r.headers().get(header::CONTENT_LENGTH).is_none());
-        assert!(
-            r.into_body()
-                .collect()
-                .await
-                .unwrap()
-                .to_bytes()
-                .is_empty()
-        );
+        // the representation's length, not the empty body's (hyper drops it on the wire anyway)
+        assert_eq!(r.headers()[header::CONTENT_LENGTH], "7");
+        assert!(r.into_body().collect().await.unwrap().to_bytes().is_empty());
 
         let other = HeaderValue::from_static("\"h-00000000000000000000000000000000\"");
         let r = app().oneshot(req("/json", Some(&other))).await.unwrap();
@@ -229,7 +231,10 @@ mod tests {
         let r = app().oneshot(req("/versioned", None)).await.unwrap();
         assert_eq!(r.headers()[header::ETAG], "\"3\"");
         let three = HeaderValue::from_static("\"3\"");
-        let r = app().oneshot(req("/versioned", Some(&three))).await.unwrap();
+        let r = app()
+            .oneshot(req("/versioned", Some(&three)))
+            .await
+            .unwrap();
         assert_eq!(r.status(), 304);
         assert_eq!(r.headers()[header::ETAG], "\"3\"");
     }

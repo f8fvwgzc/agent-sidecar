@@ -63,7 +63,11 @@ async fn versions_epochs_history_and_revisions() {
     // the first charter needs If-None-Match: *
     assert_eq!(
         store
-            .put_charter(&key, &Precondition::Version("0".into()), write(&orders_yaml()))
+            .put_charter(
+                &key,
+                &Precondition::Version("0".into()),
+                write(&orders_yaml())
+            )
             .await,
         Err(StoreError::NotFound)
     );
@@ -73,7 +77,10 @@ async fn versions_epochs_history_and_revisions() {
         .unwrap();
     assert_eq!(v1.version, "1");
     assert!(!v1.epoch.is_empty());
-    assert_eq!(store.list_services().await.unwrap(), [key.clone()]);
+    assert_eq!(
+        store.list_services().await.unwrap(),
+        std::slice::from_ref(&key)
+    );
     let got = store.get_charter(&key).await.unwrap();
     assert_eq!(got, v1);
 
@@ -107,7 +114,10 @@ async fn versions_epochs_history_and_revisions() {
         hist.iter().map(|h| h.version.as_str()).collect::<Vec<_>>(),
         ["2", "1"]
     );
-    assert!(hist.iter().all(|h| h.actor == "alice" && h.sha256.len() == 64));
+    assert!(
+        hist.iter()
+            .all(|h| h.actor == "alice" && h.sha256.len() == 64)
+    );
     assert_eq!(store.get_revision(&key, "1").await.unwrap(), orders_yaml());
     assert_eq!(store.get_revision(&key, "2").await.unwrap(), v2_yaml);
     assert_eq!(
@@ -174,7 +184,10 @@ async fn events_are_broadcast() {
             actor,
             source,
         } => {
-            assert_eq!((k, epoch, version), (key.clone(), v1.epoch, "1".to_string()));
+            assert_eq!(
+                (k, epoch, version),
+                (key.clone(), v1.epoch, "1".to_string())
+            );
             assert_eq!((actor.name.as_str(), source), ("alice", ChangeSource::Api));
         }
         other => panic!("{other:?}"),
@@ -214,17 +227,12 @@ async fn memory_is_versioned_and_pruned_by_charter_writes() {
     agents.insert("faq".to_string(), vec![note("c")]);
     agents.insert("empty".to_string(), vec![]);
     assert_eq!(
-        store
-            .put_memory(&key, "3", agents.clone(), &alice())
-            .await,
+        store.put_memory(&key, "3", agents.clone(), &alice()).await,
         Err(StoreError::Conflict {
             current: "0".into()
         })
     );
-    let m1 = store
-        .put_memory(&key, "0", agents, &alice())
-        .await
-        .unwrap();
+    let m1 = store.put_memory(&key, "0", agents, &alice()).await.unwrap();
     assert_eq!(m1.version, "1");
     assert_eq!(
         m1.agents.keys().cloned().collect::<Vec<_>>(),
@@ -338,7 +346,10 @@ async fn proposals_dedup_list_and_decide() {
         .approve_proposal(&key, "p1", "0", &alice())
         .await
         .unwrap();
-    assert_eq!((m.version.as_str(), d.status), ("1", ProposalStatus::Approved));
+    assert_eq!(
+        (m.version.as_str(), d.status),
+        ("1", ProposalStatus::Approved)
+    );
     assert_eq!(m.agents["helper"][0].text, "short note");
     assert_eq!(m.agents["helper"][0].source, NoteSource::Review);
     assert_eq!(m.agents["helper"][0].approved_by.as_deref(), Some("alice"));
@@ -369,7 +380,10 @@ async fn proposals_dedup_list_and_decide() {
         .reject_proposal(&key, "p3", "1", &alice())
         .await
         .unwrap();
-    assert_eq!((m.version.as_str(), d.status), ("1", ProposalStatus::Rejected));
+    assert_eq!(
+        (m.version.as_str(), d.status),
+        ("1", ProposalStatus::Rejected)
+    );
     // a proposal of another service, or an unknown one
     assert_eq!(
         store
@@ -409,7 +423,7 @@ async fn pending_adoptions_live_in_memory() {
     store.put_pending_adoption(adoption.clone()).await.unwrap();
     assert_eq!(
         store.list_pending_adoptions().await.unwrap(),
-        [adoption.clone()]
+        std::slice::from_ref(&adoption)
     );
     assert_eq!(
         store.take_pending_adoption(&key, "b").await,

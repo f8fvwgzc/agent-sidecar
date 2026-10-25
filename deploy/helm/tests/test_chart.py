@@ -101,7 +101,7 @@ def parse_args(args: list[str]) -> tuple[str, dict[str, list[str]]]:
     sub, rest = args[0], args[1:]
     out: dict[str, list[str]] = {}
     for a in rest:
-        m = re.fullmatch(r"--([a-z][a-z-]*)(?:=(.*))?", a)
+        m = re.fullmatch(r"--([a-z][a-z0-9-]*)(?:=(.*))?", a)
         assert m, f"argument {a!r} is not --flag[=value]"
         out.setdefault(m.group(1), []).append(m.group(2) or "")
     return sub, out

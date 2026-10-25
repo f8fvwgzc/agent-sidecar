@@ -151,7 +151,11 @@ fn entry_size(key: &Key, resp: &ServiceResponse, vary: &[(String, String)]) -> u
         + key.method.len()
         + key.path.len()
         + resp.body.len()
-        + resp.headers.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>()
+        + resp
+            .headers
+            .iter()
+            .map(|(k, v)| k.len() + v.len())
+            .sum::<usize>()
         + vary.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>()
         + 64
 }
@@ -256,7 +260,9 @@ impl ResponseCache {
         response
             .headers
             .insert("age".to_string(), age.as_secs().to_string());
-        response.headers.insert(HEADER.to_string(), "hit".to_string());
+        response
+            .headers
+            .insert(HEADER.to_string(), "hit".to_string());
         Some(Hit { response, age })
     }
 
@@ -388,27 +394,47 @@ mod tests {
     #[test]
     fn the_app_decides_with_cache_control() {
         let cap = Duration::from_secs(300);
-        assert_eq!(freshness(&resp(200, &[], "x"), cap), None, "no Cache-Control: no cache");
+        assert_eq!(
+            freshness(&resp(200, &[], "x"), cap),
+            None,
+            "no Cache-Control: no cache"
+        );
         assert_eq!(
             freshness(&resp(200, &[("Cache-Control", "max-age=30")], "x"), cap),
             Some(Duration::from_secs(30))
         );
         assert_eq!(
-            freshness(&resp(200, &[("cache-control", "public, s-maxage=20, max-age=30")], "x"), cap),
+            freshness(
+                &resp(
+                    200,
+                    &[("cache-control", "public, s-maxage=20, max-age=30")],
+                    "x"
+                ),
+                cap
+            ),
             Some(Duration::from_secs(20)),
             "s-maxage wins: this is a shared cache"
         );
         assert_eq!(
-            freshness(&resp(200, &[("Cache-Control", "max-age=\"900\"")], "x"), cap),
+            freshness(
+                &resp(200, &[("Cache-Control", "max-age=\"900\"")], "x"),
+                cap
+            ),
             Some(cap),
             "capped by --mesh-cache-max-age"
         );
         assert_eq!(
-            freshness(&resp(200, &[("Cache-Control", "max-age=30"), ("Age", "25")], "x"), cap),
+            freshness(
+                &resp(200, &[("Cache-Control", "max-age=30"), ("Age", "25")], "x"),
+                cap
+            ),
             Some(Duration::from_secs(5))
         );
         assert_eq!(
-            freshness(&resp(200, &[("Cache-Control", "max-age=30"), ("Age", "30")], "x"), cap),
+            freshness(
+                &resp(200, &[("Cache-Control", "max-age=30"), ("Age", "30")], "x"),
+                cap
+            ),
             None
         );
         for forbidden in [
@@ -427,7 +453,10 @@ mod tests {
             );
         }
         assert_eq!(
-            freshness(&resp(200, &[("Cache-Control", "max-age=30"), ("Vary", "*")], "x"), cap),
+            freshness(
+                &resp(200, &[("Cache-Control", "max-age=30"), ("Vary", "*")], "x"),
+                cap
+            ),
             None
         );
         for status in [201, 204, 301, 404, 500] {
@@ -438,7 +467,9 @@ mod tests {
             );
         }
         assert!(cacheable_method("GET") && cacheable_method("HEAD"));
-        assert!(!cacheable_method("POST") && !cacheable_method("DELETE") && !cacheable_method("get"));
+        assert!(
+            !cacheable_method("POST") && !cacheable_method("DELETE") && !cacheable_method("get")
+        );
     }
 
     #[test]
@@ -446,29 +477,58 @@ mod tests {
         let cache = ResponseCache::new(1 << 20, MIN);
         let t0 = Instant::now();
         let none = headers(&[]);
-        assert!(cache.store_at(key("/stock"), &resp(200, &[("Cache-Control", "max-age=10")], "{\"n\":1}"), &none, t0));
+        assert!(cache.store_at(
+            key("/stock"),
+            &resp(200, &[("Cache-Control", "max-age=10")], "{\"n\":1}"),
+            &none,
+            t0
+        ));
         assert_eq!(cache.len(), 1);
-        let hit = cache.get_at(&key("/stock"), &none, t0 + Duration::from_secs(3)).unwrap();
+        let hit = cache
+            .get_at(&key("/stock"), &none, t0 + Duration::from_secs(3))
+            .unwrap();
         assert_eq!(hit.age, Duration::from_secs(3));
         assert_eq!(hit.response.headers["age"], "3");
         assert_eq!(hit.response.headers[HEADER], "hit");
         assert_eq!(hit.response.body, b"{\"n\":1}");
         assert_eq!(cache.get_at(&key("/other"), &none, t0), None);
-        assert_eq!(cache.get_at(&key("/stock"), &none, t0 + Duration::from_secs(10)), None, "expired");
+        assert_eq!(
+            cache.get_at(&key("/stock"), &none, t0 + Duration::from_secs(10)),
+            None,
+            "expired"
+        );
         assert_eq!(cache.len(), 0, "an expired entry is dropped on the way out");
 
         // a response that was already a hit elsewhere: its age carries over, its TTL shrinks
-        let aged = resp(200, &[("Cache-Control", "max-age=10"), ("Age", "4"), (HEADER, "hit")], "x");
+        let aged = resp(
+            200,
+            &[
+                ("Cache-Control", "max-age=10"),
+                ("Age", "4"),
+                (HEADER, "hit"),
+            ],
+            "x",
+        );
         assert!(cache.store_at(key("/aged"), &aged, &none, t0));
-        let hit = cache.get_at(&key("/aged"), &none, t0 + Duration::from_secs(2)).unwrap();
+        let hit = cache
+            .get_at(&key("/aged"), &none, t0 + Duration::from_secs(2))
+            .unwrap();
         assert_eq!(hit.age, Duration::from_secs(6));
-        assert_eq!(cache.get_at(&key("/aged"), &none, t0 + Duration::from_secs(6)), None);
+        assert_eq!(
+            cache.get_at(&key("/aged"), &none, t0 + Duration::from_secs(6)),
+            None
+        );
 
         // not stored: a response the app did not mark, or a disabled cache
         assert!(!cache.store_at(key("/plain"), &resp(200, &[], "x"), &none, t0));
         let off = ResponseCache::disabled();
         assert!(!off.enabled());
-        assert!(!off.store_at(key("/stock"), &resp(200, &[("Cache-Control", "max-age=10")], "x"), &none, t0));
+        assert!(!off.store_at(
+            key("/stock"),
+            &resp(200, &[("Cache-Control", "max-age=10")], "x"),
+            &none,
+            t0
+        ));
         assert_eq!(off.get_at(&key("/stock"), &none, t0), None);
     }
 
@@ -478,18 +538,34 @@ mod tests {
         let t0 = Instant::now();
         let en = headers(&[("Accept-Language", "en")]);
         let de = headers(&[("accept-language", "de")]);
-        let r = resp(200, &[("Cache-Control", "max-age=10"), ("Vary", "Accept-Language")], "hello");
+        let r = resp(
+            200,
+            &[("Cache-Control", "max-age=10"), ("Vary", "Accept-Language")],
+            "hello",
+        );
         assert!(cache.store_at(key("/greet"), &r, &en, t0));
         assert!(cache.get_at(&key("/greet"), &en, t0).is_some());
-        assert_eq!(cache.get_at(&key("/greet"), &de, t0), None, "another language is a miss");
+        assert_eq!(
+            cache.get_at(&key("/greet"), &de, t0),
+            None,
+            "another language is a miss"
+        );
         assert_eq!(cache.get_at(&key("/greet"), &headers(&[]), t0), None);
 
         let mut other = key("/greet");
         other.service = "orders".into();
-        assert!(cache.store_at(other.clone(), &resp(200, &[("Cache-Control", "max-age=10")], "o"), &en, t0));
+        assert!(cache.store_at(
+            other.clone(),
+            &resp(200, &[("Cache-Control", "max-age=10")], "o"),
+            &en,
+            t0
+        ));
         assert_eq!(cache.invalidate_service("inventory"), 1);
         assert_eq!(cache.get_at(&key("/greet"), &en, t0), None);
-        assert!(cache.get_at(&other, &en, t0).is_some(), "another service's entries stay");
+        assert!(
+            cache.get_at(&other, &en, t0).is_some(),
+            "another service's entries stay"
+        );
         cache.clear();
         assert!(cache.is_empty());
         assert_eq!(cache.bytes(), 0);
@@ -513,7 +589,11 @@ mod tests {
         assert_eq!(cache.get_at(&key("/b"), &none, t0), None);
         assert!(cache.bytes() <= size * 2);
         // bigger than the whole cache: not stored
-        let huge = resp(200, &[("Cache-Control", "max-age=60")], &"x".repeat(size * 3));
+        let huge = resp(
+            200,
+            &[("Cache-Control", "max-age=60")],
+            &"x".repeat(size * 3),
+        );
         assert!(!cache.store_at(key("/huge"), &huge, &none, t0));
         assert_eq!(cache.len(), 2);
         // storing the same key again replaces, never double-counts

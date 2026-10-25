@@ -329,7 +329,8 @@ impl ServeArgs {
         if self.auto_adopt {
             if !self.store.as_ref().is_some_and(StoreSpec::is_local) {
                 errs.push(
-                    "--auto-adopt works only with --store file:<dir> or --store sqlite:<path>".into(),
+                    "--auto-adopt works only with --store file:<dir> or --store sqlite:<path>"
+                        .into(),
                 );
             }
             if !self.has(Controlplane) {
@@ -993,10 +994,17 @@ mod tests {
         let e = errors(&["--components", "ui", "--http3"]);
         assert!(e.contains("--http3 needs --http-tls"), "{e}");
         // with TLS it is fine
-        parse(&["--components", "ui", "--tls-dir", "/tls", "--http-tls", "--http3"])
-            .unwrap()
-            .validate()
-            .unwrap();
+        parse(&[
+            "--components",
+            "ui",
+            "--tls-dir",
+            "/tls",
+            "--http-tls",
+            "--http3",
+        ])
+        .unwrap()
+        .validate()
+        .unwrap();
         // --auto-adopt accepts the sqlite store like the file store
         parse(&[
             "--ca-dir",
@@ -1122,7 +1130,9 @@ mod tests {
         for components in ["ca", "ca,webhook"] {
             let e = errors(&["--components", components, "--ca-dir", "/ca"]);
             assert!(
-                e.contains("the ca component needs --store file:<dir> or --store kubernetes"),
+                e.contains(
+                    "the ca component needs --store file:<dir>, --store sqlite:<path> or --store kubernetes"
+                ),
                 "{components}: {e}"
             );
             assert!(e.contains("service.service_accounts"), "{e}");

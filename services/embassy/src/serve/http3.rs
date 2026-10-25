@@ -140,7 +140,9 @@ async fn connection(
                                 tracing::debug!(%peer, error = %e, "HTTP/3 request failed");
                             }
                         }
-                        Err(e) => tracing::debug!(%peer, error = %e, "HTTP/3 request headers failed"),
+                        Err(e) => {
+                            tracing::debug!(%peer, error = %e, "HTTP/3 request headers failed")
+                        }
                     }
                 });
             }
@@ -211,10 +213,18 @@ where
     for name in CONNECTION_HEADERS {
         parts.headers.remove(name);
     }
+    // like hyper: a 304 or 204 has no content, and we send no Content-Length with it
+    let no_content = matches!(
+        parts.status,
+        StatusCode::NOT_MODIFIED | StatusCode::NO_CONTENT
+    ) || parts.status.is_informational();
+    if no_content {
+        parts.headers.remove(header::CONTENT_LENGTH);
+    }
     stream
         .send_response(http::Response::from_parts(parts, ()))
         .await?;
-    if head_only {
+    if head_only || no_content {
         stream.finish().await?;
         return Ok(());
     }
@@ -245,7 +255,10 @@ mod tests {
 
     #[test]
     fn connection_headers_are_the_hop_by_hop_ones() {
-        let names: Vec<&str> = CONNECTION_HEADERS.iter().map(HeaderName::as_str).collect();
+        let names: Vec<String> = CONNECTION_HEADERS
+            .into_iter()
+            .map(|h| h.as_str().to_string())
+            .collect();
         assert_eq!(
             names,
             [

@@ -58,9 +58,9 @@ address of `--http-addr`, over UDP, next to the TCP listener:
   does. When UDP does not get through the console is exactly as before.
 - The serving certificate must be one the browser trusts for QUIC as for TLS over TCP (the same
   requirement `--http-tls` already has).
-- `Cargo.lock` gains the QUIC and HTTP/3 crates; a build with `--locked` needs the lock file
-  regenerated once (this change was written without compiling, at the author's request, so the
-  first `cargo build` after it updates the lock file and is the first compile of the new code).
+- `Cargo.lock` gains the QUIC and HTTP/3 crates (and `rusqlite` for ADR 0003). The code was
+  first written without compiling, at the author's request, then built, linted and tested in the
+  follow-up commit that also regenerated the lock file.
 - `curl --http3-only https://<host>:8080/api/v1/healthz` is the smoke test; Chrome's
   `chrome://net-export` or the DevTools protocol column shows `h3` once the switch happened.
 - The remaining hops stay where they are for reasons that do not change with this record: gRPC
