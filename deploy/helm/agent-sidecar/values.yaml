@@ -97,6 +97,9 @@ injection:
   # failurePolicy of the mutating webhook. Fail: pods in labelled namespaces are not created while
   # embassy-ca is unavailable (never unprotected). Ignore: they start without a sidecar.
   failurePolicy: Fail
+  # Without ANTHROPIC_API_KEY an agent whose model is not `mock` is refused. true: it runs on the
+  # deterministic mock instead (AGENTSC_MOCK_FALLBACK=1; demos only, never production).
+  mockFallback: false
   resources:
     requests:
       cpu: 50m

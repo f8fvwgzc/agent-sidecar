@@ -474,7 +474,7 @@ spec:
               value: /etc/agentsc/tls
             - name: RUST_LOG
               value: info
-            - name: ANTHROPIC_API_KEY           # unset = every agent runs on the mock model
+            - name: ANTHROPIC_API_KEY           # unset = only `model: mock` agents run
               valueFrom:
                 secretKeyRef:
                   name: agentsc-anthropic
@@ -523,7 +523,7 @@ What each part does:
 | ---- | ------- |
 | `AGENTSC_CHARTER` | Path of the charter file. The sidecar reads it once at start. |
 | `AGENTSC_TLS_DIR` | Folder with `ca.crt`, `tls.crt`, `tls.key`. The sidecar refuses to start if the identity in `tls.crt` does not match the charter's `service.name` and `service.namespace`. |
-| `ANTHROPIC_API_KEY` | Optional. With the key, agents call Claude. Without it, every agent uses the mock model. |
+| `ANTHROPIC_API_KEY` | With the key, agents call Claude. Without it, agents whose `model` is not `mock` are refused, unless `AGENTSC_MOCK_FALLBACK=1`. |
 | `run` (emptyDir) | Unix sockets between the sidecar and the agent runtime. The runtime is a child process in the same container. |
 | `agentsc-ready` | Calls `http://127.0.0.1:3500/readyz` from inside the container. Ready means the charter and TLS are loaded and the runtime answers. |
 | TLS Secret mounted only in `agentscd` | The app container never sees the private key. Keep it that way. |
@@ -629,7 +629,7 @@ A small team wants to move fast and stay safe. These are **recommendations**, no
 
 1. **Use one namespace for all services.** Each namespace gets its own CA, and cross-namespace mesh calls are not supported. One namespace keeps the mesh simple.
 2. **Start with one agent in one service.** Let only the local app call it (`identity: local`). Add a cross-service edge only when the first agent is useful.
-3. **Use the mock model in dev and CI.** Leave `ANTHROPIC_API_KEY` unset and every agent runs on the deterministic mock model. Or set `model: mock` on one agent to force the mock even when the key is set. The mock costs nothing and needs no network.
+3. **Use the mock model in dev and CI.** Leave `ANTHROPIC_API_KEY` unset and set `AGENTSC_MOCK_FALLBACK=1`: every agent runs on the deterministic mock model. Or set `model: mock` on one agent to force the mock even when the key is set. The mock costs nothing and needs no network.
 4. **Use real Claude through the Secret.** The Deployments read the key from the optional Secret `agentsc-anthropic`. Pods read it only at start, so restart them:
 
    ```bash

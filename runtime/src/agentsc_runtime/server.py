@@ -13,7 +13,7 @@ from pydantic import ValidationError
 from . import __version__
 from .agent import run_agent
 from .learning import LEARNER, Learner, Reflection
-from .models import Model, anthropic_available, model_for
+from .models import Model, ModelUnavailable, model_for, provider
 from .pb.agentsc.v1alpha1 import common_pb2, runtime_pb2, runtime_pb2_grpc
 from .sidecar import GrpcSidecar
 from .spec import AgentSpec
@@ -34,8 +34,7 @@ class RuntimeServicer(runtime_pb2_grpc.RuntimeServicer):
         self._models = models
 
     async def Health(self, request, context):
-        provider = "anthropic" if anthropic_available() else "mock"
-        return runtime_pb2.HealthResponse(ok=True, model_provider=provider, version=__version__)
+        return runtime_pb2.HealthResponse(ok=True, model_provider=provider(), version=__version__)
 
     async def Execute(self, request, context):
         try:
@@ -46,8 +45,11 @@ class RuntimeServicer(runtime_pb2_grpc.RuntimeServicer):
         remaining = context.time_remaining()
         deadline = time.monotonic() + remaining if remaining is not None else None
         ctx = CallContext(request.request_id, request.trace_id, request.span_id, spec.name, request.depth, deadline)
-        model = self._models(spec.model)
-        fallback = self._models(spec.harness.fallback_model) if spec.harness.fallback_model else None
+        try:
+            model = self._models(spec.model)
+            fallback = self._models(spec.harness.fallback_model) if spec.harness.fallback_model else None
+        except ModelUnavailable as e:
+            await context.abort(grpc.StatusCode.FAILED_PRECONDITION, f"agent {spec.name}: {e}")
         log.info(
             "execute agent=%s model=%s provider=%s request=%s",
             spec.name,
@@ -104,6 +106,10 @@ async def serve(listen: str, sidecar_address: str) -> None:
         __version__,
         listen,
         sidecar_address,
-        "anthropic" if anthropic_available() else "mock",
+        provider(),
     )
+    if provider() == "none":
+        log.warning(
+            "no ANTHROPIC_API_KEY: only agents with model: mock can run (AGENTSC_MOCK_FALLBACK=1 runs all on the mock)"
+        )
     await server.wait_for_termination()
