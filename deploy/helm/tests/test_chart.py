@@ -336,7 +336,11 @@ def test_configmaps_only_for_the_cp_audit_ring(default: list[dict], full: list[d
         )
         binding = find(docs, "RoleBinding", "agentsc-embassy-cp-audit")
         assert binding["metadata"]["namespace"] == NS
-        assert binding["roleRef"] == {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": role["metadata"]["name"]}
+        assert binding["roleRef"] == {
+            "apiGroup": "rbac.authorization.k8s.io",
+            "kind": "Role",
+            "name": role["metadata"]["name"],
+        }
         assert sorted(s["name"] for s in binding["subjects"]) == ["embassy", "embassy-ca"]
         assert {s["namespace"] for s in binding["subjects"]} == {NS}
 
