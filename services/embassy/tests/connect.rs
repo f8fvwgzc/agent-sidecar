@@ -830,6 +830,93 @@ async fn connect_shares_the_grpc_address_with_the_ca_component() {
     env.stop().await;
 }
 
+fn join_entry(name: &str, token: &str, svc: &str) -> embassy::config::JoinTokenEntry {
+    embassy::config::JoinTokenEntry {
+        name: name.into(),
+        sha256: embassy::token::sha256_hex(token),
+        namespace: NS.into(),
+        services: vec![svc.into()],
+        expires_at: "2099-01-01T00:00:00Z".parse().unwrap(),
+    }
+}
+
+#[tokio::test]
+async fn a_configured_trust_domain_is_issued_served_and_required() {
+    const TD: &str = "prod.example";
+    let token = "att_join-token-for-orders-in-prod-example";
+    let env = Env::start_with(Opts {
+        with_ca: true,
+        trust_domain: Some(TD.into()),
+        join_tokens: vec![join_entry("orders-prod", token, "orders")],
+        ..Default::default()
+    })
+    .await;
+
+    // 1. the serving certificate (what sidecars verify) names the trust domain
+    let serving = env.started().ctx.serving.as_ref().unwrap().current();
+    let leaf = agentsc_pki::certs_from_pem(&serving.cert_pem).unwrap();
+    assert_eq!(
+        agentsc_pki::uri_sans_of(&leaf[0]).unwrap(),
+        ["spiffe://prod.example/control-plane"]
+    );
+
+    // 2. IssueCertificate signs spiffe://prod.example/ns/shop/svc/orders, and the issuance is
+    //    audited under that identity
+    let (cert, key) = env.issue(token, NS, "orders").await.expect("issued");
+    let der = agentsc_pki::certs_from_pem(&cert).unwrap();
+    assert_eq!(
+        agentsc_pki::uri_sans_of(&der[0]).unwrap(),
+        ["spiffe://prod.example/ns/shop/svc/orders"]
+    );
+    eventually("cert_issue in the audit", || async {
+        audit_actions(&env).iter().any(|l| {
+            l["action"] == "cert_issue"
+                && l["actor"] == "sidecar:spiffe://prod.example/ns/shop/svc/orders/join:orders-prod"
+        })
+    })
+    .await;
+
+    // 3. Connect accepts that certificate ...
+    let mut sc = common::Sidecar::open(
+        env.channel(Some((cert, key))).await,
+        hello(NS, "orders", "orders-0"),
+    )
+    .await
+    .expect("an identity in the trust domain");
+    assert!(sc.next_within(Duration::from_millis(200)).await.is_none());
+    assert_eq!(service(&env, "orders").await.unwrap().instances.len(), 1);
+
+    // 4. ... and refuses one of the same CA in the default trust domain
+    let read = |f: &str| std::fs::read_to_string(env.dir.path().join("ca").join(f)).unwrap();
+    let default_ca = embassy::ca::CaMaterial::from_pems(&read("ca.crt"), &read("ca.key")).unwrap();
+    let key = rcgen::KeyPair::generate().unwrap();
+    let csr = rcgen::CertificateParams::default()
+        .serialize_request(&key)
+        .unwrap()
+        .pem()
+        .unwrap();
+    let foreign = default_ca
+        .sign_workload(
+            &agentsc_pki::verify_csr_p256(&csr).unwrap(),
+            NS,
+            "inventory",
+            Duration::from_secs(600),
+        )
+        .unwrap();
+    let err = common::Sidecar::open(
+        env.channel(Some((foreign.cert_pem, key.serialize_pem())))
+            .await,
+        hello(NS, "inventory", "inventory-0"),
+    )
+    .await
+    .err()
+    .expect("another trust domain");
+    assert_eq!(err.code(), tonic::Code::PermissionDenied, "{err:?}");
+    assert!(err.message().contains("prod.example"), "{err:?}");
+    assert!(service(&env, "inventory").await.is_none());
+    env.stop().await;
+}
+
 #[tokio::test]
 async fn external_edits_get_the_restart_only_check_while_instances_are_connected() {
     let env = Env::start().await;

@@ -68,6 +68,8 @@ spec:
             - --dns-name={{ . }}
             {{- end }}
             - --cp-namespace={{ $ns }}
+            - --trust-domain={{ .Values.trustDomain }}
+            - --cluster-domain={{ .Values.clusterDomain }}
             {{- if .Values.embassy.httpTLS }}
             - --http-tls
             {{- end }}

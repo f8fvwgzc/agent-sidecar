@@ -63,6 +63,8 @@ pub struct Shared {
     pub refuse_issue: AtomicBool,
     /// Lifetime of issued certificates.
     pub ttl: Mutex<Duration>,
+    /// The trust domain of issued certificates ("" = agentsc).
+    pub trust_domain: Mutex<String>,
 }
 
 #[derive(Clone)]
@@ -131,16 +133,17 @@ impl CertificateAuthority for Fake {
         if csr.public_key.algorithm() != &rcgen::PKCS_ECDSA_P256_SHA256 {
             return Err(Status::invalid_argument("ECDSA P-256 only"));
         }
-        let id = agentsc_common::identity::SpiffeId {
-            namespace: req.namespace.clone(),
-            service: req.service.clone(),
+        let td = match self.shared.trust_domain.lock().unwrap().as_str() {
+            "" => agentsc_common::identity::DEFAULT_TRUST_DOMAIN.to_string(),
+            td => td.to_string(),
         };
+        let id = agentsc_common::identity::SpiffeId::new(&td, &req.namespace, &req.service);
         let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
         params.distinguished_name = DistinguishedName::new();
         params
             .subject_alt_names
             .push(SanType::URI(Ia5String::try_from(id.uri()).unwrap()));
-        for dns in id.dns_names() {
+        for dns in id.dns_names(agentsc_common::identity::DEFAULT_CLUSTER_DOMAIN) {
             params
                 .subject_alt_names
                 .push(SanType::DnsName(Ia5String::try_from(dns).unwrap()));
@@ -181,6 +184,15 @@ impl FakeCp {
 
     pub async fn start_on(addr: &str, ca: PemBundle) -> FakeCp {
         Self::start_with(addr, ca, agentscd::tls::CONTROL_PLANE_URI).await
+    }
+
+    /// A control plane of an install with trust domain `td`: its serving certificate is
+    /// `spiffe://<td>/control-plane` and it issues identities in `td`.
+    pub async fn start_in(ca: PemBundle, td: &str) -> FakeCp {
+        let uri = agentsc_common::identity::control_plane_uri(td);
+        let cp = Self::start_with("127.0.0.1:0", ca, &uri).await;
+        *cp.shared.trust_domain.lock().unwrap() = td.to_string();
+        cp
     }
 
     /// Serve with a certificate whose only URI SAN is `uri` (an impostor when it is not the

@@ -1,5 +1,10 @@
 //! One CA per cluster, one leaf per service, SPIFFE URI SAN + DNS SANs (CONTRACT.md §5).
-use agentsc_common::identity::SpiffeId;
+//!
+//! Leaves are issued in a trust domain and with DNS SANs under a cluster domain, both chosen by
+//! the install (`--trust-domain`, `--cluster-domain`); the functions without `_in` use
+//! [`DEFAULT_TRUST_DOMAIN`] and [`DEFAULT_CLUSTER_DOMAIN`]. Reading a certificate keeps whatever
+//! trust domain it names ([`spiffe_id_of`]); [`spiffe_id_in`] accepts only one.
+use agentsc_common::identity::{DEFAULT_CLUSTER_DOMAIN, DEFAULT_TRUST_DOMAIN, SpiffeId};
 use rcgen::string::Ia5String;
 use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
@@ -12,8 +17,8 @@ use time::{Duration, OffsetDateTime};
 mod signing;
 pub use signing::{
     BACKDATE, CaKeyPair, IssuedCert, IssuedKeyPair, VerifiedPublicKey, certs_from_pem,
-    certs_to_pem, issue_server_leaf, issue_workload_leaf, not_after_of, pem_block,
-    sole_spiffe_id_of, uri_sans_of, verify_csr_der_p256, verify_csr_p256,
+    certs_to_pem, issue_server_leaf, issue_workload_leaf, issue_workload_leaf_in, not_after_of,
+    pem_block, sole_spiffe_id_of, uri_sans_of, verify_csr_der_p256, verify_csr_p256,
 };
 
 pub const CA_COMMON_NAME: &str = "agentsc embassy CA";
@@ -69,17 +74,37 @@ pub fn ca_init() -> Result<PemBundle, PkiError> {
     })
 }
 
-/// Issue a leaf for `spiffe://agentsc/ns/<namespace>/svc/<service>` signed by the CA.
+/// Issue a leaf for `spiffe://agentsc/ns/<namespace>/svc/<service>` signed by the CA (the
+/// default trust and cluster domains; [`issue_leaf_in`] for others).
 pub fn issue_leaf(
     ca: &PemBundle,
     namespace: &str,
     service: &str,
     ttl_days: i64,
 ) -> Result<PemBundle, PkiError> {
-    let id = SpiffeId {
-        namespace: namespace.into(),
-        service: service.into(),
-    };
+    issue_leaf_in(
+        ca,
+        DEFAULT_TRUST_DOMAIN,
+        DEFAULT_CLUSTER_DOMAIN,
+        namespace,
+        service,
+        ttl_days,
+    )
+}
+
+/// Issue a leaf for `spiffe://<trust_domain>/ns/<namespace>/svc/<service>` with the DNS SANs of
+/// [`SpiffeId::dns_names`] under `cluster_domain`, signed by the CA.
+pub fn issue_leaf_in(
+    ca: &PemBundle,
+    trust_domain: &str,
+    cluster_domain: &str,
+    namespace: &str,
+    service: &str,
+    ttl_days: i64,
+) -> Result<PemBundle, PkiError> {
+    agentsc_common::identity::check_trust_domain(trust_domain).map_err(PkiError::Invalid)?;
+    agentsc_common::identity::check_cluster_domain(cluster_domain).map_err(PkiError::Invalid)?;
+    let id = SpiffeId::new(trust_domain, namespace, service);
     let ca_key = KeyPair::from_pem(&ca.key_pem)?;
     let issuer = Issuer::from_ca_cert_pem(&ca.cert_pem, ca_key)?;
     let key = KeyPair::generate()?;
@@ -101,7 +126,7 @@ pub fn issue_leaf(
     params
         .subject_alt_names
         .push(SanType::URI(Ia5String::try_from(id.uri())?));
-    for dns in id.dns_names() {
+    for dns in id.dns_names(cluster_domain) {
         params
             .subject_alt_names
             .push(SanType::DnsName(Ia5String::try_from(dns)?));
@@ -115,8 +140,21 @@ pub fn issue_leaf(
     })
 }
 
-/// The SPIFFE URI SAN of a DER certificate, if it has one in our trust domain.
+/// The first workload SPIFFE URI SAN of a DER certificate, in whatever trust domain it names.
 pub fn spiffe_id_of(der: &[u8]) -> Result<Option<SpiffeId>, PkiError> {
+    first_spiffe_id(der, SpiffeId::parse)
+}
+
+/// The first workload SPIFFE URI SAN of a DER certificate in `trust_domain`; `Ok(None)` when it
+/// has none there (another trust domain's identity is no identity of this install).
+pub fn spiffe_id_in(der: &[u8], trust_domain: &str) -> Result<Option<SpiffeId>, PkiError> {
+    first_spiffe_id(der, |u| SpiffeId::parse_in(u, trust_domain))
+}
+
+fn first_spiffe_id(
+    der: &[u8],
+    parse: impl Fn(&str) -> Option<SpiffeId>,
+) -> Result<Option<SpiffeId>, PkiError> {
     let (_, cert) =
         x509_parser::parse_x509_certificate(der).map_err(|e| PkiError::Parse(e.to_string()))?;
     let san = cert
@@ -124,7 +162,7 @@ pub fn spiffe_id_of(der: &[u8]) -> Result<Option<SpiffeId>, PkiError> {
         .map_err(|e| PkiError::Parse(e.to_string()))?;
     Ok(san.and_then(|ext| {
         ext.value.general_names.iter().find_map(|g| match g {
-            x509_parser::extensions::GeneralName::URI(u) => SpiffeId::parse(u),
+            x509_parser::extensions::GeneralName::URI(u) => parse(u),
             _ => None,
         })
     }))
@@ -170,8 +208,11 @@ impl TlsMaterial {
 
     pub fn from_pems(ca_pem: String, cert_pem: String, key_pem: String) -> Result<Self, PkiError> {
         let leaf = CertificateDer::from_pem_slice(cert_pem.as_bytes())?;
-        let identity = spiffe_id_of(&leaf)?
-            .ok_or_else(|| PkiError::Parse("tls.crt has no spiffe://agentsc/ URI SAN".into()))?;
+        let identity = spiffe_id_of(&leaf)?.ok_or_else(|| {
+            PkiError::Parse(
+                "tls.crt has no spiffe://<trust domain>/ns/<ns>/svc/<svc> URI SAN".into(),
+            )
+        })?;
         let _ = PrivateKeyDer::from_pem_slice(key_pem.as_bytes())?;
         Ok(Self {
             ca_pem,
@@ -218,6 +259,29 @@ mod tests {
         // The CA itself has no SPIFFE SAN and must not load as an identity.
         let ca_der = CertificateDer::from_pem_slice(ca.cert_pem.as_bytes()).unwrap();
         assert!(spiffe_id_of(&ca_der).unwrap().is_none());
+    }
+
+    #[test]
+    fn leaves_in_another_trust_and_cluster_domain() {
+        let ca = ca_init().unwrap();
+        let leaf =
+            issue_leaf_in(&ca, "prod.example", "corp.internal", "shop", "orders", 1).unwrap();
+        let der = CertificateDer::from_pem_slice(leaf.cert_pem.as_bytes()).unwrap();
+        let id = spiffe_id_of(&der).unwrap().unwrap();
+        assert_eq!(id.uri(), "spiffe://prod.example/ns/shop/svc/orders");
+        assert_eq!(spiffe_id_in(&der, "prod.example").unwrap(), Some(id));
+        assert_eq!(spiffe_id_in(&der, "agentsc").unwrap(), None);
+        let dns = dns_names_of(&der).unwrap();
+        assert!(
+            dns.contains(&"orders.shop.svc.corp.internal".to_string()),
+            "{dns:?}"
+        );
+        assert!(!dns.iter().any(|d| d.ends_with("cluster.local")), "{dns:?}");
+        let mat = TlsMaterial::from_pems(ca.cert_pem.clone(), leaf.cert_pem, leaf.key_pem).unwrap();
+        assert_eq!(mat.identity.trust_domain, "prod.example");
+        // names that are not a trust domain or a DNS name are refused before signing
+        assert!(issue_leaf_in(&ca, "Prod", "cluster.local", "shop", "orders", 1).is_err());
+        assert!(issue_leaf_in(&ca, "agentsc", "bad_domain", "shop", "orders", 1).is_err());
     }
 
     #[test]

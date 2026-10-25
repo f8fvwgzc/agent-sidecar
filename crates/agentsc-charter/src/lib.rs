@@ -21,6 +21,11 @@ pub use resource::{CharterResource, CharterSpec, ObjectMeta, ResourceServiceSpec
 pub const API_VERSION: &str = "agentsc.io/v1alpha1";
 pub const KIND: &str = "Charter";
 pub const LOCAL_IDENTITY: &str = "local";
+/// The SPIFFE trust domain of an install that configures none (`--trust-domain`, CONTRACT.md §5).
+/// `authz` identities name whatever trust domain the install runs with.
+pub const DEFAULT_TRUST_DOMAIN: &str = "agentsc";
+/// The Kubernetes cluster DNS domain of an install that configures none (`--cluster-domain`).
+pub const DEFAULT_CLUSTER_DOMAIN: &str = "cluster.local";
 pub const DEFAULT_MESH_PORT: u16 = 50002;
 /// Largest `max_tokens` any current Claude model accepts.
 pub const MAX_TOKENS_PER_CALL_LIMIT: u32 = 128_000;
@@ -870,9 +875,15 @@ impl Charter {
         spec
     }
 
-    /// `spiffe://agentsc/ns/<namespace>/svc/<service>`
+    /// `spiffe://agentsc/ns/<namespace>/svc/<service>`: the identity in the
+    /// [`DEFAULT_TRUST_DOMAIN`] ([`Charter::spiffe_id_in`] for another).
     pub fn spiffe_id(&self) -> String {
         spiffe_id(&self.service.namespace, &self.service.name)
+    }
+
+    /// `spiffe://<trust_domain>/ns/<namespace>/svc/<service>`.
+    pub fn spiffe_id_in(&self, trust_domain: &str) -> String {
+        spiffe_id_in(trust_domain, &self.service.namespace, &self.service.name)
     }
 
     /// Mesh address of a peer service (CONTRACT.md §2).
@@ -1385,8 +1396,44 @@ pub fn check_otlp_endpoint(endpoint: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The workload identity of `namespace/service` in the [`DEFAULT_TRUST_DOMAIN`]; an install with
+/// another trust domain uses [`spiffe_id_in`].
 pub fn spiffe_id(namespace: &str, service: &str) -> String {
-    format!("spiffe://agentsc/ns/{namespace}/svc/{service}")
+    spiffe_id_in(DEFAULT_TRUST_DOMAIN, namespace, service)
+}
+
+/// `spiffe://<trust_domain>/ns/<namespace>/svc/<service>` (CONTRACT.md §5).
+pub fn spiffe_id_in(trust_domain: &str, namespace: &str, service: &str) -> String {
+    format!("spiffe://{trust_domain}/ns/{namespace}/svc/{service}")
+}
+
+/// A SPIFFE trust domain name (`--trust-domain`): 1 to 255 of `a-z 0-9 . - _`, the characters
+/// the SPIFFE ID specification allows (no uppercase, port or userinfo).
+pub fn check_trust_domain(trust_domain: &str) -> Result<(), String> {
+    if trust_domain.is_empty() || trust_domain.len() > 255 {
+        return Err(format!(
+            "trust domain {trust_domain:?} must be 1 to 255 characters"
+        ));
+    }
+    if !trust_domain
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'-' | b'_'))
+    {
+        return Err(format!(
+            "trust domain {trust_domain:?} may only contain a-z, 0-9, '.', '-' and '_'"
+        ));
+    }
+    Ok(())
+}
+
+/// A Kubernetes cluster DNS domain (`--cluster-domain`, e.g. `cluster.local`): DNS-1123 labels
+/// joined by dots, at most 253 characters.
+pub fn check_cluster_domain(domain: &str) -> Result<(), String> {
+    if domain.len() <= 253 && domain.split('.').all(is_dns_label) {
+        Ok(())
+    } else {
+        Err(format!("cluster domain {domain:?} is not a DNS name"))
+    }
 }
 
 pub fn is_dns_label(s: &str) -> bool {
@@ -1727,6 +1774,36 @@ mod tests {
         );
         let inv = Charter::from_yaml(INVENTORY).expect("inventory charter valid");
         assert!(inv.agent("stock-analyst").is_some());
+    }
+
+    #[test]
+    fn identities_in_any_trust_domain_validate() {
+        let c = Charter::from_yaml(ORDERS).unwrap();
+        assert_eq!(
+            c.spiffe_id_in("prod.example"),
+            "spiffe://prod.example/ns/agentsc-demo/svc/orders"
+        );
+        // a charter written for an install with another trust domain names its peers there
+        let other = INVENTORY.replace("spiffe://agentsc/", "spiffe://prod.example/");
+        assert_ne!(other, INVENTORY);
+        let inv = Charter::from_yaml(&other).expect("identities in prod.example validate");
+        assert!(
+            inv.authz
+                .callers
+                .iter()
+                .any(|r| r.identity == "spiffe://prod.example/ns/agentsc-demo/svc/orders")
+        );
+        for ok in ["agentsc", "prod.example", "a-b_c.0"] {
+            assert!(check_trust_domain(ok).is_ok(), "{ok}");
+        }
+        for bad in ["", "Prod", "prod:443", "a/b", "a@b", &"x".repeat(256)] {
+            assert!(check_trust_domain(bad).is_err(), "{bad}");
+        }
+        assert!(check_cluster_domain("cluster.local").is_ok());
+        assert!(check_cluster_domain("corp.internal").is_ok());
+        for bad in ["", "Cluster.local", "a..b", ".local", "a_b"] {
+            assert!(check_cluster_domain(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

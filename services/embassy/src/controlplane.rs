@@ -3,8 +3,9 @@
 //! - mTLS is required: the listener asks for a client certificate from the CA
 //!   ([`ClientAuth::Required`]; [`ClientAuth::Optional`] when it shares `--grpc-addr` with
 //!   `IssueCertificate`, and then a stream without a verified certificate is refused here). The
-//!   service and namespace come from the certificate's SPIFFE id; `Hello` must name the same
-//!   (else `PERMISSION_DENIED`, audited as `connect_denied`).
+//!   service and namespace come from the certificate's SPIFFE id, which must be in
+//!   `--trust-domain`; `Hello` must name the same (else `PERMISSION_DENIED`, audited as
+//!   `connect_denied`).
 //! - Each stream is an instance with its own UUID; closing a stream removes only that instance.
 //! - On `Hello`: a stored charter whose (epoch, version) differs from the sidecar's is pushed,
 //!   then always the stored memory. Without a stored charter, a valid `Hello.charter_yaml` is a
@@ -47,7 +48,7 @@ use crate::cp_audit::{CpAudit, now_ts};
 use crate::events::Scope;
 use crate::hub::Hub;
 use crate::registry::{Connected, Outbox};
-use crate::servingcert::{ClientAuth, ServingCertSource, peer_identity};
+use crate::servingcert::{ClientAuth, ServingCertSource, peer_identity_in};
 use crate::store::file::sha256_hex;
 use crate::store::{
     Actor, ActorKind, AgentLearning, ChangeSource, MemoryDoc, Note, PendingAdoption, Precondition,
@@ -151,13 +152,15 @@ impl ControlPlane for ConnectService {
         req: Request<Streaming<SidecarMessage>>,
     ) -> Result<Response<Self::ConnectStream>, Status> {
         let hub = &self.hub;
+        let trust_domain = &hub.opts.trust_domain;
         let id = req
             .peer_certs()
-            .and_then(|c| peer_identity(&c))
+            .and_then(|c| peer_identity_in(&c, trust_domain))
             .ok_or_else(|| {
-                Status::permission_denied(
-                    "Connect needs a workload certificate from the agentsc CA",
-                )
+                Status::permission_denied(format!(
+                    "Connect needs a workload certificate from the agentsc CA with an identity \
+                     in trust domain {trust_domain:?}"
+                ))
             })?;
         let mut inbound = req.into_inner();
         let first = tokio::time::timeout(HELLO_TIMEOUT, inbound.message())
@@ -817,10 +820,7 @@ mod tests {
 
     #[test]
     fn sidecar_actors_name_identity_and_pod() {
-        let id = SpiffeId {
-            namespace: "shop".into(),
-            service: "orders".into(),
-        };
+        let id = SpiffeId::new("agentsc", "shop", "orders");
         let a = sidecar_actor(&id, "orders-0");
         assert_eq!(
             a.name,

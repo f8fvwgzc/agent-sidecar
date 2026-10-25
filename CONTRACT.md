@@ -50,7 +50,8 @@ Principles every component honours:
    live in `charter.yaml`. The sidecar validates it on load and refuses unknown
    fields. A UI will generate it later; the schema is the API.
 4. **Identity is the certificate.** Every pod has an mTLS identity
-   `spiffe://agentsc/ns/<namespace>/svc/<service>`. The callee sidecar decides
+   `spiffe://<trust domain>/ns/<namespace>/svc/<service>` (trust domain `agentsc`
+   unless configured, §5). The callee sidecar decides
    using the caller's certificate SAN plus the calling agent name, never a
    header alone.
 5. **Default deny** for authz once a charter exists. Explicit `allow` rules
@@ -69,9 +70,10 @@ Principles every component honours:
 | `embassy`            | none (Job) — see §7                      | —                                 | Kubernetes API  |
 
 Peer discovery: the mesh address of service `S` in namespace `N` is
-`S.N.svc.cluster.local:50002` unless `mesh.peers.S` in the charter overrides
-it. Every demo Service therefore exposes port `50002` (`mesh`) next to the
-app port.
+`S.N.svc.<cluster domain>:50002` (`--peer-address-template`, cluster domain
+`cluster.local` unless `--cluster-domain` says otherwise) unless `mesh.peers.S`
+in the charter overrides it. Every demo Service therefore exposes port `50002`
+(`mesh`) next to the app port.
 
 Flags / environment of `agentscd` (flag wins over env):
 
@@ -89,6 +91,8 @@ Flags / environment of `agentscd` (flag wins over env):
 | `--mesh-cache-max-age` | `AGENTSC_MESH_CACHE_MAX_AGE` | `300`. The longest, in seconds, a cached service-call response is served, whatever the app's `max-age` says |
 | `--max-response-bytes` | `AGENTSC_MAX_RESPONSE_BYTES` | `3145728` (3 MiB). The largest response body a tool or mesh call reads from the app, a peer or an http tool's origin, read as it streams; a longer one fails the call (`http.response_too_large`) |
 | `--audit-fail-closed` | `AGENTSC_AUDIT_FAIL_CLOSED` | off. `1/true/yes/on` = while the audit sink fails, refuse new work with rule `audit.unavailable` and report not ready, until a write succeeds again (§6 "Sink failures") |
+| `--trust-domain`  | `AGENTSC_TRUST_DOMAIN`   | `agentsc`. The SPIFFE trust domain of this pod's identity, of the peers it accepts and calls, and of the control plane (§5); must be embassy's |
+| `--cluster-domain` | `AGENTSC_CLUSTER_DOMAIN` | `cluster.local`. `{cluster_domain}` of `--peer-address-template` (default `{service}.{namespace}.svc.{cluster_domain}:{port}`) |
 | `--anthropic-api-key-file` | `AGENTSC_ANTHROPIC_API_KEY_FILE` | unset. The Anthropic API key, read by the sidecar's model gateway only (§4.4) |
 | —                 | `ANTHROPIC_API_KEY`      | the same key as text (env only, never a flag). Neither set → the gateway has no provider and the runtime runs every agent on the `mock` model. The runtime the sidecar starts never gets either, nor `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY` or `AGENTSC_APP_TOKEN` |
 | `--anthropic-base-url` | `AGENTSC_ANTHROPIC_BASE_URL` | `https://api.anthropic.com` |
@@ -639,16 +643,29 @@ an OpenAI-compatible adapter (`POST /v1/chat/completions`) is the next.
 
 ## 5. Identity, mTLS, authz
 
-- Trust domain `agentsc`. SPIFFE ID `spiffe://agentsc/ns/<namespace>/svc/<service>`.
+- Trust domain: `--trust-domain` / `AGENTSC_TRUST_DOMAIN` on `agentscd` and on
+  every `embassy` command that issues or checks identities (Helm value
+  `trustDomain`, which also reaches injected sidecars), default `agentsc`; a
+  SPIFFE trust domain name (`a-z 0-9 . - _`, 1..=255). SPIFFE ID
+  `spiffe://<trust domain>/ns/<namespace>/svc/<service>`; the control plane is
+  `spiffe://<trust domain>/control-plane`. Sidecars and embassy of one install
+  must agree on it: an identity in another trust domain is no identity (a
+  sidecar refuses such a `--tls-dir` certificate, a peer's client certificate
+  and a control plane; `Connect` refuses such a sidecar). Charters name peers
+  in the install's trust domain (`authz.callers[].identity`,
+  `authz.services[].identity`: `local` or any `spiffe://` URI validates).
 - `embassy` holds one CA per cluster: Secret `agentsc-ca` (`ca.crt`, `ca.key`)
   in the demo namespace. Leaf certs: Secret `agentsc-cert-<service>` with
   `ca.crt`, `tls.crt`, `tls.key`. Leaf SANs: URI = the SPIFFE ID; DNS =
   `<service>`, `<service>.<ns>`, `<service>.<ns>.svc`,
-  `<service>.<ns>.svc.cluster.local`. CA TTL 10 years, leaf TTL 365 days
+  `<service>.<ns>.svc.<cluster domain>` (`--cluster-domain`, default
+  `cluster.local`). CA TTL 10 years, leaf TTL 365 days
   (MVP: no rotation; re-running the Job keeps the CA and re-issues leaves).
 - Mesh server: rustls, requires a client certificate chained to `ca.crt`.
-  Caller identity = the first URI SAN of the client leaf; a certificate
-  without a `spiffe://agentsc/` URI SAN is rejected (`authz.identity.invalid`).
+  Caller identity = the first URI SAN of the client leaf that is a workload ID
+  in the trust domain; a certificate without one is rejected
+  (`authz.identity.invalid`, reason `client certificate has no
+  spiffe://<trust domain>/ns/<ns>/svc/<svc> URI SAN`).
 - Mesh client: verifies the server against `ca.crt` with server name
   `<service>.<ns>.svc.cluster.local` and presents its own leaf.
 - MVP simplification (documented, not hidden): the certificate is **per

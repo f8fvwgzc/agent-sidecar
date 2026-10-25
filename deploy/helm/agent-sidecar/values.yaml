@@ -27,8 +27,16 @@ images:
 
 imagePullSecrets: []
 
-# Kubernetes cluster DNS domain, for the Service DNS names embassy serves as.
+# Kubernetes cluster DNS domain: the Service DNS names embassy serves as, the
+# <svc>.<ns>.svc.<clusterDomain> DNS SAN of workload certificates (embassy --cluster-domain), and the
+# peer addresses of injected sidecars (AGENTSC_CLUSTER_DOMAIN, set only when it is not cluster.local).
 clusterDomain: cluster.local
+
+# SPIFFE trust domain of every workload identity (spiffe://<trustDomain>/ns/<ns>/svc/<svc>) and of the
+# control plane (spiffe://<trustDomain>/control-plane): embassy --trust-domain, and AGENTSC_TRUST_DOMAIN
+# of every injected sidecar. Charters name peers in it (authz.callers[].identity). Changing it on a
+# running install re-issues every certificate and breaks rules that name the old domain.
+trustDomain: agentsc
 
 crds:
   # Render the charters.agentsc.io CRD (files/crds links to the generated deploy/crds/ file). It

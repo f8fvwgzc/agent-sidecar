@@ -41,6 +41,9 @@ pub struct HubOptions {
     pub auto_adopt: bool,
     /// The SSE keep-alive comment interval (design §10.2: 15 s).
     pub keepalive: Duration,
+    /// `--trust-domain`: the only trust domain `Connect` accepts sidecar identities in, and the
+    /// one the API writes peer identities in.
+    pub trust_domain: String,
 }
 
 impl Default for HubOptions {
@@ -49,6 +52,7 @@ impl Default for HubOptions {
             dns_names: Vec::new(),
             auto_adopt: false,
             keepalive: crate::api::KEEPALIVE,
+            trust_domain: agentsc_common::identity::DEFAULT_TRUST_DOMAIN.into(),
         }
     }
 }

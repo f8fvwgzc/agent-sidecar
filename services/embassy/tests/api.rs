@@ -1356,10 +1356,7 @@ async fn memory_exists_only_for_agents_that_learn() {
 
 async fn propose(env: &Env, note: &str, dedup: &str) {
     let actor = embassy::controlplane::sidecar_actor(
-        &agentsc_common::identity::SpiffeId {
-            namespace: NS.into(),
-            service: "support".into(),
-        },
+        &agentsc_common::identity::SpiffeId::new("agentsc", NS, "support"),
         "support-0",
     );
     embassy::controlplane::ingest_proposal(

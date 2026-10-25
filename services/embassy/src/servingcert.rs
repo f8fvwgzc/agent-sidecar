@@ -2,7 +2,8 @@
 //!
 //! One certificate serves `Connect` and `IssueCertificate` (`--grpc-addr`), the admission
 //! webhooks (`--webhook-addr`) and, with `--http-tls`, the REST API: URI SAN
-//! [`CONTROL_PLANE_SPIFFE_ID`] (sidecars verify that, not a DNS name), DNS SANs from
+//! `spiffe://<trust domain>/control-plane` ([`CONTROL_PLANE_SPIFFE_ID`] in the default trust
+//! domain; sidecars verify that, not a DNS name), DNS SANs from
 //! `--dns-name`, EKU serverAuth only, a 30-day lifetime, renewed at two thirds.
 //!
 //! [`ServingCertSource`] holds the current certificate and its CA bundle and hands out rustls
@@ -43,7 +44,9 @@ use tokio::sync::watch;
 
 use crate::ca::CaMaterial;
 
-/// The URI SAN of the control-plane serving certificate; sidecars check it (design §6.3).
+/// The URI SAN of the control-plane serving certificate in the default trust domain; sidecars
+/// check it (design §6.3). A CA with another `--trust-domain` signs
+/// [`CaMaterial::control_plane_uri`].
 pub const CONTROL_PLANE_SPIFFE_ID: &str = "spiffe://agentsc/control-plane";
 /// Lifetime of an in-memory serving certificate (design §7).
 pub const SERVING_CERT_TTL: Duration = Duration::from_secs(30 * 24 * 3600);
@@ -169,7 +172,7 @@ fn load(
 
 /// A new serving certificate from the CA.
 fn issue(ca: &CaMaterial, dns_names: &[String], ttl: Duration) -> anyhow::Result<ServingCert> {
-    let leaf = ca.sign_server(dns_names, CONTROL_PLANE_SPIFFE_ID, ttl)?;
+    let leaf = ca.sign_server(dns_names, &ca.control_plane_uri(), ttl)?;
     Ok(ServingCert {
         cert_pem: leaf.cert_pem,
         key_pem: leaf.key_pem,
@@ -339,13 +342,20 @@ impl ServingCertSource {
     }
 }
 
-/// The workload identity (`spiffe://agentsc/ns/<ns>/svc/<svc>`) of a TLS peer, from the
+/// The workload identity (`spiffe://<trust domain>/ns/<ns>/svc/<svc>`) of a TLS peer, from the
 /// certificates the handshake verified (leaf first): `None` without a certificate, or when the
 /// leaf does not carry exactly one URI SAN of that form. Only meaningful for certificates a
-/// [`ServingCertSource`] configuration verified.
+/// [`ServingCertSource`] configuration verified. The trust domain is the certificate's:
+/// [`peer_identity_in`] accepts only one.
 pub fn peer_identity(certs: &[CertificateDer<'_>]) -> Option<SpiffeId> {
     let leaf = certs.first()?;
     agentsc_pki::sole_spiffe_id_of(leaf).ok().flatten()
+}
+
+/// [`peer_identity`] in `trust_domain` (`--trust-domain`); another trust domain's identity is
+/// `None`.
+pub fn peer_identity_in(certs: &[CertificateDer<'_>], trust_domain: &str) -> Option<SpiffeId> {
+    peer_identity(certs).filter(|id| id.trust_domain == trust_domain)
 }
 
 /// Serves the current certificate on every handshake.
@@ -944,5 +954,24 @@ mod tests {
         assert_eq!(peer_identity(&[]), None);
         assert_eq!(peer_identity(&[der(ca.roots_pem())]), None);
         assert_eq!(peer_identity(&[CertificateDer::from(vec![1, 2, 3])]), None);
+        // only the configured trust domain is an identity of this install
+        assert_eq!(peer_identity_in(&[der(&cert)], "agentsc"), Some(id));
+        assert_eq!(peer_identity_in(&[der(&cert)], "prod.example"), None);
+    }
+
+    #[test]
+    fn the_serving_certificate_names_the_cas_trust_domain() {
+        let b = agentsc_pki::ca_init().unwrap();
+        let ca = Arc::new(
+            CaMaterial::from_pems(&b.cert_pem, &b.key_pem)
+                .unwrap()
+                .with_domains("prod.example", "cluster.local")
+                .unwrap(),
+        );
+        let s = issue(&ca, &dns(), HOUR).unwrap();
+        assert_eq!(
+            agentsc_pki::uri_sans_of(&der(&s.cert_pem)).unwrap(),
+            ["spiffe://prod.example/control-plane"]
+        );
     }
 }

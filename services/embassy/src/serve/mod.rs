@@ -246,6 +246,22 @@ pub struct ServeArgs {
     /// Allow the anonymous viewer and write a one-time admin token to a 0600 file.
     #[arg(long)]
     pub dev: bool,
+    /// SPIFFE trust domain of issued identities, of the serving certificate and of the sidecars
+    /// Connect accepts (spiffe://<trust domain>/...); injected sidecars get the same.
+    #[arg(
+        long,
+        env = "AGENTSC_TRUST_DOMAIN",
+        default_value = agentsc_common::identity::DEFAULT_TRUST_DOMAIN
+    )]
+    pub trust_domain: String,
+    /// Kubernetes cluster DNS domain of the workload certificates' DNS SANs
+    /// (<svc>.<ns>.svc.<cluster domain>).
+    #[arg(
+        long,
+        env = "AGENTSC_CLUSTER_DOMAIN",
+        default_value = agentsc_common::identity::DEFAULT_CLUSTER_DOMAIN
+    )]
+    pub cluster_domain: String,
 }
 
 impl ServeArgs {
@@ -274,6 +290,12 @@ impl ServeArgs {
             if !is_dns_subdomain(name) {
                 errs.push(format!("{flag} {name:?} is not a DNS-1123 subdomain"));
             }
+        }
+        if let Err(e) = agentsc_common::identity::check_trust_domain(&self.trust_domain) {
+            errs.push(format!("--trust-domain: {e}"));
+        }
+        if let Err(e) = agentsc_common::identity::check_cluster_domain(&self.cluster_domain) {
+            errs.push(format!("--cluster-domain: {e}"));
         }
 
         let ca_material = self.ca_dir.is_some() || self.ca_secret.is_some();
@@ -645,13 +667,14 @@ pub async fn start(
     let hub_cell: HubCell = Arc::default();
     let store = open_store(&args, &config, &hub_cell).await?;
     let ca = if args.has(Ca) {
-        match (&args.ca_dir, &args.ca_secret) {
-            (Some(dir), _) => Some(Arc::new(crate::ca::CaMaterial::load_dir(dir)?)),
-            (None, Some(s)) => Some(Arc::new(
-                crate::k8s::load_ca_secret(&s.namespace, &s.name).await?,
-            )),
+        let material = match (&args.ca_dir, &args.ca_secret) {
+            (Some(dir), _) => crate::ca::CaMaterial::load_dir(dir)?,
+            (None, Some(s)) => crate::k8s::load_ca_secret(&s.namespace, &s.name).await?,
             (None, None) => bail!("the ca component needs --ca-dir or --ca-secret"),
-        }
+        };
+        Some(Arc::new(
+            material.with_domains(&args.trust_domain, &args.cluster_domain)?,
+        ))
     } else {
         None
     };
@@ -710,6 +733,7 @@ pub async fn start(
             HubOptions {
                 dns_names: args.dns_names.clone(),
                 auto_adopt: args.auto_adopt,
+                trust_domain: args.trust_domain.clone(),
                 ..Default::default()
             },
             shutdown.clone(),

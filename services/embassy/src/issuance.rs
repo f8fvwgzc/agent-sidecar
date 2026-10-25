@@ -1,7 +1,7 @@
 //! `CertificateAuthority.IssueCertificate` (design §7, component `ca`).
 //!
 //! A sidecar sends a CSR and one credential; it gets a fresh workload leaf for
-//! `spiffe://agentsc/ns/<ns>/svc/<svc>` only if, in this order:
+//! `spiffe://<trust domain>/ns/<ns>/svc/<svc>` (`--trust-domain`) only if, in this order:
 //!
 //! 1. `namespace` and `service` are DNS-1123 labels and not reserved (the control-plane
 //!    namespace, the service `embassy`) — else `INVALID_ARGUMENT`;
@@ -33,7 +33,7 @@
 //! refusal is a control-plane audit record (`cert_issue` / `cert_denied`) naming the identity
 //! (`namespace`, `service`), the pod or join token, and the public key's SHA-256
 //! (`sha256_after`). The actor of an issuance follows the `sidecar:<spiffe id>/<pod>` convention
-//! of design §7 (`sidecar:spiffe://agentsc/ns/<ns>/svc/<svc>/<pod>`, or `.../join:<token name>`
+//! of design §7 (`sidecar:spiffe://<td>/ns/<ns>/svc/<svc>/<pod>`, or `.../join:<token name>`
 //! for a join token); a refusal never names the identity that was asked for but only what the
 //! credential showed: `sidecar:pod:<ns>/<pod>`, `sidecar:join:<token name>` or `sidecar:unknown`.
 //!
@@ -500,14 +500,21 @@ impl Issuer {
 
     /// The audit actor (module docs): the identity and pod (or join token) for an issuance;
     /// for a refusal only what the credential showed, never the identity asked for.
-    fn actor(namespace: &str, service: &str, who: Option<&Caller>, issued: bool) -> Actor {
+    fn actor(
+        trust_domain: &str,
+        namespace: &str,
+        service: &str,
+        who: Option<&Caller>,
+        issued: bool,
+    ) -> Actor {
         let name = match (who, issued) {
             (Some(caller), true) if is_dns_label(namespace) && is_dns_label(service) => {
                 let slot = match caller {
                     Caller::Pod { name, .. } => name.clone(),
                     Caller::Join { name } => format!("join:{name}"),
                 };
-                format!("sidecar:spiffe://agentsc/ns/{namespace}/svc/{service}/{slot}")
+                let id = agentsc_charter::spiffe_id_in(trust_domain, namespace, service);
+                format!("sidecar:{id}/{slot}")
             }
             (Some(Caller::Pod { namespace, name }), false) => {
                 format!("sidecar:pod:{namespace}/{name}")
@@ -533,7 +540,9 @@ impl Issuer {
             Ok(reason) => (CpAction::CertIssue, CpResult::Ok, reason),
             Err(d) => (CpAction::CertDenied, CpResult::Denied, d.message.clone()),
         };
-        let actor = Self::actor(&req.namespace, &req.service, who, outcome == CpResult::Ok);
+        let issued = outcome == CpResult::Ok;
+        let td = self.ca.trust_domain();
+        let actor = Self::actor(td, &req.namespace, &req.service, who, issued);
         let mut rec = CpAudit::entry(action, &actor, outcome);
         if is_dns_label(&req.namespace) {
             rec.namespace = Some(req.namespace.clone());
@@ -1425,11 +1434,11 @@ mod tests {
             name: "p".into(),
         };
         assert_eq!(
-            Issuer::actor("Bad NS", "x", Some(&pod), true).name,
+            Issuer::actor("agentsc", "Bad NS", "x", Some(&pod), true).name,
             "sidecar:unknown"
         );
         assert_eq!(
-            Issuer::actor("shop", "orders", None, true).name,
+            Issuer::actor("agentsc", "shop", "orders", None, true).name,
             "sidecar:unknown"
         );
     }

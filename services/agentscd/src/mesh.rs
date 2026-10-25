@@ -106,8 +106,12 @@ struct Inbound {
     deadline: Option<Instant>,
 }
 
+/// The caller is the first workload URI SAN of the client leaf in this install's trust domain
+/// (`--trust-domain`); a leaf with none there is `authz.identity.invalid`, even when the CA that
+/// signed it is trusted (CONTRACT.md §5).
 fn inbound<T>(
     req: &Request<T>,
+    trust_domain: &str,
     body_traceparent: &str,
     body_request_id: &str,
     body_agent: &str,
@@ -119,11 +123,13 @@ fn inbound<T>(
                 RULE_IDENTITY,
                 "empty client certificate chain",
             )),
-            Some(leaf) => match agentsc_pki::spiffe_id_of(leaf) {
+            Some(leaf) => match agentsc_pki::spiffe_id_in(leaf, trust_domain) {
                 Ok(Some(id)) => Ok(id.uri()),
                 Ok(None) => Err(Verdict::deny(
                     RULE_IDENTITY,
-                    "client certificate has no spiffe://agentsc/ URI SAN",
+                    format!(
+                        "client certificate has no spiffe://{trust_domain}/ns/<ns>/svc/<svc> URI SAN"
+                    ),
                 )),
                 Err(e) => Err(Verdict::deny(
                     RULE_IDENTITY,
@@ -203,6 +209,7 @@ impl Mesh for MeshService {
             let body = request.get_ref();
             inbound(
                 &request,
+                &self.state.trust_domain,
                 &body.traceparent,
                 &body.request_id,
                 &body.caller_agent,
@@ -263,7 +270,14 @@ impl Mesh for MeshService {
         let started = Instant::now();
         let inb = {
             let body = request.get_ref();
-            inbound(&request, &body.traceparent, &body.request_id, &body.agent)
+            let td = &self.state.trust_domain;
+            inbound(
+                &request,
+                td,
+                &body.traceparent,
+                &body.request_id,
+                &body.agent,
+            )
         };
         let peer_taint = meta(&request, crate::taint::HEADER);
         let req = request.into_inner();

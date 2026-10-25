@@ -42,6 +42,8 @@ enum Cmd {
         out: PathBuf,
         #[arg(long, default_value_t = agentsc_pki::LEAF_TTL_DAYS)]
         ttl_days: i64,
+        #[command(flatten)]
+        domains: Domains,
     },
     /// In-cluster: ensure the CA Secret exists and (re)issue one Secret per service.
     Bootstrap {
@@ -56,7 +58,28 @@ enum Cmd {
         cert_secret_prefix: String,
         #[arg(long, default_value = "https://kubernetes.default.svc")]
         api_server: String,
+        #[command(flatten)]
+        domains: Domains,
     },
+}
+
+/// The trust and cluster domain leaves are issued in (CONTRACT.md §5).
+#[derive(clap::Args)]
+struct Domains {
+    /// SPIFFE trust domain of the issued identities.
+    #[arg(
+        long,
+        env = "AGENTSC_TRUST_DOMAIN",
+        default_value = agentsc_common::identity::DEFAULT_TRUST_DOMAIN
+    )]
+    trust_domain: String,
+    /// Cluster DNS domain of the <svc>.<ns>.svc.<cluster domain> DNS SAN.
+    #[arg(
+        long,
+        env = "AGENTSC_CLUSTER_DOMAIN",
+        default_value = agentsc_common::identity::DEFAULT_CLUSTER_DOMAIN
+    )]
+    cluster_domain: String,
 }
 
 #[derive(Subcommand)]
@@ -101,12 +124,21 @@ async fn main() -> anyhow::Result<()> {
             service,
             out,
             ttl_days,
+            domains,
         } => {
             let ca = read_bundle(&ca)?;
-            let leaf = agentsc_pki::issue_leaf(&ca, &namespace, &service, ttl_days)?;
+            let leaf = agentsc_pki::issue_leaf_in(
+                &ca,
+                &domains.trust_domain,
+                &domains.cluster_domain,
+                &namespace,
+                &service,
+                ttl_days,
+            )?;
             TlsMaterial::write(&leaf, &ca.cert_pem, &out)?;
             println!(
-                "issued spiffe://agentsc/ns/{namespace}/svc/{service} into {}",
+                "issued {} into {}",
+                agentsc_charter::spiffe_id_in(&domains.trust_domain, &namespace, &service),
                 out.display()
             );
         }
@@ -116,6 +148,7 @@ async fn main() -> anyhow::Result<()> {
             ca_secret,
             cert_secret_prefix,
             api_server,
+            domains,
         } => {
             bootstrap(
                 &namespace,
@@ -123,6 +156,7 @@ async fn main() -> anyhow::Result<()> {
                 &ca_secret,
                 &cert_secret_prefix,
                 &api_server,
+                &domains,
             )
             .await?;
         }
@@ -233,6 +267,7 @@ async fn bootstrap(
     ca_secret: &str,
     prefix: &str,
     api_server: &str,
+    domains: &Domains,
 ) -> anyhow::Result<()> {
     if services.is_empty() {
         anyhow::bail!("--services is required");
@@ -264,7 +299,15 @@ async fn bootstrap(
         }
     };
     for service in services {
-        let leaf = agentsc_pki::issue_leaf(&ca, namespace, service, agentsc_pki::LEAF_TTL_DAYS)?;
+        let leaf = agentsc_pki::issue_leaf_in(
+            &ca,
+            &domains.trust_domain,
+            &domains.cluster_domain,
+            namespace,
+            service,
+            agentsc_pki::LEAF_TTL_DAYS,
+        )?;
+        let identity = agentsc_charter::spiffe_id_in(&domains.trust_domain, namespace, service);
         let name = format!("{prefix}{service}");
         let mut l = labels.clone();
         l["agentsc.io/service"] = json!(service);
@@ -278,7 +321,7 @@ async fn bootstrap(
             l,
         )
         .await?;
-        tracing::info!(secret = %name, identity = %agentsc_common::identity::SpiffeId { namespace: namespace.into(), service: service.clone() }.uri(), "issued");
+        tracing::info!(secret = %name, %identity, "issued");
     }
     println!(
         "bootstrap complete: CA {ca_secret}, {} leaf secret(s)",

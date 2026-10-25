@@ -80,6 +80,8 @@ spec:
             - --validating-webhook-name={{ include "agent-sidecar.validatorName" . }}
             - --injector-image={{ include "agent-sidecar.image" (dict "image" .Values.images.agentscd "root" $) }}
             - --cp-namespace={{ $ns }}
+            - --trust-domain={{ .Values.trustDomain }}
+            - --cluster-domain={{ .Values.clusterDomain }}
           env:
             - name: RUST_LOG
               value: {{ .Values.embassyCa.logLevel | quote }}

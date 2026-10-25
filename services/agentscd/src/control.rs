@@ -1,8 +1,8 @@
 //! Managed mode: the `Connect` stream to the control plane (design §6.3.3–6, §6.4, §7).
 //!
 //! mTLS with the workload certificate; the server must chain to the trust roots and carry the URI
-//! SAN `spiffe://agentsc/control-plane`. The first message is `Hello`, then heartbeats every 10 s,
-//! audit batches, span starts and learning proposals. `CharterUpdate` and `MemoryUpdate` are
+//! SAN `spiffe://<trust domain>/control-plane` (`--trust-domain`). The first message is `Hello`,
+//! then heartbeats every 10 s, audit batches, span starts and learning proposals. `CharterUpdate` and `MemoryUpdate` are
 //! applied (charter: when the epoch differs or the version is greater) and acknowledged; a stale
 //! one is not applied and is acknowledged with the version in force, so the control plane shows
 //! what runs. Unknown message variants are ignored (logged once). A lost stream is reconnected
@@ -230,6 +230,7 @@ async fn session(state: &Arc<AppState>, addr: &str) -> (bool, anyhow::Result<()>
         let cfg = crate::tls::control_plane_client_config(
             roots,
             Some(Arc::new(CurrentCert(state.tls.clone()))),
+            &state.trust_domain,
         )?;
         // no per-request timeout: it would cut the stream
         crate::tls::tls_channel(addr, crate::tls::server_name_of(addr)?, cfg, None)

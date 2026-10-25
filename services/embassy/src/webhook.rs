@@ -24,7 +24,8 @@
 //! - `agentscd`, env for managed mode: `AGENTSC_CONTROL_PLANE=embassy.<cp-ns>.svc:15012`,
 //!   `AGENTSC_CA_ADDRESS=embassy-ca.<cp-ns>.svc:15012`, `AGENTSC_SERVICE`, `AGENTSC_NAMESPACE`,
 //!   `AGENTSC_APP_PORT`, `POD_NAME` and `POD_NAMESPACE` (fieldRef), `AGENTSC_CA_PEM` (the CA
-//!   bundle), `AGENTSC_K8S_TOKEN_FILE`, `AGENTSC_STATE_DIR` ([`STATE_DIR`]),
+//!   bundle), `AGENTSC_K8S_TOKEN_FILE`, `AGENTSC_TRUST_DOMAIN` (embassy's `--trust-domain`),
+//!   `AGENTSC_STATE_DIR` ([`STATE_DIR`]),
 //!   `AGENTSC_NO_RUNTIME=true` (the runtime is the other container), and `ANTHROPIC_API_KEY` from
 //!   key `ANTHROPIC_API_KEY` of the Secret named by annotation `agentsc.io/anthropic-secret` when
 //!   present (on `agentscd` only);
@@ -38,7 +39,8 @@
 //!   `sidecar_images.allowed_digests` set it must be pinned to an allowed digest
 //!   ([`crate::sidecar_images`]), else the pod is denied with a message naming the image;
 //! - `imagePullPolicy`, `resources` and `securityContext` (both containers) and the env
-//!   `OTEL_EXPORTER_OTLP_ENDPOINT` / `AGENTSC_OTLP_ENDPOINT_ALLOW` (`agentscd`) from env
+//!   `OTEL_EXPORTER_OTLP_ENDPOINT`, `AGENTSC_OTLP_ENDPOINT_ALLOW` and `AGENTSC_CLUSTER_DOMAIN`
+//!   (`agentscd`) from env
 //!   `AGENTSC_INJECT_TEMPLATE` (the chart → injector contract, [`InjectTemplate`]); without it,
 //!   the chart's defaults;
 //! - annotation `agentsc.io/injected: "true"`.
@@ -145,9 +147,13 @@ pub const STARTUP_PROBE_SECONDS: i32 = STARTUP_PROBE_PERIOD * STARTUP_PROBE_FAIL
 pub const CONTROL_PLANE_PORT: u16 = 15012;
 /// The env var with the chart → injector template.
 pub const TEMPLATE_ENV: &str = "AGENTSC_INJECT_TEMPLATE";
-/// The only env names the template may set (the sidecar's own telemetry settings).
-pub const TEMPLATE_ENV_ALLOWED: [&str; 2] =
-    ["OTEL_EXPORTER_OTLP_ENDPOINT", "AGENTSC_OTLP_ENDPOINT_ALLOW"];
+/// The only env names the template may set (the sidecar's own telemetry settings, and the
+/// cluster DNS domain of its peer addresses).
+pub const TEMPLATE_ENV_ALLOWED: [&str; 3] = [
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "AGENTSC_OTLP_ENDPOINT_ALLOW",
+    "AGENTSC_CLUSTER_DOMAIN",
+];
 
 // ---- the chart → injector template -----------------------------------------------------------------
 
@@ -277,6 +283,8 @@ pub struct Injector {
     pub template: InjectTemplate,
     pub cp_namespace: String,
     pub ca_bundle: CaBundle,
+    /// `--trust-domain`, handed to the sidecar as `AGENTSC_TRUST_DOMAIN`.
+    pub trust_domain: String,
 }
 
 /// The webhook handlers' state.
@@ -302,6 +310,7 @@ impl WebhookState {
                 template: InjectTemplate::from_env()?,
                 cp_namespace: ctx.args.cp_namespace.clone(),
                 ca_bundle,
+                trust_domain: ctx.args.trust_domain.clone(),
             },
             config: ctx.config.clone(),
             cp_audit: ctx.cp_audit.clone(),
@@ -740,6 +749,7 @@ fn sidecar_container(inj: &Injector, p: &PodRequest) -> Container {
         env("AGENTSC_STATE_DIR", STATE_DIR),
         // the runtime is the agentsc-runtime container (runtime_container)
         env("AGENTSC_NO_RUNTIME", "true"),
+        env("AGENTSC_TRUST_DOMAIN", inj.trust_domain.clone()),
     ];
     // agentscd only: the runtime container never gets the key
     if let Some(secret) = &p.anthropic_secret {
@@ -1148,6 +1158,7 @@ mod tests {
             template,
             cp_namespace: "agentsc-system".into(),
             ca_bundle: CaBundle::Fixed("CA PEM".into()),
+            trust_domain: "agentsc".into(),
         }
     }
 
@@ -1241,6 +1252,7 @@ mod tests {
             json!({"name": "AGENTSC_K8S_TOKEN_FILE", "value": "/var/run/secrets/agentsc/token"}),
             json!({"name": "AGENTSC_STATE_DIR", "value": "/var/lib/agentsc/state"}),
             json!({"name": "AGENTSC_NO_RUNTIME", "value": "true"}),
+            json!({"name": "AGENTSC_TRUST_DOMAIN", "value": "agentsc"}),
         ];
         env.extend(extra_env.iter().cloned());
         json!({
@@ -1432,11 +1444,28 @@ mod tests {
     }
 
     #[test]
+    fn the_sidecar_gets_embassys_trust_domain() {
+        let mut inj = injector(InjectTemplate::default());
+        inj.trust_domain = "prod.example".into();
+        let d = mutate(&inj, &create(pod(annotated())));
+        let env = d.patch[1]["value"][0]["env"].as_array().unwrap().clone();
+        let td: Vec<&Value> = env
+            .iter()
+            .filter(|e| e["name"] == "AGENTSC_TRUST_DOMAIN")
+            .collect();
+        assert_eq!(
+            td,
+            [&json!({"name": "AGENTSC_TRUST_DOMAIN", "value": "prod.example"})]
+        );
+    }
+
+    #[test]
     fn templates_may_not_reach_the_injectors_own_settings() {
         for bad in [
             r#"{"env":[{"name":"AGENTSC_CONTROL_PLANE","value":"evil:15012"}]}"#,
             r#"{"env":[{"name":"AGENTSC_SERVICE","value":"x"}]}"#,
             r#"{"env":[{"name":"AGENTSC_NO_RUNTIME","value":"false"}]}"#,
+            r#"{"env":[{"name":"AGENTSC_TRUST_DOMAIN","value":"evil"}]}"#,
             r#"{"command":["sh"]}"#,
             r#"{"imagePullPolicy":"Sometimes"}"#,
             r#"not json"#,

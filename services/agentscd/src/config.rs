@@ -7,8 +7,9 @@ use clap::Parser;
 
 /// The default of `--max-response-bytes`: 3 MiB.
 pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 3 * 1024 * 1024;
-/// The default of `--peer-address-template` (design §6.1).
-pub const DEFAULT_PEER_ADDRESS_TEMPLATE: &str = "{service}.{namespace}.svc.cluster.local:{port}";
+/// The default of `--peer-address-template` (design §6.1). `{cluster_domain}` is
+/// `--cluster-domain` (`cluster.local` unless set).
+pub const DEFAULT_PEER_ADDRESS_TEMPLATE: &str = "{service}.{namespace}.svc.{cluster_domain}:{port}";
 
 /// agentscd — the agentsc sidecar (CONTRACT.md §2 and design §6.1 list every flag).
 #[derive(Parser, Debug, Clone)]
@@ -100,6 +101,21 @@ pub struct Config {
         default_value = DEFAULT_PEER_ADDRESS_TEMPLATE
     )]
     pub peer_address_template: String,
+    /// The SPIFFE trust domain of this install: own identity, peers' and the control plane's
+    /// (`spiffe://<trust domain>/...`); must equal embassy's.
+    #[arg(
+        long,
+        env = "AGENTSC_TRUST_DOMAIN",
+        default_value = agentsc_common::identity::DEFAULT_TRUST_DOMAIN
+    )]
+    pub trust_domain: String,
+    /// The Kubernetes cluster DNS domain (`{cluster_domain}` in `--peer-address-template`).
+    #[arg(
+        long,
+        env = "AGENTSC_CLUSTER_DOMAIN",
+        default_value = agentsc_common::identity::DEFAULT_CLUSTER_DOMAIN
+    )]
+    pub cluster_domain: String,
     /// Charter `telemetry.otlp_endpoint` values allowed (globs, comma separated; empty = refused).
     #[arg(long, env = "AGENTSC_OTLP_ENDPOINT_ALLOW", value_delimiter = ',')]
     pub otlp_endpoint_allow: Vec<String>,
@@ -246,6 +262,8 @@ impl Config {
             app_token_file: None,
             app_token: None,
             peer_address_template: DEFAULT_PEER_ADDRESS_TEMPLATE.into(),
+            trust_domain: agentsc_common::identity::DEFAULT_TRUST_DOMAIN.into(),
+            cluster_domain: agentsc_common::identity::DEFAULT_CLUSTER_DOMAIN.into(),
             otlp_endpoint_allow: Vec::new(),
             mesh_cache_bytes: crate::cache::DEFAULT_CAPACITY_BYTES,
             mesh_cache_max_age: crate::cache::DEFAULT_MAX_AGE_SECS,

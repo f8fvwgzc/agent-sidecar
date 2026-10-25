@@ -3,8 +3,8 @@
 //! The workload certificate lives in an [`ArcSwapOption<WorkloadTls>`]: the mesh server and the
 //! mesh and control-plane clients get it through rustls `ResolvesServerCert` /
 //! `ResolvesClientCert`, so a renewal takes effect without a restart. The control plane (and its
-//! CA) is verified against the trust roots and its URI SAN `spiffe://agentsc/control-plane`, never
-//! by DNS name.
+//! CA) is verified against the trust roots and its URI SAN `spiffe://<trust domain>/control-plane`
+//! (`--trust-domain`), never by DNS name.
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -28,7 +28,8 @@ use tokio::net::TcpStream;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
 
-/// The URI SAN of the control plane's serving certificate (design §7).
+/// The URI SAN of the control plane's serving certificate (design §7) in the default trust
+/// domain; [`agentsc_common::identity::control_plane_uri`] gives it for another.
 pub const CONTROL_PLANE_URI: &str = "spiffe://agentsc/control-plane";
 
 pub type TlsCell = Arc<ArcSwapOption<WorkloadTls>>;
@@ -360,16 +361,19 @@ impl ServerCertVerifier for UriSanVerifier {
 }
 
 /// A client for the control plane or its CA: the server must chain to `roots` and carry
-/// [`CONTROL_PLANE_URI`]; `cert` (the workload certificate) is presented when given.
+/// `spiffe://<trust_domain>/control-plane`; `cert` (the workload certificate) is presented when
+/// given.
 pub fn control_plane_client_config(
     roots: Arc<RootCertStore>,
     cert: Option<Arc<dyn ResolvesClientCert>>,
+    trust_domain: &str,
 ) -> anyhow::Result<Arc<ClientConfig>> {
     let provider = provider();
+    let uri = agentsc_common::identity::control_plane_uri(trust_domain);
     let builder = ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()?
         .dangerous()
-        .with_custom_certificate_verifier(Arc::new(UriSanVerifier::new(roots, CONTROL_PLANE_URI)));
+        .with_custom_certificate_verifier(Arc::new(UriSanVerifier::new(roots, &uri)));
     let mut cfg = match cert {
         Some(c) => builder.with_client_cert_resolver(c),
         None => builder.with_no_client_auth(),

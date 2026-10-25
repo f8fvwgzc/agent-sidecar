@@ -354,14 +354,37 @@ fn leaf_params(
     Ok(params)
 }
 
-/// The workload leaf of design §7 for `public_key`: URI SAN
-/// `spiffe://agentsc/ns/<namespace>/svc/<service>`, DNS SANs `<svc>`, `<svc>.<ns>`,
-/// `<svc>.<ns>.svc`, `<svc>.<ns>.svc.cluster.local`, EKU serverAuth + clientAuth, valid for
-/// `ttl` (backdated by [`BACKDATE`], capped at the CA's expiry). `namespace` and `service`
-/// must be DNS-1123 labels.
+/// [`issue_workload_leaf_in`] in the default trust domain (`agentsc`) and cluster domain
+/// (`cluster.local`).
 pub fn issue_workload_leaf(
     ca: &CaKeyPair,
     public_key: &VerifiedPublicKey,
+    namespace: &str,
+    service: &str,
+    ttl: StdDuration,
+) -> Result<IssuedCert, PkiError> {
+    issue_workload_leaf_in(
+        ca,
+        public_key,
+        agentsc_common::identity::DEFAULT_TRUST_DOMAIN,
+        agentsc_common::identity::DEFAULT_CLUSTER_DOMAIN,
+        namespace,
+        service,
+        ttl,
+    )
+}
+
+/// The workload leaf of design §7 for `public_key`: URI SAN
+/// `spiffe://<trust_domain>/ns/<namespace>/svc/<service>`, DNS SANs `<svc>`, `<svc>.<ns>`,
+/// `<svc>.<ns>.svc`, `<svc>.<ns>.svc.<cluster_domain>`, EKU serverAuth + clientAuth, valid for
+/// `ttl` (backdated by [`BACKDATE`], capped at the CA's expiry). `namespace` and `service`
+/// must be DNS-1123 labels, `trust_domain` a SPIFFE trust domain name and `cluster_domain` a DNS
+/// name.
+pub fn issue_workload_leaf_in(
+    ca: &CaKeyPair,
+    public_key: &VerifiedPublicKey,
+    trust_domain: &str,
+    cluster_domain: &str,
     namespace: &str,
     service: &str,
     ttl: StdDuration,
@@ -373,12 +396,11 @@ pub fn issue_workload_leaf(
             )));
         }
     }
-    let id = SpiffeId {
-        namespace: namespace.into(),
-        service: service.into(),
-    };
+    agentsc_common::identity::check_trust_domain(trust_domain).map_err(PkiError::Invalid)?;
+    agentsc_common::identity::check_cluster_domain(cluster_domain).map_err(PkiError::Invalid)?;
+    let id = SpiffeId::new(trust_domain, namespace, service);
     let mut sans = vec![SanType::URI(Ia5String::try_from(id.uri())?)];
-    for dns in id.dns_names() {
+    for dns in id.dns_names(cluster_domain) {
         sans.push(SanType::DnsName(Ia5String::try_from(dns)?));
     }
     let validity = ca.leaf_validity(ttl)?;
@@ -441,9 +463,10 @@ pub fn issue_server_leaf(
 }
 
 /// The workload identity of a DER certificate, strictly: the certificate must carry exactly
-/// one URI SAN and it must be `spiffe://agentsc/ns/<ns>/svc/<svc>` (a SPIFFE SVID has one URI
-/// SAN). `Ok(None)` otherwise (no URI SAN, several, or another kind of URI such as
-/// `spiffe://agentsc/control-plane`).
+/// one URI SAN and it must be `spiffe://<trust domain>/ns/<ns>/svc/<svc>` (a SPIFFE SVID has one
+/// URI SAN). `Ok(None)` otherwise (no URI SAN, several, or another kind of URI such as
+/// `spiffe://agentsc/control-plane`). The trust domain is kept: the caller compares it with its
+/// own.
 pub fn sole_spiffe_id_of(der: &[u8]) -> Result<Option<SpiffeId>, PkiError> {
     let (_, cert) =
         x509_parser::parse_x509_certificate(der).map_err(|e| PkiError::Parse(e.to_string()))?;
@@ -617,6 +640,37 @@ mod tests {
             (id.namespace.as_str(), id.service.as_str()),
             ("shop", "orders")
         );
+    }
+
+    #[test]
+    fn workload_leaf_in_a_configured_trust_and_cluster_domain() {
+        let (_, ca) = ca();
+        let (_, csr) = csr_for(&rcgen::PKCS_ECDSA_P256_SHA256);
+        let key = verify_csr_p256(&csr).unwrap();
+        let leaf = issue_workload_leaf_in(
+            &ca,
+            &key,
+            "prod.example",
+            "corp.internal",
+            "shop",
+            "orders",
+            HOUR,
+        )
+        .unwrap();
+        assert_eq!(
+            crate::uri_sans_of(&leaf.cert_der).unwrap(),
+            ["spiffe://prod.example/ns/shop/svc/orders"]
+        );
+        assert_eq!(
+            crate::dns_names_of(&leaf.cert_der).unwrap()[3],
+            "orders.shop.svc.corp.internal"
+        );
+        let id = sole_spiffe_id_of(&leaf.cert_der).unwrap().unwrap();
+        assert_eq!(id.trust_domain, "prod.example");
+        for (td, cd) in [("Prod", "cluster.local"), ("agentsc", "a..b")] {
+            let e = issue_workload_leaf_in(&ca, &key, td, cd, "shop", "orders", HOUR).unwrap_err();
+            assert!(matches!(e, PkiError::Invalid(_)), "{td} {cd}: {e}");
+        }
     }
 
     #[test]

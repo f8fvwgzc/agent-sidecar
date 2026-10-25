@@ -52,6 +52,11 @@
     },
     "imagePullSecrets": { "type": "array" },
     "clusterDomain": { "$ref": "#/definitions/dnsName" },
+    "trustDomain": {
+      "type": "string",
+      "description": "SPIFFE trust domain name: a-z, 0-9, '.', '-' and '_'.",
+      "pattern": "^[a-z0-9._-]{1,255}$"
+    },
     "crds": {
       "type": "object",
       "additionalProperties": false,

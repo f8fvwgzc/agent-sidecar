@@ -50,9 +50,18 @@ fn text(secret: &Secret, key: &str) -> Option<String> {
     String::from_utf8(b.0.clone()).ok()
 }
 
+/// The URI SANs of the leaf of a PEM chain.
+fn leaf_uri_sans(cert_pem: &str) -> Option<Vec<String>> {
+    let chain = agentsc_pki::certs_from_pem(cert_pem).ok()?;
+    agentsc_pki::uri_sans_of(chain.first()?).ok()
+}
+
+/// `control_plane_uri`: the URI SAN this replica's own certificate carries
+/// (`spiffe://<trust domain>/control-plane`).
 fn usable(
     secret: &Secret,
     ca_pem: &str,
+    control_plane_uri: &str,
     dns_names: &[String],
     min_remaining: Duration,
 ) -> Option<Theirs> {
@@ -71,7 +80,7 @@ fn usable(
     if !agentsc_pki::uri_sans_of(leaf)
         .ok()?
         .iter()
-        .any(|u| u == CONTROL_PLANE_SPIFFE_ID)
+        .any(|u| u == control_plane_uri)
     {
         return None;
     }
@@ -143,7 +152,16 @@ pub async fn sync_once(
             Err(e) => Err(anyhow!("create Secret {secret}: {e}")),
         };
     };
-    if let Some(theirs) = usable(&existing, &ours.ca_pem, dns_names, min_remaining) {
+    let control_plane_uri = leaf_uri_sans(&ours.cert_pem)
+        .and_then(|u| u.into_iter().next())
+        .unwrap_or_else(|| CONTROL_PLANE_SPIFFE_ID.to_string());
+    if let Some(theirs) = usable(
+        &existing,
+        &ours.ca_pem,
+        &control_plane_uri,
+        dns_names,
+        min_remaining,
+    ) {
         if theirs.cert.trim() == ours.cert_pem.trim() {
             return Ok(SyncOutcome::Unchanged);
         }

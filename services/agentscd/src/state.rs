@@ -41,6 +41,9 @@ pub struct AppState {
     /// This workload's identity: `--service` / `--namespace` in managed mode, else the charter's.
     pub service: String,
     pub namespace: String,
+    /// `--trust-domain`: this workload's, its peers' and the control plane's (CONTRACT.md §5).
+    pub trust_domain: String,
+    /// `spiffe://<trust domain>/ns/<namespace>/svc/<service>`.
     pub self_identity: String,
     pub pod: String,
     loaded: ArcSwapOption<Loaded>,
@@ -196,7 +199,12 @@ impl AppState {
                 "{what} {v:?} is not a DNS-1123 label"
             );
         }
-        let self_identity = agentsc_charter::spiffe_id(&namespace, &service);
+        let trust_domain = config.trust_domain.clone();
+        agentsc_common::identity::check_trust_domain(&trust_domain)
+            .map_err(|e| anyhow::anyhow!("--trust-domain: {e}"))?;
+        agentsc_common::identity::check_cluster_domain(&config.cluster_domain)
+            .map_err(|e| anyhow::anyhow!("--cluster-domain: {e}"))?;
+        let self_identity = agentsc_charter::spiffe_id_in(&trust_domain, &namespace, &service);
 
         let (redact, pii, target) = match &startup {
             Some(s) => (
@@ -256,6 +264,7 @@ impl AppState {
             pod: config.pod(),
             service,
             namespace,
+            trust_domain,
             self_identity,
             loaded: ArcSwapOption::empty(),
             apply_lock: Mutex::new(()),
@@ -339,13 +348,15 @@ impl AppState {
         format!("http://127.0.0.1:{}", self.app_port(l))
     }
 
-    /// A peer's mesh address: `mesh.peers`, else `--peer-address-template`.
+    /// A peer's mesh address: `mesh.peers`, else `--peer-address-template` (`{service}`,
+    /// `{namespace}`, `{cluster_domain}`, `{port}`).
     pub fn peer_address(&self, charter: &Charter, service: &str) -> String {
         charter.mesh.peers.get(service).cloned().unwrap_or_else(|| {
             self.config
                 .peer_address_template
                 .replace("{service}", service)
                 .replace("{namespace}", &self.namespace)
+                .replace("{cluster_domain}", &self.config.cluster_domain)
                 .replace("{port}", &charter.mesh.port.to_string())
         })
     }
