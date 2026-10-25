@@ -578,12 +578,13 @@ pub fn dev_token_path(args: &ServeArgs) -> PathBuf {
 }
 
 /// Reload `--config` when the file changes; a file that does not validate is logged and the
-/// running config stays.
+/// running config stays. A changed sidecar image allow-list is logged by `images_log`.
 async fn reload_config(
     path: PathBuf,
     cp_namespace: String,
     config: Arc<ArcSwap<ControlPlaneConfig>>,
     hub: Option<Arc<Hub>>,
+    images_log: Option<crate::sidecar_images::StateLog>,
     every: Duration,
     shutdown: CancellationToken,
 ) {
@@ -612,6 +613,12 @@ async fn reload_config(
                     );
                     continue;
                 }
+                let images_changed = config.load().sidecar_images != next.sidecar_images;
+                if let Some(log) = &images_log
+                    && images_changed
+                {
+                    log.log(&next.sidecar_images);
+                }
                 config.store(Arc::new(next));
                 tracing::info!(path = %path.display(), "reloaded the ControlPlaneConfig");
             }
@@ -629,6 +636,11 @@ pub async fn start(
     shutdown: CancellationToken,
 ) -> anyhow::Result<Started> {
     use Component::*;
+    // loudly, when the allow-list is off (crate::sidecar_images)
+    let images_log = crate::sidecar_images::StateLog::for_args(&args);
+    if let Some(log) = &images_log {
+        log.log(&config.sidecar_images);
+    }
     let config = Arc::new(ArcSwap::from_pointee(config));
     let hub_cell: HubCell = Arc::default();
     let store = open_store(&args, &config, &hub_cell).await?;
@@ -832,6 +844,7 @@ pub async fn start(
             args.cp_namespace.clone(),
             config.clone(),
             hub.clone(),
+            images_log,
             CONFIG_POLL,
             shutdown.clone(),
         )));
@@ -1268,6 +1281,7 @@ mod tests {
             path.clone(),
             "agentsc-system".into(),
             config.clone(),
+            None,
             None,
             Duration::from_millis(20),
             stop.clone(),

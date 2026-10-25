@@ -1,6 +1,7 @@
-//! `ControlPlaneConfig` (design §8.2): API tokens and roles, certificate issuance, write policy
-//! and the UI event ring. Loaded from `embassy serve --config <file>` (YAML); every struct
-//! refuses unknown fields, and [`ControlPlaneConfig::validate`] reports every problem at once.
+//! `ControlPlaneConfig` (design §8.2): API tokens and roles, certificate issuance, the sidecar
+//! image allow-list ([`crate::sidecar_images`], design §13), write policy and the UI event ring.
+//! Loaded from `embassy serve --config <file>` (YAML); every struct refuses unknown fields, and
+//! [`ControlPlaneConfig::validate`] reports every problem at once.
 //!
 //! Tokens are stored as SHA-256 only: the lowercase hex digest of the whole token text,
 //! `att_` included (see [`crate::token`]).
@@ -73,6 +74,9 @@ pub struct ControlPlaneConfig {
     pub auth: AuthConfig,
     #[serde(default)]
     pub issuance: IssuanceConfig,
+    /// The images that may run as the sidecar containers; empty = not enforced (development).
+    #[serde(default)]
+    pub sidecar_images: SidecarImagesConfig,
     /// Checked on every write after the charter validator; absent = no extra policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<PolicyConfig>,
@@ -82,13 +86,15 @@ pub struct ControlPlaneConfig {
 
 impl Default for ControlPlaneConfig {
     /// What `embassy serve` runs with when `--config` is not given: no tokens (only `--dev`
-    /// can then reach the API), Kubernetes issuance on, default TTL and event ring.
+    /// can then reach the API), Kubernetes issuance on, default TTL and event ring, and no
+    /// sidecar image allow-list (not enforced; [`crate::sidecar_images`] warns).
     fn default() -> Self {
         Self {
             api_version: API_VERSION.into(),
             kind: KIND.into(),
             auth: AuthConfig::default(),
             issuance: IssuanceConfig::default(),
+            sidecar_images: SidecarImagesConfig::default(),
             policy: None,
             events: EventsConfig::default(),
         }
@@ -189,6 +195,29 @@ pub struct JoinTokenEntry {
 impl JoinTokenEntry {
     pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
         now >= self.expires_at
+    }
+}
+
+/// `sidecar_images` (design §13, [`crate::sidecar_images`]): the image digests the sidecar
+/// containers (`agentscd`, `agentsc-runtime`) may run.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SidecarImagesConfig {
+    /// `sha256:<64 lowercase hex>` digests of signed sidecar images (the release workflow's).
+    /// Empty: not enforced (a development build has no registry digest).
+    #[serde(default)]
+    pub allowed_digests: Vec<String>,
+}
+
+impl SidecarImagesConfig {
+    /// Is the allow-list enforced (non-empty)?
+    pub fn enforced(&self) -> bool {
+        !self.allowed_digests.is_empty()
+    }
+
+    /// Is `digest` (`sha256:<hex>`) allowed? Always true when not enforced.
+    pub fn allows(&self, digest: &str) -> bool {
+        !self.enforced() || self.allowed_digests.iter().any(|d| d == digest)
     }
 }
 
@@ -435,6 +464,18 @@ impl ControlPlaneConfig {
             }
         }
 
+        let mut digests = BTreeSet::new();
+        for (i, d) in self.sidecar_images.allowed_digests.iter().enumerate() {
+            let at = format!("sidecar_images.allowed_digests[{i}]");
+            if !crate::sidecar_images::is_digest(d) {
+                errs.push(format!(
+                    "{at} {d:?} is not a digest (sha256: and 64 lowercase hex characters)"
+                ));
+            } else if !digests.insert(d.as_str()) {
+                errs.push(format!("{at} {d:?} is listed twice"));
+            }
+        }
+
         if let Some(origins) = self
             .policy
             .as_ref()
@@ -521,6 +562,8 @@ issuance:
   workload_cert_ttl: 24h
   join_tokens:
     - {{ name: compose-orders, sha256: "{b}", namespace: demo, services: [orders], expires_at: "2027-01-01T00:00:00Z" }}
+sidecar_images:
+  allowed_digests: ["sha256:{d}"]
 policy:
   require_authz_default_deny: true
   http_origin_allowlist: ["https://api.partner.example"]
@@ -529,7 +572,8 @@ events:
   retain_bytes: 67108864
 "#,
             a = hash('a'),
-            b = hash('b')
+            b = hash('b'),
+            d = hash('d')
         )
     }
 
@@ -553,6 +597,10 @@ events:
             Some(&["https://api.partner.example".to_string()][..])
         );
         assert_eq!(c.events.retain_bytes, DEFAULT_RETAIN_BYTES);
+        let digest = format!("sha256:{}", hash('d'));
+        assert!(c.sidecar_images.enforced());
+        assert!(c.sidecar_images.allows(&digest));
+        assert!(!c.sidecar_images.allows(&format!("sha256:{}", hash('e'))));
         assert_eq!(c.token_by_sha256(&hash('a')).unwrap().name, "alice");
         assert!(
             c.token_by_sha256(&hash('b')).is_none(),
@@ -579,6 +627,9 @@ events:
         assert_eq!(c.auth.anonymous, Anonymous::None);
         assert!(c.issuance.kubernetes);
         assert!(c.policy.is_none());
+        // no allow-list: not enforced, so every digest passes
+        assert!(!c.sidecar_images.enforced());
+        assert!(c.sidecar_images.allows("sha256:anything"));
     }
 
     #[test]
@@ -651,6 +702,12 @@ events:
             ..Default::default()
         });
         c.events.retain_bytes = 10;
+        c.sidecar_images.allowed_digests = vec![
+            hash('d'),
+            format!("sha256:{}", hash('D')),
+            format!("sha256:{}", hash('d')),
+            format!("sha256:{}", hash('d')),
+        ];
         let errs = c.validate("agentsc-system").unwrap_err();
         let all = errs.join("\n");
         for want in [
@@ -675,6 +732,9 @@ events:
             "policy.http_origin_allowlist[1]",
             "policy.http_origin_allowlist[2]",
             "events.retain_bytes 10 is outside",
+            "sidecar_images.allowed_digests[0] \"dddd",
+            "sidecar_images.allowed_digests[1] \"sha256:DDDD",
+            "sidecar_images.allowed_digests[3] \"sha256:dddd",
         ] {
             assert!(all.contains(want), "missing {want:?} in:\n{all}");
         }

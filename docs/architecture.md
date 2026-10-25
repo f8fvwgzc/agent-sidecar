@@ -37,7 +37,7 @@ Every tool call and every call to another service goes through the sidecar. Mode
 | Component | Language | Runs as | Job |
 | --- | --- | --- | --- |
 | `agentscd` | Rust (tokio, axum, tonic, rustls) | a container in every pod that has agents | Loads the charter. Serves the app on localhost. Starts and supervises the runtime. Checks and performs every tool call. Talks to other sidecars over mTLS. Writes the audit log. |
-| `agentsc-runtime` | Python 3.12+ (grpcio, `anthropic`, pydantic) | a child process of `agentscd`, in the same container | Runs the agent loop: model call, tool calls, model call, until done. Sends every tool call to its sidecar. Reports every model call to its sidecar for the audit log. |
+| `agentsc-runtime` | Python 3.12+ (grpcio, `anthropic`, pydantic) | a child process of `agentscd`, in the same container; in pods injected by the Helm chart, its own container `agentsc-runtime` | Runs the agent loop: model call, tool calls, model call, until done. Sends every tool call to its sidecar. Reports every model call to its sidecar for the audit log. |
 | `embassy` | Rust | a Kubernetes Job (`embassy-bootstrap`), or a local CLI | Creates the CA. Issues one certificate per service. In the cluster it stores each one in a Kubernetes Secret. Locally it writes files. |
 | `agentsc` | Rust | your laptop, or inside the `agentscd` image | Validates charters, prints the charter JSON Schema, and reads and filters audit logs. |
 
@@ -62,6 +62,8 @@ Sidecar diagnostics go to stderr. Stdout carries only audit JSON lines.
 ### agentsc-runtime (the agent loop)
 
 `agentscd` starts the runtime with the command in `--runtime-cmd` (default `agentsc-runtime`) and appends `--listen unix:<socket-dir>/runtime.sock --sidecar unix:<socket-dir>/sidecar.sock`. It also sets `AGENTSC_SERVICE` and `AGENTSC_NAMESPACE`. The runtime's own stdout and stderr go to the sidecar's stderr with a `[runtime]` prefix.
+
+In pods injected by the Helm chart (design §13) the sidecar does not start it: `agentscd` runs with `AGENTSC_NO_RUNTIME=true`, and the runtime is a native sidecar container of its own, `agentsc-runtime`, started just before `agentscd` with the same two flags and only the socket directory mounted. It has no environment, so it cannot read `ANTHROPIC_API_KEY` or the workload key, and its logs are the `agentsc-runtime` container's (`kubectl logs <pod> -c agentsc-runtime`).
 
 If the runtime exits, the sidecar restarts it. The wait starts at 1 second and doubles up to 30 seconds. It goes back to 1 second if the runtime ran for more than 60 seconds. The sidecar checks `Health` every 10 seconds while the runtime is healthy, and every second while it is not.
 
