@@ -171,6 +171,12 @@ async fn fail_closed_refuses_new_work_while_the_audit_sink_fails_and_recovers() 
     ord.audit.file = Some(orders_audit.to_string_lossy().into_owned());
     let orders = start(root, "orders", &ord, tls_dir(&ca, root, "orders"), false).await;
     let mut orders_tools = common::tools(&root.join("sock-orders")).await;
+    // the runs these tool calls belong to (tool calls of no run are refused)
+    let _runs = (
+        common::in_flight(&orders, "req-before", "ops-assistant"),
+        common::in_flight(&orders, "req-refused", "ops-assistant"),
+        common::in_flight(&inventory, "req-tool", "stock-analyst"),
+    );
     let stock = |request_id: &str| ToolServiceRequest {
         ctx: ctx("ops-assistant", "check_stock", request_id),
         service: "inventory".into(),
@@ -229,6 +235,29 @@ async fn fail_closed_refuses_new_work_while_the_audit_sink_fails_and_recovers() 
         st.metadata().get("x-agentsc-rule").unwrap(),
         "audit.unavailable"
     );
+    // … and the runtime's model calls, at the model gateway
+    let stream = tokio::net::UnixStream::connect(root.join("sock-inventory").join("model.sock"))
+        .await
+        .unwrap();
+    let (mut send, conn) =
+        hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream))
+            .await
+            .unwrap();
+    tokio::spawn(conn);
+    let resp = send
+        .send_request(
+            hyper::Request::post("http://agentsc-model-gateway/v1/messages")
+                .header("x-agentsc-request-id", "req-model")
+                .header("x-agentsc-agent", "stock-analyst")
+                .body(http_body_util::Full::new(axum::body::Bytes::from_static(
+                    b"{}",
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 503);
+    assert_eq!(resp.headers()["x-agentsc-rule"], "audit.unavailable");
     // not ready, and /readyz says why
     let (code, body) = readyz(&inventory).await;
     assert_eq!(code, 503);
@@ -278,7 +307,8 @@ async fn fail_closed_refuses_new_work_while_the_audit_sink_fails_and_recovers() 
         [
             ("agent_invocation", "deny"),
             ("service_call", "deny"),
-            ("tool_call", "deny")
+            ("tool_call", "deny"),
+            ("authz", "deny")
         ],
         "{records:#?}"
     );
