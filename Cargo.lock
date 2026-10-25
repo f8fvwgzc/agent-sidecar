@@ -19,7 +19,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agentsc-charter"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "regex",
  "schemars",
@@ -32,7 +32,7 @@ dependencies = [
 
 [[package]]
 name = "agentsc-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agentsc-charter",
  "agentsc-common",
@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "agentsc-common"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agentsc-charter",
  "chrono",
@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "agentsc-otel"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agentsc-charter",
  "agentsc-common",
@@ -82,7 +82,7 @@ dependencies = [
 
 [[package]]
 name = "agentsc-pki"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agentsc-common",
  "base64 0.23.1",
@@ -96,7 +96,7 @@ dependencies = [
 
 [[package]]
 name = "agentsc-proto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "prost",
  "tonic",
@@ -106,7 +106,7 @@ dependencies = [
 
 [[package]]
 name = "agentscd"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agentsc-charter",
  "agentsc-common",
@@ -867,7 +867,7 @@ checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
 
 [[package]]
 name = "embassy"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agentsc-charter",
  "agentsc-common",
