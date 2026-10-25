@@ -195,9 +195,9 @@ pub fn read_session_key(path: &Path) -> anyhow::Result<Vec<u8>> {
 }
 
 fn random_key() -> anyhow::Result<Vec<u8>> {
-    use rand::TryRngCore;
+    use rand::TryRng;
     let mut key = vec![0u8; 32];
-    rand::rngs::OsRng
+    rand::rngs::SysRng
         .try_fill_bytes(&mut key)
         .map_err(|e| anyhow::anyhow!("read random bytes from the operating system: {e}"))?;
     Ok(key)
