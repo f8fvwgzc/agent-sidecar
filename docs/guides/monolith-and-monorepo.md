@@ -431,7 +431,7 @@ The repo has no Docker Compose file. The tested way to run outside Kubernetes is
    | `--socket-dir` | The default `/run/agentsc` is often not writable on a laptop. |
    | `--runtime-cmd` | Runs the runtime from the `uv` project. The sidecar appends `--listen` and `--sidecar`. |
 
-   The app API keeps its defaults: HTTP on `127.0.0.1:3500` and gRPC on `127.0.0.1:50001`. Set `ANTHROPIC_API_KEY` in this shell to use Claude. Without it, every agent runs on the mock model.
+   The app API keeps its defaults: HTTP on `127.0.0.1:3500` and gRPC on `127.0.0.1:50001`. Set `ANTHROPIC_API_KEY` in this shell to use Claude. Without it, set `AGENTSC_MOCK_FALLBACK=1` to run every agent on the mock model; otherwise Claude agents are refused.
 
 5. Check readiness, call the orchestrator, and try a denied call:
 

@@ -38,6 +38,7 @@ helm upgrade --install "$RELEASE" deploy/helm/agent-sidecar \
   --kube-context "$KUBE_CONTEXT" --namespace "$CP_NS" --create-namespace \
   --set images.embassy.repository=agentsc/embassy --set "images.embassy.tag=$TAG" \
   --set images.agentscd.repository=agentsc/agentscd --set "images.agentscd.tag=$TAG" \
+  --set injection.mockFallback=true \
   --set-json "auth.tokens=[{\"name\":\"demo-admin\",\"role\":\"admin\",\"sha256\":\"$SHA256\",\"namespaces\":[\"*\"],\"payloads\":true}]" \
   --wait --timeout 5m
 

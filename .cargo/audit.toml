@@ -1,0 +1,8 @@
+# cargo audit (CI, blocking). Keep the ignore list equal to deny.toml's [advisories] ignore.
+[advisories]
+ignore = [
+    # quick-xml 0.26 via agentscd's opt-in `profiling` feature (pprof -> inferno): inferno only
+    # writes the flamegraph SVG and both advisories are in the reader; release builds never enable it.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]

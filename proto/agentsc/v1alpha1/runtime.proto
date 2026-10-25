@@ -32,7 +32,7 @@ message ExecuteResponse {
 
 message HealthResponse {
   bool ok = 1;
-  string model_provider = 2;   // anthropic | mock
+  string model_provider = 2;   // anthropic | mock | none (no ANTHROPIC_API_KEY, no AGENTSC_MOCK_FALLBACK)
   string version = 3;
 }
 
