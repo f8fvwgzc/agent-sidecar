@@ -539,7 +539,7 @@ The two hashes must be equal.
 
 | Symptom | Likely cause | What to check |
 | --- | --- | --- |
-| Answers look like `Mock answer for: ...` or `Based on <tool>: ...`. | No `ANTHROPIC_API_KEY`, so the runtime uses the mock model. An agent with `model: mock` always uses the mock. | `model_provider` in `/readyz`. Create the Secret `agentsc-anthropic` and restart the pods. `make secret-anthropic` does both. |
+| Answers look like `Mock answer for: ...` or `Based on <tool>: ...`. | No `ANTHROPIC_API_KEY` and `AGENTSC_MOCK_FALLBACK=1` (the demos set it), so the runtime uses the mock model. An agent with `model: mock` always uses the mock. Without the fallback the call fails with `FAILED_PRECONDITION` and `model_provider` is `none`. | `model_provider` in `/readyz`. Create the Secret `agentsc-anthropic` and restart the pods. `make secret-anthropic` does both. |
 | `502 model.error` | The API rejected the call or could not be reached. | `error` in the `model_call` record. The key. The model id. Egress to the API. |
 
 ### Logs
@@ -718,7 +718,7 @@ With `readOnlyRootFilesystem: true`, `/run/agentsc` is already an `emptyDir` in 
 - Records of one call are spread over several pods. Join them by `request_id` or `trace_id` in your log store.
 - The sidecar ignores write errors, and the file sink has no rotation. Prefer the stdout sink with a log agent.
 
-**5. Manage `ANTHROPIC_API_KEY` as a secret.** Shipped: the Secret `agentsc-anthropic` is referenced with `optional: true`. If it is missing, agents fall back to the mock model without an error.
+**5. Manage `ANTHROPIC_API_KEY` as a secret.** Shipped: the Secret `agentsc-anthropic` is referenced with `optional: true`. If it is missing, an agent whose `model` is not `mock` is refused with `FAILED_PRECONDITION`; only the demos set `AGENTSC_MOCK_FALLBACK=1` to run on the mock instead.
 
 - Create the Secret from a secret manager, for example External Secrets Operator, Vault, Sealed Secrets or your cloud's secret store.
 - Set `optional: false`, so that with a missing Secret the `agentscd` container does not start, instead of falling back to the mock.

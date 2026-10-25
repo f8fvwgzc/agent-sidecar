@@ -167,6 +167,7 @@
       "additionalProperties": false,
       "properties": {
         "failurePolicy": { "type": "string", "enum": ["Fail", "Ignore"] },
+        "mockFallback": { "type": "boolean" },
         "resources": { "$ref": "#/definitions/resources" },
         "securityContext": { "type": "object" }
       }

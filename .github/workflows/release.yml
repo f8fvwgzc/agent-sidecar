@@ -208,6 +208,9 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Sigstore-signed build provenance for each image (actions/attest-build-provenance).
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: true
       matrix:
@@ -260,7 +263,8 @@ jobs:
             org.opencontainers.image.title=${{ matrix.image }}
             org.opencontainers.image.licenses=MIT
 
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      - id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: docker/Dockerfile
@@ -273,6 +277,14 @@ jobs:
           provenance: mode=max
           sbom: true
 
+      # Verify with: gh attestation verify oci://ghcr.io/f8fvwgzc/agent-sidecar/<image>:<version> --owner f8fvwgzc
+      - name: Sign the image's build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE_PREFIX }}/${{ matrix.image }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
   release:
     name: GitHub release
     needs: [version, binaries, images]
@@ -280,6 +292,8 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -292,6 +306,12 @@ jobs:
         run: |
           sha256sum -- *.tar.gz >SHA256SUMS
           cat SHA256SUMS
+
+      # Verify with: gh attestation verify <archive> --owner f8fvwgzc
+      - name: Sign the archives' build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
 
       - name: Create the release
         env:

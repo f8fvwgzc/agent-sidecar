@@ -1,4 +1,7 @@
-"""Model providers: the Anthropic API when ANTHROPIC_API_KEY is set, else a deterministic mock (CONTRACT.md §9)."""
+"""Model providers: the Anthropic API, or a deterministic mock for `model: mock` (CONTRACT.md §9).
+
+Without ANTHROPIC_API_KEY a Claude model fails closed, unless AGENTSC_MOCK_FALLBACK=1 lets it run on the mock.
+"""
 
 from __future__ import annotations
 
@@ -398,7 +401,30 @@ def anthropic_available() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY"))
 
 
+def mock_fallback() -> bool:
+    """AGENTSC_MOCK_FALLBACK=1: without ANTHROPIC_API_KEY, run every agent on the mock (demos, CI)."""
+    return os.environ.get("AGENTSC_MOCK_FALLBACK") == "1"
+
+
+def provider() -> str:
+    """What a non-mock agent runs on: `anthropic`, `mock` (the fallback), or `none` (it is refused)."""
+    if anthropic_available():
+        return "anthropic"
+    return "mock" if mock_fallback() else "none"
+
+
+class ModelUnavailable(Exception):
+    """A Claude model was asked for, and there is no ANTHROPIC_API_KEY and no mock fallback."""
+
+
 def model_for(name: str) -> Model:
-    if name == "mock" or not anthropic_available():
-        return MockModel(name if name == "mock" else "mock")
-    return AnthropicModel(name)
+    if name == "mock":
+        return MockModel("mock")
+    if anthropic_available():
+        return AnthropicModel(name)
+    if mock_fallback():
+        return MockModel("mock")
+    raise ModelUnavailable(
+        f"model {name!r} needs ANTHROPIC_API_KEY; set it, use `model: mock`, "
+        "or set AGENTSC_MOCK_FALLBACK=1 to run on the deterministic mock"
+    )

@@ -86,7 +86,8 @@ Flags / environment of `agentscd` (flag wins over env):
 | `--no-runtime`    | `AGENTSC_NO_RUNTIME`     | off. `1/true/yes/on` = do not spawn the runtime; something else serves `runtime.sock`, and readiness still follows its `Health` |
 | `--mesh-cache-bytes` | `AGENTSC_MESH_CACHE_BYTES` | `16777216`. Bytes of service-call responses the response cache keeps (`GET`/`HEAD` the app marked with `Cache-Control: max-age`; docs/adr/0002-response-caching.md); `0` disables it |
 | `--mesh-cache-max-age` | `AGENTSC_MESH_CACHE_MAX_AGE` | `300`. The longest, in seconds, a cached service-call response is served, whatever the app's `max-age` says |
-| —                 | `ANTHROPIC_API_KEY`      | unset → the runtime uses the `mock` model for every agent |
+| —                 | `ANTHROPIC_API_KEY`      | unset → an agent whose `model` is not `mock` is refused (`FAILED_PRECONDITION`), unless `AGENTSC_MOCK_FALLBACK=1` |
+| —                 | `AGENTSC_MOCK_FALLBACK`  | unset. `1` = without `ANTHROPIC_API_KEY`, every agent runs on the `mock` model (demos, CI) |
 
 ## 3. `charter.yaml`
 
@@ -909,8 +910,11 @@ reads records from a file instead of kubectl.
   less 500 ms, as its SDK timeout (which bounds the connect and each wait for
   the next streamed chunk, not the whole stream). With 500 ms or less left, no
   new step starts: status `error`, rule `deadline.exceeded`.
-- Provider selection: `ANTHROPIC_API_KEY` set and `model != mock` → Anthropic
-  SDK, else the deterministic mock. Requests are streamed and collected
+- Provider selection: `model: mock` → the deterministic mock. Otherwise
+  `ANTHROPIC_API_KEY` set → Anthropic SDK; unset → the mock only with
+  `AGENTSC_MOCK_FALLBACK=1`, else Execute fails with `FAILED_PRECONDITION`
+  (fail closed: a missing key never silently becomes a mock). `Health`
+  reports `model_provider` `anthropic`, `mock` (the fallback) or `none`. Requests are streamed and collected
   (`messages.stream(...).get_final_message()`), so large `max_tokens` never
   trip the SDK's non-streaming limit; `output_config.effort: low` is sent to
   every model that accepts it (not `claude-haiku-4-5`, `claude-sonnet-4-5` or
