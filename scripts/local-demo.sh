@@ -7,6 +7,8 @@ cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 LOCAL=$ROOT/.local
 NS=agentsc-demo
+# Without ANTHROPIC_API_KEY the demo agents run on the deterministic mock instead of being refused.
+export AGENTSC_MOCK_FALLBACK=${AGENTSC_MOCK_FALLBACK:-1}
 # This machine may already use 8080/8000; the local demo runs the apps on these ports instead.
 ORDERS_PORT=${ORDERS_PORT:-38080}
 INVENTORY_PORT=${INVENTORY_PORT:-38000}

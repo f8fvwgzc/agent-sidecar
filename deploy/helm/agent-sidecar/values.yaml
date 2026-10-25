@@ -110,6 +110,9 @@ injection:
   # refuses such pods. Empty (and no images.agentscd.digest): NOT enforced, for development builds
   # without a registry digest (minikube); embassy-ca warns at start-up. Turn it on in production.
   allowedImageDigests: []
+  # Without ANTHROPIC_API_KEY an agent whose model is not `mock` is refused. true: it runs on the
+  # deterministic mock instead (AGENTSC_MOCK_FALLBACK=1; demos only, never production).
+  mockFallback: false
   resources:
     requests:
       cpu: 50m

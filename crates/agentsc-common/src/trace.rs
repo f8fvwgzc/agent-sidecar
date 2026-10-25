@@ -1,5 +1,5 @@
 //! W3C `traceparent` handling: `00-<32 hex trace id>-<16 hex span id>-<2 hex flags>`.
-use rand::RngCore;
+use rand::Rng;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraceContext {
