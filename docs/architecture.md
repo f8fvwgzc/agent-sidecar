@@ -37,7 +37,7 @@ Every tool call and every call to another service goes through the sidecar. Mode
 | Component | Language | Runs as | Job |
 | --- | --- | --- | --- |
 | `agentscd` | Rust (tokio, axum, tonic, rustls) | a container in every pod that has agents | Loads the charter. Serves the app on localhost. Starts and supervises the runtime. Checks and performs every tool call. Talks to other sidecars over mTLS. Writes the audit log. |
-| `agentsc-runtime` | Python 3.12+ (grpcio, `anthropic`, pydantic) | a child process of `agentscd`, in the same container; in pods injected by the Helm chart, its own container `agentsc-runtime` | Runs the agent loop: model call, tool calls, model call, until done. Sends every tool call to its sidecar. Reports every model call to its sidecar for the audit log. |
+| `agentsc-runtime` | Python 3.12+ (grpcio, `anthropic`, pydantic) | a child process of `agentscd`, in the same container; in pods injected by the Helm chart, its own container `agentsc-runtime` | Runs the agent loop: model call, tool calls, model call, until done. Sends every tool call to its sidecar, and every model call through its sidecar's model gateway (which holds the key and writes the record). |
 | `embassy` | Rust | a Kubernetes Job (`embassy-bootstrap`), or a local CLI | Creates the CA. Issues one certificate per service. In the cluster it stores each one in a Kubernetes Secret. Locally it writes files. |
 | `agentsc` | Rust | your laptop, or inside the `agentscd` image | Validates charters, prints the charter JSON Schema, and reads and filters audit logs. |
 
