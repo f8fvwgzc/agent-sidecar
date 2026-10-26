@@ -55,8 +55,10 @@
 //! with every problem named, when it brings a container named `agentscd` or `agentsc-runtime` of
 //! its own (it would be its own "sidecar"), defines a volume of the sidecar's names, mounts one
 //! in another container, projects another service-account token for audience `agentsc` (the
-//! `IssueCertificate` credential), or sets `shareProcessNamespace` or `hostPID` (another
-//! container could read the sidecar's memory and environment). So the injector never injects
+//! `IssueCertificate` credential), sets `shareProcessNamespace` or `hostPID` (another
+//! container could read the sidecar's memory and environment), or sets `hostAliases`,
+//! `dnsPolicy: None`, or `dnsConfig` nameservers or searches (the sidecar's control-plane
+//! addresses could resolve to another container, which would get its token). So the injector never injects
 //! twice: a pod that already carries the sidecars (an exported, injected pod applied again) is
 //! denied too; create pods from their controller's template. The chart's
 //! ValidatingAdmissionPolicy `agentsc-sidecar-integrity` applies the same rules after every
@@ -566,6 +568,36 @@ fn sidecar_conflicts(pod: &Value) -> Vec<String> {
             ));
         }
     }
+    // the control-plane addresses must resolve as the cluster says (sidecar_images::shape_problem)
+    let non_empty = |v: Option<&Value>| v.and_then(Value::as_array).is_some_and(|a| !a.is_empty());
+    let dns = spec.and_then(|s| s.get("dnsConfig"));
+    for (set, field) in [
+        (
+            non_empty(spec.and_then(|s| s.get("hostAliases"))),
+            "hostAliases",
+        ),
+        (
+            spec.and_then(|s| s.get("dnsPolicy"))
+                .and_then(Value::as_str)
+                == Some("None"),
+            "dnsPolicy None",
+        ),
+        (
+            non_empty(dns.and_then(|d| d.get("nameservers"))),
+            "dnsConfig.nameservers",
+        ),
+        (
+            non_empty(dns.and_then(|d| d.get("searches"))),
+            "dnsConfig.searches",
+        ),
+    ] {
+        if set {
+            problems.push(format!(
+                "spec.{field} is set: the sidecar's control-plane addresses could resolve to \
+                 another container"
+            ));
+        }
+    }
     problems
 }
 
@@ -865,8 +897,8 @@ fn runtime_container(inj: &Injector, p: &PodRequest) -> Container {
 }
 
 /// A pod as the injector leaves it (service account and `agentsc.io/service` = `service`, the
-/// Anthropic Secret named), for the shape checks' tests in [`crate::sidecar_images`] and
-/// [`crate::issuance`].
+/// Anthropic Secret named, `ca_pem` as the CA bundle), for the shape checks' tests in
+/// [`crate::sidecar_images`] and [`crate::issuance`].
 #[cfg(test)]
 pub(crate) fn injected_pod(
     namespace: &str,
@@ -874,6 +906,7 @@ pub(crate) fn injected_pod(
     service: &str,
     image: &str,
     template: InjectTemplate,
+    ca_pem: &str,
 ) -> k8s_openapi::api::core::v1::Pod {
     use k8s_openapi::api::core::v1::{Pod, PodSpec};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -882,7 +915,7 @@ pub(crate) fn injected_pod(
         template,
         cp_namespace: "agentsc-system".into(),
         trust_domain: "agentsc".into(),
-        ca_bundle: CaBundle::Fixed("CA PEM".into()),
+        ca_bundle: CaBundle::Fixed(ca_pem.into()),
     };
     let p = PodRequest {
         service: service.into(),
@@ -1686,7 +1719,7 @@ mod tests {
     #[test]
     fn pods_may_not_weaken_the_sidecar() {
         let inj = injector(InjectTemplate::default());
-        let cases: [(PodChange, &str); 7] = [
+        let cases: [(PodChange, &str); 11] = [
             (
                 |p| p["spec"]["shareProcessNamespace"] = json!(true),
                 "spec.shareProcessNamespace is true",
@@ -1724,6 +1757,28 @@ mod tests {
                 |p| p["spec"]["volumes"] = json!([{"name": "agentsc-state", "emptyDir": {}}]),
                 "the pod already has a volume named \"agentsc-state\"",
             ),
+            (
+                |p| {
+                    p["spec"]["hostAliases"] =
+                        json!([{"ip": "10.1.2.3", "hostnames": ["embassy-ca.agentsc-system.svc"]}])
+                },
+                "spec.hostAliases is set",
+            ),
+            (
+                |p| {
+                    p["spec"]["dnsPolicy"] = json!("None");
+                    p["spec"]["dnsConfig"] = json!({"nameservers": ["10.1.2.3"]});
+                },
+                "spec.dnsPolicy None is set",
+            ),
+            (
+                |p| p["spec"]["dnsConfig"] = json!({"nameservers": ["10.1.2.3"]}),
+                "spec.dnsConfig.nameservers is set",
+            ),
+            (
+                |p| p["spec"]["dnsConfig"] = json!({"searches": ["evil.example"]}),
+                "spec.dnsConfig.searches is set",
+            ),
         ];
         for (change, want) in cases {
             let mut p = pod(annotated());
@@ -1737,6 +1792,9 @@ mod tests {
         p["spec"]["shareProcessNamespace"] = json!(false);
         p["spec"]["hostPID"] = json!(false);
         p["spec"]["volumes"] = json!([token_volume("vault")]);
+        // DNS options that redirect nothing
+        p["spec"]["dnsPolicy"] = json!("ClusterFirst");
+        p["spec"]["dnsConfig"] = json!({"options": [{"name": "ndots", "value": "2"}]});
         assert!(mutate(&inj, &OFF, &create(p)).allowed);
     }
 

@@ -465,8 +465,11 @@ impl Issuer {
         let images = crate::sidecar_images::check_running_pod(
             &self.config.load().sidecar_images,
             &pod,
-            &self.cp_namespace,
-            self.ca.trust_domain(),
+            &crate::sidecar_images::Expected {
+                cp_namespace: &self.cp_namespace,
+                ca_roots_pem: self.ca.roots_pem(),
+                trust_domain: self.ca.trust_domain(),
+            },
         );
         match images {
             Ok(()) => {}
@@ -552,10 +555,19 @@ impl Issuer {
         key_sha256: Option<String>,
         result: Result<String, &Denial>,
     ) {
-        // refused before any credential was verified: anyone can send these (cp_audit.rs)
-        let unauthenticated = match &result {
-            Err(d) if who.is_none() => Some(format!("IssueCertificate {:?}", d.code)),
-            _ => None,
+        // a refusal anyone can cause (cp_audit.rs): before any credential was verified, or of a
+        // verified one, since any pod can mount a token for audience agentsc; one window per
+        // refusal code, and per caller once it is known
+        let refusal = match (&result, who) {
+            (Err(d), None) => Some(format!("IssueCertificate {:?}", d.code)),
+            (Err(d), Some(Caller::Pod { namespace, name })) => Some(format!(
+                "IssueCertificate {:?} pod {namespace}/{name}",
+                d.code
+            )),
+            (Err(d), Some(Caller::Join { name })) => {
+                Some(format!("IssueCertificate {:?} join {name}", d.code))
+            }
+            (Ok(_), _) => None,
         };
         let (action, outcome, reason) = match result {
             Ok(reason) => (CpAction::CertIssue, CpResult::Ok, reason),
@@ -573,8 +585,8 @@ impl Issuer {
         }
         rec.sha256_after = key_sha256;
         rec.reason = Some(reason);
-        match unauthenticated {
-            Some(kind) => self.cp_audit.record_unauthenticated(&kind, rec).await,
+        match refusal {
+            Some(kind) => self.cp_audit.record_refusal(&kind, rec).await,
             None => self.cp_audit.record(rec).await,
         }
     }
@@ -761,8 +773,20 @@ mod tests {
         audit: tokio::sync::broadcast::Receiver<Arc<CpAuditRecord>>,
         /// The audit's stdout lines: every record, also the ones held back from the store.
         lines: Lines,
+        /// Records [`Rig::next_record`] returned so far.
+        seen: usize,
         ca: Arc<CaMaterial>,
         store: Arc<KubeStore>,
+    }
+
+    impl Rig {
+        /// The next audit record, in order, from stdout: every one is there, also a refusal
+        /// held back from the store and subscribers (cp_audit.rs).
+        fn next_record(&mut self) -> CpAuditRecord {
+            let rec = self.lines.records().remove(self.seen);
+            self.seen += 1;
+            rec
+        }
     }
 
     /// A shared buffer standing in for stdout.
@@ -836,6 +860,7 @@ mod tests {
             cluster,
             audit,
             lines,
+            seen: 0,
             ca,
             store,
         }
@@ -996,7 +1021,7 @@ mod tests {
             [("tok".to_string(), vec!["agentsc".to_string()])]
         );
 
-        let rec = r.audit.recv().await.unwrap();
+        let rec = r.next_record();
         assert_eq!(rec.action, CpAction::CertIssue);
         assert_eq!(rec.result, CpResult::Ok);
         // design §7: sidecar:<spiffe id>/<pod>
@@ -1214,7 +1239,7 @@ mod tests {
                 row.name,
                 err.message()
             );
-            let rec = r.audit.recv().await.unwrap();
+            let rec = r.next_record();
             assert_eq!(rec.action, CpAction::CertDenied, "{}", row.name);
             assert_eq!(rec.result, CpResult::Denied);
             // a refusal is attributed to what the token showed, never to the identity asked for
@@ -1270,9 +1295,9 @@ mod tests {
             .issue(k8s_request("shop", "orders", "tok"))
             .await
             .unwrap();
-        let denied = r.audit.recv().await.unwrap();
+        let denied = r.next_record();
         assert_eq!(denied.action, CpAction::CertDenied);
-        let issued = r.audit.recv().await.unwrap();
+        let issued = r.next_record();
         assert_eq!(issued.action, CpAction::CertIssue);
         assert!(issued.reason.as_ref().unwrap().contains("orders-runner"));
     }
@@ -1283,7 +1308,11 @@ mod tests {
 
     /// The injector's pod as the kubelet reports it: the `imageID` of agentsc-runtime and
     /// agentscd (`None`: not reported yet).
-    fn running_pod(agentscd_image_id: Option<&str>, runtime_image_id: Option<&str>) -> Pod {
+    fn running_pod(
+        ca: &CaMaterial,
+        agentscd_image_id: Option<&str>,
+        runtime_image_id: Option<&str>,
+    ) -> Pod {
         use crate::webhook::RUNTIME_CONTAINER;
         use k8s_openapi::api::core::v1::{ContainerStatus, PodStatus};
         let mut p = crate::webhook::injected_pod(
@@ -1292,6 +1321,7 @@ mod tests {
             "orders",
             "ghcr.io/f8fvwgzc/agent-sidecar/agentscd:0.2.0",
             Default::default(),
+            ca.roots_pem(),
         );
         p.metadata.uid = Some(POD_UID.into());
         let status = |name: &str, id: Option<&str>| ContainerStatus {
@@ -1329,6 +1359,7 @@ mod tests {
 
         // allowed images (containerd's and cri-dockerd's imageID forms): issued
         r.cluster.put_pod(running_pod(
+            &r.ca,
             Some(&pulled(&a)),
             Some(&format!("ghcr.io/f8fvwgzc/agent-sidecar/agentscd@{a}")),
         ));
@@ -1336,12 +1367,12 @@ mod tests {
             .issue(k8s_request("shop", "orders", "tok"))
             .await
             .unwrap();
-        assert_eq!(r.audit.recv().await.unwrap().action, CpAction::CertIssue);
+        assert_eq!(r.next_record().action, CpAction::CertIssue);
 
         // the image is swapped under the running pod: the renewal is refused
         let cases: Vec<(Pod, Code, String)> = vec![
             (
-                running_pod(Some(&pulled(&b)), Some(&pulled(&a))),
+                running_pod(&r.ca, Some(&pulled(&b)), Some(&pulled(&a))),
                 Code::PermissionDenied,
                 format!(
                     "container \"agentscd\" of pod shop/orders-0 runs image {b}, which is not in \
@@ -1349,12 +1380,13 @@ mod tests {
                 ),
             ),
             (
-                running_pod(Some(&pulled(&a)), Some(&pulled(&b))),
+                running_pod(&r.ca, Some(&pulled(&a)), Some(&pulled(&b))),
                 Code::PermissionDenied,
                 "container \"agentsc-runtime\" of pod shop/orders-0 runs image".into(),
             ),
             (
                 running_pod(
+                    &r.ca,
                     Some("docker-pullable://agentsc/agentscd:dev"),
                     Some(&pulled(&a)),
                 ),
@@ -1364,7 +1396,7 @@ mod tests {
             (
                 // an allowed image started with another program
                 {
-                    let mut p = running_pod(Some(&pulled(&a)), Some(&pulled(&a)));
+                    let mut p = running_pod(&r.ca, Some(&pulled(&a)), Some(&pulled(&a)));
                     p.spec.as_mut().unwrap().init_containers.as_mut().unwrap()[1].command =
                         Some(vec!["python3".into(), "/tmp/evil.py".into()]);
                     p
@@ -1373,7 +1405,7 @@ mod tests {
                 "container \"agentscd\" must run its image's entrypoint".into(),
             ),
             (
-                running_pod(None, Some(&pulled(&a))),
+                running_pod(&r.ca, None, Some(&pulled(&a))),
                 Code::Unavailable,
                 "the kubelet has not reported the image of container \"agentscd\"".into(),
             ),
@@ -1391,7 +1423,7 @@ mod tests {
                 "{reason}: {}",
                 err.message()
             );
-            let rec = r.audit.recv().await.unwrap();
+            let rec = r.next_record();
             assert_eq!(
                 (rec.action, rec.result),
                 (CpAction::CertDenied, CpResult::Denied)
@@ -1405,7 +1437,7 @@ mod tests {
         // brings agentscd with an allowed image and no command, and keeps the workload key in
         // a volume the app mounts; and a pod without the runtime container (agentscd would
         // spawn its own runtime next to the key)
-        let mut loot = running_pod(Some(&pulled(&a)), Some(&pulled(&a)));
+        let mut loot = running_pod(&r.ca, Some(&pulled(&a)), Some(&pulled(&a)));
         loot.metadata.labels = None;
         let spec = loot.spec.as_mut().unwrap();
         spec.volumes.as_mut().unwrap().push(Volume {
@@ -1428,7 +1460,7 @@ mod tests {
             value: Some("/loot".into()),
             ..Default::default()
         });
-        let mut single = running_pod(Some(&pulled(&digest('c'))), None);
+        let mut single = running_pod(&r.ca, Some(&pulled(&digest('c'))), None);
         single
             .spec
             .as_mut()
@@ -1437,7 +1469,38 @@ mod tests {
             .as_mut()
             .unwrap()
             .remove(0);
+        // the fix check's relay: the control-plane address resolves to the app container, or
+        // agentscd trusts another CA; either way the app gets agentscd's token and asks for a
+        // certificate with a key of its own
+        let mut relay = running_pod(&r.ca, Some(&pulled(&a)), Some(&pulled(&a)));
+        relay.spec.as_mut().unwrap().host_aliases =
+            Some(vec![k8s_openapi::api::core::v1::HostAlias {
+                ip: "10.1.2.3".into(),
+                hostnames: Some(vec!["embassy-ca.agentsc-system.svc".into()]),
+            }]);
+        let mut other_ca = running_pod(&r.ca, Some(&pulled(&a)), Some(&pulled(&a)));
+        let attacker = agentsc_pki::ca_init().unwrap().cert_pem;
+        for e in other_ca
+            .spec
+            .as_mut()
+            .unwrap()
+            .init_containers
+            .as_mut()
+            .unwrap()[1]
+            .env
+            .as_mut()
+            .unwrap()
+        {
+            if e.name == "AGENTSC_CA_PEM" {
+                e.value = Some(attacker.clone());
+            }
+        }
         for (p, reason) in [
+            (relay, "hostAliases"),
+            (
+                other_ca,
+                "container \"agentscd\" sets env \"AGENTSC_CA_PEM\"",
+            ),
             (
                 loot,
                 "container \"agentscd\" sets env \"AGENTSC_STATE_DIR\"",
@@ -1455,7 +1518,7 @@ mod tests {
                 .unwrap_err();
             assert_eq!(err.code(), Code::PermissionDenied, "{err:?}");
             assert!(err.message().contains(reason), "{}", err.message());
-            let rec = r.audit.recv().await.unwrap();
+            let rec = r.next_record();
             assert_eq!(
                 (rec.action, rec.result),
                 (CpAction::CertDenied, CpResult::Denied)
@@ -1467,11 +1530,48 @@ mod tests {
         c.sidecar_images.allowed_digests.clear();
         r.issuer.config.store(Arc::new(c));
         r.cluster
-            .put_pod(running_pod(Some(&pulled(&b)), Some(&pulled(&b))));
+            .put_pod(running_pod(&r.ca, Some(&pulled(&b)), Some(&pulled(&b))));
         r.issuer
             .issue(k8s_request("shop", "orders", "tok"))
             .await
             .unwrap();
+    }
+
+    /// The fix check's finding: any pod can mount a token for audience agentsc, pass TokenReview
+    /// and then be refused (another namespace), one store record each. Refusals of a verified
+    /// caller are now kept once per caller and window too; stdout still has every one.
+    #[tokio::test]
+    async fn a_verified_caller_refused_again_and_again_is_stored_once_per_window() {
+        let mut r = rig(vec![]);
+        for (token, pod) in [("tok-0", "flood-0"), ("tok-1", "flood-1")] {
+            r.cluster
+                .put_token(token, review("shop", "orders", pod, POD_UID, &["agentsc"]));
+        }
+        for _ in 0..5 {
+            let err = r
+                .issuer
+                .issue(k8s_request("payments", "ledger", "tok-0"))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), Code::PermissionDenied);
+            assert!(err.message().contains("is not the requested namespace"));
+        }
+        // another pod has a window of its own
+        r.issuer
+            .issue(k8s_request("payments", "ledger", "tok-1"))
+            .await
+            .unwrap_err();
+        let lines = r.lines.records();
+        assert_eq!(lines.len(), 6, "every refusal on stdout");
+        assert!(lines.iter().all(|l| l.action == CpAction::CertDenied));
+        let mut kept = Vec::new();
+        while let Ok(rec) = r.audit.try_recv() {
+            kept.push(rec.actor.clone());
+        }
+        assert_eq!(
+            kept,
+            ["sidecar:pod:shop/flood-0", "sidecar:pod:shop/flood-1"]
+        );
     }
 
     #[tokio::test]
@@ -1518,7 +1618,7 @@ mod tests {
             agentsc_pki::uri_sans_of(&der).unwrap(),
             ["spiffe://agentsc/ns/demo/svc/orders"]
         );
-        let rec = r.audit.recv().await.unwrap();
+        let rec = r.next_record();
         assert_eq!(rec.action, CpAction::CertIssue);
         assert_eq!(
             rec.actor,
@@ -1568,7 +1668,7 @@ mod tests {
             let err = r.issuer.issue(join(ns, svc, token)).await.unwrap_err();
             assert_eq!(err.code(), code, "{ns}/{svc} {token}: {err:?}");
             assert!(err.message().contains(reason), "{}", err.message());
-            let rec = r.audit.recv().await.unwrap();
+            let rec = r.next_record();
             assert_eq!(rec.action, CpAction::CertDenied);
             assert_eq!(rec.actor, actor, "{ns}/{svc} {token}");
         }

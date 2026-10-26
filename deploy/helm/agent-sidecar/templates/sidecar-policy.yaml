@@ -28,6 +28,8 @@ What it refuses (the sidecar containers are agentscd and agentsc-runtime):
 - ephemeral containers (pods/ephemeralcontainers, kubectl debug);
 - shareProcessNamespace: true and hostPID: true (another process could read the sidecar's memory
   and /proc/<pid>/environ, which holds the provider API key);
+- hostAliases, dnsPolicy: None, and dnsConfig nameservers or searches (the sidecar's
+  control-plane addresses could resolve to another container, which would get its token);
 - any other container mounting the sidecar's volumes (agentsc-run: the Unix sockets,
   agentsc-state: the workload key, agentsc-token: the IssueCertificate credential), and
   agentsc-runtime mounting anything but agentsc-run;
@@ -125,6 +127,17 @@ spec:
     - expression: >-
         request.operation != 'CREATE' || !has(object.spec.hostPID) || !object.spec.hostPID
       message: hostPID must not be true in agentsc pods
+      reason: Forbidden
+    - expression: >-
+        request.operation != 'CREATE' ||
+        ((!has(object.spec.hostAliases) || size(object.spec.hostAliases) == 0) &&
+        (!has(object.spec.dnsPolicy) || object.spec.dnsPolicy != 'None') &&
+        (!has(object.spec.dnsConfig) ||
+        ((!has(object.spec.dnsConfig.nameservers) || size(object.spec.dnsConfig.nameservers) == 0) &&
+        (!has(object.spec.dnsConfig.searches) || size(object.spec.dnsConfig.searches) == 0))))
+      message: >-
+        agentsc pods may not set hostAliases, dnsPolicy None, or dnsConfig nameservers or searches:
+        the sidecar's control-plane addresses could resolve to another container
       reason: Forbidden
     - expression: >-
         request.operation != 'CREATE' ||

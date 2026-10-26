@@ -36,6 +36,8 @@ struct State {
     config_map_conflicts: usize,
     /// Every ConfigMap write is refused with this message (RBAC missing, quota).
     refuse_config_maps: Option<String>,
+    /// How long every ConfigMap write takes (the API server's latency).
+    config_map_write_latency: Option<std::time::Duration>,
     pods: BTreeMap<Key, Pod>,
     reviews: HashMap<String, TokenReviewStatus>,
     review_requests: Vec<(String, Vec<String>)>,
@@ -164,6 +166,18 @@ impl FakeCluster {
     /// Refuse every ConfigMap write with `message` (`None`: accept them again).
     pub fn refuse_config_maps(&self, message: Option<&str>) {
         self.st().refuse_config_maps = message.map(str::to_string);
+    }
+
+    /// Every ConfigMap write takes `latency` from now on.
+    pub fn delay_config_map_writes(&self, latency: std::time::Duration) {
+        self.st().config_map_write_latency = Some(latency);
+    }
+
+    async fn config_map_write_latency(&self) {
+        let latency = self.st().config_map_write_latency;
+        if let Some(l) = latency {
+            tokio::time::sleep(l).await;
+        }
     }
 
     pub fn calls(&self) -> Vec<String> {
@@ -620,6 +634,7 @@ impl CharterApi for FakeCluster {
         namespace: &str,
         config_map: &ConfigMap,
     ) -> Result<ConfigMap, ApiError> {
+        self.config_map_write_latency().await;
         let mut st = self.st();
         if let Some(m) = &st.refuse_config_maps {
             return Err(ApiError::Refused(m.clone()));
@@ -645,6 +660,7 @@ impl CharterApi for FakeCluster {
         namespace: &str,
         config_map: &ConfigMap,
     ) -> Result<ConfigMap, ApiError> {
+        self.config_map_write_latency().await;
         let mut st = self.st();
         if let Some(m) = &st.refuse_config_maps {
             return Err(ApiError::Refused(m.clone()));

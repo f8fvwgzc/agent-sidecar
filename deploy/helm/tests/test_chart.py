@@ -945,6 +945,7 @@ UPDATE_RULE = "image of the agentscd and agentsc-runtime containers cannot be ch
 EPHEMERAL_RULE = "ephemeral containers cannot be added"
 SHARE_RULE = "shareProcessNamespace must not be true"
 HOST_PID_RULE = "hostPID must not be true"
+DNS_RULE = "agentsc pods may not set hostAliases, dnsPolicy None, or dnsConfig nameservers or searches"
 VOLUME_RULE = "only the agentscd and agentsc-runtime containers may mount the sidecar volumes"
 RUNTIME_MOUNT_RULE = "agentsc-runtime may mount only agentsc-run"
 TOKEN_RULE = "only the volume agentsc-token may project a service-account token"
@@ -1075,6 +1076,12 @@ def test_the_policy_admits_the_injected_pod_and_ignores_other_pods(enforced: Pol
         },
     }
     assert enforced.admit(other) is None, "not an agent pod"
+    # DNS settings that redirect nothing are fine
+    tuned = changed(
+        pod,
+        lambda p: p["spec"].update(dnsPolicy="ClusterFirst", dnsConfig={"options": [{"name": "ndots", "value": "2"}]}),
+    )
+    assert enforced.admit(tuned) == []
     # allow-list off (development builds): any image, the other rules still hold
     assert unenforced.admit(injected_pod("agentsc/agentscd:dev")) == []
     [failed] = unenforced.admit(changed(injected_pod("agentsc/agentscd:dev"), lambda p: p["spec"].update(hostPID=True)))
@@ -1108,6 +1115,19 @@ def test_the_policy_admits_the_injected_pod_and_ignores_other_pods(enforced: Pol
         ),
         ("shareProcessNamespace", lambda p: p["spec"].update(shareProcessNamespace=True), [SHARE_RULE]),
         ("hostPID", lambda p: p["spec"].update(hostPID=True), [HOST_PID_RULE]),
+        (
+            "the control plane's name pointed at another address",
+            lambda p: p["spec"].update(
+                hostAliases=[{"ip": "10.1.2.3", "hostnames": ["embassy-ca.agentsc-system.svc"]}]
+            ),
+            [DNS_RULE],
+        ),
+        (
+            "another name server",
+            lambda p: p["spec"].update(dnsPolicy="None", dnsConfig={"nameservers": ["10.1.2.3"]}),
+            [DNS_RULE],
+        ),
+        ("a search domain first", lambda p: p["spec"].update(dnsConfig={"searches": ["evil.example"]}), [DNS_RULE]),
         (
             "the app mounts the sockets",
             lambda p: p["spec"]["containers"][0].update(
@@ -1226,6 +1246,28 @@ def test_updates_keep_the_sidecar_images_and_ephemeral_containers_are_refused(en
         old, lambda p: (p["spec"].update(hostPID=True), sidecar(p, "agentscd").update(image="agentsc/agentscd:dev"))
     )
     assert enforced.admit(changed(legacy, lambda p: p["metadata"]["labels"].update(tier="x")), "UPDATE", legacy) == []
+
+
+@needs_helm
+def test_e2e_allows_the_runtime_env_the_demo_install_gives_it() -> None:
+    """The fix check's finding: e2e.sh asserted that agentsc-runtime has no env at all, but the
+    injector gives it the template's AGENTSC_MOCK_FALLBACK (webhook.rs RUNTIME_TEMPLATE_ENV), and
+    demo.sh sets injection.mockFallback, so `make e2e-helm` failed after `make demo-helm`."""
+    e2e = (ROOT / "deploy/helm/e2e.sh").read_text()
+    subprocess.run(["bash", "-n", str(ROOT / "deploy/helm/e2e.sh")], check=True)
+    allowed = re.search(r'^RUNTIME_ENV_ALLOWED="([^"]*)"$', e2e, re.MULTILINE)
+    assert allowed, "e2e.sh names the runtime env it allows"
+    webhook = (ROOT / "services/embassy/src/webhook.rs").read_text()
+    runtime_env = re.search(r"pub const RUNTIME_TEMPLATE_ENV: \[&str; \d+\] = \[([^\]]*)\];", webhook)
+    assert runtime_env
+    assert set(allowed.group(1).split()) == set(re.findall(r'"([A-Z_]+)"', runtime_env.group(1)))
+    # what the demo install's template gives the runtime
+    flags = re.findall(r"--set (injection\.[\w.]+=\S+)", DEMO_SCRIPT.read_text())
+    assert "injection.mockFallback=true" in flags
+    template = inject_template(render(*[a for f in flags for a in ("--set", f)]))
+    given = {e["name"] for e in template.get("env", [])} & set(allowed.group(1).split())
+    assert given == {"AGENTSC_MOCK_FALLBACK"}
+    assert "[[ -z $renv ]]" not in e2e, "the old check refused any env"
 
 
 # ---- the demo apps (make demo-helm) -------------------------------------------------------
