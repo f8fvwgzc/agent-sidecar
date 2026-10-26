@@ -272,6 +272,7 @@ pub fn check_chat(body: &Map<String, Value>) -> Result<Checked, String> {
         stream,
         assistant_turns: assistant_turns(messages),
         has_media,
+        stored_state: false,
     })
 }
 
@@ -309,20 +310,31 @@ pub fn check_responses(body: &Map<String, Value>) -> Result<Checked, String> {
     };
     let mut has_media = false;
     scan_media(&Value::Array(input.clone()), &mut has_media)?;
-    // the earlier turns are the provider's: their size is not in this request
-    if body
+    // the earlier turns, or an item, are the provider's: their size is not in this request
+    let stored_state = body
         .get("previous_response_id")
         .is_some_and(|v| !v.is_null())
-    {
-        has_media = true;
-    }
+        || refers_to_stored_items(&Value::Array(input.clone()));
     Ok(Checked {
         model,
         max_tokens,
         stream,
         assistant_turns: assistant_turns(&input),
-        has_media,
+        has_media: has_media || stored_state,
+        stored_state,
     })
+}
+
+/// An `item_reference` anywhere in `v`: an item the provider stored, pulled into the prompt.
+fn refers_to_stored_items(v: &Value) -> bool {
+    match v {
+        Value::Object(m) => {
+            m.get("type").and_then(Value::as_str) == Some("item_reference")
+                || m.values().any(refers_to_stored_items)
+        }
+        Value::Array(a) => a.iter().any(refers_to_stored_items),
+        _ => false,
+    }
 }
 
 fn n(v: &Value, key: &str) -> u64 {
@@ -638,7 +650,8 @@ mod tests {
                 max_tokens: Some(256),
                 stream: true,
                 assistant_turns: 1,
-                has_media: false
+                has_media: false,
+                stored_state: false
             }
         );
         let no_limit = check_chat(&body(json!({"model": "m", "messages": []}))).unwrap();
@@ -714,6 +727,14 @@ mod tests {
             .has_media,
             "earlier turns are not in the request's bytes"
         );
+        // the review finding: an item_reference pulls a stored item in, whatever its size
+        let referenced = check_responses(&body(json!({"model": "m", "input": [
+            {"type": "item_reference", "id": "msg_1"},
+            {"role": "user", "content": [{"type": "input_text", "text": "and now?"}]}]})))
+        .unwrap();
+        assert!(referenced.has_media && referenced.stored_state);
+        let plain = check_responses(&body(json!({"model": "m", "input": "hi"}))).unwrap();
+        assert!(!plain.has_media && !plain.stored_state);
         for (bad, why) in [
             (
                 json!({"model": "m", "input": "x", "tools": [{"type": "web_search"}]}),

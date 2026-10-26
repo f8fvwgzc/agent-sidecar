@@ -163,6 +163,10 @@ pub struct Checked {
     pub assistant_turns: u32,
     /// Images or documents in the request: their tokens are not bounded by its bytes.
     pub has_media: bool,
+    /// The request refers to state the provider stored (`previous_response_id`, an
+    /// `item_reference`): its size is not in the request, and it lives under the key that stored
+    /// it.
+    pub stored_state: bool,
 }
 
 /// How an answer ended, which decides what it is counted at.
@@ -237,6 +241,8 @@ pub struct Providers {
     pub timeout: Option<Duration>,
     /// `LLM_MAX_RETRIES`: retries of a connection that could not be made.
     pub retries: u32,
+    /// The connection in use, for the start-up log (never a secret).
+    pub upstream: String,
 }
 
 /// The client every upstream call goes out on.
@@ -250,19 +256,49 @@ pub fn client() -> anyhow::Result<reqwest::Client> {
 impl Providers {
     pub fn from_config(config: &crate::Config) -> anyhow::Result<Self> {
         let contract = config.llm_contract.as_ref();
-        let anthropic = match (config.anthropic_key()?, contract) {
-            (Some(key), _) => Some(Arc::new(anthropic::Anthropic::new(
-                key,
-                &config.anthropic_base_url,
-            )) as Arc<dyn Provider>),
-            (None, Some(c)) => Some(sidecar_upstream(c)?),
-            (None, None) => None,
+        let key_source = if config.anthropic_api_key_file.is_some() {
+            "--anthropic-api-key-file"
+        } else {
+            "ANTHROPIC_API_KEY"
         };
+        let (anthropic, upstream) = match (config.anthropic_key()?, contract) {
+            // gateway mode means the pod holds no provider key: one here is a mistake to stop at
+            (Some(_), Some(c)) if matches!(c.upstream, Upstream::Gateway { .. }) => {
+                anyhow::bail!(
+                    "{key_source} is set, and the LLM connection contract is in gateway mode \
+                     (LLM_GATEWAY_URL), which keeps provider keys out of the pod: remove one of them"
+                );
+            }
+            (Some(key), c) => {
+                if c.is_some() {
+                    tracing::warn!(
+                        "{key_source} wins over the LLM connection contract (LLM_PROVIDER), which is not used"
+                    );
+                }
+                (
+                    Some(
+                        Arc::new(anthropic::Anthropic::new(key, &config.anthropic_base_url))
+                            as Arc<dyn Provider>,
+                    ),
+                    format!(
+                        "anthropic at {} with the key from {key_source}",
+                        config.anthropic_base_url
+                    ),
+                )
+            }
+            (None, Some(c)) => (Some(sidecar_upstream(c)?), c.describe()),
+            (None, None) => (
+                None,
+                "no provider (no key, no LLM connection contract)".into(),
+            ),
+        };
+        tracing::info!("model gateway upstream: {upstream}");
         Ok(Self {
             anthropic,
             client: client()?,
             timeout: contract.and_then(|c| c.timeout),
             retries: contract.and_then(|c| c.max_retries).unwrap_or(0),
+            upstream,
         })
     }
 
@@ -966,5 +1002,62 @@ mod tests {
             record_input(&body, &h, CallKind::Reflection)["purpose"],
             json!("reflection")
         );
+    }
+
+    fn config_with(key: Option<&str>, contract: Option<Contract>) -> crate::Config {
+        let mut c = crate::Config::for_test("/c".into(), "/t".into(), "/s".into());
+        c.anthropic_api_key = key.map(str::to_string);
+        c.llm_contract = contract;
+        c
+    }
+
+    fn contract(upstream: Upstream) -> Contract {
+        Contract {
+            upstream,
+            model: "claude-opus-5-5".into(),
+            model_small: None,
+            timeout: None,
+            max_retries: None,
+        }
+    }
+
+    /// The review finding: with ANTHROPIC_API_KEY set, the sidecar ignored an active contract,
+    /// gateway mode included, while its log said it used the gateway.
+    #[test]
+    fn a_provider_key_and_gateway_mode_together_are_refused() {
+        let gateway = contract(Upstream::Gateway {
+            root: "http://gw:8090".into(),
+            token_file: "/var/run/secrets/llm/gateway-token".into(),
+            wire: ProviderKind::Anthropic,
+        });
+        let e = Providers::from_config(&config_with(Some("sk-ant-stray"), Some(gateway.clone())))
+            .err()
+            .expect("refused")
+            .to_string();
+        assert!(
+            e.contains("ANTHROPIC_API_KEY") && e.contains("gateway mode"),
+            "{e}"
+        );
+        assert!(!e.contains("sk-ant-stray"));
+        // without the key: the gateway, and the log says so
+        let p = Providers::from_config(&config_with(None, Some(gateway))).unwrap();
+        assert!(
+            p.upstream.contains("the model gateway at http://gw:8090"),
+            "{}",
+            p.upstream
+        );
+        // a key and a provider contract: the key wins, and the log says which is used
+        let provider = contract(Upstream::Provider(
+            agentsc_common::llm_contract::ProviderConnection {
+                kind: ProviderKind::Anthropic,
+                base_url: "https://other.example".into(),
+                key: Some(SecretSource::Text("sk-contract".into())),
+            },
+        ));
+        let p = Providers::from_config(&config_with(Some("sk-ant-own"), Some(provider))).unwrap();
+        assert!(p.upstream.contains("ANTHROPIC_API_KEY"), "{}", p.upstream);
+        assert!(!p.upstream.contains("other.example"), "{}", p.upstream);
+        let none = Providers::from_config(&config_with(None, None)).unwrap();
+        assert!(none.anthropic.is_none() && none.upstream.starts_with("no provider"));
     }
 }

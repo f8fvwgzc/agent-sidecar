@@ -34,6 +34,10 @@ pub const ALLOWED_FIELDS: &[&str] = &[
     "metadata",
     "thinking",
     "output_config",
+    // sampling: no effect on the price
+    "temperature",
+    "top_p",
+    "top_k",
 ];
 /// A non-streamed answer is read up to this size for its usage.
 const MAX_BODY_METERED: usize = 16 * 1024 * 1024;
@@ -95,6 +99,13 @@ impl Provider for Anthropic {
 
 /// Check a Messages request body; `Err` is the reason it is refused (`model.request_invalid`).
 pub fn check(body: &Map<String, Value>) -> Result<Checked, String> {
+    if body.contains_key("fallbacks") {
+        return Err(
+            "request field \"fallbacks\" may answer with another model than the request names, \
+             at that model's price: turn it off (onto-intelli: llm.fallbacks = false)"
+                .into(),
+        );
+    }
     if let Some(f) = body.keys().find(|k| !ALLOWED_FIELDS.contains(&k.as_str())) {
         return Err(format!(
             "request field {f:?} is not one the gateway forwards"
@@ -155,6 +166,7 @@ pub fn check(body: &Map<String, Value>) -> Result<Checked, String> {
         stream,
         assistant_turns: u32::try_from(assistant_turns).unwrap_or(u32::MAX),
         has_media,
+        stored_state: false,
     })
 }
 
@@ -481,7 +493,8 @@ mod tests {
                 max_tokens: Some(64),
                 stream: true,
                 assistant_turns: 1,
-                has_media: false
+                has_media: false,
+                stored_state: false
             }
         );
         for (bad, why) in [
@@ -503,6 +516,40 @@ mod tests {
         ] {
             assert!(a.check(&body(bad)).is_err(), "{why}");
         }
+    }
+
+    /// The review finding: gateway-mode clients were refused for fields they send by default.
+    /// These are the bodies texc-symphony (symphony-agents api/anthropic.rs) and onto-intelli
+    /// (llm/anthropic.rs) build.
+    #[test]
+    fn the_platform_clients_bodies_pass() {
+        let texc = json!({
+            "model": "claude-opus-5-5", "max_tokens": 4096, "system": "You are a coding agent.",
+            "messages": [
+                {"role": "user", "content": "fix the test"},
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "read", "input": {"path": "a.rs"}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "fn a() {}", "is_error": false}]}
+            ],
+            "tools": [{"name": "read", "description": "read a file", "input_schema": {"type": "object"}}],
+            "temperature": 0.5, "stream": true
+        });
+        assert_eq!(check(&body(texc)).unwrap().assistant_turns, 1);
+        let mut onto = json!({
+            "model": "claude-opus-5-5", "max_tokens": 2048,
+            "system": [{"type": "text", "text": "Answer from the ontology.", "cache_control": {"type": "ephemeral"}}],
+            "messages": [{"role": "user", "content": "what depends on orders?"}],
+            "output_config": {"effort": "low"}, "stream": true
+        });
+        assert!(check(&body(onto.clone())).is_ok(), "llm.fallbacks = false");
+        onto["fallbacks"] = json!("default");
+        let e = check(&body(onto)).unwrap_err();
+        assert!(e.contains("llm.fallbacks = false"), "{e}");
+        assert!(
+            check(&body(
+                json!({"model": "m", "max_tokens": 8, "messages": [], "top_p": 0.9, "top_k": 40})
+            ))
+            .is_ok()
+        );
     }
 
     #[test]

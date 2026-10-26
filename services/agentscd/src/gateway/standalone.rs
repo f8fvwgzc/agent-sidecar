@@ -359,16 +359,26 @@ impl Gateway {
         found
     }
 
-    /// The provider for `model` in `wire`, or why there is none.
-    fn route(&self, t: &Tenant, wire: Wire, model: &str) -> Result<Arc<dyn Provider>, Verdict> {
-        let candidates: Vec<&Route> = t
-            .routes
+    /// The provider for `model` in `wire`, and whether it is the platform's (its key shared
+    /// by every tenant that uses it); or why there is none.
+    fn route(
+        &self,
+        t: &Tenant,
+        wire: Wire,
+        model: &str,
+    ) -> Result<(Arc<dyn Provider>, bool), Verdict> {
+        let own = t.routes.iter().map(|r| (r, false));
+        let platform = self
+            .platform
             .iter()
-            .chain(self.platform.iter().filter(|_| t.platform))
-            .filter(|r| any_matches(&r.models, model))
+            .filter(|_| t.platform)
+            .map(|r| (r, true));
+        let candidates: Vec<(&Route, bool)> = own
+            .chain(platform)
+            .filter(|(r, _)| any_matches(&r.models, model))
             .collect();
-        if let Some(r) = candidates.iter().find(|r| r.provider.wire() == wire) {
-            return Ok(r.provider.clone());
+        if let Some((r, shared)) = candidates.iter().find(|(r, _)| r.provider.wire() == wire) {
+            return Ok((r.provider.clone(), *shared));
         }
         if candidates.is_empty() {
             return Err(Verdict::deny(
@@ -378,7 +388,7 @@ impl Gateway {
         }
         let mut speak: Vec<&str> = candidates
             .iter()
-            .map(|r| r.provider.wire().path())
+            .map(|(r, _)| r.provider.wire().path())
             .collect();
         speak.dedup();
         Err(Verdict::deny(
@@ -623,7 +633,7 @@ async fn handle(gw: Arc<Gateway>, wire: Wire, headers: HeaderMap, bytes: Bytes) 
             ),
         );
     }
-    let provider = match gw.route(tenant, wire, &checked.model) {
+    let (provider, shared) = match gw.route(tenant, wire, &checked.model) {
         Ok(p) => p,
         Err(v) => {
             let status = if v.rule == RULE_WIRE_UNSUPPORTED {
@@ -635,7 +645,28 @@ async fn handle(gw: Arc<Gateway>, wire: Wire, headers: HeaderMap, bytes: Bytes) 
         }
     };
     call.callee = format!("{}:{}", provider.name(), checked.model);
-    let out = if provider.rewrite(&mut body) {
+    // Responses stores answers under the key that made them. On the platform's key, which every
+    // tenant using it shares, a stored response or item would be any such tenant's to read or
+    // continue: nothing is stored, and nothing stored is referred to.
+    let mut unstored = false;
+    if shared && wire == Wire::Responses {
+        if checked.stored_state {
+            return call.refuse(
+                StatusCode::BAD_REQUEST,
+                Verdict::deny(
+                    RULE_INVALID,
+                    "previous_response_id and item_reference refer to responses stored under the \
+                     platform's key, which other tenants share: send the items themselves, or use \
+                     a key of your own (the tenant's providers)",
+                ),
+            );
+        }
+        if body.get("store") != Some(&Value::Bool(false)) {
+            body.insert("store".into(), Value::Bool(false));
+            unstored = true;
+        }
+    }
+    let out = if provider.rewrite(&mut body) || unstored {
         serde_json::to_vec(&body).unwrap_or_else(|_| bytes.to_vec())
     } else {
         bytes.to_vec()

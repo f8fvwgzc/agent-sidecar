@@ -17,9 +17,7 @@ async fn main() -> anyhow::Result<()> {
     for w in &llm.warnings {
         tracing::warn!("{w}");
     }
-    if let Some(c) = &llm.contract {
-        tracing::info!("{}", c.describe());
-    }
+    // the connection actually used is logged by the model gateway (gateway::Providers)
     config.llm_contract = llm.contract;
     let sidecar = agentscd::start(config).await?;
     // Kubernetes stops containers with SIGTERM (and agentscd is PID 1, so nothing else handles it).

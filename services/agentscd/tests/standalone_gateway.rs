@@ -488,3 +488,112 @@ async fn calls_are_held_to_formats_models_tools_and_budgets() {
         ]
     );
 }
+
+/// The review finding: Responses stores answers under the key that made them, and
+/// `previous_response_id` / `item_reference` pull stored state into the prompt, uncounted. On the
+/// platform's key (shared by its tenants) nothing is stored and nothing stored is referred to; on
+/// a tenant's own key stored state is its own, and reserves the model's whole context window.
+#[tokio::test]
+async fn stored_responses_are_never_shared_on_the_platform_key() {
+    let seen = Seen::default();
+    let app = axum::Router::new()
+        .route("/v1/responses", post(fake))
+        .with_state(seen.clone());
+    let upstream = format!("http://{}", serve_app(app).await);
+    let tmp = tempfile::tempdir().unwrap();
+    let platform_key = write(tmp.path(), "platform-key", "sk-platform");
+    let own_key = write(tmp.path(), "own-key", "sk-own");
+    let tenants: standalone::TenantsFile = serde_yaml_ng::from_str(&format!(
+        r#"
+tenants:
+  - name: shared
+    token_sha256: {shared}
+  - name: byo
+    token_sha256: {byo}
+    max_cost_usd_per_day: 1
+    providers: [{{kind: openai, base_url: "{upstream}/v1", api_key_file: "{own_key}"}}]
+"#,
+        shared = sha("tok-shared"),
+        byo = sha("tok-byo"),
+        own_key = own_key.display(),
+    ))
+    .unwrap();
+    let gw = Gateway::new(Settings {
+        tenants,
+        contract: Some(Contract {
+            upstream: Upstream::Provider(ProviderConnection {
+                kind: ProviderKind::OpenAi,
+                base_url: format!("{upstream}/v1"),
+                key: Some(SecretSource::File(platform_key)),
+            }),
+            model: "gpt-5".into(),
+            model_small: None,
+            timeout: None,
+            max_retries: None,
+        }),
+        audit_payloads: false,
+        audit: AuditWriter::with_sink(SERVICE, "", vec![], Box::new(std::io::sink())),
+    })
+    .unwrap();
+    let (addr, _) = standalone::serve(gw, "127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let rig = Rig {
+        url: format!("http://{addr}"),
+        seen,
+        audit: Lines::default(),
+        tmp,
+    };
+    let shared = Some(("authorization", "Bearer tok-shared"));
+    let byo = Some(("authorization", "Bearer tok-byo"));
+    let ask = |extra: Value| {
+        let mut b =
+            json!({"model": "gpt-5", "stream": true, "input": "hi", "max_output_tokens": 256});
+        b.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        b
+    };
+    let referenced = json!({"input": [{"type": "item_reference", "id": "msg_other_tenant"}]});
+    let continued = json!({"previous_response_id": "resp_other_tenant"});
+
+    // the platform's key: nothing stored, even when asked
+    for extra in [json!({}), json!({"store": true})] {
+        let a = call(&rig, "/v1/responses", shared, ask(extra)).await;
+        assert_eq!(a.status, 200, "{}", a.text);
+        let (_, headers, body) = rig.seen.last();
+        assert_eq!(headers["authorization"], "Bearer sk-platform");
+        assert_eq!(body["store"], false);
+    }
+    for extra in [referenced.clone(), continued.clone()] {
+        let a = call(&rig, "/v1/responses", shared, ask(extra)).await;
+        assert_eq!(
+            (a.status, a.rule()),
+            (400, "model.request_invalid"),
+            "{}",
+            a.text
+        );
+        assert!(
+            a.text.contains("stored under the platform's key"),
+            "{}",
+            a.text
+        );
+    }
+    assert_eq!(rig.seen.all().len(), 2, "no reference reached the upstream");
+
+    // the tenant's own key: storing is its business; stored state reserves the context window
+    let a = call(&rig, "/v1/responses", byo, ask(json!({}))).await;
+    assert_eq!(a.status, 200, "{}", a.text);
+    let (_, headers, body) = rig.seen.last();
+    assert_eq!(headers["authorization"], "Bearer sk-own");
+    assert!(body.get("store").is_none(), "left as the tenant sent it");
+    for extra in [referenced, continued] {
+        let a = call(&rig, "/v1/responses", byo, ask(extra)).await;
+        assert_eq!(
+            (a.status, a.rule()),
+            (403, "budget.max_cost_usd_per_day"),
+            "{}",
+            a.text
+        );
+    }
+}

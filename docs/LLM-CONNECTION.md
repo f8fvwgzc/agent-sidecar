@@ -48,8 +48,11 @@ so the pod holds no provider key.
 ## The sidecar
 
 `agentscd` reads the contract when no Anthropic key is configured the sidecar's own way
-(`ANTHROPIC_API_KEY` or `--anthropic-api-key-file` win; nothing changes for a deployment that sets
-no `LLM_*`). The agent runtime speaks Anthropic Messages, so:
+(`ANTHROPIC_API_KEY` or `--anthropic-api-key-file`; nothing changes for a deployment that sets
+no `LLM_*`). With both a key and the contract set, the key wins with a warning, except in gateway
+mode: then the sidecar refuses to start, because gateway mode exists to keep provider keys out
+of the pod. The start-up log names the connection actually used (`model gateway upstream: ...`).
+The agent runtime speaks Anthropic Messages, so:
 
 | Contract | The sidecar's gateway calls |
 |---|---|
@@ -102,7 +105,7 @@ Clients in gateway mode:
 
 | Client | Settings |
 |---|---|
-| texc-symphony, onto-intelli | `LLM_GATEWAY_URL=http://agentsc-gateway:8090`, `LLM_GATEWAY_TOKEN_FILE=/var/run/secrets/llm/gateway-token`, `LLM_PROVIDER` for the wire format, `LLM_MODEL` |
+| texc-symphony, onto-intelli | `LLM_GATEWAY_URL=http://agentsc-gateway:8090`, `LLM_GATEWAY_TOKEN_FILE=/var/run/secrets/llm/gateway-token`, `LLM_PROVIDER` for the wire format, `LLM_MODEL`; onto-intelli also `llm.fallbacks = false` (below) |
 | an attache sidecar | the same (`LLM_PROVIDER` is ignored: the runtime speaks Messages) |
 | Claude Code | `ANTHROPIC_BASE_URL=http://agentsc-gateway:8090`, `ANTHROPIC_AUTH_TOKEN=<token>` |
 | Codex | a model provider with `base_url = "http://agentsc-gateway:8090/v1"`, `wire_api = "responses"`, the token as its key |
@@ -151,12 +154,22 @@ The same as the sidecar's (CONTRACT.md §4.4), per tenant:
   refused. So are `service_tier`, `audio`, `prediction`, `background`, more than one choice
   (`n`), and media the provider would fetch from a URL (inline data is fine). Refusals are `400`
   `model.request_invalid`.
+- Sampling fields (`temperature`, `top_p`, `top_k`) pass: they do not change the price.
+  Messages' `fallbacks` is refused: it may answer with another model than the request names, at
+  that model's price. onto-intelli sends it by default; set `llm.fallbacks = false` in gateway
+  mode.
 - A streamed Chat Completions request gets `stream_options.include_usage: true`, so its last
   chunk carries the usage.
+- Responses stores answers under the key that made them. On the platform's key, which every
+  tenant using it shares, a call is sent with `store: false`, and `previous_response_id` or an
+  `item_reference` input (stored state, another tenant's as likely as the caller's) is refused
+  (`400 model.request_invalid`): send the items themselves. On a tenant's own key, storing is the
+  tenant's choice, and a call that refers to stored state reserves the model's whole context
+  window, since its size is not in the request.
 - The most the call can cost is reserved against the tenant's `max_cost_usd_per_day` before it
   goes out (`403 budget.max_cost_usd_per_day` when it would not fit). The bound is the request's
-  bytes plus 4096 tokens, or the model's context window for a request with media or a
-  `previous_response_id`, and its output limit (`max_tokens`, `max_completion_tokens`,
+  bytes plus 4096 tokens, or the model's context window for a request with media or stored state
+  (`previous_response_id`, `item_reference`), and its output limit (`max_tokens`, `max_completion_tokens`,
   `max_output_tokens`; 128000 when it names none). The reservation is settled with the usage
   the provider reported. A call cut before it completed (a timeout, a broken stream, no usage
   reported) is counted at its reservation, so a server that reports no usage cannot run a budget
