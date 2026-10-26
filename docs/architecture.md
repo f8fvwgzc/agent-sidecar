@@ -63,7 +63,7 @@ Sidecar diagnostics go to stderr. Stdout carries only audit JSON lines.
 
 `agentscd` starts the runtime with the command in `--runtime-cmd` (default `agentsc-runtime`) and appends `--listen unix:<socket-dir>/runtime.sock --sidecar unix:<socket-dir>/sidecar.sock`. It also sets `AGENTSC_SERVICE` and `AGENTSC_NAMESPACE`. The runtime's own stdout and stderr go to the sidecar's stderr with a `[runtime]` prefix.
 
-In pods injected by the Helm chart (design §13) the sidecar does not start it: `agentscd` runs with `AGENTSC_NO_RUNTIME=true`, and the runtime is a native sidecar container of its own, `agentsc-runtime`, started just before `agentscd` with the same two flags and only the socket directory mounted. It has no environment, so it cannot read `ANTHROPIC_API_KEY` or the workload key, and its logs are the `agentsc-runtime` container's (`kubectl logs <pod> -c agentsc-runtime`).
+In pods injected by the Helm chart (design §13) the sidecar does not start it: `agentscd` runs with `AGENTSC_NO_RUNTIME=true`, and the runtime is a native sidecar container of its own, `agentsc-runtime`, started just before `agentscd` with the same two flags and only the socket directory mounted. Its only environment is `AGENTSC_MOCK_FALLBACK` when the chart sets `injection.mockFallback`, so it cannot read `ANTHROPIC_API_KEY` or the workload key, and its logs are the `agentsc-runtime` container's (`kubectl logs <pod> -c agentsc-runtime`).
 
 If the runtime exits, the sidecar restarts it. The wait starts at 1 second and doubles up to 30 seconds. It goes back to 1 second if the runtime ran for more than 60 seconds. The sidecar checks `Health` every 10 seconds while the runtime is healthy, and every second while it is not.
 

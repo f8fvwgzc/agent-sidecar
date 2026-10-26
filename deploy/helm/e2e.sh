@@ -105,8 +105,16 @@ spec:
 EOF
 )
 grep -q 'container named "agentscd"' <<<"$own" && ok "a pod that brings its own agentscd is refused" || die "own sidecar: $own"
-renv=$(kc -n "$NS" get pods -l app=orders -o jsonpath='{.items[0].spec.initContainers[?(@.name=="agentsc-runtime")].env}')
-[[ -z $renv ]] && ok "the agentsc-runtime container has no environment (no API key)" || die "agentsc-runtime env: $renv"
+# The runtime holds no secret: at most the template's AGENTSC_MOCK_FALLBACK (webhook.rs
+# RUNTIME_TEMPLATE_ENV; demo.sh sets injection.mockFallback), each a literal, and no envFrom.
+RUNTIME_ENV_ALLOWED="AGENTSC_MOCK_FALLBACK"
+rt='{.items[0].spec.initContainers[?(@.name=="agentsc-runtime")]'
+rnames=$(kc -n "$NS" get pods -l app=orders -o jsonpath="$rt.env[*].name}")
+rfrom=$(kc -n "$NS" get pods -l app=orders -o jsonpath="$rt.env[*].valueFrom}$rt.envFrom}")
+unexpected=$(for n in $rnames; do [[ " $RUNTIME_ENV_ALLOWED " == *" $n "* ]] || echo "$n"; done)
+[[ -z $unexpected && -z $rfrom ]] \
+  && ok "the agentsc-runtime container has no secret in its environment (${rnames:-no env})" \
+  || die "agentsc-runtime env: names [$rnames], valueFrom/envFrom [$rfrom]"
 
 echo "▶ identity cannot be borrowed"
 # A pod that claims to be orders, but runs as the default service account: the CA refuses it.
