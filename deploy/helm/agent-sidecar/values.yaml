@@ -113,6 +113,10 @@ injection:
   # Without ANTHROPIC_API_KEY an agent whose model is not `mock` is refused. true: it runs on the
   # deterministic mock instead (AGENTSC_MOCK_FALLBACK=1; demos only, never production).
   mockFallback: false
+  # true: the injected sidecars refuse new work (rule audit.unavailable) and report not ready
+  # while their audit sink fails, until a write succeeds again (AGENTSC_AUDIT_FAIL_CLOSED; the
+  # injected readiness probe then takes the pod out of its Service's endpoints).
+  auditFailClosed: false
   resources:
     requests:
       cpu: 50m

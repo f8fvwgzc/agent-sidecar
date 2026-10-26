@@ -133,6 +133,29 @@ async fn bearer_tokens_sessions_and_the_login_rate_limit() {
     let wait: u64 = r.headers["retry-after"].to_str().unwrap().parse().unwrap();
     assert!((1..=60).contains(&wait));
     assert_secure(&r);
+    // the fix check's finding: every rate-limited attempt was a store record, so anyone could
+    // flood the store; the first is kept (with the count of later ones), the rest are on stdout
+    for _ in 0..4 {
+        let r = Env::send(
+            env.req("POST", "/api/v1/login", None)
+                .body(json!({"token": embassy::token::generate().unwrap()}).to_string()),
+        )
+        .await;
+        assert_eq!(r.status, 429);
+    }
+    let limited = audit_lines(&env)
+        .into_iter()
+        .filter(|l| {
+            l["action"] == "login_failed"
+                && l["reason"]
+                    .as_str()
+                    .is_some_and(|r| r.starts_with("rate limited"))
+        })
+        .count();
+    assert_eq!(
+        limited, 1,
+        "one stored record per window, not one per attempt"
+    );
     // bearer tokens are not rate limited
     assert_eq!(env.get("/whoami", "alice").await.status, 200);
 
@@ -264,6 +287,13 @@ async fn health_and_readiness() {
     }
     let r = Env::send(env.req("GET", "/api/v1/readyz", None)).await;
     assert_eq!(r.body["ready"], true);
+    // control-plane audit persistence is reported, without changing readiness
+    assert_eq!(
+        r.body["cp_audit"],
+        json!({"persisted": true, "append_failures": 0, "last_error": null}),
+        "{}",
+        r.text
+    );
     env.stop().await;
 }
 

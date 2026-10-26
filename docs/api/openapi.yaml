@@ -1606,6 +1606,26 @@ components:
           description: Readiness per enabled component (`ca`, `webhook`, `controlplane`, `api`, `ui`, `store`).
           additionalProperties:
             type: boolean
+        cp_audit:
+          $ref: "#/components/schemas/CpAuditHealth"
+    CpAuditHealth:
+      type: object
+      additionalProperties: false
+      description: Whether control-plane audit records reach the store (design §8.5). It never changes `ready`.
+      required: [persisted, append_failures, last_error]
+      properties:
+        persisted:
+          type: boolean
+          description: This process keeps records in a store (`--store`); `false` = stdout only.
+        append_failures:
+          type: integer
+          minimum: 0
+          description: Records the store refused since start; each was still written to stdout and sent as SSE `cp_audit`.
+        last_error:
+          description: The store's last refusal, kept after later successes; null when there was none.
+          oneOf:
+            - type: string
+            - type: "null"
 
     # ---- graph (design §10.1) ------------------------------------------------------------------
     Graph:

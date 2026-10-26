@@ -9,6 +9,7 @@
 //! | memory, proposals | `status.memory` ([`MemoryDoc`]), `status.proposals` ([`Proposal`] plus the sidecar's `dedup_key`), written only by embassy |
 //! | progress | `status.observedGeneration`, `status.appliedVersion`, conditions `Valid` and `Synced` ([`KubeStore::set_synced`], reached through [`crate::k8s::report_synced`]) |
 //! | pending adoptions | in memory (they are re-offered on every sidecar `Hello`) |
+//! | control-plane audit | ConfigMap segments `agentsc-cp-audit-<n>` in the control-plane namespace ([`super::cp_audit_log`]): what [`Store::append_cp_audit`] gets, and the `cr_external_edit` records this store writes itself |
 //!
 //! **What is trusted.** `spec` and `metadata` (annotations included) are written by whoever may
 //! edit `charters`; `status` (the chart grants `charters/status` writes to embassy only) and the
@@ -33,9 +34,10 @@
 //! next version (annotations, revision, `Valid=True`, [`StoreEvent::CharterChanged`] with source
 //! `kubernetes`); an invalid one gets `Valid=False` with the validator's errors and is never
 //! served or pushed (the stored charter stays the last applied revision). Both are audited as
-//! `cr_external_edit` with actor `k8s:<last managedFields manager>` (one JSON line on stdout and
-//! [`StoreEvent::CpAudit`]). The store runs the charter validator only; the `ControlPlaneConfig`
-//! policy is enforced at admission ([`crate::webhook::policy_violations`]).
+//! `cr_external_edit` with actor `k8s:<last managedFields manager>` (one JSON line on stdout,
+//! the audit segments and [`StoreEvent::CpAudit`]). The store runs the charter validator only;
+//! the `ControlPlaneConfig` policy is enforced at admission
+//! ([`crate::webhook::policy_violations`]).
 //!
 //! **Size.** etcd refuses objects above its request limit (1.5 MiB by default), and a Charter
 //! holds its spec, memory and proposals in one object. Status writes keep the object within
@@ -69,6 +71,7 @@ use tokio::sync::broadcast;
 use super::client::{
     ApiError, CHARTER_GROUP, CHARTER_KIND, CHARTER_VERSION, CharterApi, FIELD_MANAGER,
 };
+use super::cp_audit_log::CpAuditLog;
 use crate::api::types::CpAuditRecord;
 use crate::cp_audit::{CpAction, CpAudit, CpResult, now_ts};
 use crate::store::{
@@ -100,6 +103,9 @@ pub const MAX_ATTEMPTS: usize = 8;
 pub const MAX_OBJECT_BYTES: usize = 1_400_000;
 /// Longest condition message (the validator's errors, `Synced` failures).
 pub const MAX_CONDITION_MESSAGE: usize = 4096;
+/// The control-plane namespace when [`KubeStore::with_cp_namespace`] names none (the default
+/// of `embassy serve --cp-namespace`).
+pub const DEFAULT_CP_NAMESPACE: &str = "agentsc-system";
 
 const CONDITION_VALID: &str = "Valid";
 const CONDITION_SYNCED: &str = "Synced";
@@ -726,6 +732,7 @@ struct Inner {
     seen: Mutex<HashMap<ServiceKey, Seen>>,
     pending: Mutex<BTreeMap<ServiceKey, PendingAdoption>>,
     out: Mutex<Box<dyn Write + Send>>,
+    cp_audit: CpAuditLog,
 }
 
 /// The `kubernetes` implementation of [`Store`]; see the module docs.
@@ -771,6 +778,7 @@ impl KubeStore {
         let (tx, _) = broadcast::channel(1024);
         Self {
             inner: Arc::new(Inner {
+                cp_audit: CpAuditLog::new(api.clone(), DEFAULT_CP_NAMESPACE),
                 api,
                 tx,
                 locks: Mutex::new(HashMap::new()),
@@ -780,6 +788,30 @@ impl KubeStore {
             }),
             watcher: None,
         }
+    }
+
+    /// Keep the control-plane audit in `namespace` (`--cp-namespace`). Call it before
+    /// [`Self::spawn_watcher`], while nothing else holds the store.
+    pub fn with_cp_namespace(mut self, namespace: &str) -> Self {
+        match Arc::get_mut(&mut self.inner) {
+            Some(inner) => inner.cp_audit = CpAuditLog::new(inner.api.clone(), namespace),
+            None => tracing::error!(
+                namespace,
+                kept = self.inner.cp_audit.namespace(),
+                "with_cp_namespace on a shared store; the control-plane audit namespace stays"
+            ),
+        }
+        self
+    }
+
+    /// The namespace of the control-plane audit segments.
+    pub fn cp_namespace(&self) -> &str {
+        self.inner.cp_audit.namespace()
+    }
+
+    /// Read the control-plane audit segments once (a start-up check of RBAC and namespace).
+    pub async fn check_cp_audit(&self) -> Result<(), StoreError> {
+        self.inner.cp_audit.read(0).await.map(|_| ())
     }
 
     /// Watch every Charter (list+watch with bookmarks, a fresh list every
@@ -882,8 +914,9 @@ impl Inner {
         seen.remove(key)
     }
 
-    /// One `cr_external_edit` line on stdout and [`StoreEvent::CpAudit`].
-    fn audit(&self, record: CpAuditRecord) {
+    /// One `cr_external_edit` record: a JSON line on stdout, the audit segments, then
+    /// [`StoreEvent::CpAudit`]. A failure is logged and never stops the others.
+    async fn audit(&self, record: CpAuditRecord) {
         match serde_json::to_string(&record) {
             Ok(mut line) => {
                 line.push('\n');
@@ -895,6 +928,13 @@ impl Inner {
             Err(e) => {
                 tracing::error!(error = %e, "serializing a control-plane audit record failed")
             }
+        }
+        if let Err(e) = self.cp_audit.append(&record) {
+            tracing::error!(
+                error = %e,
+                action = ?record.action,
+                "persisting a control-plane audit record failed"
+            );
         }
         self.emit(StoreEvent::CpAudit(Box::new(record)));
     }
@@ -1246,7 +1286,7 @@ impl Inner {
             record.reason = Some(format!(
                 "generation {generation} is invalid and was not applied: {errors}"
             ));
-            self.audit(record);
+            self.audit(record).await;
             return Ok(true);
         }
 
@@ -1280,7 +1320,7 @@ impl Inner {
         record.to_version = Some(next.to_string());
         record.sha256_after = Some(sha256_hex(yaml.as_bytes()));
         record.reason = Some(format!("generation {generation} applied as version {next}"));
-        self.audit(record);
+        self.audit(record).await;
         self.emit(StoreEvent::CharterChanged {
             key: key.clone(),
             epoch: uid,
@@ -1903,6 +1943,22 @@ impl Store for KubeStore {
         }
         self.inner.emit(event);
         Ok(())
+    }
+
+    async fn append_cp_audit(&self, record: &CpAuditRecord) -> Result<(), StoreError> {
+        self.inner.cp_audit.append(record)
+    }
+
+    async fn flush_cp_audit(&self) {
+        self.inner.cp_audit.flush().await;
+    }
+
+    fn cp_audit_write_failures(&self) -> (u64, Option<String>) {
+        self.inner.cp_audit.failures()
+    }
+
+    async fn cp_audit(&self, limit: usize) -> Result<Vec<CpAuditRecord>, StoreError> {
+        self.inner.cp_audit.read(limit).await
     }
 
     async fn take_pending_adoption(

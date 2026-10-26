@@ -132,14 +132,14 @@ async fn the_layout_versions_and_epochs() {
             .await,
         Err(StoreError::NotFound)
     );
-    store
-        .append_cp_audit(&embassy::cp_audit::CpAudit::entry(
-            embassy::api::types::CpAction::CharterPut,
-            &alice(),
-            embassy::api::types::CpResult::Ok,
-        ))
-        .await
-        .unwrap();
+    let rec = embassy::cp_audit::CpAudit::entry(
+        embassy::api::types::CpAction::CharterPut,
+        &alice(),
+        embassy::api::types::CpResult::Ok,
+    );
+    store.append_cp_audit(&rec).await.unwrap();
+    // read back through the trait
+    assert_eq!(store.cp_audit(10).await.unwrap(), [rec]);
     // the exact layout
     let f = files(dir.path());
     assert_eq!(

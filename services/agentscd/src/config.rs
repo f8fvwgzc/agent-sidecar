@@ -117,6 +117,19 @@ pub struct Config {
         default_value_t = crate::cache::DEFAULT_MAX_AGE_SECS
     )]
     pub mesh_cache_max_age: u64,
+    /// Refuse new work (rule `audit.unavailable`: invocations 503 / `UNAVAILABLE`, mesh and tool
+    /// calls `UNAVAILABLE`) and report not ready while the audit sink fails, until a write
+    /// succeeds again (docs/operations.md). Off: failures are logged and counted, work goes on.
+    /// Env accepts 1/0, true/false, yes/no, on/off.
+    #[arg(
+        long,
+        env = "AGENTSC_AUDIT_FAIL_CLOSED",
+        num_args = 0..=1,
+        default_value = "false",
+        default_missing_value = "true",
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
+    pub audit_fail_closed: bool,
 
     /// The largest response body a tool or mesh call reads from the app, a peer or an http tool's
     /// origin; a longer one fails the call (`http.response_too_large`). The default fits the
@@ -237,6 +250,7 @@ impl Config {
             mesh_cache_bytes: crate::cache::DEFAULT_CAPACITY_BYTES,
             mesh_cache_max_age: crate::cache::DEFAULT_MAX_AGE_SECS,
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
+            audit_fail_closed: false,
             anthropic_api_key_file: None,
             anthropic_api_key: None,
             anthropic_base_url: crate::gateway::anthropic::DEFAULT_BASE_URL.into(),
@@ -435,6 +449,19 @@ mod tests {
         assert_eq!(d.mesh_cache_bytes, crate::cache::DEFAULT_CAPACITY_BYTES);
         assert_eq!(d.mesh_cache_max_age, crate::cache::DEFAULT_MAX_AGE_SECS);
         assert_eq!(d.timing, Timing::default());
+        assert!(!d.audit_fail_closed, "fail-closed is off by default");
+
+        for (args, on) in [
+            (&["agentscd", "--audit-fail-closed"][..], true),
+            (&["agentscd", "--audit-fail-closed", "yes"][..], true),
+            (&["agentscd", "--audit-fail-closed", "0"][..], false),
+        ] {
+            assert_eq!(
+                Config::try_parse_from(args).unwrap().audit_fail_closed,
+                on,
+                "{args:?}"
+            );
+        }
 
         let e = Config::try_parse_from([
             "agentscd",

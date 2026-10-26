@@ -473,7 +473,15 @@ async fn the_audit_is_persisted_and_append_only() {
     }))
     .unwrap();
     store.append_cp_audit(&rec).await.unwrap();
-    store.append_cp_audit(&rec).await.unwrap();
+    let mut second = rec.clone();
+    second.to_version = Some("3".into());
+    store.append_cp_audit(&second).await.unwrap();
+    // read back through the trait: the newest, oldest first
+    assert_eq!(
+        store.cp_audit(10).await.unwrap(),
+        [rec.clone(), second.clone()]
+    );
+    assert_eq!(store.cp_audit(1).await.unwrap(), [second.clone()]);
 
     let conn = rusqlite::Connection::open(store.path()).unwrap();
     let (n, action, record): (i64, String, String) = conn
@@ -485,7 +493,7 @@ async fn the_audit_is_persisted_and_append_only() {
         .unwrap();
     assert_eq!((n, action.as_str()), (2, "charter_put"));
     let back: embassy::cp_audit::CpAuditRecord = serde_json::from_str(&record).unwrap();
-    assert_eq!(back, rec);
+    assert_eq!(back, second, "the larger of the two");
     assert!(conn.execute("DELETE FROM cp_audit", []).is_err());
     assert!(
         conn.execute("UPDATE cp_audit SET actor = 'mallory'", [])

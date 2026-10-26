@@ -537,6 +537,20 @@ impl Issuer {
         key_sha256: Option<String>,
         result: Result<String, &Denial>,
     ) {
+        // a refusal anyone can cause (cp_audit.rs): before any credential was verified, or of a
+        // verified one, since any pod can mount a token for audience agentsc; one window per
+        // refusal code, and per caller once it is known
+        let refusal = match (&result, who) {
+            (Err(d), None) => Some(format!("IssueCertificate {:?}", d.code)),
+            (Err(d), Some(Caller::Pod { namespace, name })) => Some(format!(
+                "IssueCertificate {:?} pod {namespace}/{name}",
+                d.code
+            )),
+            (Err(d), Some(Caller::Join { name })) => {
+                Some(format!("IssueCertificate {:?} join {name}", d.code))
+            }
+            (Ok(_), _) => None,
+        };
         let (action, outcome, reason) = match result {
             Ok(reason) => (CpAction::CertIssue, CpResult::Ok, reason),
             Err(d) => (CpAction::CertDenied, CpResult::Denied, d.message.clone()),
@@ -551,7 +565,10 @@ impl Issuer {
         }
         rec.sha256_after = key_sha256;
         rec.reason = Some(reason);
-        self.cp_audit.record(rec).await;
+        match refusal {
+            Some(kind) => self.cp_audit.record_refusal(&kind, rec).await,
+            None => self.cp_audit.record(rec).await,
+        }
     }
 
     /// Decide and sign; every outcome is audited.
@@ -713,8 +730,46 @@ mod tests {
         issuer: Issuer,
         cluster: Arc<FakeCluster>,
         audit: tokio::sync::broadcast::Receiver<Arc<CpAuditRecord>>,
+        /// The audit's stdout lines: every record, also the ones held back from the store.
+        lines: Lines,
+        /// Records [`Rig::next_record`] returned so far.
+        seen: usize,
         ca: Arc<CaMaterial>,
         store: Arc<KubeStore>,
+    }
+
+    impl Rig {
+        /// The next audit record, in order, from stdout: every one is there, also a refusal
+        /// held back from the store and subscribers (cp_audit.rs).
+        fn next_record(&mut self) -> CpAuditRecord {
+            let rec = self.lines.records().remove(self.seen);
+            self.seen += 1;
+            rec
+        }
+    }
+
+    /// A shared buffer standing in for stdout.
+    #[derive(Clone, Default)]
+    struct Lines(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Lines {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Lines {
+        fn records(&self) -> Vec<CpAuditRecord> {
+            String::from_utf8(self.0.lock().unwrap().clone())
+                .unwrap()
+                .lines()
+                .map(|l| serde_json::from_str(l).unwrap())
+                .collect()
+        }
     }
 
     fn config(join: Vec<JoinTokenEntry>) -> ControlPlaneConfig {
@@ -748,7 +803,8 @@ mod tests {
             cluster.clone(),
             Box::new(std::io::sink()),
         ));
-        let cp_audit = Arc::new(CpAudit::with_writer(None, Box::new(std::io::sink())));
+        let lines = Lines::default();
+        let cp_audit = Arc::new(CpAudit::with_writer(None, Box::new(lines.clone())));
         let audit = cp_audit.subscribe();
         let issuer = Issuer::new(
             ca.clone(),
@@ -762,6 +818,8 @@ mod tests {
             issuer,
             cluster,
             audit,
+            lines,
+            seen: 0,
             ca,
             store,
         }
@@ -869,7 +927,7 @@ mod tests {
             [("tok".to_string(), vec!["agentsc".to_string()])]
         );
 
-        let rec = r.audit.recv().await.unwrap();
+        let rec = r.next_record();
         assert_eq!(rec.action, CpAction::CertIssue);
         assert_eq!(rec.result, CpResult::Ok);
         // design §7: sidecar:<spiffe id>/<pod>
@@ -1087,7 +1145,7 @@ mod tests {
                 row.name,
                 err.message()
             );
-            let rec = r.audit.recv().await.unwrap();
+            let rec = r.next_record();
             assert_eq!(rec.action, CpAction::CertDenied, "{}", row.name);
             assert_eq!(rec.result, CpResult::Denied);
             // a refusal is attributed to what the token showed, never to the identity asked for
@@ -1143,9 +1201,9 @@ mod tests {
             .issue(k8s_request("shop", "orders", "tok"))
             .await
             .unwrap();
-        let denied = r.audit.recv().await.unwrap();
+        let denied = r.next_record();
         assert_eq!(denied.action, CpAction::CertDenied);
-        let issued = r.audit.recv().await.unwrap();
+        let issued = r.next_record();
         assert_eq!(issued.action, CpAction::CertIssue);
         assert!(issued.reason.as_ref().unwrap().contains("orders-runner"));
     }
@@ -1215,7 +1273,7 @@ mod tests {
             .issue(k8s_request("shop", "orders", "tok"))
             .await
             .unwrap();
-        assert_eq!(r.audit.recv().await.unwrap().action, CpAction::CertIssue);
+        assert_eq!(r.next_record().action, CpAction::CertIssue);
 
         // the image is swapped under the running pod: the renewal is refused
         let cases: Vec<(Pod, Code, String)> = vec![
@@ -1271,7 +1329,7 @@ mod tests {
                 "{reason}: {}",
                 err.message()
             );
-            let rec = r.audit.recv().await.unwrap();
+            let rec = r.next_record();
             assert_eq!(
                 (rec.action, rec.result),
                 (CpAction::CertDenied, CpResult::Denied)
@@ -1366,7 +1424,7 @@ mod tests {
                 .unwrap_err();
             assert_eq!(err.code(), Code::PermissionDenied, "{err:?}");
             assert!(err.message().contains(reason), "{}", err.message());
-            let rec = r.audit.recv().await.unwrap();
+            let rec = r.next_record();
             assert_eq!(
                 (rec.action, rec.result),
                 (CpAction::CertDenied, CpResult::Denied)
@@ -1383,6 +1441,43 @@ mod tests {
             .issue(k8s_request("shop", "orders", "tok"))
             .await
             .unwrap();
+    }
+
+    /// The fix check's finding: any pod can mount a token for audience agentsc, pass TokenReview
+    /// and then be refused (another namespace), one store record each. Refusals of a verified
+    /// caller are now kept once per caller and window too; stdout still has every one.
+    #[tokio::test]
+    async fn a_verified_caller_refused_again_and_again_is_stored_once_per_window() {
+        let mut r = rig(vec![]);
+        for (token, pod) in [("tok-0", "flood-0"), ("tok-1", "flood-1")] {
+            r.cluster
+                .put_token(token, review("shop", "orders", pod, POD_UID, &["agentsc"]));
+        }
+        for _ in 0..5 {
+            let err = r
+                .issuer
+                .issue(k8s_request("payments", "ledger", "tok-0"))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), Code::PermissionDenied);
+            assert!(err.message().contains("is not the requested namespace"));
+        }
+        // another pod has a window of its own
+        r.issuer
+            .issue(k8s_request("payments", "ledger", "tok-1"))
+            .await
+            .unwrap_err();
+        let lines = r.lines.records();
+        assert_eq!(lines.len(), 6, "every refusal on stdout");
+        assert!(lines.iter().all(|l| l.action == CpAction::CertDenied));
+        let mut kept = Vec::new();
+        while let Ok(rec) = r.audit.try_recv() {
+            kept.push(rec.actor.clone());
+        }
+        assert_eq!(
+            kept,
+            ["sidecar:pod:shop/flood-0", "sidecar:pod:shop/flood-1"]
+        );
     }
 
     #[tokio::test]
@@ -1429,7 +1524,7 @@ mod tests {
             agentsc_pki::uri_sans_of(&der).unwrap(),
             ["spiffe://agentsc/ns/demo/svc/orders"]
         );
-        let rec = r.audit.recv().await.unwrap();
+        let rec = r.next_record();
         assert_eq!(rec.action, CpAction::CertIssue);
         assert_eq!(
             rec.actor,
@@ -1479,7 +1574,7 @@ mod tests {
             let err = r.issuer.issue(join(ns, svc, token)).await.unwrap_err();
             assert_eq!(err.code(), code, "{ns}/{svc} {token}: {err:?}");
             assert!(err.message().contains(reason), "{}", err.message());
-            let rec = r.audit.recv().await.unwrap();
+            let rec = r.next_record();
             assert_eq!(rec.action, CpAction::CertDenied);
             assert_eq!(rec.actor, actor, "{ns}/{svc} {token}");
         }
@@ -1510,10 +1605,17 @@ mod tests {
             let err = r.issuer.issue(req).await.unwrap_err();
             assert_eq!(err.code(), Code::InvalidArgument, "{ns}/{svc}");
             assert!(err.message().contains(reason), "{}", err.message());
-            let rec = r.audit.recv().await.unwrap();
+            let rec = r.lines.records().pop().unwrap();
             assert_eq!(rec.action, CpAction::CertDenied);
+            assert_eq!(rec.reason.as_deref(), Some(err.message()));
             assert!(rec.sha256_after.is_none());
         }
+        // refused before any credential was checked: all on stdout, the first to subscribers
+        // (and the store) only, so a flood of them cannot push the store's records out
+        assert_eq!(r.lines.records().len(), 5);
+        let first = r.audit.recv().await.unwrap();
+        assert!(first.reason.as_deref().unwrap().contains("\"Demo\""));
+        assert!(r.audit.try_recv().is_err());
         // a garbage name never reaches the audit record verbatim as an identity
         let pod = Caller::Pod {
             namespace: "shop".into(),
@@ -1573,10 +1675,13 @@ mod tests {
                 "{reason}: {}",
                 err.message()
             );
-            let rec = r.audit.recv().await.unwrap();
+            let rec = r.lines.records().pop().unwrap();
             assert_eq!(rec.action, CpAction::CertDenied);
             assert!(rec.sha256_after.is_none());
         }
+        assert_eq!(r.lines.records().len(), 4);
+        assert!(r.audit.recv().await.is_ok());
+        assert!(r.audit.try_recv().is_err(), "one per kind and window");
     }
 
     #[tokio::test]

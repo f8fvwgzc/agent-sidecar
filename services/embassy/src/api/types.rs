@@ -147,6 +147,22 @@ pub struct AdoptRequest {
 pub struct ReadyStatus {
     pub ready: bool,
     pub components: BTreeMap<String, bool>,
+    /// The control-plane audit's persistence (design §8.5); it never changes `ready`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cp_audit: Option<CpAuditHealth>,
+}
+
+/// Whether control-plane audit records reach the store (`GET /readyz`, `cp_audit`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CpAuditHealth {
+    /// This process persists records in a store (`--store`); else stdout only.
+    pub persisted: bool,
+    /// Records the store refused since start (each was still written to stdout and sent to
+    /// subscribers).
+    pub append_failures: u64,
+    /// The last refusal (kept after later successes).
+    pub last_error: Option<String>,
 }
 
 // ---- graph (design §10.1) ------------------------------------------------------------------------

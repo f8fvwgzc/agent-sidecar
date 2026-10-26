@@ -159,6 +159,8 @@ def test_default_render_has_exactly_the_designed_resources(default: list[dict]) 
         ("ClusterRoleBinding", "agentsc-embassy"),
         ("Role", "agentsc-embassy-secrets"),
         ("RoleBinding", "agentsc-embassy-secrets"),
+        ("Role", "agentsc-embassy-cp-audit"),
+        ("RoleBinding", "agentsc-embassy-cp-audit"),
         ("ClusterRole", "agentsc-charter-view"),
         ("ClusterRole", "agentsc-charter-edit"),
         ("Secret", "embassy-config"),
@@ -302,14 +304,45 @@ def test_only_embassy_ca_can_read_the_ca_and_tls_secrets(default: list[dict]) ->
     assert secrets == {"embassy-config", "agentsc-session-key", "embassy-tls"}
 
 
+def cp_audit_segments() -> int:
+    """`SEGMENTS` of the kubernetes store's control-plane audit ring, from the Rust source."""
+    source = (ROOT / "services/embassy/src/k8s/cp_audit_log.rs").read_text()
+    match = re.search(r"^pub const SEGMENTS: u64 = (\d+);$", source, re.MULTILINE)
+    assert match, "SEGMENTS not found in cp_audit_log.rs"
+    return int(match.group(1))
+
+
 @needs_helm
-def test_no_configmap_permissions_anywhere(full: list[dict]) -> None:
-    for d in full:
-        if d["kind"] in {"Role", "ClusterRole"}:
+def test_configmaps_only_for_the_cp_audit_ring(default: list[dict], full: list[dict]) -> None:
+    names = [f"agentsc-cp-audit-{i}" for i in range(cp_audit_segments())]
+    for docs in (default, full):
+        for d in docs:
+            if d["kind"] not in {"Role", "ClusterRole"}:
+                continue
             for rule in d["rules"]:
-                assert "configmaps" not in rule.get("resources", []), d["metadata"]["name"]
                 assert "*" not in rule.get("resources", []), d["metadata"]["name"]
                 assert "*" not in rule["verbs"], d["metadata"]["name"]
+                if "configmaps" in rule.get("resources", []):
+                    # nothing but the audit ring, in the release namespace
+                    assert (d["kind"], d["metadata"]["name"]) == ("Role", "agentsc-embassy-cp-audit")
+        role = find(docs, "Role", "agentsc-embassy-cp-audit")
+        assert role["metadata"]["namespace"] == NS
+        assert norm(role["rules"]) == norm(
+            [
+                {"apiGroups": [""], "resources": ["configmaps"], "resourceNames": names, "verbs": ["get", "update"]},
+                # Kubernetes cannot restrict create by name
+                {"apiGroups": [""], "resources": ["configmaps"], "verbs": ["create"]},
+            ]
+        )
+        binding = find(docs, "RoleBinding", "agentsc-embassy-cp-audit")
+        assert binding["metadata"]["namespace"] == NS
+        assert binding["roleRef"] == {
+            "apiGroup": "rbac.authorization.k8s.io",
+            "kind": "Role",
+            "name": role["metadata"]["name"],
+        }
+        assert sorted(s["name"] for s in binding["subjects"]) == ["embassy", "embassy-ca"]
+        assert {s["namespace"] for s in binding["subjects"]} == {NS}
 
 
 @needs_helm
@@ -634,6 +667,11 @@ def test_injection_defaults_reach_embassy_ca_as_one_container_template(default: 
     # Off by default: without ANTHROPIC_API_KEY the runtime refuses a Claude model
     assert inject_template(render("--set", "injection.mockFallback=true"))["env"] == [
         {"name": "AGENTSC_MOCK_FALLBACK", "value": "1"}
+    ]
+    # fail-closed audit for the injected sidecars (off by default)
+    assert "env" not in inject_template(render())
+    assert inject_template(render("--set", "injection.auditFailClosed=true"))["env"] == [
+        {"name": "AGENTSC_AUDIT_FAIL_CLOSED", "value": "true"}
     ]
 
 

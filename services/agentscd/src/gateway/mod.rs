@@ -21,7 +21,9 @@
 //! `retry-after` headers, SSE events, errors), so the runtime's harness classifies and retries
 //! exactly as against the provider. A call the gateway refuses gets `403` (`400` for a request it
 //! cannot read) with an error body in the provider's shape and `x-agentsc-rule`; a refused budget
-//! is remembered for the run, and the invocation's answer names it (pipeline.rs).
+//! is remembered for the run, and the invocation's answer names it (pipeline.rs). With
+//! `--audit-fail-closed` and a failing audit sink, every call is refused with `503` and
+//! `audit.unavailable` before anything else (audit.rs).
 //!
 //! Providers are adapters ([`Provider`]): the Anthropic Messages API (`POST /v1/messages`,
 //! anthropic.rs) today. An OpenAI-compatible adapter (`POST /v1/chat/completions`) implements
@@ -368,6 +370,10 @@ async fn messages(
         started: Instant::now(),
         run: None,
     };
+    // Fail-closed (audit.rs): no model call goes out while the audit sink fails.
+    if let Err(v) = state.audit.check() {
+        return call.refuse(&state, StatusCode::SERVICE_UNAVAILABLE, v);
+    }
     let Some(provider) = state.providers.anthropic.clone() else {
         return call.refuse(
             &state,

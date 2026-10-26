@@ -5,6 +5,7 @@
 //! | --- | --- |
 //! | [`client`] | the [`client::KubeApi`] and [`client::CharterApi`] traits and their kube-rs implementation |
 //! | [`store`] | [`store::KubeStore`], the `--store kubernetes` implementation of [`crate::store::Store`] |
+//! | [`cp_audit_log`] | the store's control-plane audit: a ring of ConfigMap segments in the control-plane namespace |
 //! | [`tls_secret`] | Secret `embassy-tls` (`--tls-secret`) written and renewed from the `ca` component's serving certificate |
 //! | [`ca_bundle`] | `clientConfig.caBundle` of both webhook configurations, reconciled every 30 s |
 //!
@@ -31,6 +32,7 @@ use crate::store::{ServiceKey, Store, StoreError};
 
 pub mod ca_bundle;
 pub mod client;
+pub mod cp_audit_log;
 pub mod store;
 pub mod tls_secret;
 
@@ -109,7 +111,17 @@ pub async fn open_kube_store(args: &ServeArgs) -> anyhow::Result<Arc<KubeStore>>
         ),
         Err(e) => bail!("--store kubernetes: listing Charters failed: {e}"),
     }
-    let mut store = KubeStore::new(Arc::new(client.clone()));
+    let mut store = KubeStore::new(Arc::new(client.clone())).with_cp_namespace(&args.cp_namespace);
+    // the control-plane audit must be writable (RBAC, the namespace): say so at start, not at
+    // the first lost record
+    if let Err(e) = store.check_cp_audit().await {
+        tracing::error!(
+            namespace = %args.cp_namespace,
+            error = %e,
+            "the control-plane audit ConfigMaps cannot be read; records will fail to persist \
+             (the chart's Role agentsc-embassy-cp-audit grants access)"
+        );
+    }
     if args.has(Component::Controlplane) {
         store.spawn_watcher(client.client().clone());
     }

@@ -577,11 +577,26 @@ pub trait Store: Send + Sync {
         sha256: &str,
     ) -> Result<PendingAdoption, StoreError>;
 
-    /// Persist one control-plane audit record (the file store appends `.audit.jsonl`; stores
-    /// without an audit file keep the default, which writes nothing). Records the store
-    /// produces itself are also broadcast as [`StoreEvent::CpAudit`].
-    async fn append_cp_audit(&self, _record: &CpAuditRecord) -> Result<(), StoreError> {
-        Ok(())
+    /// Persist one control-plane audit record durably (design §8.5): the file store appends
+    /// `.audit.jsonl`, the SQLite store inserts into `cp_audit`, the Kubernetes store appends to
+    /// its ConfigMap segments in the control-plane namespace. There is no default: a store that
+    /// cannot keep the audit must say so with an error, which [`crate::cp_audit::CpAudit`]
+    /// logs and counts, never drop it. Records the store produces itself are also broadcast as
+    /// [`StoreEvent::CpAudit`].
+    async fn append_cp_audit(&self, record: &CpAuditRecord) -> Result<(), StoreError>;
+
+    /// The newest `limit` control-plane audit records this store kept, oldest first (what
+    /// [`Store::append_cp_audit`] wrote, and the records the store produced itself).
+    async fn cp_audit(&self, limit: usize) -> Result<Vec<CpAuditRecord>, StoreError>;
+
+    /// A store that writes the audit in the background (the Kubernetes store): once the records
+    /// appended so far are written or given up. The others write in `append_cp_audit`.
+    async fn flush_cp_audit(&self) {}
+
+    /// Records `append_cp_audit` accepted that a background write lost later, and the last
+    /// error ([`crate::cp_audit::CpAudit::health`] adds them to its own count).
+    fn cp_audit_write_failures(&self) -> (u64, Option<String>) {
+        (0, None)
     }
 
     /// Changes from now on. Lagging receivers lose events (`RecvError::Lagged`) and must resync.
@@ -608,6 +623,7 @@ mod tests {
     struct Empty {
         tx: broadcast::Sender<StoreEvent>,
         learning: std::sync::Mutex<Learning>,
+        audit: std::sync::Mutex<Vec<CpAuditRecord>>,
     }
 
     /// support's charter: `support-agent` learns in review mode (at most `max_notes` notes of
@@ -636,6 +652,7 @@ mod tests {
                     },
                     proposals,
                 }),
+                audit: std::sync::Mutex::new(Vec::new()),
             }
         }
 
@@ -810,6 +827,20 @@ mod tests {
         ) -> Result<PendingAdoption, StoreError> {
             Err(StoreError::NotFound)
         }
+        async fn append_cp_audit(&self, record: &CpAuditRecord) -> Result<(), StoreError> {
+            self.audit
+                .lock()
+                .map_err(|_| StoreError::Io("poisoned".into()))?
+                .push(record.clone());
+            Ok(())
+        }
+        async fn cp_audit(&self, limit: usize) -> Result<Vec<CpAuditRecord>, StoreError> {
+            let all = self
+                .audit
+                .lock()
+                .map_err(|_| StoreError::Io("poisoned".into()))?;
+            Ok(all[all.len().saturating_sub(limit)..].to_vec())
+        }
         fn subscribe(&self) -> broadcast::Receiver<StoreEvent> {
             self.tx.subscribe()
         }
@@ -840,7 +871,7 @@ mod tests {
             })
         );
         assert_eq!(store.get_memory(&key).await.unwrap().version, "0");
-        // the default `append_cp_audit` accepts and drops
+        // every store keeps the control-plane audit (no default that drops it) and reads it back
         let rec: CpAuditRecord = serde_json::from_value(serde_json::json!({
             "ts": "2026-10-21T10:00:00.000Z", "actor": "alice", "actor_kind": "session", "role": "admin",
             "action": "login", "namespace": null, "service": null, "agent": null, "from_version": null,
@@ -848,6 +879,14 @@ mod tests {
         }))
         .unwrap();
         store.append_cp_audit(&rec).await.unwrap();
+        let mut logout = rec.clone();
+        logout.action = crate::api::types::CpAction::Logout;
+        store.append_cp_audit(&logout).await.unwrap();
+        assert_eq!(
+            store.cp_audit(10).await.unwrap(),
+            [rec.clone(), logout.clone()]
+        );
+        assert_eq!(store.cp_audit(1).await.unwrap(), [logout], "the newest");
         let mut rx = store.subscribe();
         tx.send(StoreEvent::MemoryChanged {
             key: key.clone(),

@@ -164,6 +164,32 @@ impl MeshService {
         .latency(started);
         self.state.audit.write(rec);
     }
+
+    /// The fail-closed audit gate (audit.rs) of an inbound service call: a refusal writes the
+    /// callee's `service_call` record with rule `audit.unavailable` and is `UNAVAILABLE`.
+    /// `InvokeAgent` passes the same gate at the entry of `pipeline::invoke`.
+    fn audit_gate(&self, inb: &Inbound, callee: &str, started: Instant) -> Result<(), Status> {
+        let Err(v) = self.state.audit.check() else {
+            return Ok(());
+        };
+        let caller = inb.caller.as_deref().unwrap_or("unknown");
+        let rec = AuditRecord::new(
+            Kind::ServiceCall,
+            Direction::Inbound,
+            &inb.request_id,
+            &inb.trace,
+            inb.agent.as_deref(),
+            caller,
+            inb.agent.as_deref(),
+            callee,
+            Value::Null,
+            Value::Null,
+        )
+        .verdict(&v)
+        .latency(started);
+        self.state.audit.write(rec);
+        Err(crate::audit::unavailable(v))
+    }
 }
 
 #[tonic::async_trait]
@@ -243,6 +269,7 @@ impl Mesh for MeshService {
         let req = request.into_inner();
         let me = self.state.service.clone();
         let raw_callee = format!("{me} {} {}", req.method, req.path);
+        self.audit_gate(&inb, &raw_callee, started)?;
         let caller = match &inb.caller {
             Ok(c) => c.clone(),
             Err(v) => {

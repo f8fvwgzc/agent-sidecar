@@ -1,7 +1,7 @@
 //! An in-memory Kubernetes API for the tests of this crate: Charters with the API server's
 //! `resourceVersion`, `generation`, `uid` and `managedFields` behaviour and a `status`
-//! subresource, ControllerRevisions with owner-reference garbage collection, pods, TokenReviews,
-//! Secrets and webhook configurations. Failures can be injected.
+//! subresource, ControllerRevisions with owner-reference garbage collection, ConfigMaps, pods,
+//! TokenReviews, Secrets and webhook configurations. Failures can be injected.
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Mutex;
 
@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use k8s_openapi::ByteString;
 use k8s_openapi::api::apps::v1::ControllerRevision;
 use k8s_openapi::api::authentication::v1::TokenReviewStatus;
-use k8s_openapi::api::core::v1::{Pod, Secret};
+use k8s_openapi::api::core::v1::{ConfigMap, Pod, Secret};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use serde_json::{Value, json};
 
@@ -31,6 +31,13 @@ struct State {
     clock: u64,
     charters: BTreeMap<Key, Value>,
     revisions: BTreeMap<Key, ControllerRevision>,
+    config_maps: BTreeMap<Key, ConfigMap>,
+    /// The next N ConfigMap `replace` calls fail with a conflict (another writer got there).
+    config_map_conflicts: usize,
+    /// Every ConfigMap write is refused with this message (RBAC missing, quota).
+    refuse_config_maps: Option<String>,
+    /// How long every ConfigMap write takes (the API server's latency).
+    config_map_write_latency: Option<std::time::Duration>,
     pods: BTreeMap<Key, Pod>,
     reviews: HashMap<String, TokenReviewStatus>,
     review_requests: Vec<(String, Vec<String>)>,
@@ -127,6 +134,50 @@ impl FakeCluster {
             .filter(|(n, _)| n == ns)
             .map(|(_, name)| name.clone())
             .collect()
+    }
+
+    pub fn config_map(&self, ns: &str, name: &str) -> Option<ConfigMap> {
+        self.st().config_maps.get(&key(ns, name)).cloned()
+    }
+
+    pub fn config_map_names(&self, ns: &str) -> Vec<String> {
+        self.st()
+            .config_maps
+            .keys()
+            .filter(|(n, _)| n == ns)
+            .map(|(_, name)| name.clone())
+            .collect()
+    }
+
+    /// What `kubectl edit configmap` does: change a ConfigMap (its `resourceVersion` moves).
+    pub fn edit_config_map(&self, ns: &str, name: &str, f: impl FnOnce(&mut ConfigMap)) {
+        let mut st = self.st();
+        let rv = st.next_rv();
+        if let Some(cm) = st.config_maps.get_mut(&key(ns, name)) {
+            f(cm);
+            cm.metadata.resource_version = Some(rv);
+        }
+    }
+
+    pub fn fail_config_map_replaces_with_conflict(&self, n: usize) {
+        self.st().config_map_conflicts = n;
+    }
+
+    /// Refuse every ConfigMap write with `message` (`None`: accept them again).
+    pub fn refuse_config_maps(&self, message: Option<&str>) {
+        self.st().refuse_config_maps = message.map(str::to_string);
+    }
+
+    /// Every ConfigMap write takes `latency` from now on.
+    pub fn delay_config_map_writes(&self, latency: std::time::Duration) {
+        self.st().config_map_write_latency = Some(latency);
+    }
+
+    async fn config_map_write_latency(&self) {
+        let latency = self.st().config_map_write_latency;
+        if let Some(l) = latency {
+            tokio::time::sleep(l).await;
+        }
     }
 
     pub fn calls(&self) -> Vec<String> {
@@ -568,5 +619,68 @@ impl CharterApi for FakeCluster {
         st.revisions.remove(&key(namespace, name));
         st.log(format!("delete revision {namespace}/{name}"));
         Ok(())
+    }
+
+    async fn get_config_map(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<Option<ConfigMap>, ApiError> {
+        Ok(self.st().config_maps.get(&key(namespace, name)).cloned())
+    }
+
+    async fn create_config_map(
+        &self,
+        namespace: &str,
+        config_map: &ConfigMap,
+    ) -> Result<ConfigMap, ApiError> {
+        self.config_map_write_latency().await;
+        let mut st = self.st();
+        if let Some(m) = &st.refuse_config_maps {
+            return Err(ApiError::Refused(m.clone()));
+        }
+        let name = config_map.metadata.name.clone().unwrap_or_default();
+        let k = key(namespace, &name);
+        if st.config_maps.contains_key(&k) {
+            return Err(ApiError::AlreadyExists(format!(
+                "configmaps {name:?} already exists"
+            )));
+        }
+        let rv = st.next_rv();
+        let mut cm = config_map.clone();
+        cm.metadata.namespace = Some(namespace.to_string());
+        cm.metadata.resource_version = Some(rv);
+        st.config_maps.insert(k, cm.clone());
+        st.log(format!("create configmap {namespace}/{name}"));
+        Ok(cm)
+    }
+
+    async fn replace_config_map(
+        &self,
+        namespace: &str,
+        config_map: &ConfigMap,
+    ) -> Result<ConfigMap, ApiError> {
+        self.config_map_write_latency().await;
+        let mut st = self.st();
+        if let Some(m) = &st.refuse_config_maps {
+            return Err(ApiError::Refused(m.clone()));
+        }
+        if st.config_map_conflicts > 0 {
+            st.config_map_conflicts -= 1;
+            st.next_rv();
+            return Err(ApiError::Conflict("the object has been modified".into()));
+        }
+        let name = config_map.metadata.name.clone().unwrap_or_default();
+        let k = key(namespace, &name);
+        let current = st.config_maps.get(&k).ok_or(ApiError::NotFound)?;
+        if current.metadata.resource_version != config_map.metadata.resource_version {
+            return Err(ApiError::Conflict("the object has been modified".into()));
+        }
+        let rv = st.next_rv();
+        let mut cm = config_map.clone();
+        cm.metadata.resource_version = Some(rv);
+        st.config_maps.insert(k, cm.clone());
+        st.log(format!("replace configmap {namespace}/{name}"));
+        Ok(cm)
     }
 }

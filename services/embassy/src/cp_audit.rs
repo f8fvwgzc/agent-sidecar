@@ -1,31 +1,66 @@
 //! Control-plane audit (docs/design/agent-platform.md §8.5).
 //!
 //! [`CpAudit::record`] writes every control-plane action three ways: one JSON line on stdout,
-//! [`Store::append_cp_audit`] (the file store's `.audit.jsonl`), and a broadcast that the API
-//! turns into the admin-only SSE event `cp_audit` ([`CpAudit::subscribe`]). Records a store
-//! produces by itself (`cr_external_edit`) reach subscribers of the store as
+//! [`Store::append_cp_audit`] (the file store's `.audit.jsonl`, the SQLite store's `cp_audit`
+//! table, the Kubernetes store's ConfigMap segments), and a broadcast that the API turns into
+//! the admin-only SSE event `cp_audit` ([`CpAudit::subscribe`]). Records a store produces by
+//! itself (`cr_external_edit`) reach subscribers of the store as
 //! [`crate::store::StoreEvent::CpAudit`] instead.
+//!
+//! A store that refuses a record never stops the line, the broadcast or the action audited: the
+//! refusal is logged, counted and reported on `GET /readyz` as `cp_audit` ([`CpAudit::health`]),
+//! so a lost record is visible. Every store implements `append_cp_audit` (the trait has no
+//! default); a process without a store writes stdout only and says so (`persisted: false`).
+//!
+//! **Refusals anyone can cause** ([`CpAudit::record_refusal`]: a login while rate limited; an
+//! `IssueCertificate` refused, before its credential was verified or after, since any pod can
+//! mount a token for audience `agentsc`) are cheap to send, so a flood of them would push a
+//! store's records out (the Kubernetes store keeps the newest 4 MiB). Each still writes its line
+//! on stdout; the store and subscribers get the first of each kind per [`REFUSAL_WINDOW`] (a
+//! kind names what was refused and, for a verified caller, who: never what the caller chose),
+//! whose `reason` counts the ones before it that they did not get.
 //!
 //! The record type is [`CpAuditRecord`] of the API types (its JSON shape is the OpenAPI
 //! `CpAuditRecord`), re-exported here with its enums.
+use std::collections::HashMap;
 use std::fmt;
 use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use chrono::{SecondsFormat, Utc};
 use tokio::sync::broadcast;
 
-pub use crate::api::types::{CpAction, CpAuditRecord, CpResult};
+pub use crate::api::types::{CpAction, CpAuditHealth, CpAuditRecord, CpResult};
 use crate::store::{Actor, Store};
 
 /// Records a slow SSE subscriber may fall behind before it loses some (`RecvError::Lagged`).
 pub const SUBSCRIBER_CAPACITY: usize = 1024;
+/// Refusals of one kind reach the store once per window (module docs).
+pub const REFUSAL_WINDOW: Duration = Duration::from_secs(60);
+/// Kinds of refusals tracked at once; beyond them (after the windows ended are dropped), the
+/// others share one window, [`OTHER_REFUSALS`].
+const MAX_REFUSAL_KINDS: usize = 1024;
+const OTHER_REFUSALS: &str = "other refusals";
+
+/// One kind of refusal: when its window began, and how many the store did not get since.
+struct Window {
+    since: Instant,
+    held_back: u64,
+}
 
 /// The control-plane audit log.
 pub struct CpAudit {
     store: Option<Arc<dyn Store>>,
     out: Mutex<Box<dyn Write + Send>>,
     tx: broadcast::Sender<Arc<CpAuditRecord>>,
+    /// Records the store refused, and the last refusal.
+    append_failures: AtomicU64,
+    last_error: Mutex<Option<String>>,
+    /// [`CpAudit::record_refusal`], by kind, and its window.
+    refusals: Mutex<HashMap<String, Window>>,
+    window: Duration,
 }
 
 impl fmt::Debug for CpAudit {
@@ -33,6 +68,10 @@ impl fmt::Debug for CpAudit {
         f.debug_struct("CpAudit")
             .field("store", &self.store.is_some())
             .field("subscribers", &self.tx.receiver_count())
+            .field(
+                "append_failures",
+                &self.append_failures.load(Ordering::Relaxed),
+            )
             .finish()
     }
 }
@@ -55,6 +94,43 @@ impl CpAudit {
             store,
             out: Mutex::new(out),
             tx,
+            append_failures: AtomicU64::new(0),
+            last_error: Mutex::new(None),
+            refusals: Mutex::new(HashMap::new()),
+            window: REFUSAL_WINDOW,
+        }
+    }
+
+    /// Another window for [`CpAudit::record_refusal`] (tests).
+    #[cfg(test)]
+    pub fn with_refusal_window(mut self, window: Duration) -> Self {
+        self.window = window;
+        self
+    }
+
+    /// Whether records are persisted, and the records the store refused or lost so far, at
+    /// once or in a background write ([`Store::cp_audit_write_failures`]) (`GET /readyz`).
+    pub fn health(&self) -> CpAuditHealth {
+        let (lost, lost_error) = self
+            .store
+            .as_ref()
+            .map_or((0, None), |s| s.cp_audit_write_failures());
+        let refused = self
+            .last_error
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        CpAuditHealth {
+            persisted: self.store.is_some(),
+            append_failures: self.append_failures.load(Ordering::Relaxed) + lost,
+            last_error: lost_error.or(refused),
+        }
+    }
+
+    /// Once the store has written the records so far ([`Store::flush_cp_audit`]).
+    pub async fn flush(&self) {
+        if let Some(store) = &self.store {
+            store.flush_cp_audit().await;
         }
     }
 
@@ -80,10 +156,71 @@ impl CpAudit {
     }
 
     /// Write `record`: one JSON line on stdout, then the store, then subscribers. A failure of
-    /// one is logged and never stops the others or the caller.
+    /// one is logged (a store's also counted, [`CpAudit::health`]) and never stops the others or
+    /// the caller.
     pub async fn record(&self, record: CpAuditRecord) {
         let record = Arc::new(record);
-        match serde_json::to_string(&*record) {
+        self.write_line(&record);
+        self.persist(record).await;
+    }
+
+    /// [`CpAudit::record`] for a refusal anyone can cause (module docs): `kind` names what was
+    /// refused and, for a verified caller, who; never anything the caller chose.
+    pub async fn record_refusal(&self, kind: &str, mut record: CpAuditRecord) {
+        self.write_line(&record);
+        let now = Instant::now();
+        let held_back = {
+            let mut windows = self.refusals.lock().unwrap_or_else(|p| p.into_inner());
+            if !windows.contains_key(kind) && windows.len() >= MAX_REFUSAL_KINDS {
+                windows.retain(|_, w| now.duration_since(w.since) < self.window);
+            }
+            let kind = if windows.contains_key(kind) || windows.len() < MAX_REFUSAL_KINDS {
+                kind
+            } else {
+                OTHER_REFUSALS
+            };
+            match windows.get_mut(kind) {
+                Some(w) if now.duration_since(w.since) < self.window => {
+                    w.held_back += 1;
+                    return;
+                }
+                Some(w) => {
+                    std::mem::replace(
+                        w,
+                        Window {
+                            since: now,
+                            held_back: 0,
+                        },
+                    )
+                    .held_back
+                }
+                None => {
+                    windows.insert(
+                        kind.to_string(),
+                        Window {
+                            since: now,
+                            held_back: 0,
+                        },
+                    );
+                    0
+                }
+            }
+        };
+        if held_back > 0 {
+            let note = format!(
+                "{held_back} more refusals like this one since the last recorded are on stdout only"
+            );
+            record.reason = Some(match record.reason.take() {
+                Some(r) => format!("{r}; {note}"),
+                None => note,
+            });
+        }
+        self.persist(Arc::new(record)).await;
+    }
+
+    /// The JSON line on stdout.
+    fn write_line(&self, record: &CpAuditRecord) {
+        match serde_json::to_string(record) {
             Ok(mut line) => {
                 line.push('\n');
                 // one write per line, under the lock, so concurrent records never interleave
@@ -96,13 +233,20 @@ impl CpAudit {
                 tracing::error!(error = %e, "serializing a control-plane audit record failed")
             }
         }
+    }
+
+    /// The store, then subscribers.
+    async fn persist(&self, record: Arc<CpAuditRecord>) {
         if let Some(store) = &self.store
             && let Err(e) = store.append_cp_audit(&record).await
         {
+            let failures = self.append_failures.fetch_add(1, Ordering::Relaxed) + 1;
+            *self.last_error.lock().unwrap_or_else(|p| p.into_inner()) = Some(e.to_string());
             tracing::error!(
                 error = %e,
                 action = ?record.action,
-                "persisting a control-plane audit record failed"
+                failures,
+                "persisting a control-plane audit record failed; it is only on stdout"
             );
         }
         // no subscriber is not an error
@@ -261,6 +405,10 @@ mod tests {
             self.records.lock().unwrap().push(record.clone());
             Ok(())
         }
+        async fn cp_audit(&self, limit: usize) -> Result<Vec<CpAuditRecord>, StoreError> {
+            let all = self.records.lock().unwrap();
+            Ok(all[all.len().saturating_sub(limit)..].to_vec())
+        }
         fn subscribe(&self) -> broadcast::Receiver<StoreEvent> {
             self.tx.subscribe()
         }
@@ -350,9 +498,23 @@ mod tests {
         let out = Capture::default();
         let audit = CpAudit::with_writer(Some(AuditOnly::new(true)), Box::new(out.clone()));
         let mut rx = audit.subscribe();
+        assert_eq!(
+            audit.health(),
+            CpAuditHealth {
+                persisted: true,
+                append_failures: 0,
+                last_error: None
+            }
+        );
         audit.record(charter_put()).await;
-        assert_eq!(out.lines().len(), 1);
+        audit.record(charter_put()).await;
+        assert_eq!(out.lines().len(), 2);
         assert_eq!(rx.recv().await.unwrap().action, CpAction::CharterPut);
+        // the refusals are surfaced, not dropped
+        let h = audit.health();
+        assert_eq!(h.append_failures, 2);
+        assert_eq!(h.last_error.as_deref(), Some("store: disk full"));
+        assert!(format!("{audit:?}").contains("append_failures: 2"));
     }
 
     #[tokio::test]
@@ -363,6 +525,8 @@ mod tests {
         let late = audit.subscribe();
         assert_eq!(out.lines().len(), 1);
         assert!(late.is_empty());
+        // stdout only, and it says so
+        assert!(!audit.health().persisted);
         // the stdout constructor builds
         let _ = CpAudit::new(None);
     }
@@ -388,5 +552,61 @@ mod tests {
         for line in lines {
             serde_json::from_str::<CpAuditRecord>(&line).unwrap();
         }
+    }
+
+    /// The review finding: anyone can send refusals of unauthenticated requests (a login while
+    /// rate limited, an IssueCertificate with a bad name), and one store record each let a flood
+    /// push the store's records out. Every one is on stdout; the store and subscribers get the
+    /// first of each kind per window, which counts the ones they did not get.
+    #[tokio::test]
+    async fn refusals_reach_the_store_once_per_kind_and_window() {
+        let store = AuditOnly::new(false);
+        let out = Capture::default();
+        let audit = CpAudit::with_writer(Some(store.clone()), Box::new(out.clone()))
+            .with_refusal_window(Duration::from_millis(200));
+        let mut rx = audit.subscribe();
+        let refused = |reason: &str| {
+            let mut r = CpAudit::entry(CpAction::LoginFailed, &alice(), CpResult::Denied);
+            r.reason = Some(reason.into());
+            r
+        };
+        for i in 0..5 {
+            audit
+                .record_refusal("login rate limited", refused(&format!("flood {i}")))
+                .await;
+        }
+        audit
+            .record_refusal("IssueCertificate InvalidArgument", refused("other kind"))
+            .await;
+        assert_eq!(out.lines().len(), 6, "every one on stdout");
+        let kept = |s: &AuditOnly| -> Vec<String> {
+            s.records
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|r| r.reason.clone().unwrap())
+                .collect()
+        };
+        assert_eq!(kept(&store), ["flood 0", "other kind"]);
+        assert_eq!(rx.recv().await.unwrap().reason.as_deref(), Some("flood 0"));
+        assert_eq!(
+            rx.recv().await.unwrap().reason.as_deref(),
+            Some("other kind")
+        );
+        assert!(rx.try_recv().is_err());
+        // the next window: recorded, with the count of the ones held back
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        audit
+            .record_refusal("login rate limited", refused("flood 5"))
+            .await;
+        assert_eq!(
+            kept(&store).last().unwrap(),
+            "flood 5; 4 more refusals like this one since the last recorded are on stdout only"
+        );
+        // record() is never held back
+        for _ in 0..3 {
+            audit.record(refused("authenticated")).await;
+        }
+        assert_eq!(kept(&store).len(), 6);
     }
 }

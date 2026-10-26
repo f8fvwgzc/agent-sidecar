@@ -4,7 +4,8 @@ kubernetes store delete the service's Charter (§8.4 "delete service"; its Contr
 with it through their owner reference), which §13's verb list leaves out. ClusterRole
 agentsc-embassy is bound to both control-plane service accounts. The Secret Role is bound to embassy-ca only, so embassy-ca is the only workload that can
 read the CA key; embassy reads embassy-tls, the config and the session key as mounted volumes.
-No ConfigMap permissions anywhere.
+ConfigMaps: only the control-plane audit of the kubernetes store (Role agentsc-embassy-cp-audit,
+design §8.5), by name, in the release namespace. No other ConfigMap permissions anywhere.
 */ -}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -126,6 +127,50 @@ subjects:
     name: embassy-ca
     namespace: {{ $.Release.Namespace }}
 {{- end }}
+---
+# The control-plane audit of the kubernetes store (services/embassy/src/k8s/cp_audit_log.rs): a
+# ring of 16 ConfigMaps agentsc-cp-audit-0 .. agentsc-cp-audit-15 in this namespace, appended by
+# both service accounts (embassy: the API and Connect; embassy-ca: issuance and the validating
+# webhook). `get` and `update` only on those names; `create` cannot be restricted by name, so it
+# is a rule without names, in this namespace only. No list, watch or delete. The ring size is
+# `SEGMENTS` in cp_audit_log.rs: change both together.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agentsc-embassy-cp-audit
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "agent-sidecar.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames:
+      {{- range until 16 }}
+      - agentsc-cp-audit-{{ . }}
+      {{- end }}
+    verbs: ["get", "update"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agentsc-embassy-cp-audit
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "agent-sidecar.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: agentsc-embassy-cp-audit
+subjects:
+  - kind: ServiceAccount
+    name: embassy-ca
+    namespace: {{ .Release.Namespace }}
+  - kind: ServiceAccount
+    name: embassy
+    namespace: {{ .Release.Namespace }}
 ---
 # For users. Writing a Charter is equivalent to the agentsc admin role for that service: the
 # validating webhook checks it, but no role-on-diff check applies to kubectl.

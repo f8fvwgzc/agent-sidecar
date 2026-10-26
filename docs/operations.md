@@ -65,7 +65,35 @@ What you need to know about the `file` sink:
 - The demo Deployments mount no volume at `/var/log/agentsc`. The file lives in the container's writable layer. It is lost when the container restarts. Mount a volume there if you use the file sink.
 - With the file sink, stdout has no audit records. `kubectl logs` and `agentsc logs <service>` show no records. Read the file with `kubectl exec` (see [Reading logs](#reading-logs)).
 - The sidecar does not rotate the file.
-- The sidecar ignores write errors on the sink. If the disk is full, records are lost without a warning.
+- A write error (a full disk, a closed pipe) is never ignored. See [Audit sink failures](#audit-sink-failures).
+
+### Audit sink failures
+
+When the sink refuses a write or a flush, the sidecar:
+
+- **keeps the record.** The bytes the sink did not take wait in memory, up to 4 MiB, and are written first by the next attempt. It resumes at the first byte the sink did not take, so a record is never written twice or cut in half. When the 4 MiB are full, new records are not kept. They are counted as `dropped`.
+- **retries.** Every later record, every `GET /readyz` and a timer once a second try again. When the backlog is written and flushed, the sink is healthy again.
+- **logs it** on stderr. The first failure at once, then at most one summary every 10 seconds (`audit sink write failed; unwritten records are kept and retried`, with the counts and the error), and `audit sink recovered` when it is over.
+- **reports it** in the `/readyz` body:
+
+```json
+"audit": {"healthy": false, "fail_closed": true, "write_errors": 3, "dropped": 0, "pending_bytes": 2741, "last_error": "No space left on device (os error 28)"}
+```
+
+The control-plane export and the OpenTelemetry exporter still get every record, also one the sink did not take.
+
+**Fail-closed mode.** By default the sidecar goes on working while the sink fails: an audit outage is visible, but agents keep running. Start `agentscd` with `--audit-fail-closed` (or `AGENTSC_AUDIT_FAIL_CLOSED=true`; Helm: `injection.auditFailClosed: true` for every injected sidecar) when no work may happen without a local audit record. Then, from the first failed write or flush until a write succeeds again:
+
+| What | Answer |
+| --- | --- |
+| `POST /v1/agents/{name}/invoke` | `503`, `status: denied`, rule `audit.unavailable` |
+| gRPC `AppApi.InvokeAgent`, mesh `InvokeAgent` / `InvokeService` | `UNAVAILABLE`, metadata `x-agentsc-rule: audit.unavailable` |
+| The runtime's `InvokeService`, `InvokeAgent`, `InvokeHttp`, `ProposeLesson` | `UNAVAILABLE`, rule `audit.unavailable` |
+| `GET /readyz` | `503`: the pod leaves its Service's endpoints (the injected `agentscd` has a readiness probe on it; give a hand-written sidecar one too) |
+
+Every refusal writes its own record (`agent_invocation`, inbound `service_call` or `tool_call`, `decision: deny`, rule `audit.unavailable`, the error in `reason`), except a refused `ProposeLesson`. That write is also an attempt, as are the probes and the timer. The first attempt that writes the backlog ends the refusals, so the sidecar recovers by itself once the disk has room again, without a restart. Work that started before the failure finishes, and its records are written or kept. `ReportEvent` is never refused: the model call it reports already ran and was paid for.
+
+A closed stdout pipe does not recover. With fail-closed the pod then stays not ready until it is restarted.
 
 ### Local runs
 
@@ -158,6 +186,7 @@ Rule names come in families:
 | `budget.<limit>` | `max_calls_per_minute`, `max_cost_usd_per_day`, `max_depth`. |
 | `model.refusal` | The model refused the request. |
 | `agent.unknown` | The agent is not in the charter. The record has `decision: allow` and `error` set. |
+| `audit.unavailable` | `--audit-fail-closed` refused new work while the audit sink was failing. See [Audit sink failures](#audit-sink-failures). |
 
 Some failures name a rule only in the HTTP response: `runtime.unavailable`, `model.error`, `budget.max_steps` and `budget.max_tokens_per_call`. Their `agent_invocation` record has `decision: allow`, `rule: null` and the reason in `error`.
 
@@ -198,8 +227,8 @@ The sidecar does these steps, in this order, for every record it writes:
 
 1. **Hash.** `input_sha256` and `output_sha256` are computed over the full original payload, before any redaction or truncation. For a string payload, the hash is SHA-256 of its UTF-8 bytes. For any other JSON value, it is SHA-256 of its compact JSON text. A `null` payload has a `null` hash. So you can prove later that a payload you hold is the one that passed, without the log storing it.
 2. **`audit.redact` paths.** Each path is a dotted path that starts with `input.` or `output.`, for example `output.body.warehouse_contact`. The value there becomes `"[redacted]"`. Arrays are walked. The path `input` or `output` alone redacts the whole payload. The charter validator does not check these paths. A path with another start does nothing.
-3. **Scrub repeated values.** The values found at those paths (strings and numbers of 4 or more characters) are remembered for that `request_id` for 15 minutes. They are replaced with `[redacted]` wherever they appear as text in later records of the same request in that sidecar, for example inside a model prompt.
-4. **PII.** With `guardrails.pii_redact: true`, emails become `[redacted:email]` and phone numbers become `[redacted:phone]`. This applies to every string in `input` and `output`.
+3. **Scrub repeated values.** The values found at those paths (strings and numbers of 4 or more characters) are remembered for that `request_id` for 15 minutes. They are replaced with `[redacted]` wherever they appear as text in later records of the same request in that sidecar, for example inside a model prompt. This covers `input`, `output`, `callee`, `reason` and `error`: a value can come back in a URL (`GET https://api.example.com/x?ssn=…`) or in an error message that echoes the input. A payload a content guardrail withheld (step 1) is scrubbed the same way.
+4. **PII.** With `guardrails.pii_redact: true`, emails become `[redacted:email]` and phone numbers become `[redacted:phone]`. This applies to every string in `input` and `output`, and to `callee`, `reason` and `error`. Steps 3 and 4 also apply to the callee of the span starts a managed sidecar sends the control plane for its trace views (an http tool's URL with its query), which leave the pod before the record is written.
 5. **Truncate.** A payload larger than 8 KiB is cut to 8 KiB plus `…(truncated, N bytes)`. Truncation comes after redaction, so a cut never shows part of a redacted value.
 
 This snippet is partial: it shows only the `audit` block of a charter.
@@ -419,8 +448,9 @@ These come from `POST /v1/agents/{name}/invoke`.
 | `502`, rule `model.error` | The model API call failed: wrong key, unknown model id, or no network egress. | `error` in the `model_call` record. |
 | `502`, rule `budget.max_steps` | The agent did not finish within `max_steps` model calls. | Raise `max_steps`, or make the task or tools simpler. |
 | `502`, rule `budget.max_tokens_per_call` | The model hit `max_tokens` in the middle of a tool call, or with no text. | Raise `max_tokens_per_call` (at most 128000). |
+| `503`, rule `audit.unavailable` | `--audit-fail-closed` is on and the audit sink is failing (a full disk). | `audit` in the `/readyz` body, and the `audit sink write failed` log line. See [Audit sink failures](#audit-sink-failures). |
 
-The gRPC app API on `127.0.0.1:50001` maps the same cases to status codes. A denial is `PERMISSION_DENIED`, or `RESOURCE_EXHAUSTED` for `budget.*`. An unknown agent is `NOT_FOUND`. Everything else is `UNAVAILABLE`. The rule is in the `x-agentsc-rule` metadata.
+The gRPC app API on `127.0.0.1:50001` maps the same cases to status codes. A denial is `PERMISSION_DENIED`, or `RESOURCE_EXHAUSTED` for `budget.*`. An unknown agent is `NOT_FOUND`. Everything else, `audit.unavailable` included, is `UNAVAILABLE`. The rule is in the `x-agentsc-rule` metadata.
 
 ### A tool call was denied or failed, but the invocation returned 200
 
@@ -463,8 +493,9 @@ Caused by:
 
 **What `agentsc-ready` checks.** `agentsc-ready` is a small script in the image. It calls `http://127.0.0.1:3500/readyz` and exits 0 only on HTTP 200. `/readyz` returns 200 when both are true:
 
-- the TLS material is loaded (`mesh: true`), and
-- the runtime answered its last `Health` call (`runtime: true`).
+- the TLS material is loaded (`mesh: true`),
+- the runtime answered its last `Health` call (`runtime: true`), and
+- with `--audit-fail-closed` only: the audit sink takes writes (`audit.healthy: true`).
 
 The charter is always loaded while the sidecar runs, because the sidecar exits when it cannot load it. The script uses port 3500. If you change `--http-addr`, change the probe too.
 
@@ -487,10 +518,11 @@ A sidecar that has no TLS files and no runtime answers:
 
 | Field | Meaning |
 | --- | --- |
-| `ready` | `true` only when `mesh` and `runtime` are both `true`. |
+| `ready` | `true` only when `mesh` and `runtime` are both `true` (and, with `--audit-fail-closed`, `audit.healthy`). |
 | `mesh` | `false`: no TLS files in `--tls-dir`. The mesh is off and remote calls fail. The sidecar log says `no TLS material in ...: mesh disabled, remote calls will fail`. |
 | `runtime` | `false`: the runtime is not running, or did not answer `Health` within 3 seconds. |
 | `model_provider` | `anthropic` or `mock`, as the runtime reports it. `unknown` until the runtime has answered once. |
+| `audit` | The audit sink: `healthy`, `fail_closed`, `write_errors`, `dropped`, `pending_bytes` and `last_error`. See [Audit sink failures](#audit-sink-failures). |
 
 The same `python3` command works for `/v1/agents` (the agents and the tools each may use) and `/v1/charter` (the loaded charter as JSON).
 
@@ -718,7 +750,7 @@ With `readOnlyRootFilesystem: true`, `/run/agentsc` is already an `emptyDir` in 
 - Keep the lines that start with `{"ts"` and parse them as JSON.
 - Store them append-only, with the retention your rules need. Keep the `*_sha256` fields.
 - Records of one call are spread over several pods. Join them by `request_id` or `trace_id` in your log store.
-- The sidecar ignores write errors, and the file sink has no rotation. Prefer the stdout sink with a log agent.
+- The file sink has no rotation. Prefer the stdout sink with a log agent. A failing sink is logged and reported on `/readyz`; turn on `--audit-fail-closed` if no work may run without a local record ([Audit sink failures](#audit-sink-failures)).
 
 **5. Manage `ANTHROPIC_API_KEY` as a secret.** Shipped: the Secret `agentsc-anthropic` is referenced with `optional: true`. If it is missing, an agent whose `model` is not `mock` is refused with `FAILED_PRECONDITION`; only the demos set `AGENTSC_MOCK_FALLBACK=1` to run on the mock instead.
 
@@ -753,6 +785,7 @@ Require a review for changes to `authz` and `guardrails`, for example with a COD
 | `budget.max_cost_usd_per_day` | An agent reached its spending limit. |
 | `model_call` records with `error` set | The model API has problems. |
 | The sidecar log line `agent runtime exited` | The runtime crashes. |
+| The sidecar log line `audit sink write failed`, or `audit.healthy: false` on `/readyz` | Audit records are not reaching the sink (a full disk). They are kept for a while, then dropped. |
 | Container restarts and not-ready pods | Use your normal Kubernetes monitoring. |
 
 **9. Other points.**
@@ -779,7 +812,7 @@ These are true for the current code. "Not built yet" means there is no code for 
 10. **No NetworkPolicy is shipped.**
 11. **No UI.** The charter schema (`schemas/charter.schema.json`) is the API.
 12. **No CI config in the repo.**
-13. **Audit output is basic.** There are two sinks (stdout and file). There is no shipping, no file rotation, and write errors are ignored.
+13. **Audit output is basic.** There are two sinks (stdout and file). There is no shipping and no file rotation. A failing sink keeps at most 4 MiB of records in memory ([Audit sink failures](#audit-sink-failures)).
 14. **No metrics and no trace export.** There is no metrics endpoint. Trace ids are propagated, but spans are not exported to a tracing backend. They exist only in the audit records.
 15. **The manifests are a demo.** The namespace `agentsc-demo` and the services `orders,inventory` are hard-coded in the Job and the kustomization. The images are `:dev` tags built inside minikube. No images are published.
 16. **The readiness probe uses a fixed address.** `agentsc-ready` always calls `127.0.0.1:3500`.
@@ -819,6 +852,22 @@ Two caches, both revalidating, neither ever serving something the origin would n
 
 - **Console ↔ control plane.** Every API `GET` carries an `ETag` and answers `304 Not Modified` to a matching `If-None-Match`; the console keeps the last body per URL and revalidates. An unchanged graph or trace list costs a round trip and no payload. Console files are `no-cache` (revalidated on every load); `vendor/` files, versioned in their names, are immutable for a year.
 - **Service to service.** A `GET`/`HEAD` the app answers with `Cache-Control: max-age=N` is kept for `N` seconds (at most `--mesh-cache-max-age`, default 300) by the sidecars on both ends of the call, keyed by service, caller, agent, method, path and the response's `Vary` headers. A hit carries `Age` and `x-agentsc-cache: hit` and still writes its `service_call` record. A write through a sidecar empties that service's entries in it. Nothing is kept without `Cache-Control`, with `no-store`, `no-cache` or `private`, or for anything but a `200`. `--mesh-cache-bytes 0` turns it off. `InvokeAgent` and `http` tools are never cached.
+
+### Control-plane audit in the stores
+
+Every store keeps the control-plane audit (who changed which charter, approvals, issuance, connections; design §8.5) as well as writing it to embassy's stdout:
+
+| Store | Where | Read it |
+| --- | --- | --- |
+| `file:<dir>` | `<dir>/.audit.jsonl` | `tail <dir>/.audit.jsonl` |
+| `sqlite:<path>` | table `cp_audit` (append-only) | `sqlite3 -readonly` (below) |
+| `kubernetes` | ConfigMaps `agentsc-cp-audit-0` … `agentsc-cp-audit-15` in the control-plane namespace, JSON lines in `records.jsonl`, about 256 KiB each; the newest ~4 MiB are kept, the oldest segment is reused | `kubectl -n agentsc-system get cm -l agentsc.io/cp-audit -o jsonpath='{range .items[*]}{.data.records\.jsonl}{end}' \| jq -c -s 'sort_by(.ts)[]'` (the segments come in name order, so sort by `ts`) |
+
+The kubernetes store needs the chart's Role `agentsc-embassy-cp-audit` (`get`/`update` on those 16 names, `create`). If a record cannot be stored (RBAC, quota, the API server), the action still happens and its line is still on stdout; embassy logs `persisting a control-plane audit record failed` and counts it: `GET /api/v1/readyz` answers `"cp_audit": {"persisted": true, "append_failures": 1, "last_error": "..."}`. Alert on `append_failures` above 0. The ring is bounded: ship embassy's stdout to append-only storage for longer retention.
+
+The kubernetes store writes the ring in the background: a write replaces a whole segment (up to 256 KiB), so records are queued and written together, one second after the previous write (or as soon as a segment's worth is queued), and no request waits for the API server. That is at most one segment write per second per embassy process however many records arrive, plus one per full segment of records, each an etcd revision until the API server compacts. A record queued but not yet written at a crash is on stdout only; `embassy serve` writes the queue before it exits. While the API server refuses the writes, the queue holds at most 4 MiB; beyond that, records are counted in `append_failures`.
+
+Refusals that anyone can cause cheaply (a login while rate limited; an `IssueCertificate` refused, whether before its token was checked or after, since any pod can mount a token for audience `agentsc`) go to stdout every time, but to the store and the console's `cp_audit` events only once per kind per minute. A kind is the refusal's code, and for a verified token also its pod (or join token name). The kept record's `reason` ends with the number held back since the one before (`... more refusals like this one since the last recorded are on stdout only`). So a flood of them cannot push the ring's other records out.
 
 ### The SQLite store
 

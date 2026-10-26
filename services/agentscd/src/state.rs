@@ -206,8 +206,9 @@ impl AppState {
             ),
             None => (Vec::new(), false, SinkTarget::Stdout),
         };
-        let audit =
-            Audit::new(&service, &namespace, redact, pii, target).context("open audit sink")?;
+        let audit = Audit::new(&service, &namespace, redact, pii, target)
+            .context("open audit sink")?
+            .with_fail_closed(config.audit_fail_closed);
 
         // TLS: standalone loads `--tls-dir` (v0.1); managed finds or obtains a certificate.
         let (tls, trust_pem) = if managed {
@@ -315,13 +316,15 @@ impl AppState {
         self.tls.load_full()
     }
 
-    /// Ready = a charter is loaded, an unexpired TLS identity is loaded and the runtime is
-    /// healthy. In managed mode it never depends on the control-plane connection (design
-    /// §6.3.4); an expired certificate is no certificate.
+    /// Ready = a charter is loaded, an unexpired TLS identity is loaded, the runtime is healthy
+    /// and, with `--audit-fail-closed`, the audit sink takes writes. In managed mode it never
+    /// depends on the control-plane connection (design §6.3.4); an expired certificate is no
+    /// certificate.
     pub fn is_ready(&self) -> bool {
         self.loaded.load().is_some()
             && self.tls.load().as_ref().is_some_and(|t| !t.expired())
             && self.runtime_ready.load(Ordering::Relaxed)
+            && self.audit.serving()
     }
 
     /// The app's port: `--app-port` in managed mode (authoritative), else the charter's.
