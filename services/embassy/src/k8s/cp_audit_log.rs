@@ -9,10 +9,11 @@
 //!
 //! **Append** ([`CpAuditLog::append`]) only queues the record: a write replaces a whole segment
 //! (up to [`SEGMENT_BYTES`]) for records of a few hundred bytes, so no request handler and no
-//! admission webhook waits for one. A writer task, started by the first record queued, waits
-//! [`FLUSH_DELAY`] to gather what comes in meanwhile and then writes the queue, at most
-//! [`SEGMENT_BYTES`] of records per write, until it is empty: at most about one write per second
-//! and process however many records arrive, plus one per segment filled. The queue holds at most
+//! admission webhook waits for one. A writer task, started by the first record queued, writes
+//! the queue, at most [`SEGMENT_BYTES`] of records per write, until it is empty, and waits
+//! [`FLUSH_DELAY`] before each write (gathering what comes in meanwhile) unless a segment's worth
+//! is waiting: at most one write per second and process however many records arrive, plus one
+//! per full segment. The queue holds at most
 //! [`MAX_QUEUED_BYTES`]; beyond that `append` refuses, for [`crate::cp_audit::CpAudit`] to log
 //! and count. A write that fails is logged and its records are counted
 //! ([`CpAuditLog::failures`], reported by `GET /readyz` as `cp_audit.append_failures`): nothing is
@@ -127,8 +128,10 @@ struct Shared {
     queue: Mutex<Queue>,
     /// Records the writer is done with, written or not.
     done: watch::Sender<u64>,
-    /// [`CpAuditLog::flush`]: write now instead of after [`FLUSH_DELAY`].
+    /// [`CpAuditLog::flush`]: write now instead of after the delay.
     now: Notify,
+    /// The pause before each write ([`FLUSH_DELAY`]; tests set another).
+    delay: Duration,
     /// Records the writer could not persist, and the last error.
     failures: AtomicU64,
     last_error: Mutex<Option<String>>,
@@ -157,10 +160,20 @@ impl CpAuditLog {
                 queue: Mutex::new(Queue::default()),
                 done: watch::Sender::new(0),
                 now: Notify::new(),
+                delay: FLUSH_DELAY,
                 failures: AtomicU64::new(0),
                 last_error: Mutex::new(None),
             }),
         }
+    }
+
+    /// Another pause before each write than [`FLUSH_DELAY`] (tests).
+    #[cfg(test)]
+    pub fn with_flush_delay(mut self, delay: Duration) -> Self {
+        if let Some(shared) = Arc::get_mut(&mut self.shared) {
+            shared.delay = delay;
+        }
+        self
     }
 
     pub fn namespace(&self) -> &str {
@@ -222,14 +235,19 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 impl Shared {
-    /// The writer task: after [`FLUSH_DELAY`] (or a flush), the queue in writes of at most
-    /// [`SEGMENT_BYTES`] each, until it is empty.
+    /// The writer task: the queue in writes of at most [`SEGMENT_BYTES`] each, until it is
+    /// empty, each after [`FLUSH_DELAY`] unless a segment's worth is waiting or a flush asks.
     async fn write_queue(self: Arc<Self>) {
-        tokio::select! {
-            () = tokio::time::sleep(FLUSH_DELAY) => {}
-            () = self.now.notified() => {}
-        }
         loop {
+            // before every write, also the next one under sustained load: a write replaces a
+            // whole segment, so it may come once per delay, or as soon as a segment's worth
+            // is waiting (or a flush asks)
+            if lock(&self.queue).bytes < SEGMENT_BYTES {
+                tokio::select! {
+                    () = tokio::time::sleep(self.delay) => {}
+                    () = self.now.notified() => {}
+                }
+            }
             let (lines, n) = {
                 let mut q = lock(&self.queue);
                 let mut lines = String::new();

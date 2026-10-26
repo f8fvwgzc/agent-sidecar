@@ -2,6 +2,7 @@
 use super::*;
 use crate::config::Role;
 use crate::k8s::fake::FakeCluster;
+use std::time::Duration;
 
 /// A shared buffer standing in for stdout.
 #[derive(Clone, Default)]
@@ -1724,6 +1725,43 @@ async fn a_burst_of_records_is_one_write_and_the_queue_is_bounded() {
         .append_cp_audit(&cp_record(CpAction::Connect, "after"))
         .await
         .unwrap();
+}
+
+/// The fix check's finding: the writer paused only before its first write, so under a steady
+/// stream of records it wrote again as soon as each write returned (one write per API round
+/// trip, each rewriting the head segment). It now pauses before every write: at most one per
+/// delay, however many records arrive.
+#[tokio::test]
+async fn under_sustained_load_the_ring_is_written_at_most_once_per_delay() {
+    use crate::k8s::cp_audit_log::CpAuditLog;
+    let cluster = Arc::new(FakeCluster::new());
+    cluster.delay_config_map_writes(Duration::from_millis(20));
+    let delay = Duration::from_millis(100);
+    let log = CpAuditLog::new(cluster.clone(), CP_NS).with_flush_delay(delay);
+    let started = std::time::Instant::now();
+    let mut sent = 0;
+    while started.elapsed() < Duration::from_millis(1200) {
+        log.append(&cp_record(
+            CpAction::LoginFailed,
+            &format!("attempt {sent}"),
+        ))
+        .unwrap();
+        sent += 1;
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let elapsed = started.elapsed();
+    log.flush().await;
+    let writes = cluster
+        .calls()
+        .iter()
+        .filter(|c| c.contains(&format!(" configmap {CP_NS}/agentsc-cp-audit-")))
+        .count();
+    let bound = (elapsed.as_millis() / delay.as_millis()) as usize + 2;
+    assert!(
+        writes <= bound,
+        "{writes} writes in {elapsed:?} for {sent} records (at most {bound})"
+    );
+    assert_eq!(log.read(usize::MAX).await.unwrap().len(), sent, "none lost");
 }
 
 #[tokio::test]

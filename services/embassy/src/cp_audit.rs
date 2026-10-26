@@ -12,12 +12,13 @@
 //! so a lost record is visible. Every store implements `append_cp_audit` (the trait has no
 //! default); a process without a store writes stdout only and says so (`persisted: false`).
 //!
-//! **Refusals of unauthenticated requests** ([`CpAudit::record_unauthenticated`]: a login while
-//! rate limited, an `IssueCertificate` refused before its credential was verified) cost nothing
-//! to send, so a flood of them would push a store's records out (the Kubernetes store keeps the
-//! newest 4 MiB). Each still writes its line on stdout; the store and subscribers get the first
-//! of each kind per [`UNAUTHENTICATED_WINDOW`], whose `reason` counts the ones before it that
-//! they did not get.
+//! **Refusals anyone can cause** ([`CpAudit::record_refusal`]: a login while rate limited; an
+//! `IssueCertificate` refused, before its credential was verified or after, since any pod can
+//! mount a token for audience `agentsc`) are cheap to send, so a flood of them would push a
+//! store's records out (the Kubernetes store keeps the newest 4 MiB). Each still writes its line
+//! on stdout; the store and subscribers get the first of each kind per [`REFUSAL_WINDOW`] (a
+//! kind names what was refused and, for a verified caller, who: never what the caller chose),
+//! whose `reason` counts the ones before it that they did not get.
 //!
 //! The record type is [`CpAuditRecord`] of the API types (its JSON shape is the OpenAPI
 //! `CpAuditRecord`), re-exported here with its enums.
@@ -36,14 +37,14 @@ use crate::store::{Actor, Store};
 
 /// Records a slow SSE subscriber may fall behind before it loses some (`RecvError::Lagged`).
 pub const SUBSCRIBER_CAPACITY: usize = 1024;
-/// Refusals of unauthenticated requests of one kind reach the store once per window (module
-/// docs).
-pub const UNAUTHENTICATED_WINDOW: Duration = Duration::from_secs(60);
-/// Kinds of unauthenticated refusals tracked at once; more start over the windows ended.
-const MAX_UNAUTHENTICATED_KINDS: usize = 256;
+/// Refusals of one kind reach the store once per window (module docs).
+pub const REFUSAL_WINDOW: Duration = Duration::from_secs(60);
+/// Kinds of refusals tracked at once; beyond them (after the windows ended are dropped), the
+/// others share one window, [`OTHER_REFUSALS`].
+const MAX_REFUSAL_KINDS: usize = 1024;
+const OTHER_REFUSALS: &str = "other refusals";
 
-/// One kind of unauthenticated refusal: when its window began, and how many the store did not
-/// get since.
+/// One kind of refusal: when its window began, and how many the store did not get since.
 struct Window {
     since: Instant,
     held_back: u64,
@@ -57,8 +58,8 @@ pub struct CpAudit {
     /// Records the store refused, and the last refusal.
     append_failures: AtomicU64,
     last_error: Mutex<Option<String>>,
-    /// [`CpAudit::record_unauthenticated`], by kind, and its window.
-    unauthenticated: Mutex<HashMap<String, Window>>,
+    /// [`CpAudit::record_refusal`], by kind, and its window.
+    refusals: Mutex<HashMap<String, Window>>,
     window: Duration,
 }
 
@@ -95,14 +96,14 @@ impl CpAudit {
             tx,
             append_failures: AtomicU64::new(0),
             last_error: Mutex::new(None),
-            unauthenticated: Mutex::new(HashMap::new()),
-            window: UNAUTHENTICATED_WINDOW,
+            refusals: Mutex::new(HashMap::new()),
+            window: REFUSAL_WINDOW,
         }
     }
 
-    /// Another window for [`CpAudit::record_unauthenticated`] (tests).
+    /// Another window for [`CpAudit::record_refusal`] (tests).
     #[cfg(test)]
-    pub fn with_unauthenticated_window(mut self, window: Duration) -> Self {
+    pub fn with_refusal_window(mut self, window: Duration) -> Self {
         self.window = window;
         self
     }
@@ -163,16 +164,21 @@ impl CpAudit {
         self.persist(record).await;
     }
 
-    /// [`CpAudit::record`] for the refusal of a request nobody authenticated (module docs):
-    /// `kind` names what was refused, without anything the caller chose.
-    pub async fn record_unauthenticated(&self, kind: &str, mut record: CpAuditRecord) {
+    /// [`CpAudit::record`] for a refusal anyone can cause (module docs): `kind` names what was
+    /// refused and, for a verified caller, who; never anything the caller chose.
+    pub async fn record_refusal(&self, kind: &str, mut record: CpAuditRecord) {
         self.write_line(&record);
         let now = Instant::now();
         let held_back = {
-            let mut windows = self
-                .unauthenticated
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
+            let mut windows = self.refusals.lock().unwrap_or_else(|p| p.into_inner());
+            if !windows.contains_key(kind) && windows.len() >= MAX_REFUSAL_KINDS {
+                windows.retain(|_, w| now.duration_since(w.since) < self.window);
+            }
+            let kind = if windows.contains_key(kind) || windows.len() < MAX_REFUSAL_KINDS {
+                kind
+            } else {
+                OTHER_REFUSALS
+            };
             match windows.get_mut(kind) {
                 Some(w) if now.duration_since(w.since) < self.window => {
                     w.held_back += 1;
@@ -189,9 +195,6 @@ impl CpAudit {
                     .held_back
                 }
                 None => {
-                    if windows.len() >= MAX_UNAUTHENTICATED_KINDS {
-                        windows.retain(|_, w| now.duration_since(w.since) < self.window);
-                    }
                     windows.insert(
                         kind.to_string(),
                         Window {
@@ -556,11 +559,11 @@ mod tests {
     /// push the store's records out. Every one is on stdout; the store and subscribers get the
     /// first of each kind per window, which counts the ones they did not get.
     #[tokio::test]
-    async fn unauthenticated_refusals_reach_the_store_once_per_window() {
+    async fn refusals_reach_the_store_once_per_kind_and_window() {
         let store = AuditOnly::new(false);
         let out = Capture::default();
         let audit = CpAudit::with_writer(Some(store.clone()), Box::new(out.clone()))
-            .with_unauthenticated_window(Duration::from_millis(200));
+            .with_refusal_window(Duration::from_millis(200));
         let mut rx = audit.subscribe();
         let refused = |reason: &str| {
             let mut r = CpAudit::entry(CpAction::LoginFailed, &alice(), CpResult::Denied);
@@ -569,11 +572,11 @@ mod tests {
         };
         for i in 0..5 {
             audit
-                .record_unauthenticated("login rate limited", refused(&format!("flood {i}")))
+                .record_refusal("login rate limited", refused(&format!("flood {i}")))
                 .await;
         }
         audit
-            .record_unauthenticated("IssueCertificate InvalidArgument", refused("other kind"))
+            .record_refusal("IssueCertificate InvalidArgument", refused("other kind"))
             .await;
         assert_eq!(out.lines().len(), 6, "every one on stdout");
         let kept = |s: &AuditOnly| -> Vec<String> {
@@ -594,7 +597,7 @@ mod tests {
         // the next window: recorded, with the count of the ones held back
         tokio::time::sleep(Duration::from_millis(250)).await;
         audit
-            .record_unauthenticated("login rate limited", refused("flood 5"))
+            .record_refusal("login rate limited", refused("flood 5"))
             .await;
         assert_eq!(
             kept(&store).last().unwrap(),
