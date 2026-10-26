@@ -50,7 +50,8 @@ Principles every component honours:
    live in `charter.yaml`. The sidecar validates it on load and refuses unknown
    fields. A UI will generate it later; the schema is the API.
 4. **Identity is the certificate.** Every pod has an mTLS identity
-   `spiffe://agentsc/ns/<namespace>/svc/<service>`. The callee sidecar decides
+   `spiffe://<trust domain>/ns/<namespace>/svc/<service>` (trust domain `agentsc`
+   unless configured, §5). The callee sidecar decides
    using the caller's certificate SAN plus the calling agent name, never a
    header alone.
 5. **Default deny** for authz once a charter exists. Explicit `allow` rules
@@ -68,9 +69,14 @@ Principles every component honours:
 | `agentsc-runtime`    | `unix:/run/agentsc/runtime.sock`         | the local sidecar                 | gRPC            |
 | `embassy`            | none (Job) — see §7                      | —                                 | Kubernetes API  |
 
-Peer discovery: the mesh address of service `S` in namespace `N` is
-`S.N.svc.cluster.local:50002` unless `mesh.peers.S` in the charter overrides
-it. Every demo Service therefore exposes port `50002` (`mesh`) next to the
+Peer discovery: a charter names a peer `S` (a service of its own namespace) or
+`S.N` (service `S` in namespace `N`, charter schema level 5) in `tools[].service`
+and `mesh.peers`. The mesh address of service `S` in namespace `N` is
+`S.N.svc.<cluster domain>:50002` (`--peer-address-template`, cluster domain
+`cluster.local` unless `--cluster-domain` says otherwise) unless `mesh.peers`
+in the charter overrides it under the name the tools use. Whatever the address,
+the caller accepts only the peer's identity `spiffe://<trust domain>/ns/N/svc/S`
+(§5). Every demo Service therefore exposes port `50002` (`mesh`) next to the
 app port.
 
 Flags / environment of `agentscd` (flag wins over env):
@@ -89,6 +95,8 @@ Flags / environment of `agentscd` (flag wins over env):
 | `--mesh-cache-max-age` | `AGENTSC_MESH_CACHE_MAX_AGE` | `300`. The longest, in seconds, a cached service-call response is served, whatever the app's `max-age` says |
 | `--max-response-bytes` | `AGENTSC_MAX_RESPONSE_BYTES` | `3145728` (3 MiB). The largest response body a tool or mesh call reads from the app, a peer or an http tool's origin, read as it streams; a longer one fails the call (`http.response_too_large`) |
 | `--audit-fail-closed` | `AGENTSC_AUDIT_FAIL_CLOSED` | off. `1/true/yes/on` = while the audit sink fails, refuse new work with rule `audit.unavailable` and report not ready, until a write succeeds again (§6 "Sink failures") |
+| `--trust-domain`  | `AGENTSC_TRUST_DOMAIN`   | `agentsc`. The SPIFFE trust domain of this pod's identity, of the peers it accepts and calls, and of the control plane (§5); must be embassy's |
+| `--cluster-domain` | `AGENTSC_CLUSTER_DOMAIN` | `cluster.local`. `{cluster_domain}` of `--peer-address-template` (default `{service}.{namespace}.svc.{cluster_domain}:{port}`) |
 | `--anthropic-api-key-file` | `AGENTSC_ANTHROPIC_API_KEY_FILE` | unset. The Anthropic API key, read by the sidecar's model gateway only (§4.4) |
 | —                 | `ANTHROPIC_API_KEY`      | the same key as text (env only, never a flag). Neither set → the gateway has no provider, and an agent whose `model` is not `mock` is refused (`FAILED_PRECONDITION`), unless `AGENTSC_MOCK_FALLBACK=1`. The runtime the sidecar starts never gets either, nor `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY` or `AGENTSC_APP_TOKEN` |
 | `--anthropic-base-url` | `AGENTSC_ANTHROPIC_BASE_URL` | `https://api.anthropic.com` |
@@ -113,7 +121,7 @@ service:
   service_accounts: [orders]   # v0.2: Kubernetes service accounts allowed to obtain this identity (default: [<service.name>])
 mesh:                          # optional
   port: 50002
-  peers: {}                    # service name → host:port override
+  peers: {}                    # peer (`inventory`, or `inventory.warehouse` for another namespace) → host:port override
 skills:                        # v0.2, at most 64
   - name: refund-policy        # DNS-1123 label, unique
     description: How to decide whether a refund is allowed.   # 1..=1024 characters
@@ -198,7 +206,8 @@ audit:
     properties: { order_id: { type: string } }
     required: [order_id]
   # type: service — call another (or this) service's HTTP API through the sidecar
-  service: orders              # target service name; this service's own name = local app
+  service: orders              # target service name; this service's own name = local app;
+                               # `<service>.<namespace>` = a service in another namespace (level 5)
   method: GET
   path: /orders/{order_id}     # `{param}` is substituted from the tool input; leftovers become the JSON body (POST/PUT/PATCH) or query (GET/DELETE)
                                # `{param?}` as the whole last segment is optional: /stock/{sku?} → /stock
@@ -238,6 +247,11 @@ literal segments, and one segment of one or more characters for each
 
 - `apiVersion` must be `agentsc.io/v1alpha1`, `kind` must be `Charter`.
 - Names (`service.name`, `service.namespace`, agent names) are DNS-1123 labels.
+- A peer named with a namespace (`tools[].service` of `service` and `agent`
+  tools, `mesh.peers` keys) is `<service>.<namespace>`, two DNS-1123 labels, and
+  never the charter's own namespace (that peer is written `<service>`, so every
+  rule names it one way). The rest of the charter names it the same way:
+  `guardrails.allowed_services` and the caller's `authz.services[].service`.
 - Agent names unique; tool names unique per agent.
 - `agent` tools only on orchestrators; a local `agent` tool (no `service`, or this service) must name an agent in this charter; an agent may not call itself.
 - `http` tool `url` is `http(s)://host[:port]/…` with no `{param}` and no userinfo before the path.
@@ -354,11 +368,14 @@ an oversized plain charter before it is parsed.
 
 - `Charter::schema_level()` is 1 for a charter that uses only v0.1 fields, 2 when it uses any
   v0.2 field (`skills`, `telemetry`, `service.service_accounts`, `agents[].skills`, `harness`,
-  `learning`; empty lists count as unused) and 3 when it uses a taint field (`agents[].taint`,
-  `tools[].label`, `tools[].effect`). `Charter::level_fields()` lists each such field with its
-  level. `CHARTER_SCHEMA_LEVEL` = 3 is the level this build understands (sent as
-  `Hello.charter_schema_level`); the control plane refuses to push a field to a connected
-  instance below its level, naming the field and the instances.
+  `learning`; empty lists count as unused), 3 when it uses a taint field (`agents[].taint`,
+  `tools[].label`, `tools[].effect`), 4 when it uses `authz.taint`, and 5 when it names a peer
+  in another namespace (`<service>.<namespace>` as a tool's `service` or a `mesh.peers` key: no
+  new field, but an older sidecar would take it for a service of its own namespace).
+  `Charter::level_fields()` lists each such field with its level (a tool once, at the highest).
+  `CHARTER_SCHEMA_LEVEL` = 5 is the level this build understands (sent as `Hello.charter_schema_level`); the control
+  plane refuses to push a field to a connected instance below its level, naming the field and
+  the instances.
 - **Restart-only fields**: a hot reload may not change `service.name`, `service.namespace`,
   `service.app_port`, `mesh.port`, `audit.sink`, `audit.file` or `telemetry.otlp_endpoint`
   (`agentsc_charter::diff::restart_required` lists the ones that differ). A sidecar refuses such
@@ -649,16 +666,29 @@ an OpenAI-compatible adapter (`POST /v1/chat/completions`) is the next.
 
 ## 5. Identity, mTLS, authz
 
-- Trust domain `agentsc`. SPIFFE ID `spiffe://agentsc/ns/<namespace>/svc/<service>`.
+- Trust domain: `--trust-domain` / `AGENTSC_TRUST_DOMAIN` on `agentscd` and on
+  every `embassy` command that issues or checks identities (Helm value
+  `trustDomain`, which also reaches injected sidecars), default `agentsc`; a
+  SPIFFE trust domain name (`a-z 0-9 . - _`, 1..=255). SPIFFE ID
+  `spiffe://<trust domain>/ns/<namespace>/svc/<service>`; the control plane is
+  `spiffe://<trust domain>/control-plane`. Sidecars and embassy of one install
+  must agree on it: an identity in another trust domain is no identity (a
+  sidecar refuses such a `--tls-dir` certificate, a peer's client certificate
+  and a control plane; `Connect` refuses such a sidecar). Charters name peers
+  in the install's trust domain (`authz.callers[].identity`,
+  `authz.services[].identity`: `local` or any `spiffe://` URI validates).
 - `embassy` holds one CA per cluster: Secret `agentsc-ca` (`ca.crt`, `ca.key`)
   in the demo namespace. Leaf certs: Secret `agentsc-cert-<service>` with
   `ca.crt`, `tls.crt`, `tls.key`. Leaf SANs: URI = the SPIFFE ID; DNS =
   `<service>`, `<service>.<ns>`, `<service>.<ns>.svc`,
-  `<service>.<ns>.svc.cluster.local`. CA TTL 10 years, leaf TTL 365 days
+  `<service>.<ns>.svc.<cluster domain>` (`--cluster-domain`, default
+  `cluster.local`). CA TTL 10 years, leaf TTL 365 days
   (MVP: no rotation; re-running the Job keeps the CA and re-issues leaves).
 - Mesh server: rustls, requires a client certificate chained to `ca.crt`.
-  Caller identity = the first URI SAN of the client leaf; a certificate
-  without a `spiffe://agentsc/` URI SAN is rejected (`authz.identity.invalid`).
+  Caller identity = the first URI SAN of the client leaf that is a workload ID
+  in the trust domain; a certificate without one is rejected
+  (`authz.identity.invalid`, reason `client certificate has no
+  spiffe://<trust domain>/ns/<ns>/svc/<svc> URI SAN`).
 - Mesh client: verifies the server against `ca.crt` with server name
   `<service>.<ns>.svc.cluster.local` and presents its own leaf.
 - MVP simplification (documented, not hidden): the certificate is **per

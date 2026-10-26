@@ -154,7 +154,7 @@ Each record is one JSON object on one line. Only `agentscd` writes records. The 
 | `http_call` | outbound | An `http` tool request was sent. | `GET https://example.com/items/1` |
 | `guardrail` | internal | An input or output guardrail denied the invocation, or `pii_redact` rewrote the output (then `decision: allow` and `rule: guardrail.pii_redact`). | the agent name |
 | `budget` | internal | `max_calls_per_minute` or `max_cost_usd_per_day` denied an invocation. | the agent name |
-| `authz` | inbound | A mesh call was refused because the client certificate has no `spiffe://agentsc/` URI SAN. The rule is `authz.identity.invalid` and `caller` is `unknown`. | the agent, or `<service> <METHOD> <path>` |
+| `authz` | inbound | A mesh call was refused because the client certificate has no `spiffe://<trust domain>/` workload URI SAN (the callee's `--trust-domain`, `agentsc` by default). The rule is `authz.identity.invalid` and `caller` is `unknown`. | the agent, or `<service> <METHOD> <path>` |
 
 Some details:
 
@@ -553,7 +553,8 @@ Log lines to look for:
 | Symptom | Likely cause | What to check |
 | --- | --- | --- |
 | A tool fails with `mesh.unavailable`, and the callee has no record of the call. | The connection or the TLS handshake failed before the callee handled the call. The peer is down, the name `<svc>.<ns>.svc.cluster.local` does not resolve, the Service has no port `mesh` (50002), or the two certificates come from different CAs. | The peer pod is ready. `kubectl get svc <svc>` shows port 50002. Both Secrets hold the same `ca.crt` (command below). |
-| The callee writes kind `authz`, rule `authz.identity.invalid`, caller `unknown`. | The client certificate is signed by the trusted CA, but has no `spiffe://agentsc/` URI SAN. | How that certificate was made. Leaf certificates issued by `embassy` carry the SAN. |
+| The callee writes kind `authz`, rule `authz.identity.invalid`, caller `unknown`. | The client certificate is signed by the trusted CA, but has no `spiffe://<trust domain>/ns/<ns>/svc/<svc>` URI SAN in the callee's trust domain. The reason names the trust domain the callee expects. | How that certificate was made, and that both sidecars run with the same `--trust-domain` (`AGENTSC_TRUST_DOMAIN`). Leaf certificates issued by `embassy` carry the SAN in embassy's `--trust-domain`. |
+| Managed sidecars log `cert.issue_failed` with a certificate error, or never connect, after the trust domain was changed. | The sidecar checks the control plane for `spiffe://<its --trust-domain>/control-plane`; embassy signs its serving certificate in its own `--trust-domain`. | Both get the same value: with the chart, `trustDomain` sets embassy's flag and the injector hands it to every sidecar it injects (pods injected before the change keep the old value until they are recreated). |
 | Calls to a service in another namespace fail. | Not supported out of the box. Each namespace gets its own CA, because the Job looks up `agentsc-ca` in its own namespace. The sidecar also checks the peer certificate for `<svc>.<own namespace>.svc.cluster.local`. | Keep services that call each other in one namespace. |
 | All mesh calls fail after about one year. | Leaf certificates expire after 365 days. | The expiry date (command in [Rotating certificates](#rotating-certificates)). |
 | A tool error says `mesh disabled: no TLS material loaded`. | This sidecar started without TLS files. | `--tls-dir` and the Secret mount. |
@@ -675,6 +676,32 @@ The Job creates a new CA (its log says `created new CA`) and new leaves. Restart
 ./target/debug/embassy cert-issue --ca .local/ca --namespace agentsc-demo --service orders --out .local/tls/orders
 ```
 
+### Trust domain and cluster domain
+
+Every identity is `spiffe://<trust domain>/ns/<ns>/svc/<svc>`, and the control plane is `spiffe://<trust domain>/control-plane`. The trust domain is `agentsc` unless you set it. Set the same value everywhere:
+
+| Where | Setting |
+| --- | --- |
+| `agentscd` | `--trust-domain` / `AGENTSC_TRUST_DOMAIN` |
+| `embassy serve` (both Deployments), `embassy cert-issue`, `embassy bootstrap` | `--trust-domain` / `AGENTSC_TRUST_DOMAIN` |
+| Helm chart | `trustDomain` (embassy's flag; the injector puts the same value into `AGENTSC_TRUST_DOMAIN` of every sidecar it injects) |
+
+The value is a SPIFFE trust domain name: `a-z`, `0-9`, `.`, `-` and `_`. Charters name peers in it, for example `identity: spiffe://prod.example/ns/shop/svc/orders`. Changing it on a running install is a CA-level change: sidecars refuse certificates of the old domain and get new ones, peers with the old identity are refused (`authz.identity.invalid`), and charter rules that name the old domain stop matching. Change the charters and recreate every injected pod in the same rollout.
+
+The cluster DNS domain (`cluster.local` unless set) is the last part of the `<svc>.<ns>.svc.<cluster domain>` DNS SAN of workload certificates (embassy `--cluster-domain` / `AGENTSC_CLUSTER_DOMAIN`) and of the sidecar's default peer address `{service}.{namespace}.svc.{cluster_domain}:{port}` (agentscd `--cluster-domain`). The chart sets both from `clusterDomain`.
+
+## Control-plane rate limits
+
+`embassy serve` limits two surfaces with token buckets, per process:
+
+| Surface | Key | Flags (env) | Default | Refusal |
+| --- | --- | --- | --- | --- |
+| `IssueCertificate` | the peer address, and a digest of the credential (each its own bucket; both must have a token) | `--issuance-rate-limit` (`AGENTSC_ISSUANCE_RATE_LIMIT`), `--issuance-burst` (`AGENTSC_ISSUANCE_BURST`) | 12 a minute, burst 20 | `RESOURCE_EXHAUSTED` with `retry-after` metadata; the first refusal of a run is a `cert_denied` control-plane audit record |
+| REST API (`/api/v1`) | the client's token name (or the remote address for the anonymous viewer) | `--api-rate-limit` (`AGENTSC_API_RATE_LIMIT`), `--api-burst` (`AGENTSC_API_BURST`) | 1200 a minute, burst 300 | HTTP 429 `rate_limited` with `Retry-After`; the first refusal of a run is logged as a warning |
+
+`0` turns a surface's limit off. The limit is checked before any other work, so a flood of bad
+credentials costs no TokenReview calls. With several embassy replicas each keeps its own buckets.
+
 ## Budgets on restart and with replicas
 
 Budgets live in the memory of each `agentscd` process. They are counted per agent name.
@@ -682,7 +709,7 @@ Budgets live in the memory of each `agentscd` process. They are counted per agen
 | Budget | How it is counted |
 | --- | --- |
 | `max_calls_per_minute` | A sliding 60-second window. It counts invocations of the agent on this replica that passed `authz.callers`, the agent lookup and the depth check. A call that a guardrail denies later still counts. Calls from a local orchestrator's `agent` tool count too. |
-| `max_cost_usd_per_day` | The sum of `cost_usd` of the agent's `model_call` records on this replica, per UTC day. It is checked once, at the start of an invocation. A running invocation can go over the limit. The `mock` model costs 0, so this budget never triggers with the mock. |
+| `max_cost_usd_per_day` | The cost of the agent's model calls on this replica, per UTC day, as the model gateway measured it from the provider's usage. It is checked at the start of an invocation and before every model call, which holds the most it can cost until it ends, so the limit is not passed. The `mock` model costs 0, so this budget never triggers with the mock. |
 | `max_steps` | Model calls per invocation. The runtime enforces it. No state is kept. |
 | `max_tokens_per_call` | `max_tokens` of each model call. The runtime enforces it. No state is kept. |
 | Agent-call depth | More than 4 nested agent calls are denied with `budget.max_depth`. Fixed, not configurable. |

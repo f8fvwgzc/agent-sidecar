@@ -30,9 +30,10 @@ pub const RULE_EXPIRED: &str = "cert.expired";
 /// `IssueCertificate` answers are small (design §3: 64 KiB).
 const MAX_ISSUE_MESSAGE: usize = 64 * 1024;
 
-fn usable(t: WorkloadTls, service: &str, namespace: &str) -> Option<WorkloadTls> {
+fn usable(t: WorkloadTls, config: &Config, service: &str, namespace: &str) -> Option<WorkloadTls> {
     let id = &t.material.identity;
-    (id.service == service && id.namespace == namespace && !t.expired()).then_some(t)
+    let ours = id.trust_domain == config.trust_domain;
+    (ours && id.service == service && id.namespace == namespace && !t.expired()).then_some(t)
 }
 
 /// A certificate to start with, without asking the CA: `--tls-dir`, then `<state-dir>`.
@@ -45,7 +46,7 @@ pub fn initial(
     if let Some(t) = TlsMaterial::load(&config.tls_dir)
         .ok()
         .and_then(|m| WorkloadTls::from_material(m).ok())
-        .and_then(|t| usable(t, service, namespace))
+        .and_then(|t| usable(t, config, service, namespace))
     {
         tracing::info!(dir = %config.tls_dir.display(), "using the --tls-dir certificate");
         return Some(t);
@@ -53,7 +54,7 @@ pub fn initial(
     if let Some(t) = state_dir
         .load_tls()
         .and_then(|(ca, cert, key)| WorkloadTls::from_pems(&ca, &cert, &key).ok())
-        .and_then(|t| usable(t, service, namespace))
+        .and_then(|t| usable(t, config, service, namespace))
     {
         tracing::info!(dir = %state_dir.dir.display(), "using the persisted certificate");
         return Some(t);
@@ -98,7 +99,7 @@ pub async fn issue(state: &AppState) -> anyhow::Result<WorkloadTls> {
         .trust_roots
         .clone()
         .ok_or_else(|| anyhow::anyhow!("no trust roots for the CA"))?;
-    let cfg = crate::tls::control_plane_client_config(roots, None)?;
+    let cfg = crate::tls::control_plane_client_config(roots, None, &state.trust_domain)?;
     let timeout = config.timing.issue_timeout;
     let channel =
         crate::tls::tls_channel(addr, crate::tls::server_name_of(addr)?, cfg, Some(timeout))?;
@@ -126,7 +127,7 @@ pub async fn issue(state: &AppState) -> anyhow::Result<WorkloadTls> {
         .context("the issued certificate")?;
     let id = &tls.material.identity;
     anyhow::ensure!(
-        id.service == state.service && id.namespace == state.namespace,
+        id.uri() == state.self_identity,
         "the CA issued {} instead of {}",
         id.uri(),
         state.self_identity

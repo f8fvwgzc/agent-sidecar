@@ -41,6 +41,12 @@ pub struct Opts {
     pub with_ca: bool,
     pub http_tls: bool,
     pub retain_bytes: Option<u64>,
+    /// `--trust-domain` (the test CA signs in it too); `None` = the default.
+    pub trust_domain: Option<String>,
+    /// `issuance.join_tokens`.
+    pub join_tokens: Vec<embassy::config::JoinTokenEntry>,
+    /// Extra `embassy serve` flags.
+    pub args: Vec<String>,
 }
 
 /// One response.
@@ -117,13 +123,17 @@ impl Env {
         std::fs::create_dir_all(&ca_dir).unwrap();
         std::fs::write(ca_dir.join("ca.crt"), &ca.cert_pem).unwrap();
         std::fs::write(ca_dir.join("ca.key"), &ca.key_pem).unwrap();
-        let ca = Arc::new(CaMaterial::from_pems(&ca.cert_pem, &ca.key_pem).unwrap());
+        let mut ca = CaMaterial::from_pems(&ca.cert_pem, &ca.key_pem).unwrap();
+        if let Some(td) = &opts.trust_domain {
+            ca = ca.with_domains(td, "cluster.local").unwrap();
+        }
+        let ca = Arc::new(ca);
         let tls = dir.path().join("tls");
         std::fs::create_dir_all(&tls).unwrap();
         let serving = ca
             .sign_server(
                 &["localhost".to_string()],
-                embassy::servingcert::CONTROL_PLANE_SPIFFE_ID,
+                &ca.control_plane_uri(),
                 Duration::from_secs(3600),
             )
             .unwrap();
@@ -148,6 +158,7 @@ impl Env {
             config.auth.anonymous = Anonymous::Viewer;
         }
         config.policy = opts.policy.clone();
+        config.issuance.join_tokens = opts.join_tokens.clone();
         if let Some(r) = opts.retain_bytes {
             config.events.retain_bytes = r;
         }
@@ -188,6 +199,11 @@ impl Env {
         if opts.http_tls {
             argv.push("--http-tls".into());
         }
+        if let Some(td) = &opts.trust_domain {
+            argv.push("--trust-domain".into());
+            argv.push(td.clone());
+        }
+        argv.extend(opts.args.iter().cloned());
         let args = Cli::try_parse_from(argv).unwrap().serve;
         args.validate().unwrap();
         let started = embassy::serve::start(args, config, CancellationToken::new())
@@ -228,6 +244,41 @@ impl Env {
 
     pub fn token(&self, who: &str) -> &str {
         &self.tokens[who]
+    }
+
+    /// What `embassy serve` started.
+    pub fn started(&self) -> &Started {
+        self.started.as_ref().expect("running")
+    }
+
+    /// `IssueCertificate` on `--grpc-addr` (needs `with_ca`) with a fresh P-256 key and a join
+    /// token; the certificate and its key.
+    pub async fn issue(
+        &self,
+        join_token: &str,
+        ns: &str,
+        svc: &str,
+    ) -> Result<(String, String), Status> {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let csr_pem = rcgen::CertificateParams::default()
+            .serialize_request(&key)
+            .unwrap()
+            .pem()
+            .unwrap();
+        let mut ca = agentsc_proto::certificate_authority_client::CertificateAuthorityClient::new(
+            self.channel(None).await,
+        );
+        let resp = ca
+            .issue_certificate(agentsc_proto::CertificateRequest {
+                csr_pem,
+                kubernetes_token: String::new(),
+                join_token: join_token.into(),
+                namespace: ns.into(),
+                service: svc.into(),
+            })
+            .await?
+            .into_inner();
+        Ok((resp.cert_pem, key.serialize_pem()))
     }
 
     /// A request with the CSRF header and JSON content type on mutations.

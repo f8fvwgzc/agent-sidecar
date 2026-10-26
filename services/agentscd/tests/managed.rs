@@ -252,7 +252,7 @@ async fn issuance_hello_heartbeats_and_updates() {
         h.charter_schema_level,
         agentsc_charter::CHARTER_SCHEMA_LEVEL
     );
-    assert_eq!(h.charter_schema_level, 4);
+    assert_eq!(h.charter_schema_level, 5);
     assert_eq!(h.memory_version, "");
     assert_eq!(
         cp.shared.peers.lock().unwrap()[0],
@@ -1367,4 +1367,71 @@ async fn the_control_plane_and_its_ca_must_carry_the_control_plane_uri_san() {
         "the oldest were dropped"
     );
     m.sidecar.abort();
+}
+
+#[tokio::test]
+async fn a_configured_trust_domain_end_to_end() {
+    const TD: &str = "prod.example";
+    let ca = agentsc_pki::ca_init().unwrap();
+    let cp = FakeCp::start_in(ca.clone(), TD).await;
+    let audit_dir = tempfile::tempdir().unwrap();
+
+    // 1. a sidecar left on the default trust domain does not take that control plane for its
+    //    own: spiffe://prod.example/control-plane is not spiffe://agentsc/control-plane
+    let audit = audit_dir.path().join("default.jsonl");
+    let state_dir = tempfile::tempdir().unwrap();
+    let m = start_managed(
+        cp.addr,
+        &ca,
+        state_dir.path(),
+        Some(&charter(&audit)),
+        |_| FakeRuntime::answering("done"),
+        |_| {},
+    )
+    .await;
+    let failed = wait_audit(&audit, 1, |v| v["rule"] == "cert.issue_failed").await;
+    assert!(!failed.is_empty(), "issuance refused in the handshake");
+    assert!(cp.shared.issued.lock().unwrap().is_empty());
+    m.sidecar.abort();
+
+    // 2. with --trust-domain prod.example: a certificate in prod.example (a default-domain
+    //    certificate in --tls-dir is not used), Connect, and the identity everywhere
+    let audit = audit_dir.path().join("prod.jsonl");
+    let state_dir = tempfile::tempdir().unwrap();
+    let old = tempfile::tempdir().unwrap();
+    let leaf = agentsc_pki::issue_leaf(&ca, "agentsc-demo", "orders", 1).unwrap();
+    agentsc_pki::TlsMaterial::write(&leaf, &ca.cert_pem, old.path()).unwrap();
+    let tls_dir = old.path().to_path_buf();
+    let m = start_managed(
+        cp.addr,
+        &ca,
+        state_dir.path(),
+        Some(&charter(&audit)),
+        |_| FakeRuntime::answering("done"),
+        move |cfg| {
+            cfg.trust_domain = TD.into();
+            cfg.tls_dir = tls_dir;
+        },
+    )
+    .await;
+    eventually("a certificate", || m.state().tls().is_some()).await;
+    let id = "spiffe://prod.example/ns/agentsc-demo/svc/orders";
+    assert_eq!(m.state().self_identity, id);
+    assert_eq!(m.state().tls().unwrap().material.identity.uri(), id);
+    assert_eq!(cp.shared.issued.lock().unwrap().len(), 1);
+    eventually("a Hello", || !cp.hellos().is_empty()).await;
+    assert_eq!(cp.shared.peers.lock().unwrap()[0], id);
+    m.sidecar.abort();
+
+    // 3. a trust domain that is not a SPIFFE trust domain name is refused at start-up
+    let path = audit_dir.path().join("x.yaml");
+    write_charter(&path, &charter(&audit));
+    let mut cfg = Config::for_test(
+        path,
+        audit_dir.path().join("no-tls"),
+        audit_dir.path().join("sock-x"),
+    );
+    cfg.trust_domain = "Prod Example".into();
+    let err = agentscd::start(cfg).await.err().expect("refused");
+    assert!(format!("{err:#}").contains("--trust-domain"), "{err:#}");
 }

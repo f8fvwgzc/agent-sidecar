@@ -211,6 +211,8 @@ pub struct Expected<'a> {
     pub cp_namespace: &'a str,
     /// The CA's roots (`AGENTSC_CA_PEM`).
     pub ca_roots_pem: &'a str,
+    /// embassy's `--trust-domain` (`AGENTSC_TRUST_DOMAIN`).
+    pub trust_domain: &'a str,
 }
 /// `agentscd` env the injector takes from the pod's own fields.
 const INJECTED_FIELD_ENV: [(&str, &str); 2] = [
@@ -227,8 +229,9 @@ const INJECTED_FIELD_ENV: [(&str, &str); 2] = [
 /// and lifecycle hooks run programs inside the container. So, besides the image and command line:
 ///
 /// - `agentscd` has exactly the injector's env: `AGENTSC_CONTROL_PLANE`,
-///   `AGENTSC_CA_ADDRESS`, `AGENTSC_K8S_TOKEN_FILE`, `AGENTSC_STATE_DIR` and
-///   `AGENTSC_NO_RUNTIME=true` with the injected values, `AGENTSC_CA_PEM` with roots of the
+///   `AGENTSC_CA_ADDRESS`, `AGENTSC_K8S_TOKEN_FILE`, `AGENTSC_TRUST_DOMAIN`,
+///   `AGENTSC_STATE_DIR` and `AGENTSC_NO_RUNTIME=true` with the injected values,
+///   `AGENTSC_CA_PEM` with roots of the
 ///   CA only ([`only_roots_of`]), the pod-specific literals
 ///   ([`INJECTED_LITERAL_ENV`]) and fields ([`INJECTED_FIELD_ENV`]), `ANTHROPIC_API_KEY` from
 ///   a Secret's key `ANTHROPIC_API_KEY`, and the template's [`TEMPLATE_ENV_ALLOWED`];
@@ -301,6 +304,7 @@ pub fn shape_problem(pod: &Pod, expected: &Expected) -> Option<String> {
             format!("embassy-ca.{cp_namespace}.svc:{CONTROL_PLANE_PORT}"),
         ),
         ("AGENTSC_K8S_TOKEN_FILE", TOKEN_FILE.to_string()),
+        ("AGENTSC_TRUST_DOMAIN", expected.trust_domain.to_string()),
         ("AGENTSC_STATE_DIR", STATE_DIR.to_string()),
         ("AGENTSC_NO_RUNTIME", "true".to_string()),
     ];
@@ -654,6 +658,7 @@ mod tests {
         Expected {
             cp_namespace: "agentsc-system",
             ca_roots_pem: test_ca(),
+            trust_domain: "agentsc",
         }
     }
 
@@ -886,7 +891,7 @@ mod tests {
             "the addresses name the control plane's namespace"
         );
 
-        let cases: [ShapeCase; 26] = [
+        let cases: [ShapeCase; 27] = [
             (
                 "the key in a volume the app mounts (the review's pod)",
                 |p| {
@@ -940,6 +945,16 @@ mod tests {
                         )
                 },
                 "sets env \"AGENTSC_CONTROL_PLANE\"",
+            ),
+            (
+                "another trust domain",
+                |p| {
+                    p["spec"]["initContainers"][1]["env"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"name": "AGENTSC_TRUST_DOMAIN", "value": "evil"}))
+                },
+                "sets env \"AGENTSC_TRUST_DOMAIN\"",
             ),
             (
                 "an attacker's CA (the fix check's relay)",

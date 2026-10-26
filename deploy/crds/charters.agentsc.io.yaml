@@ -93,7 +93,10 @@ spec:
                     maximum: 65535
                   peers:
                     type: object
-                    description: service name → `host:port` override of `<service>.<namespace>.svc.cluster.local:50002`.
+                    description: |-
+                      peer (`<service>`, or `<service>.<namespace>` for another namespace, as the tools name it)
+                      → `host:port` override of `<service>.<namespace>.svc.<cluster domain>:<port>`. The peer
+                      is still verified by its SPIFFE ID, whatever the address.
                     additionalProperties:
                       type: string
                     x-kubernetes-preserve-unknown-fields: true
@@ -177,7 +180,10 @@ spec:
                             x-kubernetes-preserve-unknown-fields: true
                           service:
                             type: string
-                            description: '`service` tools: target service. `agent` tools: remote service (omit for local).'
+                            description: |-
+                              `service` tools: target service. `agent` tools: remote service (omit for local). A service
+                              of this charter's namespace is `<service>`; one in another namespace is
+                              `<service>.<namespace>` (charter schema level 5).
                             nullable: true
                           method:
                             type: string

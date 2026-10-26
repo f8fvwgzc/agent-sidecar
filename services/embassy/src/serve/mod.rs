@@ -246,9 +246,55 @@ pub struct ServeArgs {
     /// Allow the anonymous viewer and write a one-time admin token to a 0600 file.
     #[arg(long)]
     pub dev: bool,
+    /// SPIFFE trust domain of issued identities, of the serving certificate and of the sidecars
+    /// Connect accepts (spiffe://<trust domain>/...); injected sidecars get the same.
+    #[arg(
+        long,
+        env = "AGENTSC_TRUST_DOMAIN",
+        default_value = agentsc_common::identity::DEFAULT_TRUST_DOMAIN
+    )]
+    pub trust_domain: String,
+    /// Kubernetes cluster DNS domain of the workload certificates' DNS SANs
+    /// (<svc>.<ns>.svc.<cluster domain>).
+    #[arg(
+        long,
+        env = "AGENTSC_CLUSTER_DOMAIN",
+        default_value = agentsc_common::identity::DEFAULT_CLUSTER_DOMAIN
+    )]
+    pub cluster_domain: String,
+    /// `IssueCertificate` requests per minute, per peer address and per credential (0 = no
+    /// limit; ratelimit.rs).
+    #[arg(long, env = "AGENTSC_ISSUANCE_RATE_LIMIT", default_value_t = crate::ratelimit::ISSUANCE_DEFAULT.per_minute)]
+    pub issuance_rate_limit: u32,
+    /// The burst of `--issuance-rate-limit`.
+    #[arg(long, env = "AGENTSC_ISSUANCE_BURST", default_value_t = crate::ratelimit::ISSUANCE_DEFAULT.burst)]
+    pub issuance_burst: u32,
+    /// REST API requests per minute, per client identity (or remote address when anonymous;
+    /// 0 = no limit; ratelimit.rs).
+    #[arg(long, env = "AGENTSC_API_RATE_LIMIT", default_value_t = crate::ratelimit::API_DEFAULT.per_minute)]
+    pub api_rate_limit: u32,
+    /// The burst of `--api-rate-limit`.
+    #[arg(long, env = "AGENTSC_API_BURST", default_value_t = crate::ratelimit::API_DEFAULT.burst)]
+    pub api_burst: u32,
 }
 
 impl ServeArgs {
+    /// `--issuance-rate-limit` and `--issuance-burst`.
+    pub fn issuance_limit(&self) -> crate::ratelimit::RateLimit {
+        crate::ratelimit::RateLimit {
+            per_minute: self.issuance_rate_limit,
+            burst: self.issuance_burst,
+        }
+    }
+
+    /// `--api-rate-limit` and `--api-burst`.
+    pub fn api_limit(&self) -> crate::ratelimit::RateLimit {
+        crate::ratelimit::RateLimit {
+            per_minute: self.api_rate_limit,
+            burst: self.api_burst,
+        }
+    }
+
     pub fn has(&self, c: Component) -> bool {
         self.components.has(c)
     }
@@ -274,6 +320,21 @@ impl ServeArgs {
             if !is_dns_subdomain(name) {
                 errs.push(format!("{flag} {name:?} is not a DNS-1123 subdomain"));
             }
+        }
+        if let Err(e) = agentsc_common::identity::check_trust_domain(&self.trust_domain) {
+            errs.push(format!("--trust-domain: {e}"));
+        }
+        if let Err(e) = agentsc_common::identity::check_cluster_domain(&self.cluster_domain) {
+            errs.push(format!("--cluster-domain: {e}"));
+        }
+        for p in [
+            self.issuance_limit().problem("--issuance-burst"),
+            self.api_limit().problem("--api-burst"),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            errs.push(p);
         }
 
         let ca_material = self.ca_dir.is_some() || self.ca_secret.is_some();
@@ -655,13 +716,14 @@ pub async fn start(
     let hub_cell: HubCell = Arc::default();
     let store = open_store(&args, &config, &hub_cell).await?;
     let ca = if args.has(Ca) {
-        match (&args.ca_dir, &args.ca_secret) {
-            (Some(dir), _) => Some(Arc::new(crate::ca::CaMaterial::load_dir(dir)?)),
-            (None, Some(s)) => Some(Arc::new(
-                crate::k8s::load_ca_secret(&s.namespace, &s.name).await?,
-            )),
+        let material = match (&args.ca_dir, &args.ca_secret) {
+            (Some(dir), _) => crate::ca::CaMaterial::load_dir(dir)?,
+            (None, Some(s)) => crate::k8s::load_ca_secret(&s.namespace, &s.name).await?,
             (None, None) => bail!("the ca component needs --ca-dir or --ca-secret"),
-        }
+        };
+        Some(Arc::new(
+            material.with_domains(&args.trust_domain, &args.cluster_domain)?,
+        ))
     } else {
         None
     };
@@ -720,6 +782,8 @@ pub async fn start(
             HubOptions {
                 dns_names: args.dns_names.clone(),
                 auto_adopt: args.auto_adopt,
+                trust_domain: args.trust_domain.clone(),
+                api_rate_limit: args.api_limit(),
                 ..Default::default()
             },
             shutdown.clone(),

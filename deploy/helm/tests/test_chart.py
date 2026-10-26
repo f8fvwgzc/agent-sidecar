@@ -55,6 +55,8 @@ SERVE_FLAGS = {
     "cp-namespace",
     "ui-dir",
     "dev",
+    "trust-domain",
+    "cluster-domain",
 }
 
 needs_helm = pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
@@ -673,6 +675,27 @@ def test_injection_defaults_reach_embassy_ca_as_one_container_template(default: 
     assert inject_template(render("--set", "injection.auditFailClosed=true"))["env"] == [
         {"name": "AGENTSC_AUDIT_FAIL_CLOSED", "value": "true"}
     ]
+
+
+@needs_helm
+def test_trust_and_cluster_domain_reach_embassy_and_the_sidecars(default: list[dict]) -> None:
+    # the defaults change nothing: agentsc, cluster.local, and no extra sidecar variable
+    for name in ("embassy-ca", "embassy"):
+        flags = deployment_flags(default, name)
+        assert flags["trust-domain"] == ["agentsc"], name
+        assert flags["cluster-domain"] == ["cluster.local"], name
+    assert "env" not in inject_template(default)
+    docs = render("--set", "trustDomain=prod.example", "--set", "clusterDomain=corp.internal")
+    for name in ("embassy-ca", "embassy"):
+        flags = deployment_flags(docs, name)
+        assert flags["trust-domain"] == ["prod.example"], name
+        assert flags["cluster-domain"] == ["corp.internal"], name
+    # embassy-ca hands its --trust-domain to every sidecar it injects (AGENTSC_TRUST_DOMAIN); the
+    # cluster domain of peer addresses goes through the injection template
+    assert inject_template(docs)["env"] == [{"name": "AGENTSC_CLUSTER_DOMAIN", "value": "corp.internal"}]
+    assert f"embassy.{NS}.svc.corp.internal" in deployment_flags(docs, "embassy")["dns-name"]
+    for bad in ("Prod", "prod:443", "a/b", ""):
+        assert "trustDomain" in render_fails("--set", f"trustDomain={bad}")
 
 
 @needs_helm

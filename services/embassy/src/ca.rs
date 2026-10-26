@@ -10,10 +10,16 @@
 //!
 //! The Kubernetes form (`--ca-secret <ns>/<name>`) is loaded by
 //! [`crate::k8s::load_ca_secret`] and ends up in the same type.
+//!
+//! The CA signs in one trust domain, with DNS SANs under one cluster domain (`--trust-domain`,
+//! `--cluster-domain`, [`CaMaterial::with_domains`]; `agentsc` and `cluster.local` unless set):
+//! workload leaves are `spiffe://<trust domain>/ns/<ns>/svc/<svc>` and the serving certificate
+//! is `spiffe://<trust domain>/control-plane`.
 use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
+use agentsc_common::identity::{DEFAULT_CLUSTER_DOMAIN, DEFAULT_TRUST_DOMAIN};
 use agentsc_pki::{CaKeyPair, IssuedCert, IssuedKeyPair, VerifiedPublicKey};
 use anyhow::Context;
 
@@ -23,6 +29,10 @@ pub struct CaMaterial {
     roots_pem: String,
     /// The first root that is a CA certificate for `ca.key`.
     signer: CaKeyPair,
+    /// `--trust-domain`.
+    trust_domain: String,
+    /// `--cluster-domain`.
+    cluster_domain: String,
 }
 
 impl fmt::Debug for CaMaterial {
@@ -34,6 +44,8 @@ impl fmt::Debug for CaMaterial {
                 &self.roots_pem.matches("BEGIN CERTIFICATE").count(),
             )
             .field("signer", &self.signer)
+            .field("trust_domain", &self.trust_domain)
+            .field("cluster_domain", &self.cluster_domain)
             .finish()
     }
 }
@@ -59,7 +71,23 @@ impl CaMaterial {
         Ok(Self {
             roots_pem: agentsc_pki::certs_to_pem(&roots),
             signer,
+            trust_domain: DEFAULT_TRUST_DOMAIN.into(),
+            cluster_domain: DEFAULT_CLUSTER_DOMAIN.into(),
         })
+    }
+
+    /// Sign in `trust_domain` with DNS SANs under `cluster_domain` (both checked).
+    pub fn with_domains(
+        mut self,
+        trust_domain: &str,
+        cluster_domain: &str,
+    ) -> anyhow::Result<Self> {
+        agentsc_common::identity::check_trust_domain(trust_domain).map_err(anyhow::Error::msg)?;
+        agentsc_common::identity::check_cluster_domain(cluster_domain)
+            .map_err(anyhow::Error::msg)?;
+        self.trust_domain = trust_domain.into();
+        self.cluster_domain = cluster_domain.into();
+        Ok(self)
     }
 
     /// Every trust root, PEM (may hold several certificates).
@@ -72,11 +100,21 @@ impl CaMaterial {
         &self.signer
     }
 
-    /// A workload leaf for `spiffe://agentsc/ns/<namespace>/svc/<service>` (design §7): only
-    /// the verified CSR key is used; DNS SANs `<svc>`, `<svc>.<ns>`, `<svc>.<ns>.svc`,
-    /// `<svc>.<ns>.svc.cluster.local`; EKU serverAuth + clientAuth; valid for `ttl` (capped at
-    /// the CA's expiry). The caller has already checked the names (DNS labels, not reserved) and
-    /// the caller's right to the identity.
+    /// The trust domain this CA issues identities in.
+    pub fn trust_domain(&self) -> &str {
+        &self.trust_domain
+    }
+
+    /// The URI SAN of the serving certificate: `spiffe://<trust domain>/control-plane`.
+    pub fn control_plane_uri(&self) -> String {
+        agentsc_common::identity::control_plane_uri(&self.trust_domain)
+    }
+
+    /// A workload leaf for `spiffe://<trust domain>/ns/<namespace>/svc/<service>` (design §7):
+    /// only the verified CSR key is used; DNS SANs `<svc>`, `<svc>.<ns>`, `<svc>.<ns>.svc`,
+    /// `<svc>.<ns>.svc.<cluster domain>`; EKU serverAuth + clientAuth; valid for `ttl` (capped
+    /// at the CA's expiry). The caller has already checked the names (DNS labels, not reserved)
+    /// and the caller's right to the identity.
     pub fn sign_workload(
         &self,
         public_key: &VerifiedPublicKey,
@@ -84,8 +122,16 @@ impl CaMaterial {
         service: &str,
         ttl: Duration,
     ) -> anyhow::Result<IssuedCert> {
-        agentsc_pki::issue_workload_leaf(&self.signer, public_key, namespace, service, ttl)
-            .with_context(|| format!("sign a certificate for {namespace}/{service}"))
+        agentsc_pki::issue_workload_leaf_in(
+            &self.signer,
+            public_key,
+            &self.trust_domain,
+            &self.cluster_domain,
+            namespace,
+            service,
+            ttl,
+        )
+        .with_context(|| format!("sign a certificate for {namespace}/{service}"))
     }
 
     /// A server-only leaf with a fresh P-256 key: URI SAN `uri_san`, DNS SANs `dns_names`, EKU
@@ -273,5 +319,34 @@ mod tests {
             m.sign_workload(&csr(), "Shop", "orders", HOUR).unwrap_err()
         );
         assert!(e.contains("DNS-1123"), "{e}");
+    }
+
+    #[test]
+    fn the_configured_trust_and_cluster_domain_are_signed() {
+        let b = agentsc_pki::ca_init().unwrap();
+        let m = CaMaterial::from_pems(&b.cert_pem, &b.key_pem)
+            .unwrap()
+            .with_domains("prod.example", "corp.internal")
+            .unwrap();
+        assert_eq!(m.trust_domain(), "prod.example");
+        assert_eq!(m.control_plane_uri(), "spiffe://prod.example/control-plane");
+        let leaf = m.sign_workload(&csr(), "shop", "orders", HOUR).unwrap();
+        assert_eq!(
+            agentsc_pki::uri_sans_of(&leaf.cert_der).unwrap(),
+            ["spiffe://prod.example/ns/shop/svc/orders"]
+        );
+        assert!(
+            agentsc_pki::dns_names_of(&leaf.cert_der)
+                .unwrap()
+                .contains(&"orders.shop.svc.corp.internal".to_string())
+        );
+        // the defaults stay agentsc and cluster.local
+        let d = CaMaterial::from_pems(&b.cert_pem, &b.key_pem).unwrap();
+        assert_eq!(
+            d.control_plane_uri(),
+            crate::servingcert::CONTROL_PLANE_SPIFFE_ID
+        );
+        let bad = CaMaterial::from_pems(&b.cert_pem, &b.key_pem).unwrap();
+        assert!(bad.with_domains("Prod Example", "cluster.local").is_err());
     }
 }

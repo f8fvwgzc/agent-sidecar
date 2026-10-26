@@ -26,8 +26,14 @@ struct Pki {
 
 impl Pki {
     fn tls_dir(&self, root: &std::path::Path, service: &str) -> PathBuf {
-        let leaf = agentsc_pki::issue_leaf(&self.ca, "agentsc-demo", service, 1).unwrap();
-        let dir = root.join(format!("tls-{service}"));
+        self.tls_dir_in(root, "agentsc", "agentsc-demo", service)
+    }
+
+    /// A certificate for `spiffe://<td>/ns/<ns>/svc/<service>` from the CA.
+    fn tls_dir_in(&self, root: &std::path::Path, td: &str, ns: &str, service: &str) -> PathBuf {
+        let leaf =
+            agentsc_pki::issue_leaf_in(&self.ca, td, "cluster.local", ns, service, 1).unwrap();
+        let dir = root.join(format!("tls-{td}-{ns}-{service}"));
         agentsc_pki::TlsMaterial::write(&leaf, &self.ca.cert_pem, &dir).unwrap();
         dir
     }
@@ -61,9 +67,77 @@ fn write_charter(root: &std::path::Path, name: &str, c: &Charter) -> PathBuf {
 }
 
 async fn start(root: &std::path::Path, name: &str, charter: PathBuf, tls_dir: PathBuf) -> Sidecar {
+    start_with(root, name, charter, tls_dir, |_| {}).await
+}
+
+async fn start_with(
+    root: &std::path::Path,
+    name: &str,
+    charter: PathBuf,
+    tls_dir: PathBuf,
+    tweak: impl FnOnce(&mut Config),
+) -> Sidecar {
     let sock = root.join(format!("sock-{name}"));
-    let cfg = Config::for_test(charter, tls_dir, sock);
+    let mut cfg = Config::for_test(charter, tls_dir, sock);
+    tweak(&mut cfg);
     agentscd::start(cfg).await.expect("sidecar starts")
+}
+
+/// The orders charter with a `check_stock` service tool (GET /stock/{sku}) to `target`, and
+/// `mesh.peers[target]` = `addr`; audit to `<root>/<name>-audit.jsonl`.
+fn orders_calling(root: &std::path::Path, name: &str, target: &str, addr: &str) -> Charter {
+    let mut ord = Charter::from_yaml(ORDERS).unwrap();
+    ord.mesh.peers.insert(target.into(), addr.into());
+    let ops = ord
+        .agents
+        .iter_mut()
+        .find(|a| a.name == "ops-assistant")
+        .unwrap();
+    ops.tools.push(ToolSpec {
+        name: "check_stock".into(),
+        description: "read stock".into(),
+        tool_type: ToolType::Service,
+        parameters: None,
+        service: Some(target.into()),
+        method: Some("GET".into()),
+        path: Some("/stock/{sku}".into()),
+        agent: None,
+        url: None,
+        label: None,
+        effect: None,
+    });
+    ord.guardrails
+        .allowed_tools
+        .get_mut("ops-assistant")
+        .unwrap()
+        .push("check_stock".into());
+    ord.guardrails.allowed_services.remove("ops-assistant");
+    ord.authz.services.push(agentsc_charter::ServiceRule {
+        name: format!("check-stock-{}", target.replace('.', "-")),
+        identity: None,
+        agent: Some("ops-assistant".into()),
+        service: target.into(),
+        allow: vec!["GET /stock/*".into()],
+        deny: vec![],
+    });
+    ord.audit.sink = agentsc_charter::AuditSink::File;
+    ord.audit.file = Some(
+        root.join(format!("{name}-audit.jsonl"))
+            .to_string_lossy()
+            .into_owned(),
+    );
+    ord
+}
+
+fn stock_request(service: &str, request_id: &str) -> ToolServiceRequest {
+    ToolServiceRequest {
+        ctx: ctx("check_stock", request_id),
+        service: service.into(),
+        method: "GET".into(),
+        path: "/stock/WIDGET-1".into(),
+        headers: Default::default(),
+        body: vec![],
+    }
 }
 
 async fn tools_client(
@@ -250,7 +324,7 @@ async fn mesh_mtls_end_to_end() {
     let channel = agentscd::tls::client_channel(
         &billing,
         &inv_mesh.to_string(),
-        "inventory.agentsc-demo.svc.cluster.local",
+        "spiffe://agentsc/ns/agentsc-demo/svc/inventory",
     )
     .unwrap();
     let mut mesh = MeshClient::new(channel);
@@ -274,7 +348,7 @@ async fn mesh_mtls_end_to_end() {
     let channel = agentscd::tls::client_channel(
         &orders_tls.material,
         &inv_mesh.to_string(),
-        "inventory.agentsc-demo.svc.cluster.local",
+        "spiffe://agentsc/ns/agentsc-demo/svc/inventory",
     )
     .unwrap();
     let mut mesh = MeshClient::new(channel);
@@ -672,7 +746,7 @@ async fn a_peer_run_that_read_untrusted_data_cannot_write_with_authz_taint() {
     let channel = agentscd::tls::client_channel(
         &orders,
         &inventory.mesh_addr.unwrap().to_string(),
-        "inventory.agentsc-demo.svc.cluster.local",
+        "spiffe://agentsc/ns/agentsc-demo/svc/inventory",
     )
     .unwrap();
     let mut mesh = MeshClient::new(channel);
@@ -732,5 +806,309 @@ async fn a_peer_run_that_read_untrusted_data_cannot_write_with_authz_taint() {
         recs[0]["caller"],
         "spiffe://agentsc/ns/agentsc-demo/svc/orders"
     );
+    inventory.abort();
+}
+
+/// The inventory charter for a fake app on `app`, its authz identities moved to trust domain
+/// `td` and namespace `ns`; audit to `<root>/<name>-audit.jsonl`.
+fn inventory_in(root: &std::path::Path, name: &str, td: &str, ns: &str, app: u16) -> Charter {
+    let text = INVENTORY
+        .replace("spiffe://agentsc/", &format!("spiffe://{td}/"))
+        .replace("namespace: agentsc-demo", &format!("namespace: {ns}"));
+    let mut inv = Charter::from_yaml(&text).unwrap();
+    inv.service.app_port = app;
+    inv.audit.sink = agentsc_charter::AuditSink::File;
+    inv.audit.file = Some(
+        root.join(format!("{name}-audit.jsonl"))
+            .to_string_lossy()
+            .into_owned(),
+    );
+    inv
+}
+
+fn audit_of(root: &std::path::Path, name: &str) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(root.join(format!("{name}-audit.jsonl")))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_configured_trust_domain_end_to_end() {
+    const TD: &str = "prod.example";
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let pki = Pki {
+        ca: agentsc_pki::ca_init().unwrap(),
+    };
+    let app = fake_inventory_app().await;
+    let in_td = |cfg: &mut Config| cfg.trust_domain = TD.into();
+
+    let inv = inventory_in(root, "inventory", TD, "agentsc-demo", app.port());
+    let inventory = start_with(
+        root,
+        "inventory",
+        write_charter(root, "inventory", &inv),
+        pki.tls_dir_in(root, TD, "agentsc-demo", "inventory"),
+        in_td,
+    )
+    .await;
+    assert_eq!(
+        inventory.state.self_identity,
+        "spiffe://prod.example/ns/agentsc-demo/svc/inventory"
+    );
+    let inv_mesh = inventory.mesh_addr.unwrap().to_string();
+
+    // 1. orders in prod.example reaches inventory in prod.example; the callee's rules name
+    //    spiffe://prod.example/... and match
+    let ord = orders_calling(root, "orders", "inventory", &inv_mesh);
+    let orders = start_with(
+        root,
+        "orders",
+        write_charter(root, "orders", &ord),
+        pki.tls_dir_in(root, TD, "agentsc-demo", "orders"),
+        in_td,
+    )
+    .await;
+    let mut tools = tools_client(&root.join("sock-orders")).await;
+    // the runs these tool calls belong to (tool calls of no run are refused)
+    let _runs: Vec<_> = ["req-td"]
+        .into_iter()
+        .map(|id| {
+            orders.state.runs.start(
+                id,
+                "ops-assistant",
+                "local",
+                "4bf92f3577b34da6a3ce929d0e0e4736",
+            )
+        })
+        .collect();
+    let ok = tools
+        .invoke_service(stock_request("inventory", "req-td"))
+        .await
+        .expect("a call inside the trust domain")
+        .into_inner();
+    assert_eq!(ok.status, 200);
+    let rec = audit_of(root, "inventory")
+        .into_iter()
+        .find(|v| v["request_id"] == "req-td")
+        .unwrap();
+    assert_eq!(
+        rec["caller"],
+        "spiffe://prod.example/ns/agentsc-demo/svc/orders"
+    );
+    assert_eq!(rec["rule"], "authz.services.orders-reads-stock");
+
+    // 2. the same CA's certificate for orders in the default trust domain is no identity here:
+    //    refused before any rule, with the trust domain in the message, and audited
+    let foreign = agentsc_pki::TlsMaterial::load(pki.tls_dir(root, "orders")).unwrap();
+    let channel = agentscd::tls::client_channel(
+        &foreign,
+        &inv_mesh,
+        "spiffe://prod.example/ns/agentsc-demo/svc/inventory",
+    )
+    .unwrap();
+    let mut req = tonic::Request::new(agentsc_proto::ServiceRequest {
+        method: "GET".into(),
+        path: "/stock/WIDGET-1".into(),
+        request_id: "req-foreign-td".into(),
+        ..Default::default()
+    });
+    req.metadata_mut()
+        .insert("x-agentsc-agent", "ops-assistant".parse().unwrap());
+    let err = MeshClient::new(channel)
+        .invoke_service(req)
+        .await
+        .expect_err("another trust domain");
+    assert_eq!(err.code(), tonic::Code::PermissionDenied, "{err:?}");
+    assert_eq!(
+        err.metadata().get("x-agentsc-rule").unwrap(),
+        "authz.identity.invalid"
+    );
+    assert!(err.message().contains("spiffe://prod.example/"), "{err:?}");
+    let refused = audit_of(root, "inventory")
+        .into_iter()
+        .find(|v| v["request_id"] == "req-foreign-td")
+        .expect("the refusal is audited");
+    assert_eq!(refused["rule"], "authz.identity.invalid");
+
+    // 2b. and the other way round: a server is held to the caller's trust domain too — the
+    //     prod.example inventory is not spiffe://agentsc/ns/agentsc-demo/svc/inventory
+    let ours =
+        agentsc_pki::TlsMaterial::load(pki.tls_dir_in(root, TD, "agentsc-demo", "orders")).unwrap();
+    let channel = agentscd::tls::client_channel(
+        &ours,
+        &inv_mesh,
+        "spiffe://agentsc/ns/agentsc-demo/svc/inventory",
+    )
+    .unwrap();
+    let err = MeshClient::new(channel)
+        .invoke_service(agentsc_proto::ServiceRequest::default())
+        .await
+        .expect_err("refused in the handshake");
+    assert_eq!(err.code(), tonic::Code::Unavailable, "{err:?}");
+
+    // 3. a sidecar does not start with a --tls-dir certificate of another trust domain
+    let sock = root.join("sock-mismatch");
+    let mut cfg = Config::for_test(
+        write_charter(root, "mismatch", &ord),
+        pki.tls_dir(root, "orders"),
+        sock,
+    );
+    in_td(&mut cfg);
+    let err = agentscd::start(cfg).await.err().expect("refused");
+    assert!(
+        format!("{err:#}").contains("does not match charter identity spiffe://prod.example/"),
+        "{err:#}"
+    );
+
+    orders.abort();
+    inventory.abort();
+}
+
+#[tokio::test]
+async fn a_peer_in_another_namespace_is_verified_by_its_spiffe_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let pki = Pki {
+        ca: agentsc_pki::ca_init().unwrap(),
+    };
+    let app = fake_inventory_app().await;
+
+    // inventory runs in namespace warehouse; its rules admit orders of agentsc-demo
+    let inv = inventory_in(root, "warehouse", "agentsc", "warehouse", app.port());
+    let inventory = start(
+        root,
+        "warehouse",
+        write_charter(root, "warehouse", &inv),
+        pki.tls_dir_in(root, "agentsc", "warehouse", "inventory"),
+    )
+    .await;
+    let addr = inventory.mesh_addr.unwrap().to_string();
+
+    // orders in agentsc-demo names it inventory.warehouse; a second tool names the same
+    // address plain `inventory`, i.e. inventory of orders' own namespace
+    let mut ord = orders_calling(root, "orders", "inventory.warehouse", &addr);
+    ord.mesh.peers.insert("inventory".into(), addr.clone());
+    let ops = ord
+        .agents
+        .iter_mut()
+        .find(|a| a.name == "ops-assistant")
+        .unwrap();
+    let mut here = ops
+        .tools
+        .iter()
+        .find(|t| t.name == "check_stock")
+        .unwrap()
+        .clone();
+    here.name = "check_stock_here".into();
+    here.service = Some("inventory".into());
+    ops.tools.push(here);
+    ord.guardrails
+        .allowed_tools
+        .get_mut("ops-assistant")
+        .unwrap()
+        .push("check_stock_here".into());
+    assert_eq!(ord.schema_level(), 5);
+    let orders = start(
+        root,
+        "orders",
+        write_charter(root, "orders", &ord),
+        pki.tls_dir(root, "orders"),
+    )
+    .await;
+    let mut tools = tools_client(&root.join("sock-orders")).await;
+    // the runs these tool calls belong to (tool calls of no run are refused)
+    let _runs: Vec<_> = ["req-xns", "req-wrong-id"]
+        .into_iter()
+        .map(|id| {
+            orders.state.runs.start(
+                id,
+                "ops-assistant",
+                "local",
+                "4bf92f3577b34da6a3ce929d0e0e4736",
+            )
+        })
+        .collect();
+
+    // 1. the cross-namespace call: the server is spiffe://agentsc/ns/warehouse/svc/inventory,
+    //    as the charter names it, and the callee sees the caller's identity
+    let ok = tools
+        .invoke_service(stock_request("inventory.warehouse", "req-xns"))
+        .await
+        .expect("a call to another namespace")
+        .into_inner();
+    assert_eq!(ok.status, 200);
+    let body: serde_json::Value = serde_json::from_slice(&ok.body).unwrap();
+    assert_eq!(body["sku"], "WIDGET-1");
+    let rec = audit_of(root, "warehouse")
+        .into_iter()
+        .find(|v| v["request_id"] == "req-xns")
+        .unwrap();
+    assert_eq!(rec["caller"], "spiffe://agentsc/ns/agentsc-demo/svc/orders");
+    assert_eq!(rec["decision"], "allow");
+    let out = audit_of(root, "orders")
+        .into_iter()
+        .find(|v| v["request_id"] == "req-xns" && v["kind"] == "service_call")
+        .unwrap();
+    assert_eq!(out["callee"], "inventory.warehouse GET /stock/WIDGET-1");
+
+    // 2. the same server under the name `inventory` is the wrong workload: the handshake fails
+    //    on the SPIFFE ID (a DNS name check never decides), and the callee never sees the call
+    let mut wrong = stock_request("inventory", "req-wrong-id");
+    wrong.ctx = ctx("check_stock_here", "req-wrong-id");
+    let err = tools
+        .invoke_service(wrong)
+        .await
+        .expect_err("not spiffe://agentsc/ns/agentsc-demo/svc/inventory");
+    assert_eq!(err.code(), tonic::Code::Unavailable, "{err:?}");
+    assert_eq!(
+        err.metadata().get("x-agentsc-rule").unwrap(),
+        "mesh.unavailable"
+    );
+    assert!(
+        err.message()
+            .contains("spiffe://agentsc/ns/warehouse/svc/inventory"),
+        "the error names what the peer presented: {err:?}"
+    );
+    assert!(
+        !audit_of(root, "warehouse")
+            .iter()
+            .any(|v| v["request_id"] == "req-wrong-id"),
+        "refused before any request"
+    );
+
+    // 3. with fixed material: the right SPIFFE ID passes, any other is refused
+    let mine = orders.state.tls().unwrap();
+    for (peer, ok) in [
+        ("spiffe://agentsc/ns/warehouse/svc/inventory", true),
+        ("spiffe://agentsc/ns/agentsc-demo/svc/inventory", false),
+        ("spiffe://prod.example/ns/warehouse/svc/inventory", false),
+    ] {
+        let channel = agentscd::tls::client_channel(&mine.material, &addr, peer).unwrap();
+        let mut req = tonic::Request::new(agentsc_proto::ServiceRequest {
+            method: "GET".into(),
+            path: "/stock/WIDGET-1".into(),
+            ..Default::default()
+        });
+        req.metadata_mut()
+            .insert("x-agentsc-agent", "ops-assistant".parse().unwrap());
+        let r = MeshClient::new(channel).invoke_service(req).await;
+        assert_eq!(r.is_ok(), ok, "{peer}: {r:?}");
+    }
+
+    // 4. default addresses use the peer's namespace and the cluster domain
+    let snap = orders.state.loaded().unwrap();
+    let mut no_peers = snap.charter.clone();
+    no_peers.mesh.peers.clear();
+    let p = orders.state.peer(&no_peers, "inventory.warehouse");
+    assert_eq!(p.address, "inventory.warehouse.svc.cluster.local:50002");
+    assert_eq!(p.identity, "spiffe://agentsc/ns/warehouse/svc/inventory");
+    let p = orders.state.peer(&no_peers, "inventory");
+    assert_eq!(p.address, "inventory.agentsc-demo.svc.cluster.local:50002");
+    assert_eq!(p.identity, "spiffe://agentsc/ns/agentsc-demo/svc/inventory");
+
+    orders.abort();
     inventory.abort();
 }

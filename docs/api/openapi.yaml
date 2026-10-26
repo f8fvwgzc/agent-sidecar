@@ -100,6 +100,14 @@ info:
     revalidate it before every use (docs/adr/0002-response-caching.md). The event stream
     (`GET /events`) is `no-store` and never conditional.
 
+    ## Rate limits
+
+    Every path but `/healthz` and `/readyz` is rate-limited per client: a token bucket of
+    `--api-burst` requests (default 300) refilled with `--api-rate-limit` a minute (default 1200;
+    `0` turns the limit off), keyed by the authenticated token (its bearer and its sessions share
+    one bucket), else by the client IP. Beyond it, 429 `rate_limited` with `Retry-After` (seconds).
+    The limit is per `embassy` process. `POST /login` also counts failed logins (below).
+
     ## Errors
 
     Every error body is an `Error`: `{"error": "<code>", "details": ["..."], "current_version": "<v>"?}`.
@@ -1471,7 +1479,7 @@ components:
             error: misdirected_request
             details: ["host evil.example is not served here"]
     TooManyRequests:
-      description: Too many failed logins from this client IP.
+      description: Too many failed logins from this client IP, or too many requests from this client.
       headers:
         Retry-After:
           $ref: "#/components/headers/RetryAfter"

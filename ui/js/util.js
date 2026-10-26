@@ -449,7 +449,7 @@ export function linkRequirement(fromId, toId) {
   if (a.svc !== b.svc) {
     return {
       level: 'admin',
-      reason: `Adds an authz.callers rule to ${b.svc} for spiffe://agentsc/ns/${a.ns}/svc/${a.svc}.`,
+      reason: `Adds an authz.callers rule to ${b.svc} for the identity of ${a.ns}/${a.svc}.`,
     };
   }
   return { level: 'editor', reason: 'Same service.' };

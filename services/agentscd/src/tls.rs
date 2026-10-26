@@ -2,9 +2,12 @@
 //!
 //! The workload certificate lives in an [`ArcSwapOption<WorkloadTls>`]: the mesh server and the
 //! mesh and control-plane clients get it through rustls `ResolvesServerCert` /
-//! `ResolvesClientCert`, so a renewal takes effect without a restart. The control plane (and its
-//! CA) is verified against the trust roots and its URI SAN `spiffe://agentsc/control-plane`, never
-//! by DNS name.
+//! `ResolvesClientCert`, so a renewal takes effect without a restart. Servers are verified by
+//! their identity, never by DNS name (the name sent for SNI decides nothing): the control plane
+//! (and its CA) against the trust roots and its URI SAN `spiffe://<trust domain>/control-plane`
+//! (`--trust-domain`), a mesh peer against the mesh CA roots and the SPIFFE ID of the service
+//! the charter names, `spiffe://<trust domain>/ns/<namespace>/svc/<service>`, as its only URI
+//! SAN ([`UriSanVerifier::sole`], CONTRACT.md §5).
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -12,8 +15,8 @@ use agentsc_pki::TlsMaterial;
 use anyhow::Context;
 use arc_swap::ArcSwapOption;
 use hyper_util::rt::TokioIo;
+use rustls::client::ResolvesClientCert;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::client::{ResolvesClientCert, WebPkiServerVerifier};
 use rustls::crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signature};
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::server::{ClientHello, ParsedCertificate, ResolvesServerCert, WebPkiClientVerifier};
@@ -28,7 +31,8 @@ use tokio::net::TcpStream;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
 
-/// The URI SAN of the control plane's serving certificate (design §7).
+/// The URI SAN of the control plane's serving certificate (design §7) in the default trust
+/// domain; [`agentsc_common::identity::control_plane_uri`] gives it for another.
 pub const CONTROL_PLANE_URI: &str = "spiffe://agentsc/control-plane";
 
 pub type TlsCell = Arc<ArcSwapOption<WorkloadTls>>;
@@ -263,37 +267,76 @@ pub fn mesh_server_config(tls: &TlsCell) -> anyhow::Result<Arc<ServerConfig>> {
     Ok(Arc::new(cfg))
 }
 
-/// A mesh client: verifies the peer against `roots` by DNS name and presents the current
-/// certificate.
+/// A mesh client for the peer whose SPIFFE ID is `peer`: the server's chain must verify against
+/// `roots` (the mesh CA) and its leaf must carry `peer` as its only URI SAN
+/// ([`UriSanVerifier::sole`]); presents the current certificate.
 pub fn mesh_client_config(
     roots: Arc<RootCertStore>,
     cert: Arc<dyn ResolvesClientCert>,
+    peer: &str,
 ) -> anyhow::Result<Arc<ClientConfig>> {
     let provider = provider();
-    let verifier = WebPkiServerVerifier::builder_with_provider(roots, provider.clone()).build()?;
     let mut cfg = ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()?
-        .with_webpki_verifier(verifier)
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(UriSanVerifier::sole(roots, peer)))
         .with_client_cert_resolver(cert);
     cfg.alpn_protocols = vec![b"h2".to_vec()];
     Ok(Arc::new(cfg))
 }
 
-/// Verifies a server certificate chains to `roots` and carries the URI SAN `uri` (DNS names are
-/// not looked at).
+/// Verifies a server certificate chains to `roots` (webpki: signatures, validity, EKU
+/// serverAuth) and carries the URI SAN `uri`; DNS names are not looked at.
 #[derive(Debug)]
 pub struct UriSanVerifier {
     roots: Arc<RootCertStore>,
     uri: String,
     provider: Arc<CryptoProvider>,
+    /// `uri` must be the leaf's only URI SAN.
+    sole: bool,
 }
 
+/// A mesh peer whose certificate is another workload's.
+#[derive(Debug)]
+struct WrongPeer {
+    expected: String,
+    presented: Vec<String>,
+}
+
+impl std::fmt::Display for WrongPeer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let presented = match self.presented.as_slice() {
+            [] => "no URI SAN".to_string(),
+            [one] => one.clone(),
+            many => many.join(", "),
+        };
+        write!(
+            f,
+            "the peer's certificate is {presented}, not {} (the identity the charter names)",
+            self.expected
+        )
+    }
+}
+
+impl std::error::Error for WrongPeer {}
+
 impl UriSanVerifier {
+    /// The control plane: `uri` among the leaf's URI SANs.
     pub fn new(roots: Arc<RootCertStore>, uri: &str) -> Self {
         Self {
             roots,
             uri: uri.to_string(),
             provider: provider(),
+            sole: false,
+        }
+    }
+
+    /// A mesh peer: `uri`, its SPIFFE ID, is the leaf's only URI SAN (a SPIFFE SVID has exactly
+    /// one). A mismatch names the identity presented.
+    pub fn sole(roots: Arc<RootCertStore>, uri: &str) -> Self {
+        Self {
+            sole: true,
+            ..Self::new(roots, uri)
         }
     }
 }
@@ -315,7 +358,20 @@ impl ServerCertVerifier for UriSanVerifier {
             now,
             self.provider.signature_verification_algorithms.all,
         )?;
-        if uri_sans(end_entity).iter().any(|u| u == &self.uri) {
+        let sans = uri_sans(end_entity);
+        if self.sole {
+            return if sans.len() == 1 && sans[0] == self.uri {
+                Ok(ServerCertVerified::assertion())
+            } else {
+                Err(rustls::Error::InvalidCertificate(
+                    rustls::CertificateError::Other(rustls::OtherError(Arc::new(WrongPeer {
+                        expected: self.uri.clone(),
+                        presented: sans,
+                    }))),
+                ))
+            };
+        }
+        if sans.iter().any(|u| u == &self.uri) {
             Ok(ServerCertVerified::assertion())
         } else {
             Err(rustls::Error::InvalidCertificate(
@@ -360,16 +416,19 @@ impl ServerCertVerifier for UriSanVerifier {
 }
 
 /// A client for the control plane or its CA: the server must chain to `roots` and carry
-/// [`CONTROL_PLANE_URI`]; `cert` (the workload certificate) is presented when given.
+/// `spiffe://<trust_domain>/control-plane`; `cert` (the workload certificate) is presented when
+/// given.
 pub fn control_plane_client_config(
     roots: Arc<RootCertStore>,
     cert: Option<Arc<dyn ResolvesClientCert>>,
+    trust_domain: &str,
 ) -> anyhow::Result<Arc<ClientConfig>> {
     let provider = provider();
+    let uri = agentsc_common::identity::control_plane_uri(trust_domain);
     let builder = ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()?
         .dangerous()
-        .with_custom_certificate_verifier(Arc::new(UriSanVerifier::new(roots, CONTROL_PLANE_URI)));
+        .with_custom_certificate_verifier(Arc::new(UriSanVerifier::new(roots, &uri)));
     let mut cfg = match cert {
         Some(c) => builder.with_client_cert_resolver(c),
         None => builder.with_no_client_auth(),
@@ -419,10 +478,10 @@ pub fn tls_channel(
     )
 }
 
-/// A mesh channel with fixed material: verifies the peer against `tls.ca_pem` with
-/// `server_name` and presents `tls`'s certificate. Kept for tools and tests; the sidecar itself
-/// uses [`mesh_client_config`] with the current certificate.
-pub fn client_channel(tls: &TlsMaterial, addr: &str, server_name: &str) -> anyhow::Result<Channel> {
+/// A mesh channel with fixed material: verifies the peer at `addr` against `tls.ca_pem` and its
+/// SPIFFE ID `peer`, and presents `tls`'s certificate. Kept for tools and tests; the sidecar
+/// itself uses [`mesh_client_config`] with the current certificate.
+pub fn client_channel(tls: &TlsMaterial, addr: &str, peer: &str) -> anyhow::Result<Channel> {
     let workload = Arc::new(WorkloadTls::from_pems(
         &tls.ca_pem,
         &tls.cert_pem,
@@ -430,10 +489,10 @@ pub fn client_channel(tls: &TlsMaterial, addr: &str, server_name: &str) -> anyho
     )?);
     let roots = workload.roots.clone();
     let cell: TlsCell = Arc::new(ArcSwapOption::from(Some(workload)));
-    let cfg = mesh_client_config(roots, Arc::new(CurrentCert(cell)))?;
+    let cfg = mesh_client_config(roots, Arc::new(CurrentCert(cell)), peer)?;
     tls_channel(
         addr,
-        ServerName::try_from(server_name.to_string())?,
+        server_name_of(addr)?,
         cfg,
         Some(crate::deadline::RUN_TIMEOUT),
     )
@@ -498,6 +557,63 @@ mod tests {
         // the right URI from another CA does not chain to the trust roots
         let other = agentsc_pki::ca_init().unwrap();
         assert!(check(&served_by(&other, CONTROL_PLANE_URI)).is_err());
+    }
+
+    #[test]
+    fn a_mesh_peer_is_checked_by_its_spiffe_id_alone() {
+        let ca = agentsc_pki::ca_init().unwrap();
+        let roots = Arc::new(roots_from_pem(&ca.cert_pem).unwrap());
+        let want = "spiffe://agentsc/ns/warehouse/svc/inventory";
+        let v = UriSanVerifier::sole(roots, want);
+        // the name sent for SNI decides nothing, whatever it is
+        let check = |der: &CertificateDer<'_>, name: &str| {
+            let name = ServerName::try_from(name.to_string()).unwrap();
+            v.verify_server_cert(der, &[], &name, &[], UnixTime::now())
+        };
+        let leaf = |td: &str, ns: &str, svc: &str| {
+            let l = agentsc_pki::issue_leaf_in(&ca, td, "cluster.local", ns, svc, 1).unwrap();
+            CertificateDer::from_pem_slice(l.cert_pem.as_bytes()).unwrap()
+        };
+        let right = leaf("agentsc", "warehouse", "inventory");
+        assert!(check(&right, "inventory.warehouse.svc.cluster.local").is_ok());
+        assert!(check(&right, "anything.example").is_ok());
+        // the same service in another namespace (the DNS SAN check of old accepted it as
+        // inventory.<own namespace>), another trust domain, another service: refused, naming
+        // what the peer presented
+        for (td, ns, svc) in [
+            ("agentsc", "agentsc-demo", "inventory"),
+            ("prod.example", "warehouse", "inventory"),
+            ("agentsc", "warehouse", "billing"),
+        ] {
+            let err = check(&leaf(td, ns, svc), "inventory.warehouse.svc.cluster.local")
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains(&format!("spiffe://{td}/ns/{ns}/svc/{svc}")) && err.contains(want),
+                "{err}"
+            );
+        }
+        // the right URI next to another one is not an SVID
+        let issuer = rcgen::Issuer::from_ca_cert_pem(
+            &ca.cert_pem,
+            rcgen::KeyPair::from_pem(&ca.key_pem).unwrap(),
+        )
+        .unwrap();
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        for u in [want, "spiffe://agentsc/ns/agentsc-demo/svc/admin"] {
+            params.subject_alt_names.push(rcgen::SanType::URI(
+                rcgen::string::Ia5String::try_from(u).unwrap(),
+            ));
+        }
+        params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
+        let key = rcgen::KeyPair::generate().unwrap();
+        let two = params.signed_by(&key, &issuer).unwrap().der().clone();
+        assert!(check(&two, "x.example").is_err());
+        // the right identity from another CA does not chain
+        let other = agentsc_pki::ca_init().unwrap();
+        assert!(check(&served_by(&other, want), "x.example").is_err());
+        // a workload certificate is a server too (EKU serverAuth): the plain one passes
+        assert!(check(&served_by(&ca, want), "x.example").is_ok());
     }
 
     #[test]

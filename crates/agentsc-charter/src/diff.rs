@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AgentSpec, CallerRule, Charter, Decision, LOCAL_IDENTITY, LearningMode, RegexRule, TaintLabel,
-    TaintMode, ToolEffect, ToolType, http_origin,
+    TaintMode, ToolEffect, ToolType, http_origin, is_qualified_peer,
 };
 
 /// The roles of the control-plane API, lowest first (`Role::Viewer < Role::Editor < Role::Admin`).
@@ -155,7 +155,8 @@ pub fn weakened(old: &Charter, new: &Charter) -> Vec<String> {
 /// The role a write from `old` (the stored charter) to `new` needs (design §8.3), and, when that
 /// is admin, one `"<field> requires admin"` reason per field that needs it. Any write needs at
 /// least editor. Editors may change agents' `system`, `model`, `skills`, `harness`, `budgets`,
-/// `learning` (except setting `mode: auto`) and tools of type `service` and `agent`; top-level
+/// `learning` (except setting `mode: auto`) and tools of type `service` and `agent` within the
+/// namespace (a target `<service>.<namespace>` no tool had before needs admin); top-level
 /// `skills`; the `guardrails.allowed_tools` / `allowed_services` entries; the agent names in
 /// `authz.callers` rules whose identity is `local`; and create and delete agents (removing a
 /// deleted agent's name from any `authz.callers` rule, and dropping a rule left empty, is part of
@@ -251,6 +252,7 @@ pub fn required_role(old: &Charter, new: &Charter) -> (Role, Vec<String>) {
     // agents: created and deleted ones are editor; per agent, only `type`, `learning.mode: auto`
     // and new http tool origins need admin
     let old_origins = http_origins(&old.agents);
+    let old_remote = cross_namespace_targets(&old.agents);
     for a in &new.agents {
         let prev = old.agent(&a.name);
         if let Some(p) = prev
@@ -278,6 +280,18 @@ pub fn required_role(old: &Charter, new: &Charter) -> (Role, Vec<String>) {
             if changed {
                 admin.push(format!(
                     "agents.{}.tools.{} label or effect requires admin",
+                    a.name, t.name
+                ));
+            }
+        }
+        // a tool aimed at another namespace opens an edge editors may not open (design §8.3:
+        // `service` and `agent` tools "within the same namespace")
+        for t in a.tools.iter().filter(|t| t.tool_type != ToolType::Http) {
+            if let Some(s) = t.service.as_deref().filter(|s| is_qualified_peer(s))
+                && !old_remote.contains(s)
+            {
+                admin.push(format!(
+                    "agents.{}.tools.{} (service {s} in another namespace) requires admin",
                     a.name, t.name
                 ));
             }
@@ -368,6 +382,17 @@ fn non_local_callers<'a>(
             .or_insert(0) += 1;
     }
     out
+}
+
+/// The `<service>.<namespace>` targets of the `service` and `agent` tools of these agents.
+fn cross_namespace_targets(agents: &[AgentSpec]) -> BTreeSet<&str> {
+    agents
+        .iter()
+        .flat_map(|a| a.tools.iter())
+        .filter(|t| t.tool_type != ToolType::Http)
+        .filter_map(|t| t.service.as_deref())
+        .filter(|s| is_qualified_peer(s))
+        .collect()
 }
 
 /// Origins of every `http` tool of these agents.

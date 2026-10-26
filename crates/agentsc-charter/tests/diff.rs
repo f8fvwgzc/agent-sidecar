@@ -543,6 +543,18 @@ fn auto_learning_agent_type_and_new_http_origins_need_admin() {
         },
         "agents.triage.tools.partner2 (new http origin https://api.partner.example:8443) requires admin",
     );
+    // a service in another namespace is a new edge out of it: admin, like a new http origin
+    admin(
+        |c| c.agents[0].tools[0].service = Some("orders.billing".into()),
+        "agents.support.tools.get_order (service orders.billing in another namespace) requires admin",
+    );
+    // once it is there, an editor may point another tool at it
+    let mut old = v02();
+    old.agents[0].tools[0].service = Some("orders.billing".into());
+    let mut new = old.clone();
+    new.agents[0].tools[1].service = Some("orders.billing".into());
+    new.validate().unwrap();
+    assert_eq!(required_role(&old, &new), (Role::Editor, vec![]));
 }
 
 #[test]

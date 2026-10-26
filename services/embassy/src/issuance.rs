@@ -1,7 +1,7 @@
 //! `CertificateAuthority.IssueCertificate` (design §7, component `ca`).
 //!
 //! A sidecar sends a CSR and one credential; it gets a fresh workload leaf for
-//! `spiffe://agentsc/ns/<ns>/svc/<svc>` only if, in this order:
+//! `spiffe://<trust domain>/ns/<ns>/svc/<svc>` (`--trust-domain`) only if, in this order:
 //!
 //! 1. `namespace` and `service` are DNS-1123 labels and not reserved (the control-plane
 //!    namespace, the service `embassy`) — else `INVALID_ARGUMENT`;
@@ -35,7 +35,7 @@
 //! refusal is a control-plane audit record (`cert_issue` / `cert_denied`) naming the identity
 //! (`namespace`, `service`), the pod or join token, and the public key's SHA-256
 //! (`sha256_after`). The actor of an issuance follows the `sidecar:<spiffe id>/<pod>` convention
-//! of design §7 (`sidecar:spiffe://agentsc/ns/<ns>/svc/<svc>/<pod>`, or `.../join:<token name>`
+//! of design §7 (`sidecar:spiffe://<td>/ns/<ns>/svc/<svc>/<pod>`, or `.../join:<token name>`
 //! for a join token); a refusal never names the identity that was asked for but only what the
 //! credential showed: `sidecar:pod:<ns>/<pod>`, `sidecar:join:<token name>` or `sidecar:unknown`.
 //!
@@ -92,6 +92,8 @@ pub struct Issuer {
     cp_audit: Arc<CpAudit>,
     cp_namespace: String,
     kube: KubeSource,
+    /// Requests per peer address and per credential (ratelimit.rs).
+    limiter: crate::ratelimit::RateLimiter,
 }
 
 impl std::fmt::Debug for Issuer {
@@ -115,7 +117,8 @@ pub fn issuance_service(ctx: &ServeContext) -> anyhow::Result<CertificateAuthori
         ctx.cp_audit.clone(),
         ctx.args.cp_namespace.clone(),
         None,
-    );
+    )
+    .with_rate_limit(ctx.args.issuance_limit());
     Ok(issuer.into_server())
 }
 
@@ -218,6 +221,12 @@ pub fn pod_service(pod: &Pod) -> Option<String> {
 }
 
 impl Issuer {
+    /// Replace the default `IssueCertificate` rate limit (`--issuance-rate-limit`).
+    pub fn with_rate_limit(mut self, limit: crate::ratelimit::RateLimit) -> Self {
+        self.limiter = crate::ratelimit::RateLimiter::new(limit);
+        self
+    }
+
     /// `kube`: the Kubernetes API to use; `None` = the in-cluster client, created when the
     /// first Kubernetes token arrives.
     pub fn new(
@@ -238,6 +247,7 @@ impl Issuer {
                 Some(k) => KubeSource::Fixed(k),
                 None => KubeSource::Lazy(tokio::sync::OnceCell::new()),
             },
+            limiter: crate::ratelimit::RateLimiter::new(crate::ratelimit::ISSUANCE_DEFAULT),
         }
     }
 
@@ -458,6 +468,7 @@ impl Issuer {
             &crate::sidecar_images::Expected {
                 cp_namespace: &self.cp_namespace,
                 ca_roots_pem: self.ca.roots_pem(),
+                trust_domain: self.ca.trust_domain(),
             },
         );
         match images {
@@ -508,14 +519,21 @@ impl Issuer {
 
     /// The audit actor (module docs): the identity and pod (or join token) for an issuance;
     /// for a refusal only what the credential showed, never the identity asked for.
-    fn actor(namespace: &str, service: &str, who: Option<&Caller>, issued: bool) -> Actor {
+    fn actor(
+        trust_domain: &str,
+        namespace: &str,
+        service: &str,
+        who: Option<&Caller>,
+        issued: bool,
+    ) -> Actor {
         let name = match (who, issued) {
             (Some(caller), true) if is_dns_label(namespace) && is_dns_label(service) => {
                 let slot = match caller {
                     Caller::Pod { name, .. } => name.clone(),
                     Caller::Join { name } => format!("join:{name}"),
                 };
-                format!("sidecar:spiffe://agentsc/ns/{namespace}/svc/{service}/{slot}")
+                let id = agentsc_charter::spiffe_id_in(trust_domain, namespace, service);
+                format!("sidecar:{id}/{slot}")
             }
             (Some(Caller::Pod { namespace, name }), false) => {
                 format!("sidecar:pod:{namespace}/{name}")
@@ -555,7 +573,9 @@ impl Issuer {
             Ok(reason) => (CpAction::CertIssue, CpResult::Ok, reason),
             Err(d) => (CpAction::CertDenied, CpResult::Denied, d.message.clone()),
         };
-        let actor = Self::actor(&req.namespace, &req.service, who, outcome == CpResult::Ok);
+        let issued = outcome == CpResult::Ok;
+        let td = self.ca.trust_domain();
+        let actor = Self::actor(td, &req.namespace, &req.service, who, issued);
         let mut rec = CpAudit::entry(action, &actor, outcome);
         if is_dns_label(&req.namespace) {
             rec.namespace = Some(req.namespace.clone());
@@ -649,6 +669,27 @@ impl CertificateAuthority for Issuer {
         &self,
         request: Request<CertificateRequest>,
     ) -> Result<Response<CertificateResponse>, Status> {
+        // Before any work (a TokenReview, a pod read): the request's address and credential
+        // each have a budget (ratelimit.rs). A key's first refusal is audited, later ones counted.
+        let keys = crate::ratelimit::issuance_keys(request.remote_addr(), request.get_ref());
+        if let Err(l) = self.limiter.check(&keys) {
+            if l.first {
+                let d = Denial {
+                    code: Code::ResourceExhausted,
+                    message: format!(
+                        "rate limited ({}): too many certificate requests; retry in {} s",
+                        l.key,
+                        l.retry_after_secs()
+                    ),
+                    who: None,
+                };
+                self.audit(request.get_ref(), None, None, Err(&d)).await;
+            }
+            return Err(crate::ratelimit::resource_exhausted(
+                "certificate requests",
+                &l,
+            ));
+        }
         self.issue(request.into_inner()).await.map(Response::new)
     }
 }
@@ -833,6 +874,59 @@ mod tests {
             namespace: ns.into(),
             service: svc.into(),
         }
+    }
+
+    /// The audit finding: IssueCertificate had no rate limit. A credential's (and an address's)
+    /// budget runs out before any verification work; the refusal is RESOURCE_EXHAUSTED with
+    /// `retry-after`, audited once per run of refusals, and another credential is not affected.
+    #[tokio::test]
+    async fn issue_certificate_is_rate_limited_before_any_verification() {
+        let mut r = rig(vec![]);
+        r.issuer = r.issuer.with_rate_limit(crate::ratelimit::RateLimit {
+            per_minute: 1,
+            burst: 2,
+        });
+        let call = |token: &str| Request::new(k8s_request("shop", "orders", token));
+        for _ in 0..2 {
+            let e = r.issuer.issue_certificate(call("tok")).await.unwrap_err();
+            assert_ne!(e.code(), Code::ResourceExhausted, "within the burst: {e:?}");
+        }
+        for _ in 0..3 {
+            let e = r.issuer.issue_certificate(call("tok")).await.unwrap_err();
+            assert_eq!(e.code(), Code::ResourceExhausted, "{e:?}");
+            let secs: u64 = e
+                .metadata()
+                .get("retry-after")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!((1..=60).contains(&secs), "{secs}");
+        }
+        let e = r
+            .issuer
+            .issue_certificate(call("another"))
+            .await
+            .unwrap_err();
+        assert_ne!(
+            e.code(),
+            Code::ResourceExhausted,
+            "another credential has its own budget"
+        );
+
+        let mut limited = 0;
+        while let Ok(rec) = r.audit.try_recv() {
+            if rec
+                .reason
+                .as_deref()
+                .is_some_and(|x| x.starts_with("rate limited"))
+            {
+                assert_eq!(rec.action, CpAction::CertDenied);
+                limited += 1;
+            }
+        }
+        assert_eq!(limited, 1, "the first refusal is audited, the rest counted");
     }
 
     fn k8s_request(ns: &str, svc: &str, token: &str) -> CertificateRequest {
@@ -1622,11 +1716,11 @@ mod tests {
             name: "p".into(),
         };
         assert_eq!(
-            Issuer::actor("Bad NS", "x", Some(&pod), true).name,
+            Issuer::actor("agentsc", "Bad NS", "x", Some(&pod), true).name,
             "sidecar:unknown"
         );
         assert_eq!(
-            Issuer::actor("shop", "orders", None, true).name,
+            Issuer::actor("agentsc", "shop", "orders", None, true).name,
             "sidecar:unknown"
         );
     }
