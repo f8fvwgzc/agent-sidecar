@@ -92,6 +92,7 @@ async fn open_as(db: &Db, name: &str) -> Arc<PgStore> {
         ca_file: None,
         pool_size: 4,
         application_name: format!("{}-{name}", db.schema),
+        allow_plaintext: false,
     })
     .await
     .unwrap()
@@ -471,6 +472,7 @@ async fn replicas_starting_together_migrate_once_and_a_newer_schema_is_refused()
         ca_file: None,
         pool_size: 1,
         application_name: "newer".into(),
+        allow_plaintext: false,
     })
     .await
     .unwrap_err();
@@ -657,5 +659,33 @@ async fn keys_sort_bytewise_and_bad_keys_are_not_found() {
             .put_charter(&bad, &Precondition::NotExists, write(&orders_yaml()))
             .await,
         Err(StoreError::NotFound)
+    );
+}
+
+/// TLS against a real server (`AGENTSC_TEST_POSTGRES_TLS_URL`, `sslmode=require` to a name its
+/// certificate carries, and `AGENTSC_TEST_POSTGRES_TLS_CA`, the CA that signed it): verified with
+/// the CA file; refused against the system roots, which do not know that CA.
+#[tokio::test]
+async fn tls_is_verified_against_a_real_server() {
+    let (Ok(url), Ok(ca)) = (
+        std::env::var("AGENTSC_TEST_POSTGRES_TLS_URL"),
+        std::env::var("AGENTSC_TEST_POSTGRES_TLS_CA"),
+    ) else {
+        eprintln!("AGENTSC_TEST_POSTGRES_TLS_URL/_CA are not set: the TLS test did not run");
+        return;
+    };
+    let opts = |ca_file: Option<std::path::PathBuf>| PgOptions {
+        url: url.clone(),
+        ca_file,
+        pool_size: 1,
+        application_name: "tls-test".into(),
+        allow_plaintext: false,
+    };
+    let store = PgStore::open(opts(Some(ca.clone().into()))).await.unwrap();
+    assert!(store.list_services().await.is_ok());
+    let e = PgStore::open(opts(None)).await.unwrap_err().to_string();
+    assert!(
+        e.contains("certificate") || e.contains("TLS") || e.contains("tls"),
+        "{e}"
     );
 }

@@ -17,8 +17,12 @@
 //! meanwhile is not lost.
 //!
 //! **Connection.** A `postgres://` connection string (from a file or the environment, never
-//! argv: it holds a password). `sslmode=require` (or `prefer`) speaks TLS through rustls,
-//! verifying the server against the system roots or, with a CA file, only that file's.
+//! argv: it holds a password). TLS is required ([`tls_policy`]): a string without `sslmode`
+//! gets `require`, and rustls verifies the server's chain (the system roots, or with a CA file
+//! only that file's) and name, as libpq's `verify-full` does. `prefer` and `disable` can fall
+//! back to plaintext, where a man in the middle reads the password: they are refused unless
+//! every host is loopback or a Unix socket, or the operator allows plaintext explicitly
+//! (`--postgres-allow-plaintext`). SCRAM's channel binding (`tls-server-end-point`) is offered.
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -66,6 +70,8 @@ pub struct PgOptions {
     pub pool_size: usize,
     /// `application_name` of the connections (`pg_stat_activity`).
     pub application_name: String,
+    /// Allow `sslmode=prefer` or `disable` to a host that is not loopback ([`tls_policy`]).
+    pub allow_plaintext: bool,
 }
 
 impl std::fmt::Debug for PgOptions {
@@ -290,9 +296,67 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for RustlsStream<S> {
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> TlsStream for RustlsStream<S> {
+    /// `tls-server-end-point` (RFC 5929): the SHA-256 of the server's certificate, so SCRAM's
+    /// `-PLUS` binds the password exchange to this TLS session.
     fn channel_binding(&self) -> ChannelBinding {
-        ChannelBinding::none()
+        use sha2::Digest;
+        match self
+            .0
+            .get_ref()
+            .1
+            .peer_certificates()
+            .and_then(|c| c.first())
+        {
+            Some(cert) => ChannelBinding::tls_server_end_point(sha2::Sha256::digest(cert).to_vec()),
+            None => ChannelBinding::none(),
+        }
     }
+}
+
+/// The connection's TLS (module docs): an `sslmode` the string does not name becomes `require`;
+/// a mode that may fall back to plaintext is refused unless every host is loopback or a Unix
+/// socket, or `allow_plaintext`; a CA file needs `require`. `url` is only searched for the
+/// `sslmode` parameter, never echoed.
+pub fn tls_policy(
+    config: &mut tokio_postgres::Config,
+    url: &str,
+    ca_file: bool,
+    allow_plaintext: bool,
+) -> Result<(), StoreError> {
+    use tokio_postgres::config::{Host, SslMode};
+    let named = url
+        .split(['?', '&', ' '])
+        .any(|part| part.trim_start().starts_with("sslmode="));
+    if !named {
+        config.ssl_mode(SslMode::Require);
+    }
+    if config.get_ssl_mode() == SslMode::Require {
+        return Ok(());
+    }
+    if ca_file {
+        return Err(StoreError::Io(
+            "postgres: --postgres-ca-file needs sslmode=require".into(),
+        ));
+    }
+    let local = !config.get_hosts().is_empty()
+        && config.get_hosts().iter().all(|h| match h {
+            Host::Tcp(name) => {
+                name == "localhost"
+                    || name
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback())
+            }
+            #[cfg(unix)]
+            Host::Unix(_) => true,
+        });
+    if local || allow_plaintext {
+        return Ok(());
+    }
+    Err(StoreError::Io(
+        "postgres: sslmode=prefer or disable may send the password in plaintext to a host that is \
+         not loopback: use sslmode=require, or --postgres-allow-plaintext on a network you trust"
+            .into(),
+    ))
 }
 
 // ---- migrations -----------------------------------------------------------------------------
@@ -656,6 +720,12 @@ impl PgStore {
             .parse()
             .map_err(|_| StoreError::Io("postgres: the connection string is invalid".into()))?;
         config.application_name(&opts.application_name);
+        tls_policy(
+            &mut config,
+            &opts.url,
+            opts.ca_file.is_some(),
+            opts.allow_plaintext,
+        )?;
         let tls = MakeRustls::new(opts.ca_file.as_deref())?;
         let manager = Manager::from_config(
             config.clone(),
@@ -1529,7 +1599,129 @@ mod tests {
             ca_file: None,
             pool_size: 2,
             application_name: "embassy".into(),
+            allow_plaintext: false,
         };
         assert!(!format!("{opts:?}").contains("s3cret"));
+    }
+
+    fn policy(
+        url: &str,
+        ca_file: bool,
+        allow: bool,
+    ) -> Result<tokio_postgres::config::SslMode, StoreError> {
+        let mut config: tokio_postgres::Config = url.parse().unwrap();
+        tls_policy(&mut config, url, ca_file, allow).map(|()| config.get_ssl_mode())
+    }
+
+    /// The review finding: without `sslmode` tokio-postgres used `prefer`, which goes on in
+    /// plaintext when the server (or a man in the middle) declines TLS, and sends the password.
+    #[test]
+    fn tls_is_required_unless_the_server_is_local_or_plaintext_is_allowed() {
+        use tokio_postgres::config::SslMode;
+        assert_eq!(
+            policy("postgres://u:p@db.example:5432/x", false, false).unwrap(),
+            SslMode::Require
+        );
+        assert_eq!(
+            policy("host=db.example user=u password=p", false, false).unwrap(),
+            SslMode::Require
+        );
+        for url in [
+            "postgres://u:p@db.example/x?sslmode=prefer",
+            "postgres://u:p@db.example/x?sslmode=disable",
+            "postgres://u:p@10.0.0.7/x?sslmode=prefer",
+            "postgres://u:p@localhost,db.example/x?sslmode=disable",
+        ] {
+            let e = policy(url, false, false).unwrap_err().to_string();
+            assert!(e.contains("plaintext") && !e.contains(":p@"), "{url}: {e}");
+            assert!(
+                policy(url, false, true).is_ok(),
+                "{url}: allowed explicitly"
+            );
+        }
+        for url in [
+            "postgres://u@127.0.0.1:5432/x?sslmode=disable",
+            "postgres://u@localhost/x?sslmode=prefer",
+            "postgres://u@[::1]/x?sslmode=disable",
+            "host=/run/postgresql user=u sslmode=disable",
+        ] {
+            assert!(
+                policy(url, false, false).is_ok(),
+                "{url}: loopback or a Unix socket"
+            );
+        }
+        assert!(
+            policy("postgres://u@localhost/x?sslmode=disable", true, true)
+                .unwrap_err()
+                .to_string()
+                .contains("--postgres-ca-file needs sslmode=require")
+        );
+    }
+
+    /// `require` verifies the server: a certificate of an unknown CA is refused, the same with
+    /// its CA given as `--postgres-ca-file` is accepted, and a name it does not carry is refused.
+    #[tokio::test]
+    async fn the_server_certificate_is_verified() {
+        use rustls::pki_types::pem::PemObject;
+        let ca = agentsc_pki::ca_init().unwrap();
+        let ca = crate::ca::CaMaterial::from_pems(&ca.cert_pem, &ca.key_pem).unwrap();
+        let leaf = ca
+            .sign_server(
+                &["db.example".to_string()],
+                "spiffe://agentsc/db",
+                Duration::from_secs(3600),
+            )
+            .unwrap();
+        let chain = rustls::pki_types::CertificateDer::pem_slice_iter(leaf.cert_pem.as_bytes())
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let key =
+            rustls::pki_types::PrivateKeyDer::from_pem_slice(leaf.key_pem.as_bytes()).unwrap();
+        let server = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(chain, key)
+        .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    let _ = acceptor.accept(tcp).await;
+                });
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let ca_file = dir.path().join("ca.crt");
+        std::fs::write(&ca_file, ca.roots_pem()).unwrap();
+        let handshake = |mut make: MakeRustls, name: &'static str| async move {
+            let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let connect =
+                MakeTlsConnect::<tokio::net::TcpStream>::make_tls_connect(&mut make, name).unwrap();
+            connect.connect(tcp).await.map(|s| s.channel_binding())
+        };
+        let e = handshake(MakeRustls::new(None).unwrap(), "db.example")
+            .await
+            .err()
+            .expect("an unknown CA is refused");
+        assert!(
+            e.to_string().contains("UnknownIssuer")
+                || e.to_string().contains("invalid peer certificate"),
+            "{e}"
+        );
+        handshake(MakeRustls::new(Some(&ca_file)).unwrap(), "db.example")
+            .await
+            .expect("its CA, given");
+        assert!(
+            handshake(MakeRustls::new(Some(&ca_file)).unwrap(), "other.example")
+                .await
+                .is_err(),
+            "the name is verified too"
+        );
     }
 }

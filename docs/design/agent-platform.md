@@ -271,6 +271,7 @@ embassy serve
                                                   postgres: docs/design/agentsecops-merge.md §7)
   --postgres-url-file <file> | env AGENTSC_POSTGRES_URL   the connection string (never a flag value)
   --postgres-ca-file <pem>                        CA certificates for sslmode=require (default: the system roots)
+  --postgres-allow-plaintext                      allow sslmode=prefer/disable to a host that is not loopback
   --postgres-pool-size <n>                        connections per replica (8)
   --config <file>                                 ControlPlaneConfig (reloaded on change)
   --dns-name <name> (repeatable)                  serving-cert DNS SANs and allowed Host headers

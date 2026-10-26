@@ -227,6 +227,10 @@ pub struct ServeArgs {
     /// `sslmode=require`, instead of the system roots.
     #[arg(long, env = "AGENTSC_POSTGRES_CA_FILE")]
     pub postgres_ca_file: Option<PathBuf>,
+    /// `--store postgres`: allow `sslmode=prefer` or `disable` to a host that is not loopback
+    /// (the password may cross the network in plaintext): only on a network you trust.
+    #[arg(long, env = "AGENTSC_POSTGRES_ALLOW_PLAINTEXT")]
+    pub postgres_allow_plaintext: bool,
     /// `--store postgres`: connections per replica.
     #[arg(long, env = "AGENTSC_POSTGRES_POOL_SIZE", default_value_t = crate::store::postgres::DEFAULT_POOL_SIZE)]
     pub postgres_pool_size: usize,
@@ -667,6 +671,7 @@ async fn open_store(
                 ca_file: args.postgres_ca_file.clone(),
                 pool_size: args.postgres_pool_size,
                 application_name: "agentsc-embassy".into(),
+                allow_plaintext: args.postgres_allow_plaintext,
             })
             .await
             .context("--store postgres")?;

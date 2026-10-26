@@ -174,8 +174,10 @@ or many embassy replicas.
 - **Connection.** The connection string (`postgres://user:password@host:5432/db?sslmode=require`)
   comes from `--postgres-url-file` (a mounted Secret) or env `AGENTSC_POSTGRES_URL`, never a flag
   value (it holds a password, and argv is visible to every process on the host).
-  `sslmode=require` uses TLS verified against the system roots, or only against
-  `--postgres-ca-file`'s certificates when given (a private CA, a cloud provider's bundle). `--postgres-pool-size` bounds the
+  TLS is required: without `sslmode` the store uses `require`, verifying the server's chain and
+  name against the system roots, or only `--postgres-ca-file`'s certificates (a private CA, a
+  cloud provider's bundle). `prefer` and `disable` may fall back to plaintext and are refused
+  unless every host is loopback or a Unix socket, or `--postgres-allow-plaintext` is given. `--postgres-pool-size` bounds the
   connections per replica.
 - **Schema and migrations.** The same tables as SQLite (docs/adr/0003-sqlite-store-schema.md),
   in PostgreSQL types, with the same invariants as triggers: counters never go down, a stored
