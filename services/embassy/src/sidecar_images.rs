@@ -27,13 +27,23 @@
 //!   `agentscd` must run its image's entrypoint (no `command`, no `args`) and `agentsc-runtime`
 //!   exactly the injected command line ([`crate::webhook::RUNTIME_COMMAND`]): an allowed image
 //!   started with another command runs any program (the image has `python3`) as the sidecar;
+//!   and the pod must have the injected shape ([`shape_problem`]: the sidecars' env, mounts,
+//!   probes and volumes), since a pod without the injection label brings its own `agentscd`
+//!   past the injector, and every `agentscd` flag has an env form;
 //! - the chart's ValidatingAdmissionPolicy `agentsc-sidecar-integrity` applies the same image and
-//!   command rules to the pod spec (`deploy/helm/agent-sidecar/templates/sidecar-policy.yaml`).
-use k8s_openapi::api::core::v1::{Container, ContainerStatus, Pod};
+//!   command rules to the pod spec (`deploy/helm/agent-sidecar/templates/sidecar-policy.yaml`),
+//!   and refuses the sidecar containers in a pod without the label `agentsc.io/inject: "true"`,
+//!   so the injector checks every pod that has them.
+use k8s_openapi::api::core::v1::{Container, ContainerStatus, EnvVar, Pod, Probe, VolumeMount};
+use serde_json::Value;
 
 use crate::config::SidecarImagesConfig;
 use crate::names::is_sha256_hex;
-use crate::webhook::{RUNTIME_ARGS, RUNTIME_COMMAND, RUNTIME_CONTAINER, SIDECAR_CONTAINER};
+use crate::webhook::{
+    CONTROL_PLANE_PORT, READY_COMMAND, RUN_DIR, RUN_VOLUME, RUNTIME_ARGS, RUNTIME_COMMAND,
+    RUNTIME_CONTAINER, RUNTIME_TEMPLATE_ENV, SIDECAR_CONTAINER, SIDECAR_VOLUMES, STATE_DIR,
+    STATE_VOLUME, TEMPLATE_ENV_ALLOWED, TOKEN_AUDIENCE, TOKEN_DIR, TOKEN_FILE, TOKEN_VOLUME,
+};
 
 /// The container names the injector owns: a pod may not bring its own.
 pub const SIDECAR_CONTAINERS: [&str; 2] = [SIDECAR_CONTAINER, RUNTIME_CONTAINER];
@@ -118,9 +128,273 @@ fn program_problem(c: &Container) -> Option<String> {
     }
 }
 
+/// Is `p` the injected probe (exec [`READY_COMMAND`], nothing else)?
+fn is_ready_probe(p: &Probe) -> bool {
+    p.exec.as_ref().and_then(|e| e.command.as_deref()) == Some(&[READY_COMMAND.to_string()])
+        && p.http_get.is_none()
+        && p.tcp_socket.is_none()
+        && p.grpc.is_none()
+}
+
+/// Does `c` have exactly the mounts `want` (name, path), with no subPath and no propagation?
+fn mounts_are(c: &Container, want: &[(&str, &str)]) -> bool {
+    let got: Vec<&VolumeMount> = c.volume_mounts.iter().flatten().collect();
+    got.len() == want.len()
+        && want
+            .iter()
+            .all(|(n, path)| got.iter().any(|m| m.name == *n && m.mount_path == *path))
+        && got.iter().all(|m| {
+            m.sub_path.as_deref().unwrap_or_default().is_empty()
+                && m.sub_path_expr.as_deref().unwrap_or_default().is_empty()
+                && m.mount_propagation.as_deref().is_none_or(|p| p == "None")
+        })
+        && c.volume_devices.as_ref().is_none_or(Vec::is_empty)
+}
+
+/// The JSON object `v` has exactly the keys `keys`.
+fn keys_are(v: &Value, keys: &[&str]) -> bool {
+    v.as_object()
+        .is_some_and(|o| o.len() == keys.len() && keys.iter().all(|k| o.contains_key(*k)))
+}
+
+/// Is `e` one of the env entries the injector gives `agentscd` (module docs)? `fixed`: the
+/// names with one possible value.
+fn sidecar_env_ok(e: &EnvVar, fixed: &[(&str, String)]) -> bool {
+    let literal = e
+        .value_from
+        .is_none()
+        .then(|| e.value.as_deref().unwrap_or_default());
+    let from = || serde_json::to_value(e.value_from.as_ref()?).ok();
+    let name = e.name.as_str();
+    if let Some((_, want)) = fixed.iter().find(|(n, _)| *n == name) {
+        literal == Some(want.as_str())
+    } else if INJECTED_LITERAL_ENV.contains(&name) {
+        literal.is_some()
+    } else if let Some((_, path)) = INJECTED_FIELD_ENV.iter().find(|(n, _)| *n == name) {
+        e.value.is_none()
+            && from()
+                .is_some_and(|f| keys_are(&f, &["fieldRef"]) && f["fieldRef"]["fieldPath"] == *path)
+    } else if name == "ANTHROPIC_API_KEY" {
+        e.value.is_none()
+            && from().is_some_and(|f| {
+                keys_are(&f, &["secretKeyRef"]) && f["secretKeyRef"]["key"] == "ANTHROPIC_API_KEY"
+            })
+    } else {
+        TEMPLATE_ENV_ALLOWED.contains(&name)
+    }
+}
+
+/// `agentscd` env the injector sets to a literal that depends on the pod.
+const INJECTED_LITERAL_ENV: [&str; 4] = [
+    "AGENTSC_SERVICE",
+    "AGENTSC_NAMESPACE",
+    "AGENTSC_APP_PORT",
+    "AGENTSC_CA_PEM",
+];
+/// `agentscd` env the injector takes from the pod's own fields.
+const INJECTED_FIELD_ENV: [(&str, &str); 2] = [
+    ("POD_NAME", "metadata.name"),
+    ("POD_NAMESPACE", "metadata.namespace"),
+];
+
+/// How `pod` differs from what the injector makes ([`crate::webhook`] module docs), in what
+/// matters for the workload key and the program that runs; `cp_namespace`: the control plane's
+/// namespace, which the injected addresses name. A pod can bring its own `agentscd`: without
+/// the label `agentsc.io/inject` the injector never sees it, and while the injector is bypassed
+/// (`failurePolicy: Ignore`) nothing at admission may check it. Every `agentscd` flag has an env
+/// form, so the allowed image with no `command` can still keep its key in a volume the app
+/// mounts (`AGENTSC_STATE_DIR`) or start another program (`AGENTSC_RUNTIME_CMD`), and probes
+/// and lifecycle hooks run programs inside the container. So, besides the image and command line:
+///
+/// - `agentscd` has exactly the injector's env: `AGENTSC_CONTROL_PLANE`,
+///   `AGENTSC_CA_ADDRESS`, `AGENTSC_K8S_TOKEN_FILE`, `AGENTSC_STATE_DIR` and
+///   `AGENTSC_NO_RUNTIME=true` with the injected values, the pod-specific literals
+///   ([`INJECTED_LITERAL_ENV`]) and fields ([`INJECTED_FIELD_ENV`]), `ANTHROPIC_API_KEY` from
+///   a Secret's key `ANTHROPIC_API_KEY`, and the template's [`TEMPLATE_ENV_ALLOWED`];
+///   `agentsc-runtime` only the template's [`RUNTIME_TEMPLATE_ENV`]; neither has `envFrom` or
+///   lifecycle hooks, and no probe but exec [`READY_COMMAND`] (`agentscd`'s; the runtime has
+///   none);
+/// - both are present, and mount exactly the injected volumes at the injected paths
+///   (`agentscd`: [`RUN_VOLUME`], [`STATE_VOLUME`], [`TOKEN_VOLUME`]; the runtime:
+///   [`RUN_VOLUME`]), which no other container mounts;
+/// - [`RUN_VOLUME`] and [`STATE_VOLUME`] are `emptyDir`s and [`TOKEN_VOLUME`] projects only
+///   the service-account token for audience [`TOKEN_AUDIENCE`]; no other volume projects one;
+/// - no ephemeral containers, `shareProcessNamespace` or `hostPID`.
+pub fn shape_problem(pod: &Pod, cp_namespace: &str) -> Option<String> {
+    let Some(spec) = pod.spec.as_ref() else {
+        return Some("the pod has no spec".into());
+    };
+    if spec.share_process_namespace == Some(true) || spec.host_pid == Some(true) {
+        return Some(
+            "shareProcessNamespace or hostPID is set: another container could read the sidecar's \
+             memory and environment"
+                .into(),
+        );
+    }
+    if spec
+        .ephemeral_containers
+        .as_ref()
+        .is_some_and(|e| !e.is_empty())
+    {
+        return Some("the pod has ephemeral containers".into());
+    }
+    let all: Vec<&Container> = spec
+        .init_containers
+        .iter()
+        .flatten()
+        .chain(&spec.containers)
+        .collect();
+    let find = |name: &str| all.iter().copied().find(|c| c.name == name);
+    let (Some(sidecar), Some(runtime)) = (find(SIDECAR_CONTAINER), find(RUNTIME_CONTAINER)) else {
+        return Some(format!(
+            "the pod lacks the {SIDECAR_CONTAINER:?} or {RUNTIME_CONTAINER:?} container the \
+             injector adds"
+        ));
+    };
+    let fixed = [
+        (
+            "AGENTSC_CONTROL_PLANE",
+            format!("embassy.{cp_namespace}.svc:{CONTROL_PLANE_PORT}"),
+        ),
+        (
+            "AGENTSC_CA_ADDRESS",
+            format!("embassy-ca.{cp_namespace}.svc:{CONTROL_PLANE_PORT}"),
+        ),
+        ("AGENTSC_K8S_TOKEN_FILE", TOKEN_FILE.to_string()),
+        ("AGENTSC_STATE_DIR", STATE_DIR.to_string()),
+        ("AGENTSC_NO_RUNTIME", "true".to_string()),
+    ];
+    let env: Vec<&EnvVar> = sidecar.env.iter().flatten().collect();
+    if let Some(e) = env.iter().find(|e| !sidecar_env_ok(e, &fixed)) {
+        return Some(format!(
+            "container {SIDECAR_CONTAINER:?} sets env {:?}, which the injector does not set so",
+            e.name
+        ));
+    }
+    if let Some((name, want)) = fixed
+        .iter()
+        .find(|(n, _)| !env.iter().any(|e| e.name == *n))
+    {
+        return Some(format!(
+            "container {SIDECAR_CONTAINER:?} lacks env {name}={want:?}"
+        ));
+    }
+    if let Some(e) = runtime
+        .env
+        .iter()
+        .flatten()
+        .find(|e| !RUNTIME_TEMPLATE_ENV.contains(&e.name.as_str()))
+    {
+        return Some(format!(
+            "container {RUNTIME_CONTAINER:?} sets env {:?}, which the injector does not set",
+            e.name
+        ));
+    }
+    for (c, probes) in [(sidecar, true), (runtime, false)] {
+        if c.env_from.as_ref().is_some_and(|e| !e.is_empty()) {
+            return Some(format!("container {:?} sets envFrom", c.name));
+        }
+        if c.lifecycle.is_some() {
+            return Some(format!("container {:?} has lifecycle hooks", c.name));
+        }
+        let probe_ok = |p: &Option<Probe>| p.as_ref().is_none_or(|p| probes && is_ready_probe(p));
+        if !(probe_ok(&c.startup_probe)
+            && probe_ok(&c.readiness_probe)
+            && probe_ok(&c.liveness_probe))
+        {
+            return Some(format!(
+                "container {:?} has a probe other than the injected exec {READY_COMMAND:?}",
+                c.name
+            ));
+        }
+    }
+    if !mounts_are(
+        sidecar,
+        &[
+            (RUN_VOLUME, RUN_DIR),
+            (STATE_VOLUME, STATE_DIR),
+            (TOKEN_VOLUME, TOKEN_DIR),
+        ],
+    ) {
+        return Some(format!(
+            "container {SIDECAR_CONTAINER:?} must mount exactly {RUN_VOLUME} at {RUN_DIR}, \
+             {STATE_VOLUME} at {STATE_DIR} and {TOKEN_VOLUME} at {TOKEN_DIR}"
+        ));
+    }
+    if !mounts_are(runtime, &[(RUN_VOLUME, RUN_DIR)]) {
+        return Some(format!(
+            "container {RUNTIME_CONTAINER:?} must mount exactly {RUN_VOLUME} at {RUN_DIR}"
+        ));
+    }
+    let ephemeral_mounts = spec
+        .ephemeral_containers
+        .iter()
+        .flatten()
+        .flat_map(|c| c.volume_mounts.iter().flatten());
+    if let Some(m) = all
+        .iter()
+        .filter(|c| !SIDECAR_CONTAINERS.contains(&c.name.as_str()))
+        .flat_map(|c| c.volume_mounts.iter().flatten())
+        .chain(ephemeral_mounts)
+        .find(|m| SIDECAR_VOLUMES.contains(&m.name.as_str()))
+    {
+        return Some(format!(
+            "another container mounts the sidecar volume {:?}",
+            m.name
+        ));
+    }
+    let volumes: Vec<Value> = spec
+        .volumes
+        .iter()
+        .flatten()
+        .filter_map(|v| serde_json::to_value(v).ok())
+        .collect();
+    let volume = |name: &str| volumes.iter().find(|v| v["name"] == name);
+    for name in [RUN_VOLUME, STATE_VOLUME] {
+        if !volume(name).is_some_and(|v| keys_are(v, &["name", "emptyDir"])) {
+            return Some(format!("volume {name:?} must be an emptyDir"));
+        }
+    }
+    let projects_token = |v: &Value| {
+        v["projected"]["sources"].as_array().is_some_and(|s| {
+            s.iter()
+                .any(|s| s["serviceAccountToken"]["audience"] == TOKEN_AUDIENCE)
+        })
+    };
+    let token_ok = volume(TOKEN_VOLUME).is_some_and(|v| {
+        keys_are(v, &["name", "projected"])
+            && v["projected"]["sources"].as_array().is_some_and(|s| {
+                s.len() == 1
+                    && keys_are(&s[0], &["serviceAccountToken"])
+                    && s[0]["serviceAccountToken"]["audience"] == TOKEN_AUDIENCE
+                    && s[0]["serviceAccountToken"]["path"] == "token"
+            })
+    });
+    if !token_ok {
+        return Some(format!(
+            "volume {TOKEN_VOLUME:?} must project only the service-account token for audience \
+             {TOKEN_AUDIENCE:?}"
+        ));
+    }
+    if let Some(v) = volumes
+        .iter()
+        .find(|v| v["name"] != TOKEN_VOLUME && projects_token(v))
+    {
+        return Some(format!(
+            "volume {} projects a service-account token for audience {TOKEN_AUDIENCE:?}",
+            v["name"]
+        ));
+    }
+    None
+}
+
 /// `IssueCertificate`'s check of a pod's running sidecar containers (module docs); `Ok` when
-/// the allow-list is not enforced.
-pub fn check_running_pod(cfg: &SidecarImagesConfig, pod: &Pod) -> Result<(), Refusal> {
+/// the allow-list is not enforced. `cp_namespace`: the control plane's ([`shape_problem`]).
+pub fn check_running_pod(
+    cfg: &SidecarImagesConfig,
+    pod: &Pod,
+    cp_namespace: &str,
+) -> Result<(), Refusal> {
     if !cfg.enforced() {
         return Ok(());
     }
@@ -135,7 +409,11 @@ pub fn check_running_pod(cfg: &SidecarImagesConfig, pod: &Pod) -> Result<(), Ref
         .flat_map(|s| s.init_containers.iter().flatten().chain(&s.containers))
         .filter(|c| SIDECAR_CONTAINERS.contains(&c.name.as_str()))
         .collect();
-    if let Some(problem) = sidecars.iter().find_map(|c| program_problem(c)) {
+    if let Some(problem) = sidecars
+        .iter()
+        .find_map(|c| program_problem(c))
+        .or_else(|| shape_problem(pod, cp_namespace))
+    {
         return Err(Refusal::Refused(format!("pod {name}: {problem}")));
     }
     let status = pod.status.as_ref();
@@ -247,8 +525,7 @@ impl StateLog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use k8s_openapi::api::core::v1::{PodSpec, PodStatus};
-    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    use k8s_openapi::api::core::v1::PodStatus;
 
     fn d(c: char) -> String {
         format!("sha256:{}", std::iter::repeat_n(c, 64).collect::<String>())
@@ -325,20 +602,8 @@ mod tests {
         assert!(injector_image_problem(&off, Some("r/agentscd:0.2.0")).is_none());
     }
 
-    fn container(name: &str) -> Container {
-        Container {
-            name: name.into(),
-            ..Default::default()
-        }
-    }
-
-    fn runtime() -> Container {
-        Container {
-            command: Some(vec![RUNTIME_COMMAND.into()]),
-            args: Some(RUNTIME_ARGS.iter().map(|a| a.to_string()).collect()),
-            ..container(RUNTIME_CONTAINER)
-        }
-    }
+    /// The control plane's namespace in [`crate::webhook::injected_pod`].
+    const CP: &str = "agentsc-system";
 
     fn status(name: &str, image_id: &str) -> ContainerStatus {
         ContainerStatus {
@@ -348,24 +613,16 @@ mod tests {
         }
     }
 
-    fn running(init: Vec<Container>, statuses: Vec<ContainerStatus>) -> Pod {
-        Pod {
-            metadata: ObjectMeta {
-                name: Some("orders-0".into()),
-                namespace: Some("shop".into()),
-                ..Default::default()
-            },
-            spec: Some(PodSpec {
-                init_containers: Some(init),
-                containers: vec![container("app")],
-                ..Default::default()
-            }),
-            status: Some(PodStatus {
-                init_container_statuses: Some(statuses),
-                container_statuses: Some(vec![status("app", "docker.io/app@sha256:x")]),
-                ..Default::default()
-            }),
-        }
+    /// The injector's pod with images reported for `statuses`.
+    fn running(image: &str, statuses: Vec<ContainerStatus>) -> Pod {
+        let mut p =
+            crate::webhook::injected_pod("shop", "orders-0", "orders", image, Default::default());
+        p.status = Some(PodStatus {
+            init_container_statuses: Some(statuses),
+            container_statuses: Some(vec![status("app", "docker.io/app@sha256:x")]),
+            ..Default::default()
+        });
+        p
     }
 
     #[test]
@@ -374,7 +631,7 @@ mod tests {
         let on = allow(std::slice::from_ref(&a));
         let good = || {
             running(
-                vec![runtime(), container(SIDECAR_CONTAINER)],
+                &format!("ghcr.io/x/agentscd@{a}"),
                 vec![
                     status(RUNTIME_CONTAINER, &format!("ghcr.io/x/agentscd@{a}")),
                     status(
@@ -384,11 +641,11 @@ mod tests {
                 ],
             )
         };
-        assert_eq!(check_running_pod(&on, &good()), Ok(()));
+        assert_eq!(check_running_pod(&on, &good(), CP), Ok(()));
         // off: anything goes
         let mut evil = good();
         evil.status = None;
-        assert_eq!(check_running_pod(&allow(&[]), &evil), Ok(()));
+        assert_eq!(check_running_pod(&allow(&[]), &evil, CP), Ok(()));
 
         // the agentscd image is another one
         let mut p = good();
@@ -399,7 +656,7 @@ mod tests {
             .as_mut()
             .unwrap()[1]
             .image_id = format!("ghcr.io/evil/agentscd@{}", d('b'));
-        let Err(Refusal::Refused(m)) = check_running_pod(&on, &p) else {
+        let Err(Refusal::Refused(m)) = check_running_pod(&on, &p, CP) else {
             panic!()
         };
         assert!(
@@ -416,20 +673,20 @@ mod tests {
             .unwrap()[0]
             .image_id = format!("ghcr.io/evil/agentscd@{}", d('b'));
         assert!(
-            matches!(check_running_pod(&on, &p), Err(Refusal::Refused(m)) if m.contains("agentsc-runtime"))
+            matches!(check_running_pod(&on, &p, CP), Err(Refusal::Refused(m)) if m.contains("agentsc-runtime"))
         );
         // agentscd as a regular container (an explicit sidecar), reported in containerStatuses
         let mut p = good();
         let spec = p.spec.as_mut().unwrap();
-        spec.init_containers = Some(vec![]);
-        spec.containers.push(container(SIDECAR_CONTAINER));
+        let sidecar = spec.init_containers.as_mut().unwrap().remove(1);
+        spec.containers.push(sidecar);
         let st = p.status.as_mut().unwrap();
-        st.init_container_statuses = None;
+        st.init_container_statuses.as_mut().unwrap().truncate(1);
         st.container_statuses
             .as_mut()
             .unwrap()
             .push(status(SIDECAR_CONTAINER, &a));
-        assert_eq!(check_running_pod(&on, &p), Ok(()));
+        assert_eq!(check_running_pod(&on, &p, CP), Ok(()));
         // a tag-only image id names no digest
         st_set(
             &mut p,
@@ -437,7 +694,7 @@ mod tests {
             "docker-pullable://agentsc/agentscd:dev",
         );
         assert!(
-            matches!(check_running_pod(&on, &p), Err(Refusal::Refused(m)) if m.contains("names no sha256 digest"))
+            matches!(check_running_pod(&on, &p, CP), Err(Refusal::Refused(m)) if m.contains("names no sha256 digest"))
         );
         // not reported yet: retryable
         let mut p = good();
@@ -449,12 +706,12 @@ mod tests {
             .unwrap()[1]
             .image_id = String::new();
         assert!(
-            matches!(check_running_pod(&on, &p), Err(Refusal::NotReported(m)) if m.contains("has not reported"))
+            matches!(check_running_pod(&on, &p, CP), Err(Refusal::NotReported(m)) if m.contains("has not reported"))
         );
         let mut p = good();
         p.status = None;
         assert!(matches!(
-            check_running_pod(&on, &p),
+            check_running_pod(&on, &p, CP),
             Err(Refusal::NotReported(_))
         ));
 
@@ -475,7 +732,7 @@ mod tests {
             let c = init.iter_mut().find(|c| c.name == name).unwrap();
             c.command = command.map(|v| v.into_iter().map(String::from).collect());
             c.args = args.map(|v| v.into_iter().map(String::from).collect());
-            let Err(Refusal::Refused(m)) = check_running_pod(&on, &p) else {
+            let Err(Refusal::Refused(m)) = check_running_pod(&on, &p, CP) else {
                 panic!("{name}")
             };
             assert!(m.contains(name) && m.contains("must run"), "{m}");
@@ -494,5 +751,281 @@ mod tests {
                 s.image_id = image_id.into();
             }
         }
+    }
+
+    /// A weakened pod: what it does, the change, and the problem named.
+    type ShapeCase = (&'static str, fn(&mut Value), &'static str);
+
+    /// `p` changed as JSON (`initContainers[0]` is agentsc-runtime, `[1]` agentscd).
+    fn edited(p: &Pod, change: fn(&mut Value)) -> Pod {
+        let mut v = serde_json::to_value(p).unwrap();
+        change(&mut v);
+        serde_json::from_value(v).unwrap()
+    }
+
+    /// The review finding: a pod without the injection label never reaches the injector, so it
+    /// can bring its own agentscd with the allowed image and no command, and change what it does
+    /// through env (every flag has one), probes, hooks, mounts and volumes. Each is refused at
+    /// IssueCertificate; the injector's own pods pass.
+    #[test]
+    fn a_pod_supplied_sidecar_must_have_the_injected_shape() {
+        use serde_json::json;
+        let a = d('a');
+        let on = allow(std::slice::from_ref(&a));
+        let image = format!("ghcr.io/x/agentscd@{a}");
+        let good = running(
+            &image,
+            vec![
+                status(RUNTIME_CONTAINER, &image),
+                status(SIDECAR_CONTAINER, &image),
+            ],
+        );
+        assert_eq!(shape_problem(&good, CP), None);
+        // with the template's env (Helm otlp.* and injection.mockFallback)
+        let template = crate::webhook::InjectTemplate::parse(
+            r#"{"env": [{"name": "OTEL_EXPORTER_OTLP_ENDPOINT", "value": "http://otel:4317"},
+                        {"name": "AGENTSC_MOCK_FALLBACK", "value": "1"}]}"#,
+        )
+        .unwrap();
+        let templated =
+            crate::webhook::injected_pod("shop", "orders-0", "orders", &image, template);
+        assert_eq!(shape_problem(&templated, CP), None);
+        assert!(
+            shape_problem(&good, "elsewhere")
+                .unwrap()
+                .contains("AGENTSC_CONTROL_PLANE"),
+            "the addresses name the control plane's namespace"
+        );
+
+        let cases: [ShapeCase; 21] = [
+            (
+                "the key in a volume the app mounts (the review's pod)",
+                |p| {
+                    let s = &mut p["spec"];
+                    s["volumes"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"name": "loot", "emptyDir": {}}));
+                    s["containers"][0]["volumeMounts"] =
+                        json!([{"name": "loot", "mountPath": "/loot"}]);
+                    let agentscd = &mut s["initContainers"][1];
+                    agentscd["volumeMounts"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"name": "loot", "mountPath": "/loot"}));
+                    agentscd["env"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"name": "AGENTSC_STATE_DIR", "value": "/loot"}));
+                },
+                "sets env \"AGENTSC_STATE_DIR\"",
+            ),
+            (
+                "another runtime program",
+                |p| {
+                    p["spec"]["initContainers"][1]["env"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"name": "AGENTSC_RUNTIME_CMD", "value": "python3 -c x"}))
+                },
+                "sets env \"AGENTSC_RUNTIME_CMD\"",
+            ),
+            (
+                "agentscd spawns the runtime itself",
+                |p| {
+                    p["spec"]["initContainers"][1]["env"]
+                        .as_array_mut()
+                        .unwrap()
+                        .retain(|e| e["name"] != "AGENTSC_NO_RUNTIME")
+                },
+                "lacks env AGENTSC_NO_RUNTIME=\"true\"",
+            ),
+            (
+                "another control plane",
+                |p| {
+                    p["spec"]["initContainers"][1]["env"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(
+                            json!({"name": "AGENTSC_CONTROL_PLANE", "value": "evil.example:15012"}),
+                        )
+                },
+                "sets env \"AGENTSC_CONTROL_PLANE\"",
+            ),
+            (
+                "a fixed value from a ConfigMap",
+                |p| {
+                    p["spec"]["initContainers"][1]["env"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({
+                            "name": "AGENTSC_STATE_DIR",
+                            "valueFrom": {"configMapKeyRef": {"name": "x", "key": "dir"}},
+                        }))
+                },
+                "sets env \"AGENTSC_STATE_DIR\"",
+            ),
+            (
+                "the pod name from another field",
+                |p| {
+                    p["spec"]["initContainers"][1]["env"].as_array_mut().unwrap().push(json!({
+                    "name": "POD_NAME", "valueFrom": {"fieldRef": {"fieldPath": "spec.nodeName"}},
+                }))
+                },
+                "sets env \"POD_NAME\"",
+            ),
+            (
+                "envFrom",
+                |p| {
+                    p["spec"]["initContainers"][1]["envFrom"] =
+                        json!([{"configMapRef": {"name": "flags"}}])
+                },
+                "sets envFrom",
+            ),
+            (
+                "the runtime gets the key",
+                |p| {
+                    p["spec"]["initContainers"][0]["env"] = json!([{
+                        "name": "ANTHROPIC_API_KEY",
+                        "valueFrom": {"secretKeyRef": {"name": "agentsc-anthropic", "key": "ANTHROPIC_API_KEY"}},
+                    }])
+                },
+                "container \"agentsc-runtime\" sets env \"ANTHROPIC_API_KEY\"",
+            ),
+            (
+                "a liveness probe runs a program",
+                |p| {
+                    p["spec"]["initContainers"][1]["livenessProbe"] =
+                        json!({"exec": {"command": ["python3", "-c", "x"]}})
+                },
+                "container \"agentscd\" has a probe other than",
+            ),
+            (
+                "the startup probe runs another program",
+                |p| {
+                    p["spec"]["initContainers"][1]["startupProbe"]["exec"]["command"] =
+                        json!(["sh", "-c", "x"])
+                },
+                "container \"agentscd\" has a probe other than",
+            ),
+            (
+                "the runtime gets a probe",
+                |p| {
+                    p["spec"]["initContainers"][0]["readinessProbe"] =
+                        json!({"exec": {"command": [READY_COMMAND]}})
+                },
+                "container \"agentsc-runtime\" has a probe other than",
+            ),
+            (
+                "a postStart hook",
+                |p| p["spec"]["initContainers"][1]["lifecycle"] = json!({"postStart": {"exec": {"command": ["cp", "-r", "/var/lib/agentsc/state", "/run/agentsc"]}}}),
+                "container \"agentscd\" has lifecycle hooks",
+            ),
+            (
+                "agentscd mounts another volume",
+                |p| {
+                    p["spec"]["volumes"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"name": "x", "emptyDir": {}}));
+                    p["spec"]["initContainers"][1]["volumeMounts"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"name": "x", "mountPath": "/x"}));
+                },
+                "container \"agentscd\" must mount exactly",
+            ),
+            (
+                "the state at another path",
+                |p| {
+                    p["spec"]["initContainers"][1]["volumeMounts"][1]["mountPath"] =
+                        json!("/run/agentsc/state")
+                },
+                "container \"agentscd\" must mount exactly",
+            ),
+            (
+                "the runtime mounts the state",
+                |p| {
+                    p["spec"]["initContainers"][0]["volumeMounts"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"name": "agentsc-state", "mountPath": "/s"}))
+                },
+                "container \"agentsc-runtime\" must mount exactly",
+            ),
+            (
+                "the app mounts the state",
+                |p| {
+                    p["spec"]["containers"][0]["volumeMounts"] =
+                        json!([{"name": "agentsc-state", "mountPath": "/s"}])
+                },
+                "another container mounts the sidecar volume \"agentsc-state\"",
+            ),
+            (
+                "the state on the node",
+                |p| {
+                    p["spec"]["volumes"][1] =
+                        json!({"name": "agentsc-state", "hostPath": {"path": "/tmp/loot"}})
+                },
+                "volume \"agentsc-state\" must be an emptyDir",
+            ),
+            (
+                "the token volume carries more",
+                |p| {
+                    p["spec"]["volumes"][2]["projected"]["sources"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"configMap": {"name": "x"}}))
+                },
+                "volume \"agentsc-token\" must project only",
+            ),
+            (
+                "the app gets an agentsc token of its own",
+                |p| {
+                    p["spec"]["volumes"].as_array_mut().unwrap().push(json!({
+                    "name": "mine",
+                    "projected": {"sources": [{"serviceAccountToken": {"audience": "agentsc", "path": "t"}}]},
+                }))
+                },
+                "volume \"mine\" projects a service-account token",
+            ),
+            (
+                "no runtime container (agentscd spawns one)",
+                |p| {
+                    p["spec"]["initContainers"]
+                        .as_array_mut()
+                        .unwrap()
+                        .remove(0);
+                },
+                "lacks the \"agentscd\" or \"agentsc-runtime\" container",
+            ),
+            (
+                "shareProcessNamespace",
+                |p| p["spec"]["shareProcessNamespace"] = json!(true),
+                "shareProcessNamespace or hostPID",
+            ),
+        ];
+        for (case, change, want) in cases {
+            let p = edited(&good, change);
+            let problem = shape_problem(&p, CP).unwrap_or_else(|| panic!("{case}: no problem"));
+            assert!(problem.contains(want), "{case}: {problem}");
+            // IssueCertificate refuses it, while the allow-list is on
+            let Err(Refusal::Refused(m)) = check_running_pod(&on, &p, CP) else {
+                panic!("{case}")
+            };
+            assert!(
+                m.starts_with("pod shop/orders-0: ") && m.contains(want),
+                "{case}: {m}"
+            );
+            assert_eq!(check_running_pod(&allow(&[]), &p, CP), Ok(()), "{case}");
+        }
+        let debug = edited(&good, |p| {
+            p["spec"]["ephemeralContainers"] = json!([{"name": "debugger", "image": "busybox"}]);
+        });
+        assert!(
+            shape_problem(&debug, CP)
+                .unwrap()
+                .contains("ephemeral containers")
+        );
     }
 }

@@ -887,6 +887,7 @@ HOST_PID_RULE = "hostPID must not be true"
 VOLUME_RULE = "only the agentscd and agentsc-runtime containers may mount the sidecar volumes"
 RUNTIME_MOUNT_RULE = "agentsc-runtime may mount only agentsc-run"
 TOKEN_RULE = "only the volume agentsc-token may project a service-account token"
+LABEL_RULE = "only the injector adds the agentscd and agentsc-runtime containers"
 
 
 def injected_pod(image: str) -> dict:
@@ -1103,6 +1104,46 @@ def test_a_bypassed_injector_cannot_bring_its_own_sidecar(enforced: Policy) -> N
     # an allowed image with a command of its own
     own["spec"]["containers"][1].update(image=f"r@{D1}", command=["python3", "-c", "..."])
     assert [m for m in enforced.admit(own) if PROGRAM_RULE in m]
+
+
+@needs_helm
+def test_a_pod_without_the_injection_label_cannot_bring_a_sidecar(enforced: Policy, unenforced: Policy) -> None:
+    """The review's pod: no injection label, so the injector never sees it; an agentscd with the
+    allowed image and no command, which keeps the workload key in a volume the app mounts."""
+    loot = {"name": "loot", "mountPath": "/loot"}
+    pod = {
+        "metadata": {"labels": {"app": "orders"}},
+        "spec": {
+            "serviceAccountName": "orders",
+            "containers": [
+                {"name": "app", "image": "orders:1", "volumeMounts": [loot]},
+                {
+                    "name": "agentscd",
+                    "image": f"ghcr.io/f8fvwgzc/agent-sidecar/agentscd@{D1}",
+                    "env": [
+                        {"name": "AGENTSC_SERVICE", "value": "orders"},
+                        {"name": "AGENTSC_STATE_DIR", "value": "/loot"},
+                    ],
+                    "volumeMounts": [loot, {"name": "agentsc-token", "mountPath": "/var/run/secrets/agentsc"}],
+                },
+            ],
+            "volumes": [
+                {"name": "loot", "emptyDir": {}},
+                {
+                    "name": "agentsc-token",
+                    "projected": {"sources": [{"serviceAccountToken": {"audience": "agentsc", "path": "token"}}]},
+                },
+            ],
+        },
+    }
+    for policy in (enforced, unenforced):
+        [failed] = policy.admit(pod)
+        assert LABEL_RULE in failed
+    # the injector's own pods are labelled, and so is a runtime container alone
+    runtime_only = changed(pod, lambda p: p["spec"]["containers"][1].update(name="agentsc-runtime"))
+    assert [m for m in enforced.admit(runtime_only) if LABEL_RULE in m]
+    # the label is checked on CREATE only (it may be removed later; the containers cannot change)
+    assert enforced.admit(pod, "UPDATE", pod) == []
 
 
 @needs_helm

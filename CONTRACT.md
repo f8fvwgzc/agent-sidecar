@@ -91,7 +91,7 @@ Flags / environment of `agentscd` (flag wins over env):
 | `--anthropic-api-key-file` | `AGENTSC_ANTHROPIC_API_KEY_FILE` | unset. The Anthropic API key, read by the sidecar's model gateway only (§4.4) |
 | —                 | `ANTHROPIC_API_KEY`      | the same key as text (env only, never a flag). Neither set → the gateway has no provider, and an agent whose `model` is not `mock` is refused (`FAILED_PRECONDITION`), unless `AGENTSC_MOCK_FALLBACK=1`. The runtime the sidecar starts never gets either, nor `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY` or `AGENTSC_APP_TOKEN` |
 | `--anthropic-base-url` | `AGENTSC_ANTHROPIC_BASE_URL` | `https://api.anthropic.com` |
-| —                 | `AGENTSC_MOCK_FALLBACK`  | unset. `1` = when the sidecar holds no key, every agent runs on the `mock` model (demos, CI); the runtime the sidecar starts inherits it |
+| —                 | `AGENTSC_MOCK_FALLBACK`  | unset. `1` = when the sidecar holds no key, every agent runs on the `mock` model (demos, CI); the runtime the sidecar starts inherits it (an injected pod's `agentsc-runtime` container gets it from the injector's template, Helm `injection.mockFallback`) |
 
 ## 3. `charter.yaml`
 
@@ -967,7 +967,12 @@ the values it remembered for open requests and its subscribers are unaffected.
     are injected, IssueCertificate and every renewal refuse pods whose
     running sidecar `imageID` is not allowed, and the ValidatingAdmissionPolicy
     `agentsc-sidecar-integrity` (Kubernetes 1.30+) refuses such pods, sidecar
-    image changes and ephemeral containers.
+    image changes and ephemeral containers;
+  - with the allow-list on, IssueCertificate also refuses a pod whose sidecars
+    differ from the injected shape (`agentscd` env, `envFrom`, lifecycle hooks,
+    probes, mounts, volume types, a missing `agentsc-runtime`), and the policy
+    refuses sidecar containers in pods without the label
+    `agentsc.io/inject: "true"`, so the injector checks every pod that has them.
 
 ## 8. CLI
 
