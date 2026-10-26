@@ -22,6 +22,7 @@
 //! | [`k8s`] | B3b | the Kubernetes store, caBundle reconcile |
 //! | [`issuance`] | B3b | `IssueCertificate` (§7) |
 //! | [`webhook`] | B3b | mutating and validating admission (§13) |
+//! | [`sidecar_images`] | B3b | the sidecar image allow-list the injector and the CA apply (§13) |
 //! | [`servingcert`] | B3b | the control-plane serving certificate (§7) |
 //! | [`token`] | A2 | `embassy token create` |
 //! | [`names`] | A2 | DNS-1123 names and hex checks shared by the modules above |
@@ -42,6 +43,7 @@ pub mod names;
 pub mod registry;
 pub mod serve;
 pub mod servingcert;
+pub mod sidecar_images;
 pub mod store;
 pub mod token;
 pub mod traces;

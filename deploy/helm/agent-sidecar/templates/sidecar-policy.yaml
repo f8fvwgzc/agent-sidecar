@@ -1,0 +1,183 @@
+{{- if .Capabilities.APIVersions.Has "admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy" }}
+{{- $digests := include "agent-sidecar.sidecarImageDigests" . | fromJsonArray }}
+{{- /*
+agentsc-sidecar-integrity (design §13): the API server's own check of every agent pod, after all
+mutating webhooks, so it holds when the injector was bypassed (failurePolicy Ignore while
+embassy-ca was down, or a pod outside the injector's selectors). Rendered only when the cluster
+serves admissionregistration.k8s.io/v1 ValidatingAdmissionPolicy (Kubernetes 1.30+); on 1.29 the
+injector and IssueCertificate apply the same rules on their own.
+
+Which pods: those labelled agentsc.io/inject: "true" (the injector's object selector) and those
+with a container named agentscd or agentsc-runtime, in every namespace but kube-system and the
+release namespace (the injector's exclusions). The injector also needs the namespace label
+agentsc.io/injection=enabled; this policy does not, so a pod that brings its own sidecar in a
+namespace without injection is checked too.
+
+What it refuses (the sidecar containers are agentscd and agentsc-runtime):
+- on CREATE, a sidecar container in a pod without the label agentsc.io/inject: "true": only the
+  injector adds them, and only for labelled pods, so a pod that writes its own agentscd (the
+  allowed image, but env, mounts or probes of its own) is never checked by the injector;
+  IssueCertificate also refuses any pod whose sidecars differ from the injected shape;
+- on CREATE, a sidecar image that is not pinned to an allowed digest (only with the allow-list on,
+  ControlPlaneConfig sidecar_images.allowed_digests, the same list embassy-ca applies);
+- on CREATE, a sidecar container running another program than the injector gives it (agentscd:
+  its image's entrypoint; agentsc-runtime: agentsc-runtime with the two socket flags): an allowed
+  image started with another command runs any program as the sidecar;
+- on UPDATE, a changed image of a sidecar container (container images are the one mutable part of
+  a pod's containers);
+- ephemeral containers (pods/ephemeralcontainers, kubectl debug);
+- shareProcessNamespace: true and hostPID: true (another process could read the sidecar's memory
+  and /proc/<pid>/environ, which holds the provider API key);
+- hostAliases, dnsPolicy: None, and dnsConfig nameservers or searches (the sidecar's
+  control-plane addresses could resolve to another container, which would get its token);
+- any other container mounting the sidecar's volumes (agentsc-run: the Unix sockets,
+  agentsc-state: the workload key, agentsc-token: the IssueCertificate credential), and
+  agentsc-runtime mounting anything but agentsc-run;
+- a projected service-account token for audience agentsc in any volume but agentsc-token.
+The spec checks run on CREATE only (those fields cannot change later), so pods admitted before the
+policy existed can still be labelled, patched and deleted.
+*/}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: agentsc-sidecar-integrity
+  labels:
+    {{- include "agent-sidecar.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods", "pods/ephemeralcontainers"]
+  matchConditions:
+    - name: agent-pod
+      expression: >-
+        (has(object.metadata.labels) && 'agentsc.io/inject' in object.metadata.labels &&
+        object.metadata.labels['agentsc.io/inject'] == 'true') ||
+        object.spec.containers.exists(c, c.name in ['agentscd', 'agentsc-runtime']) ||
+        (has(object.spec.initContainers) &&
+        object.spec.initContainers.exists(c, c.name in ['agentscd', 'agentsc-runtime']))
+  variables:
+    - name: containers
+      expression: >-
+        object.spec.containers +
+        (has(object.spec.initContainers) ? object.spec.initContainers : [])
+    - name: sidecars
+      expression: >-
+        variables.containers.filter(c, c.name in ['agentscd', 'agentsc-runtime'])
+    - name: others
+      expression: >-
+        variables.containers.filter(c, !(c.name in ['agentscd', 'agentsc-runtime']))
+    {{- if $digests }}
+    - name: allowedDigests
+      expression: {{ $digests | toJson | quote }}
+    {{- end }}
+  validations:
+    - expression: >-
+        request.operation != 'CREATE' || size(variables.sidecars) == 0 ||
+        (has(object.metadata.labels) && 'agentsc.io/inject' in object.metadata.labels &&
+        object.metadata.labels['agentsc.io/inject'] == 'true')
+      message: >-
+        only the injector adds the agentscd and agentsc-runtime containers: a pod with either
+        must carry the label agentsc.io/inject: "true", so the injector checks it
+      reason: Forbidden
+    {{- if $digests }}
+    - expression: >-
+        request.operation != 'CREATE' ||
+        variables.sidecars.all(c, has(c.image) &&
+        variables.allowedDigests.exists(d, c.image.endsWith('@' + d)))
+      message: >-
+        the agentscd and agentsc-runtime containers must run an image pinned to a digest in the
+        sidecar image allow-list (<repository>@sha256:<hex>; Helm values images.agentscd.digest and
+        injection.allowedImageDigests)
+      reason: Forbidden
+    {{- end }}
+    - expression: >-
+        request.operation != 'CREATE' ||
+        variables.sidecars.all(c, c.name == 'agentsc-runtime'
+        ? (has(c.command) && c.command == ['agentsc-runtime'] && has(c.args) &&
+        c.args == ['--listen', 'unix:/run/agentsc/runtime.sock', '--sidecar', 'unix:/run/agentsc/sidecar.sock'])
+        : ((!has(c.command) || size(c.command) == 0) && (!has(c.args) || size(c.args) == 0)))
+      message: >-
+        agentscd must run its image's entrypoint (no command or args) and agentsc-runtime exactly
+        `agentsc-runtime --listen unix:/run/agentsc/runtime.sock --sidecar
+        unix:/run/agentsc/sidecar.sock`
+      reason: Forbidden
+    - expression: >-
+        request.operation != 'UPDATE' ||
+        (oldObject.spec.containers + (has(oldObject.spec.initContainers) ? oldObject.spec.initContainers : [])).filter(o,
+        o.name in ['agentscd', 'agentsc-runtime']).all(o,
+        variables.sidecars.exists(c, c.name == o.name && c.image == o.image))
+      message: the image of the agentscd and agentsc-runtime containers cannot be changed
+      reason: Forbidden
+    - expression: request.subResource != 'ephemeralcontainers'
+      message: >-
+        ephemeral containers cannot be added to agentsc pods: a debug container could read the
+        sidecar's memory, sockets and keys
+      reason: Forbidden
+    - expression: >-
+        request.operation != 'CREATE' ||
+        !has(object.spec.shareProcessNamespace) || !object.spec.shareProcessNamespace
+      message: >-
+        shareProcessNamespace must not be true in agentsc pods: the other containers could read
+        the sidecar's environment (its API key)
+      reason: Forbidden
+    - expression: >-
+        request.operation != 'CREATE' || !has(object.spec.hostPID) || !object.spec.hostPID
+      message: hostPID must not be true in agentsc pods
+      reason: Forbidden
+    - expression: >-
+        request.operation != 'CREATE' ||
+        ((!has(object.spec.hostAliases) || size(object.spec.hostAliases) == 0) &&
+        (!has(object.spec.dnsPolicy) || object.spec.dnsPolicy != 'None') &&
+        (!has(object.spec.dnsConfig) ||
+        ((!has(object.spec.dnsConfig.nameservers) || size(object.spec.dnsConfig.nameservers) == 0) &&
+        (!has(object.spec.dnsConfig.searches) || size(object.spec.dnsConfig.searches) == 0))))
+      message: >-
+        agentsc pods may not set hostAliases, dnsPolicy None, or dnsConfig nameservers or searches:
+        the sidecar's control-plane addresses could resolve to another container
+      reason: Forbidden
+    - expression: >-
+        request.operation != 'CREATE' ||
+        variables.others.all(c, !has(c.volumeMounts) ||
+        c.volumeMounts.all(m, !(m.name in ['agentsc-run', 'agentsc-state', 'agentsc-token'])))
+      message: >-
+        only the agentscd and agentsc-runtime containers may mount the sidecar volumes
+        agentsc-run, agentsc-state and agentsc-token
+      reason: Forbidden
+    - expression: >-
+        request.operation != 'CREATE' ||
+        variables.sidecars.filter(c, c.name == 'agentsc-runtime').all(c,
+        !has(c.volumeMounts) || c.volumeMounts.all(m, m.name == 'agentsc-run'))
+      message: >-
+        agentsc-runtime may mount only agentsc-run (the sockets): the workload key and the token
+        are agentscd's
+      reason: Forbidden
+    - expression: >-
+        request.operation != 'CREATE' || !has(object.spec.volumes) ||
+        object.spec.volumes.all(v, v.name == 'agentsc-token' || !has(v.projected) ||
+        !has(v.projected.sources) || v.projected.sources.all(s, !has(s.serviceAccountToken) ||
+        !has(s.serviceAccountToken.audience) || s.serviceAccountToken.audience != 'agentsc'))
+      message: >-
+        only the volume agentsc-token may project a service-account token for audience agentsc
+        (the IssueCertificate credential)
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: agentsc-sidecar-integrity
+  labels:
+    {{- include "agent-sidecar.labels" . | nindent 4 }}
+spec:
+  policyName: agentsc-sidecar-integrity
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values: ["kube-system", {{ .Release.Namespace | quote }}]
+{{- end }}

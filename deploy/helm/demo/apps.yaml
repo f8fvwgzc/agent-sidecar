@@ -1,5 +1,6 @@
-# The v0.2 demo apps for `make demo-helm`. No sidecar container here: the pod label
-# agentsc.io/inject: "true" makes the agent-sidecar webhook add the agentscd native sidecar, the
+# The v0.2 demo apps for `make demo-helm`. No sidecar container here (the webhook refuses a pod that
+# brings its own): the pod label agentsc.io/inject: "true" makes the agent-sidecar webhook add the
+# agentsc-runtime and agentscd native sidecars, the
 # annotations name the service and app port, and the charters come from the Charter resources
 # (agentsc charter to-cr examples/charters/<svc>.charter.yaml). Each pod runs as a service account
 # named like its service, which is what IssueCertificate accepts without service.service_accounts.

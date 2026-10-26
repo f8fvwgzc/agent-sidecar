@@ -6,6 +6,7 @@ images:
   agentscd:
     repository: registry.example/agentsc/agentscd
     tag: 0.2.0-rc.1
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000002
     pullPolicy: Always
 imagePullSecrets:
   - name: registry-example
@@ -43,6 +44,9 @@ otlp:
   endpointAllow: ["http://otel-collector.*:4318", "https://otlp.example"]
 injection:
   failurePolicy: Ignore
+  # the previous release's sidecar, still running during an upgrade
+  allowedImageDigests:
+    - sha256:0000000000000000000000000000000000000000000000000000000000000003
 embassyCa:
   replicas: 3
   antiAffinity: hard

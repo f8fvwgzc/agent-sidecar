@@ -85,6 +85,24 @@ embassy-ca.<ns>.svc:15012).
 {{- toJson $t -}}
 {{- end -}}
 
+{{/*
+The sidecar image allow-list as a JSON list (ControlPlaneConfig sidecar_images.allowed_digests and
+the ValidatingAdmissionPolicy): images.agentscd.digest, when the injector image is pinned by
+digest, then injection.allowedImageDigests. Empty: not enforced (development builds). With digests
+listed, the injector injects only images pinned to one of them, so the injector image must be
+pinned too.
+*/}}
+{{- define "agent-sidecar.sidecarImageDigests" -}}
+{{- $digests := list -}}
+{{- with .Values.images.agentscd.digest -}}
+{{- $digests = append $digests . -}}
+{{- end -}}
+{{- if and .Values.injection.allowedImageDigests (not .Values.images.agentscd.digest) -}}
+{{- fail "injection.allowedImageDigests needs images.agentscd.digest: with the sidecar image allow-list on, the injector injects only an image pinned to an allowed digest" -}}
+{{- end -}}
+{{- concat $digests .Values.injection.allowedImageDigests | uniq | toJson -}}
+{{- end -}}
+
 {{/* The DNS names of a Service: pass (dict "root" $ "service" "embassy"). */}}
 {{- define "agent-sidecar.serviceDNSNames" -}}
 {{- $ns := .root.Release.Namespace -}}
@@ -93,7 +111,7 @@ embassy-ca.<ns>.svc:15012).
 
 {{/*
 The ControlPlaneConfig (design §8.2). Tokens carry SHA-256 only (values.schema.json refuses any
-other field).
+other field). embassy-ca applies sidecar_images; embassy reads the same file and ignores it.
 */}}
 {{- define "agent-sidecar.controlPlaneConfig" -}}
 {{- $tokens := list -}}
@@ -115,6 +133,7 @@ other field).
     "kubernetes" .Values.issuance.kubernetes
     "workload_cert_ttl" .Values.issuance.workloadCertTTL
     "join_tokens" $joinTokens)
+  "sidecar_images" (dict "allowed_digests" (include "agent-sidecar.sidecarImageDigests" . | fromJsonArray))
   "events" (dict "retain_bytes" (int64 .Values.events.retainBytes))
 -}}
 {{- if .Values.policy -}}

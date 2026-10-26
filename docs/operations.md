@@ -26,6 +26,8 @@ The `agentscd` container writes three kinds of lines.
 
 The runtime is a child process of the sidecar. The sidecar reads the runtime's stdout and stderr. It writes every line to its own stderr with the prefix `[runtime] `. So stdout carries audit records only.
 
+In pods injected by the Helm chart the runtime is a container of its own, `agentsc-runtime` (so that it cannot read the sidecar's API key). Its lines are in `kubectl logs -c agentsc-runtime`, without the prefix, and `-c agentscd` has the audit records and sidecar logs only.
+
 Kubernetes keeps stdout and stderr of a container in one log. So `kubectl logs -c agentscd` shows all three streams mixed together. `agentsc logs` keeps only the lines that parse as audit records.
 
 ```mermaid
@@ -502,7 +504,7 @@ The sidecar supervises the runtime:
 - If `--runtime-cmd` is empty or cannot be split into words, the sidecar logs `invalid --runtime-cmd` and never starts a runtime. The pod never becomes ready.
 - The sidecar checks `Health` every 10 seconds while the runtime is healthy, and every second while it is not.
 - While the runtime is down, `/readyz` returns 503 and invocations fail with `502 runtime.unavailable`.
-- With `--no-runtime` (or `AGENTSC_NO_RUNTIME=1`), the sidecar starts no runtime. Something else must serve `runtime.sock`. Readiness still follows its `Health` answer.
+- With `--no-runtime` (or `AGENTSC_NO_RUNTIME=1`), the sidecar starts no runtime. Something else must serve `runtime.sock`. Readiness still follows its `Health` answer. Pods injected by the Helm chart run this way: the runtime is the native sidecar container `agentsc-runtime`, and the kubelet restarts it (`kubectl describe pod` shows its restarts, `kubectl logs -c agentsc-runtime --previous` its last run).
 
 Log lines to look for:
 
@@ -722,11 +724,13 @@ With `readOnlyRootFilesystem: true`, `/run/agentsc` is already an `emptyDir` in 
 
 - Create the Secret from a secret manager, for example External Secrets Operator, Vault, Sealed Secrets or your cloud's secret store.
 - Set `optional: false`, so that with a missing Secret the `agentscd` container does not start, instead of falling back to the mock.
-- The key is an environment variable of the `agentscd` container. The sidecar and the runtime can read it. The app container cannot.
+- The key is an environment variable of the `agentscd` container. In the explicit-sidecar manifests the sidecar and the runtime can read it (the runtime is its child process). In pods injected by the Helm chart the runtime runs in its own container, `agentsc-runtime`, without the key. The app container cannot read it either way.
 - To rotate the key, update the Secret and restart the pods. Environment variables are read at start.
 - Protect the CA too. The CA private key is in the Secret `agentsc-ca`, in the same namespace. Anyone who can read it can issue identities. Limit who can `get` Secrets. The shipped `embassy` Role can get, create and update every Secret in its namespace. You can narrow `get` and `update` with `resourceNames`. Kubernetes cannot narrow `create` that way.
 
 **6. Pin image tags.** Shipped: the images are `agentsc/agentscd:dev`, `agentsc/embassy:dev`, `agentsc/orders:dev` and `agentsc/inventory:dev`. They are built locally into minikube's Docker, with `imagePullPolicy: IfNotPresent`. No images are published. For production, build in CI, push to your registry, and use a unique tag or a digest for each build. `docker/Dockerfile` pins its base images by tag (`rust:1.99-bookworm`, `python:3.12-slim-bookworm`, `ghcr.io/astral-sh/uv:0.10.12`, `debian:bookworm-slim`). Pin them by digest for repeatable builds.
+
+With the Helm chart, **turn the sidecar image allow-list on**: set `images.agentscd.digest` to the digest of the release's `agentscd` image (the release asset `IMAGE_DIGESTS`, or the `Digest:` line of `docker buildx imagetools inspect ghcr.io/f8fvwgzc/agent-sidecar/agentscd:<version>`). Without a digest the list (`sidecar_images.allowed_digests` in the ControlPlaneConfig) is empty and not enforced: any image may run as the sidecar, and embassy-ca logs `SIDECAR IMAGE ALLOW-LIST IS OFF` at start-up. With it, the injector injects only allowed digests, IssueCertificate refuses certificates (first ones and renewals) to pods whose running sidecar image is not allowed, and the chart's ValidatingAdmissionPolicy `agentsc-sidecar-integrity` refuses such pods. During an upgrade keep the previous digest in `injection.allowedImageDigests` until every pod has been replaced. The chart README's "Sidecar integrity" section has the details.
 
 **7. Review charters in CI.** There is no CI config in the repo. Validate every charter in every pull request. `agentsc charter validate` exits 1 and prints the errors:
 
@@ -768,7 +772,7 @@ These are true for the current code. "Not built yet" means there is no code for 
 3. **One CA per namespace.** The bootstrap Job looks up the CA Secret `agentsc-ca` in its own namespace (the one in `--namespace`, where it also writes the certificates). So each namespace gets its own CA. Mesh calls across namespaces are not supported out of the box.
 4. **Budgets are in memory per replica.** They are not shared between replicas, and they reset on restart.
 5. **Model calls go through the sidecar's gateway** (CONTRACT.md §4.4). The sidecar holds `ANTHROPIC_API_KEY`, binds each call to a run, enforces `max_tokens_per_call`, `max_steps` and the daily cost budget itself, and counts the usage the provider reports. The runtime's own figures are never used. The `mock` model runs inside the runtime and costs nothing.
-6. **The runtime runs in the sidecar's container** in these explicit-sidecar manifests. It is a child process of `agentscd`, started without the provider key (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `AGENTSC_APP_TOKEN` are removed from its environment). It still shares the container's user, filesystem, resource limits and network, so a compromised runtime process could read the sidecar's memory or `/proc/<pid>/environ`; running it in its own container closes that.
+6. **The runtime runs in the sidecar's container** in these explicit-sidecar manifests. It is a child process of `agentscd`, started without the provider key (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `AGENTSC_APP_TOKEN` are removed from its environment). It still shares the container's user, filesystem, resource limits and network, so a compromised runtime process could read the sidecar's memory or `/proc/<pid>/environ`. The Helm chart's injector instead runs it as its own native sidecar, `agentsc-runtime`, which shares only the socket directory and the pod's network with `agentscd` and has no key; its model calls reach the provider through the gateway's socket in that directory.
 7. **`pii_redact` has a narrow scope.** It applies to the agent's final output and to audit records. It does not apply to prompts and tool results sent to the model provider. With a real model, data such as the demo's warehouse email reaches the provider. It finds only emails and phone numbers.
 8. **Configuration is read once.** The charter, the TLS files and `ANTHROPIC_API_KEY` are read at startup. A ConfigMap or Secret change needs a pod restart.
 9. **Refusal fallbacks are not enabled.** A model refusal is returned as `model.refusal`.

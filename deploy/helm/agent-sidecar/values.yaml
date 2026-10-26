@@ -15,8 +15,10 @@ images:
     tag: ""          # default: the chart's appVersion
     digest: ""       # sha256:<64 hex>; wins over tag
     pullPolicy: IfNotPresent
-  # The image the injector adds to labelled pods as the `agentscd` native sidecar
-  # (embassy-ca --injector-image; a pod may override it with annotation agentsc.io/sidecar-image).
+  # The image the injector adds to labelled pods as the `agentscd` and `agentsc-runtime` native
+  # sidecars (embassy-ca --injector-image; a pod may name another with annotation
+  # agentsc.io/sidecar-image). Production: set `digest` (it turns the sidecar image allow-list on
+  # and is allowed automatically, see injection.allowedImageDigests).
   agentscd:
     repository: ghcr.io/f8fvwgzc/agent-sidecar/agentscd
     tag: ""
@@ -91,12 +93,23 @@ otlp:
   # are refused.
   endpointAllow: []
 
-# Defaults for the injected `agentscd` native sidecar. resources, securityContext (and
-# images.agentscd.pullPolicy) reach the injector as embassy-ca's AGENTSC_INJECT_TEMPLATE (README.md).
+# Defaults for the injected native sidecars, `agentscd` and the agent runtime `agentsc-runtime`.
+# resources, securityContext (and images.agentscd.pullPolicy) reach the injector as embassy-ca's
+# AGENTSC_INJECT_TEMPLATE (README.md) and apply to both containers.
 injection:
   # failurePolicy of the mutating webhook. Fail: pods in labelled namespaces are not created while
   # embassy-ca is unavailable (never unprotected). Ignore: they start without a sidecar.
   failurePolicy: Fail
+  # The sidecar image allow-list (ControlPlaneConfig sidecar_images.allowed_digests): digests
+  # (sha256:<64 hex>) of signed sidecar images, the release workflow's (docker buildx imagetools
+  # inspect ghcr.io/f8fvwgzc/agent-sidecar/agentscd:<version>). images.agentscd.digest is always
+  # allowed when set; list here the digests pods still run during an upgrade (the previous
+  # release's) and any you name with agentsc.io/sidecar-image. With at least one digest the list
+  # is enforced: the injector injects only images pinned to an allowed digest, IssueCertificate
+  # refuses pods whose running sidecar images are not allowed, and the ValidatingAdmissionPolicy
+  # refuses such pods. Empty (and no images.agentscd.digest): NOT enforced, for development builds
+  # without a registry digest (minikube); embassy-ca warns at start-up. Turn it on in production.
+  allowedImageDigests: []
   # Without ANTHROPIC_API_KEY an agent whose model is not `mock` is refused. true: it runs on the
   # deterministic mock instead (AGENTSC_MOCK_FALLBACK=1; demos only, never production).
   mockFallback: false

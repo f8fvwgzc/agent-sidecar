@@ -88,10 +88,11 @@ for svc in orders inventory; do
   IFS='|' read -r -a inits <<<"$pods"
   [[ ${#inits[@]} -gt 0 ]] || { echo "✗ no $svc pod" >&2; exit 1; }
   for init in "${inits[@]}"; do
-    [[ " $init " == *" agentscd "* ]] || { echo "✗ a $svc pod was not injected (init containers: ${init:-none})" >&2; exit 1; }
+    # the runtime first: agentscd's startup probe waits for its Health
+    [[ " $init " == *" agentsc-runtime agentscd "* ]] || { echo "✗ a $svc pod was not injected (init containers: ${init:-none})" >&2; exit 1; }
   done
 done
-echo "✓ both pods run the injected agentscd sidecar"
+echo "✓ both pods run the injected agentsc-runtime and agentscd sidecars"
 
 # Ready pods are not yet reachable through their Service for a moment after a rollout: wait until
 # the orders sidecar can open inventory's mesh port before the first cross-service call.

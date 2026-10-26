@@ -3,34 +3,61 @@
 //! and out.
 //!
 //! **`/mutate`** (`agentsc-sidecar-injector`, pods labelled `agentsc.io/inject: "true"`): adds
-//! the `agentscd` native sidecar (an init container with `restartPolicy: Always` and a
-//! `startupProbe` on the sidecar's `/readyz`) with a JSONPatch. `/readyz` is served by the app
-//! API, which listens on `127.0.0.1:3500` only (the app shares the pod's loopback; the kubelet's
-//! `httpGet` probes connect to the pod IP and cannot reach it), so the probe is an `exec` of
-//! [`READY_COMMAND`] inside the sidecar container. **Image contract:** whatever image is
-//! injected (the official `agentscd` image, `--injector-image`, or annotation
-//! `agentsc.io/sidecar-image`) must have [`READY_COMMAND`] on its `PATH`, exiting 0 exactly when
-//! `GET http://127.0.0.1:3500/readyz` answers 200; the official image ships it
-//! (`docker/agentsc-ready`, which needs `python3`). An image without it never passes the probe:
-//! the pod waits [`STARTUP_PROBE_SECONDS`] and the sidecar is restarted. The patch:
+//! two native sidecars (init containers with `restartPolicy: Always`) with a JSONPatch, first
+//! `agentsc-runtime` (the agent runtime), then `agentscd` with a `startupProbe` on its `/readyz`.
+//! The runtime has a container of its own so that it cannot read what `agentscd` holds (the
+//! provider API key in its environment, the workload key in its state directory): containers
+//! do not share a process namespace (`/proc/<pid>/environ`), and the runtime mounts only the
+//! socket directory. It must come first: the kubelet starts the next init container only when
+//! the previous native sidecar has started (and passed its startup probe), and `agentscd`'s
+//! `/readyz` waits for the runtime's `Health`. `/readyz` is served by the app API, which listens
+//! on `127.0.0.1:3500` only (the app shares the pod's loopback; the kubelet's `httpGet` probes
+//! connect to the pod IP and cannot reach it), so the probe is an `exec` of [`READY_COMMAND`]
+//! inside the sidecar container. **Image contract:** whatever image is injected (the official
+//! `agentscd` image, `--injector-image`, or annotation `agentsc.io/sidecar-image`) runs both
+//! containers: its entrypoint is `agentscd`, it has [`RUNTIME_COMMAND`] and [`READY_COMMAND`] on
+//! its `PATH`, and [`READY_COMMAND`] exits 0 exactly when `GET http://127.0.0.1:3500/readyz`
+//! answers 200; the official image ships them (`docker/agentsc-ready`, which needs `python3`). An
+//! image without it never passes the probe: the pod waits [`STARTUP_PROBE_SECONDS`] and the
+//! sidecar is restarted. The patch:
 //!
-//! - env for managed mode: `AGENTSC_CONTROL_PLANE=embassy.<cp-ns>.svc:15012`,
+//! - `agentscd`, env for managed mode: `AGENTSC_CONTROL_PLANE=embassy.<cp-ns>.svc:15012`,
 //!   `AGENTSC_CA_ADDRESS=embassy-ca.<cp-ns>.svc:15012`, `AGENTSC_SERVICE`, `AGENTSC_NAMESPACE`,
 //!   `AGENTSC_APP_PORT`, `POD_NAME` and `POD_NAMESPACE` (fieldRef), `AGENTSC_CA_PEM` (the CA
-//!   bundle), `AGENTSC_K8S_TOKEN_FILE`, and `ANTHROPIC_API_KEY` from key `ANTHROPIC_API_KEY` of
-//!   the Secret named by annotation `agentsc.io/anthropic-secret` when present;
-//! - an `emptyDir` at `/run/agentsc`, a projected service-account token (audience `agentsc`,
-//!   `expirationSeconds: 3600`) at `/var/run/secrets/agentsc/token`, containerPort 50002 `mesh`;
-//! - image from annotation `agentsc.io/sidecar-image`, else `--injector-image`;
-//! - `imagePullPolicy`, `resources`, `securityContext` and the env `OTEL_EXPORTER_OTLP_ENDPOINT` /
-//!   `AGENTSC_OTLP_ENDPOINT_ALLOW` from env `AGENTSC_INJECT_TEMPLATE` (the chart → injector
-//!   contract, [`InjectTemplate`]); without it, the chart's defaults;
+//!   bundle), `AGENTSC_K8S_TOKEN_FILE`, `AGENTSC_STATE_DIR` ([`STATE_DIR`]),
+//!   `AGENTSC_NO_RUNTIME=true` (the runtime is the other container), and `ANTHROPIC_API_KEY` from
+//!   key `ANTHROPIC_API_KEY` of the Secret named by annotation `agentsc.io/anthropic-secret` when
+//!   present (on `agentscd` only);
+//! - `agentscd` mounts an `emptyDir` at `/run/agentsc` (the Unix sockets), an `emptyDir` at
+//!   [`STATE_DIR`] (key, certificate, last charter) and a projected service-account token
+//!   (audience `agentsc`, `expirationSeconds: 3600`) at `/var/run/secrets/agentsc/token`, and has
+//!   containerPort 50002 `mesh`;
+//! - `agentsc-runtime`: the same image, command [`RUNTIME_COMMAND`] with [`RUNTIME_ARGS`] only,
+//!   no env but the template's [`RUNTIME_TEMPLATE_ENV`] (no secret, no `ANTHROPIC_API_KEY`), and
+//!   only the `/run/agentsc` mount;
+//! - image from annotation `agentsc.io/sidecar-image`, else `--injector-image`; with
+//!   `sidecar_images.allowed_digests` set it must be pinned to an allowed digest
+//!   ([`crate::sidecar_images`]), else the pod is denied with a message naming the image;
+//! - `imagePullPolicy`, `resources` and `securityContext` (both containers) and the env
+//!   `OTEL_EXPORTER_OTLP_ENDPOINT` / `AGENTSC_OTLP_ENDPOINT_ALLOW` (`agentscd`) and
+//!   `AGENTSC_MOCK_FALLBACK` (both containers: the runtime reads it) from env
+//!   `AGENTSC_INJECT_TEMPLATE` (the chart → injector contract, [`InjectTemplate`]); without it,
+//!   the chart's defaults;
 //! - annotation `agentsc.io/injected: "true"`.
 //!
 //! Annotations `agentsc.io/service` (a DNS label) and `agentsc.io/app-port` are required; without
-//! them the pod is denied with a message naming what is missing. A pod that already has a
-//! container named `agentscd` is left alone and annotated `agentsc.io/injected:
-//! skipped-existing`. Mutating an already mutated pod changes nothing (idempotent).
+//! them the pod is denied with a message naming what is missing. A labelled pod is also denied,
+//! with every problem named, when it brings a container named `agentscd` or `agentsc-runtime` of
+//! its own (it would be its own "sidecar"), defines a volume of the sidecar's names, mounts one
+//! in another container, projects another service-account token for audience `agentsc` (the
+//! `IssueCertificate` credential), sets `shareProcessNamespace` or `hostPID` (another
+//! container could read the sidecar's memory and environment), or sets `hostAliases`,
+//! `dnsPolicy: None`, or `dnsConfig` nameservers or searches (the sidecar's control-plane
+//! addresses could resolve to another container, which would get its token). So the injector never injects
+//! twice: a pod that already carries the sidecars (an exported, injected pod applied again) is
+//! denied too; create pods from their controller's template. The chart's
+//! ValidatingAdmissionPolicy `agentsc-sidecar-integrity` applies the same rules after every
+//! mutation, which covers a webhook that was bypassed (`failurePolicy: Ignore`).
 //!
 //! **`/validate-charter`** (`agentsc-charter-validator`, CREATE/UPDATE of `charters`): the
 //! charter validator ([`agentsc_charter::Charter::from_value`] on the whole resource, so unknown
@@ -69,7 +96,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::ca::CaMaterial;
-use crate::config::{ControlPlaneConfig, PolicyConfig};
+use crate::config::{ControlPlaneConfig, PolicyConfig, SidecarImagesConfig};
 use crate::context::ServeContext;
 use crate::cp_audit::{CpAction, CpAudit, CpResult};
 use crate::names::{RESERVED_SERVICE, is_dns_label, is_dns_subdomain};
@@ -84,16 +111,32 @@ pub const APP_PORT_ANNOTATION: &str = "agentsc.io/app-port";
 pub const ANTHROPIC_SECRET_ANNOTATION: &str = "agentsc.io/anthropic-secret";
 pub const SIDECAR_IMAGE_ANNOTATION: &str = "agentsc.io/sidecar-image";
 pub const INJECTED_ANNOTATION: &str = "agentsc.io/injected";
-pub const SKIPPED_EXISTING: &str = "skipped-existing";
-/// The injected container's name (and the one whose presence skips injection).
+/// The injected sidecar container's name (a pod that brings one of its own is denied).
 pub const SIDECAR_CONTAINER: &str = "agentscd";
+/// The injected agent runtime container's name (a pod that brings one of its own is denied).
+pub const RUNTIME_CONTAINER: &str = "agentsc-runtime";
+/// The runtime container's command and its only arguments (the sockets in [`RUN_DIR`]).
+pub const RUNTIME_COMMAND: &str = "agentsc-runtime";
+pub const RUNTIME_ARGS: [&str; 4] = [
+    "--listen",
+    "unix:/run/agentsc/runtime.sock",
+    "--sidecar",
+    "unix:/run/agentsc/sidecar.sock",
+];
+/// The Unix sockets (`sidecar.sock`, `runtime.sock`): the only volume both containers mount.
 pub const RUN_VOLUME: &str = "agentsc-run";
 pub const RUN_DIR: &str = "/run/agentsc";
+/// `agentscd`'s state directory (workload key, certificate, last charter): its own volume, so
+/// the runtime, which mounts only [`RUN_VOLUME`], cannot read the key.
+pub const STATE_VOLUME: &str = "agentsc-state";
+pub const STATE_DIR: &str = "/var/lib/agentsc/state";
 pub const TOKEN_VOLUME: &str = "agentsc-token";
 pub const TOKEN_DIR: &str = "/var/run/secrets/agentsc";
 pub const TOKEN_FILE: &str = "/var/run/secrets/agentsc/token";
 pub const TOKEN_AUDIENCE: &str = "agentsc";
 pub const TOKEN_EXPIRATION_SECONDS: i64 = 3600;
+/// The volumes the injector adds: no other container may mount them.
+pub const SIDECAR_VOLUMES: [&str; 3] = [RUN_VOLUME, STATE_VOLUME, TOKEN_VOLUME];
 pub const MESH_PORT: i32 = 50002;
 /// The startup probe's command (see the module docs for the image contract).
 pub const READY_COMMAND: &str = "agentsc-ready";
@@ -113,12 +156,16 @@ pub const TEMPLATE_ENV_ALLOWED: [&str; 3] = [
     "AGENTSC_OTLP_ENDPOINT_ALLOW",
     "AGENTSC_MOCK_FALLBACK",
 ];
+/// The template env the `agentsc-runtime` container gets too: the runtime's own opt-in to the
+/// mock model (not a secret). Every other template env is `agentscd`'s only.
+pub const RUNTIME_TEMPLATE_ENV: [&str; 1] = ["AGENTSC_MOCK_FALLBACK"];
 
 // ---- the chart → injector template -----------------------------------------------------------------
 
 /// `AGENTSC_INJECT_TEMPLATE`: Kubernetes `Container` fields applied to the generated `agentscd`
-/// container. Any other field, or an env name outside [`TEMPLATE_ENV_ALLOWED`], is an error at
-/// start-up. A field left out keeps the built-in default (the chart's default values).
+/// container (and, except `env` outside [`RUNTIME_TEMPLATE_ENV`], to `agentsc-runtime`). Any other field, or an env name outside
+/// [`TEMPLATE_ENV_ALLOWED`], is an error at start-up. A field left out keeps the built-in
+/// default (the chart's default values).
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct InjectTemplate {
@@ -233,7 +280,7 @@ impl CaBundle {
     }
 }
 
-/// What the injector needs.
+/// What the injector needs (the image allow-list comes from the live config, see [`mutate`]).
 #[derive(Clone)]
 pub struct Injector {
     /// `--injector-image` (a pod may name another with `agentsc.io/sidecar-image`).
@@ -401,7 +448,7 @@ async fn mutate_handler(State(state): State<Arc<WebhookState>>, body: Bytes) -> 
         Ok(r) => r,
         Err(why) => return (StatusCode::BAD_REQUEST, why).into_response(),
     };
-    let decision = mutate(&state.injector, &req);
+    let decision = mutate(&state.injector, &state.config.load().sidecar_images, &req);
     if !decision.allowed {
         tracing::info!(
             namespace = req.namespace.as_deref().unwrap_or(""),
@@ -428,16 +475,116 @@ fn escape(token: &str) -> String {
     token.replace('~', "~0").replace('/', "~1")
 }
 
-fn has_container(pod: &Value, name: &str) -> bool {
-    ["containers", "initContainers"].iter().any(|list| {
-        pod.get("spec")
-            .and_then(|s| s.get(*list))
+/// Every container of the pod (`containers`, `initContainers`, `ephemeralContainers`).
+fn all_containers(pod: &Value) -> impl Iterator<Item = &Value> {
+    ["containers", "initContainers", "ephemeralContainers"]
+        .into_iter()
+        .filter_map(|list| pod.get("spec")?.get(list)?.as_array())
+        .flatten()
+}
+
+fn name_of(v: &Value) -> &str {
+    v.get("name").and_then(Value::as_str).unwrap_or_default()
+}
+
+/// What the pod itself does that would weaken the sidecar (module docs), one message each.
+fn sidecar_conflicts(pod: &Value) -> Vec<String> {
+    let mut problems = Vec::new();
+    let spec = pod.get("spec");
+    for c in all_containers(pod) {
+        let name = name_of(c);
+        if crate::sidecar_images::SIDECAR_CONTAINERS.contains(&name) {
+            problems.push(format!(
+                "the pod already has a container named {name:?}: the injector adds the sidecar \
+                 containers, a pod may not bring its own"
+            ));
+            continue;
+        }
+        for m in c
+            .get("volumeMounts")
             .and_then(Value::as_array)
-            .is_some_and(|l| {
-                l.iter()
-                    .any(|c| c.get("name").and_then(Value::as_str) == Some(name))
-            })
-    })
+            .into_iter()
+            .flatten()
+        {
+            let volume = name_of(m);
+            if SIDECAR_VOLUMES.contains(&volume) {
+                problems.push(format!(
+                    "container {name:?} mounts volume {volume:?}, which only the sidecar may mount"
+                ));
+            }
+        }
+    }
+    for v in spec
+        .and_then(|s| s.get("volumes"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let volume = name_of(v);
+        if SIDECAR_VOLUMES.contains(&volume) {
+            problems.push(format!(
+                "the pod already has a volume named {volume:?}, which the sidecar needs"
+            ));
+        }
+        let agentsc_token = v
+            .get("projected")
+            .and_then(|p| p.get("sources"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .any(|s| {
+                s.get("serviceAccountToken")
+                    .and_then(|t| t.get("audience"))
+                    .and_then(Value::as_str)
+                    == Some(TOKEN_AUDIENCE)
+            });
+        if agentsc_token && !SIDECAR_VOLUMES.contains(&volume) {
+            problems.push(format!(
+                "volume {volume:?} projects a service-account token for audience \
+                 {TOKEN_AUDIENCE:?}, the IssueCertificate credential, which only the sidecar may \
+                 hold"
+            ));
+        }
+    }
+    for field in ["shareProcessNamespace", "hostPID"] {
+        if spec.and_then(|s| s.get(field)).and_then(Value::as_bool) == Some(true) {
+            problems.push(format!(
+                "spec.{field} is true: other containers could read the sidecar's memory and \
+                 environment"
+            ));
+        }
+    }
+    // the control-plane addresses must resolve as the cluster says (sidecar_images::shape_problem)
+    let non_empty = |v: Option<&Value>| v.and_then(Value::as_array).is_some_and(|a| !a.is_empty());
+    let dns = spec.and_then(|s| s.get("dnsConfig"));
+    for (set, field) in [
+        (
+            non_empty(spec.and_then(|s| s.get("hostAliases"))),
+            "hostAliases",
+        ),
+        (
+            spec.and_then(|s| s.get("dnsPolicy"))
+                .and_then(Value::as_str)
+                == Some("None"),
+            "dnsPolicy None",
+        ),
+        (
+            non_empty(dns.and_then(|d| d.get("nameservers"))),
+            "dnsConfig.nameservers",
+        ),
+        (
+            non_empty(dns.and_then(|d| d.get("searches"))),
+            "dnsConfig.searches",
+        ),
+    ] {
+        if set {
+            problems.push(format!(
+                "spec.{field} is set: the sidecar's control-plane addresses could resolve to \
+                 another container"
+            ));
+        }
+    }
+    problems
 }
 
 fn annotation<'a>(pod: &'a Value, key: &str) -> Option<&'a str> {
@@ -490,10 +637,11 @@ struct PodRequest {
 
 fn read_pod_request(
     inj: &Injector,
+    images: &SidecarImagesConfig,
     req: &AdmissionRequest,
     pod: &Value,
 ) -> Result<PodRequest, String> {
-    let mut problems = Vec::new();
+    let mut problems = sidecar_conflicts(pod);
     let service = match annotation(pod, SERVICE_ANNOTATION) {
         None => {
             problems.push(format!(
@@ -558,9 +706,25 @@ fn read_pod_request(
             ));
             String::new()
         }
-        Some(i) => i.to_string(),
+        Some(i) => {
+            if let Err(e) = crate::sidecar_images::check_reference(
+                images,
+                i,
+                &format!("annotation {SIDECAR_IMAGE_ANNOTATION}"),
+            ) {
+                problems.push(e);
+            }
+            i.to_string()
+        }
         None => match &inj.image {
-            Some(i) => i.clone(),
+            Some(i) => {
+                if let Err(e) =
+                    crate::sidecar_images::check_reference(images, i, "embassy's --injector-image")
+                {
+                    problems.push(e);
+                }
+                i.clone()
+            }
             None => {
                 problems.push(format!(
                     "no sidecar image: embassy has no --injector-image and the pod has no \
@@ -579,21 +743,6 @@ fn read_pod_request(
         }
         other => other.map(str::to_string),
     };
-    for (list, volume) in [("volumes", RUN_VOLUME), ("volumes", TOKEN_VOLUME)] {
-        let taken = pod
-            .get("spec")
-            .and_then(|s| s.get(list))
-            .and_then(Value::as_array)
-            .is_some_and(|l| {
-                l.iter()
-                    .any(|v| v.get("name").and_then(Value::as_str) == Some(volume))
-            });
-        if taken {
-            problems.push(format!(
-                "the pod already has a volume named {volume:?}, which the sidecar needs"
-            ));
-        }
-    }
     if problems.is_empty() {
         Ok(PodRequest {
             service,
@@ -629,7 +778,11 @@ fn sidecar_container(inj: &Injector, p: &PodRequest) -> Container {
         field_env("POD_NAMESPACE", "metadata.namespace"),
         env("AGENTSC_CA_PEM", inj.ca_bundle.pem()),
         env("AGENTSC_K8S_TOKEN_FILE", TOKEN_FILE),
+        env("AGENTSC_STATE_DIR", STATE_DIR),
+        // the runtime is the agentsc-runtime container (runtime_container)
+        env("AGENTSC_NO_RUNTIME", "true"),
     ];
+    // agentscd only: the runtime container never gets the key
     if let Some(secret) = &p.anthropic_secret {
         env_list.push(EnvVar {
             name: "ANTHROPIC_API_KEY".into(),
@@ -658,9 +811,10 @@ fn sidecar_container(inj: &Injector, p: &PodRequest) -> Container {
         }]),
         env: Some(env_list),
         volume_mounts: Some(vec![
+            run_mount(),
             VolumeMount {
-                name: RUN_VOLUME.into(),
-                mount_path: RUN_DIR.into(),
+                name: STATE_VOLUME.into(),
+                mount_path: STATE_DIR.into(),
                 ..Default::default()
             },
             VolumeMount {
@@ -686,13 +840,102 @@ fn sidecar_container(inj: &Injector, p: &PodRequest) -> Container {
     }
 }
 
-fn sidecar_volumes() -> Vec<Volume> {
-    vec![
-        Volume {
-            name: RUN_VOLUME.into(),
-            empty_dir: Some(Default::default()),
+fn run_mount() -> VolumeMount {
+    VolumeMount {
+        name: RUN_VOLUME.into(),
+        mount_path: RUN_DIR.into(),
+        ..Default::default()
+    }
+}
+
+/// The `agentsc-runtime` container for `p`: `agentscd`'s image, pull policy, resources and
+/// securityContext; its command line, the socket directory and the template's
+/// [`RUNTIME_TEMPLATE_ENV`] only (no secret).
+fn runtime_container(inj: &Injector, p: &PodRequest) -> Container {
+    let env: Vec<EnvVar> = inj
+        .template
+        .env
+        .iter()
+        .flatten()
+        .filter(|e| RUNTIME_TEMPLATE_ENV.contains(&e.name.as_str()))
+        .cloned()
+        .collect();
+    Container {
+        name: RUNTIME_CONTAINER.into(),
+        image: Some(p.image.clone()),
+        image_pull_policy: Some(inj.template.pull_policy()),
+        restart_policy: Some("Always".into()),
+        command: Some(vec![RUNTIME_COMMAND.into()]),
+        args: Some(RUNTIME_ARGS.iter().map(|a| a.to_string()).collect()),
+        env: (!env.is_empty()).then_some(env),
+        volume_mounts: Some(vec![run_mount()]),
+        resources: Some(inj.template.resources()),
+        security_context: Some(inj.template.security_context()),
+        ..Default::default()
+    }
+}
+
+/// A pod as the injector leaves it (service account and `agentsc.io/service` = `service`, the
+/// Anthropic Secret named, `ca_pem` as the CA bundle), for the shape checks' tests in
+/// [`crate::sidecar_images`] and [`crate::issuance`].
+#[cfg(test)]
+pub(crate) fn injected_pod(
+    namespace: &str,
+    name: &str,
+    service: &str,
+    image: &str,
+    template: InjectTemplate,
+    ca_pem: &str,
+) -> k8s_openapi::api::core::v1::Pod {
+    use k8s_openapi::api::core::v1::{Pod, PodSpec};
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    let inj = Injector {
+        image: Some(image.into()),
+        template,
+        cp_namespace: "agentsc-system".into(),
+        ca_bundle: CaBundle::Fixed(ca_pem.into()),
+    };
+    let p = PodRequest {
+        service: service.into(),
+        app_port: 8080,
+        namespace: namespace.into(),
+        image: image.into(),
+        anthropic_secret: Some("agentsc-anthropic".into()),
+    };
+    Pod {
+        metadata: ObjectMeta {
+            name: Some(name.into()),
+            namespace: Some(namespace.into()),
+            labels: Some([(INJECT_LABEL.to_string(), "true".to_string())].into()),
             ..Default::default()
         },
+        spec: Some(PodSpec {
+            service_account_name: Some(service.into()),
+            init_containers: Some(vec![
+                runtime_container(&inj, &p),
+                sidecar_container(&inj, &p),
+            ]),
+            containers: vec![Container {
+                name: "app".into(),
+                image: Some("orders:1".into()),
+                ..Default::default()
+            }],
+            volumes: Some(sidecar_volumes()),
+            ..Default::default()
+        }),
+        status: None,
+    }
+}
+
+fn sidecar_volumes() -> Vec<Volume> {
+    let empty_dir = |name: &str| Volume {
+        name: name.into(),
+        empty_dir: Some(Default::default()),
+        ..Default::default()
+    };
+    vec![
+        empty_dir(RUN_VOLUME),
+        empty_dir(STATE_VOLUME),
         Volume {
             name: TOKEN_VOLUME.into(),
             projected: Some(ProjectedVolumeSource {
@@ -711,8 +954,8 @@ fn sidecar_volumes() -> Vec<Volume> {
     ]
 }
 
-/// The `/mutate` decision for one request.
-pub fn mutate(inj: &Injector, req: &AdmissionRequest) -> Decision {
+/// The `/mutate` decision for one request; `images` is the live config's allow-list.
+pub fn mutate(inj: &Injector, images: &SidecarImagesConfig, req: &AdmissionRequest) -> Decision {
     if req.operation != "CREATE" {
         return Decision::allow();
     }
@@ -732,25 +975,19 @@ pub fn mutate(inj: &Injector, req: &AdmissionRequest) -> Decision {
     if !labelled {
         return Decision::allow();
     }
-    if has_container(pod, SIDECAR_CONTAINER) {
-        // ours (already injected) or the pod's own: leave the containers alone
-        if annotation(pod, INJECTED_ANNOTATION).is_some() {
-            return Decision::allow();
-        }
-        return Decision::patch(vec![set_annotation_op(
-            pod,
-            INJECTED_ANNOTATION,
-            SKIPPED_EXISTING,
-        )]);
-    }
-    let p = match read_pod_request(inj, req, pod) {
+    // a pod's own agentscd (or one injected before) is denied, never skipped: the annotation
+    // agentsc.io/injected is the pod owner's to write, so it proves nothing
+    let p = match read_pod_request(inj, images, req, pod) {
         Ok(p) => p,
         Err(message) => return Decision::deny(400, message),
     };
-    let container = match serde_json::to_value(sidecar_container(inj, &p)) {
-        Ok(c) => c,
-        Err(e) => {
-            return Decision::deny(500, format!("building the sidecar container failed: {e}"));
+    let containers = match (
+        serde_json::to_value(runtime_container(inj, &p)),
+        serde_json::to_value(sidecar_container(inj, &p)),
+    ) {
+        (Ok(runtime), Ok(sidecar)) => [runtime, sidecar],
+        (Err(e), _) | (_, Err(e)) => {
+            return Decision::deny(500, format!("building the sidecar containers failed: {e}"));
         }
     };
     let spec = pod.get("spec");
@@ -759,10 +996,13 @@ pub fn mutate(inj: &Injector, req: &AdmissionRequest) -> Decision {
         .and_then(|s| s.get("initContainers"))
         .is_some_and(Value::is_array)
     {
-        // first, so the sidecar is up before the other init containers and the app
-        ops.push(json!({"op": "add", "path": "/spec/initContainers/0", "value": container}));
+        // first, so the sidecars are up before the other init containers and the app; the
+        // runtime before agentscd, whose startup probe waits for the runtime's Health
+        let [runtime, sidecar] = containers;
+        ops.push(json!({"op": "add", "path": "/spec/initContainers/0", "value": runtime}));
+        ops.push(json!({"op": "add", "path": "/spec/initContainers/1", "value": sidecar}));
     } else {
-        ops.push(json!({"op": "add", "path": "/spec/initContainers", "value": [container]}));
+        ops.push(json!({"op": "add", "path": "/spec/initContainers", "value": containers}));
     }
     let volumes: Vec<Value> = sidecar_volumes()
         .iter()
@@ -1070,6 +1310,27 @@ mod tests {
         }
     }
 
+    /// The allow-list off (development builds), as in the default config.
+    const OFF: SidecarImagesConfig = SidecarImagesConfig {
+        allowed_digests: Vec::new(),
+    };
+
+    fn digest(c: char) -> String {
+        format!("sha256:{}", std::iter::repeat_n(c, 64).collect::<String>())
+    }
+
+    fn security_context() -> Value {
+        json!({
+            "runAsNonRoot": true, "runAsUser": 10001, "runAsGroup": 10001,
+            "readOnlyRootFilesystem": true, "allowPrivilegeEscalation": false,
+            "capabilities": {"drop": ["ALL"]}, "seccompProfile": {"type": "RuntimeDefault"}
+        })
+    }
+
+    fn resources() -> Value {
+        json!({"requests": {"cpu": "50m", "memory": "128Mi"}, "limits": {"memory": "512Mi"}})
+    }
+
     fn expected_container(extra_env: &[Value]) -> Value {
         let mut env = vec![
             json!({"name": "AGENTSC_CONTROL_PLANE", "value": "embassy.agentsc-system.svc:15012"}),
@@ -1081,6 +1342,8 @@ mod tests {
             json!({"name": "POD_NAMESPACE", "valueFrom": {"fieldRef": {"apiVersion": "v1", "fieldPath": "metadata.namespace"}}}),
             json!({"name": "AGENTSC_CA_PEM", "value": "CA PEM"}),
             json!({"name": "AGENTSC_K8S_TOKEN_FILE", "value": "/var/run/secrets/agentsc/token"}),
+            json!({"name": "AGENTSC_STATE_DIR", "value": "/var/lib/agentsc/state"}),
+            json!({"name": "AGENTSC_NO_RUNTIME", "value": "true"}),
         ];
         env.extend(extra_env.iter().cloned());
         json!({
@@ -1092,21 +1355,34 @@ mod tests {
             "env": env,
             "volumeMounts": [
                 {"name": "agentsc-run", "mountPath": "/run/agentsc"},
+                {"name": "agentsc-state", "mountPath": "/var/lib/agentsc/state"},
                 {"name": "agentsc-token", "mountPath": "/var/run/secrets/agentsc", "readOnly": true}
             ],
             "startupProbe": {"exec": {"command": ["agentsc-ready"]}, "periodSeconds": 2, "timeoutSeconds": 3, "failureThreshold": 150},
-            "resources": {"requests": {"cpu": "50m", "memory": "128Mi"}, "limits": {"memory": "512Mi"}},
-            "securityContext": {
-                "runAsNonRoot": true, "runAsUser": 10001, "runAsGroup": 10001,
-                "readOnlyRootFilesystem": true, "allowPrivilegeEscalation": false,
-                "capabilities": {"drop": ["ALL"]}, "seccompProfile": {"type": "RuntimeDefault"}
-            }
+            "resources": resources(),
+            "securityContext": security_context()
+        })
+    }
+
+    /// The runtime: agentscd's image and template, its command line, the sockets, nothing else.
+    fn expected_runtime() -> Value {
+        json!({
+            "name": "agentsc-runtime",
+            "image": IMAGE,
+            "imagePullPolicy": "IfNotPresent",
+            "restartPolicy": "Always",
+            "command": ["agentsc-runtime"],
+            "args": ["--listen", "unix:/run/agentsc/runtime.sock", "--sidecar", "unix:/run/agentsc/sidecar.sock"],
+            "volumeMounts": [{"name": "agentsc-run", "mountPath": "/run/agentsc"}],
+            "resources": resources(),
+            "securityContext": security_context()
         })
     }
 
     fn expected_volumes() -> Value {
         json!([
             {"name": "agentsc-run", "emptyDir": {}},
+            {"name": "agentsc-state", "emptyDir": {}},
             {"name": "agentsc-token", "projected": {"sources": [
                 {"serviceAccountToken": {"audience": "agentsc", "expirationSeconds": 3600, "path": "token"}}
             ]}}
@@ -1117,6 +1393,7 @@ mod tests {
     fn inject_golden_patch() {
         let d = mutate(
             &injector(InjectTemplate::default()),
+            &OFF,
             &create(pod(annotated())),
         );
         assert!(d.allowed && d.status.is_none());
@@ -1124,10 +1401,86 @@ mod tests {
             Value::Array(d.patch.clone()),
             json!([
                 {"op": "add", "path": "/metadata/annotations/agentsc.io~1injected", "value": "true"},
-                {"op": "add", "path": "/spec/initContainers", "value": [expected_container(&[])]},
+                {"op": "add", "path": "/spec/initContainers", "value": [expected_runtime(), expected_container(&[])]},
                 {"op": "add", "path": "/spec/volumes", "value": expected_volumes()}
             ])
         );
+    }
+
+    #[test]
+    fn the_runtime_shares_only_the_sockets_with_agentscd() {
+        let mut ann = annotated();
+        ann[ANTHROPIC_SECRET_ANNOTATION] = json!("agentsc-anthropic");
+        let d = mutate(
+            &injector(InjectTemplate::default()),
+            &OFF,
+            &create(pod(ann)),
+        );
+        let [runtime, sidecar] = [&d.patch[1]["value"][0], &d.patch[1]["value"][1]];
+        assert_eq!(
+            (runtime["name"].as_str(), sidecar["name"].as_str()),
+            (Some(RUNTIME_CONTAINER), Some(SIDECAR_CONTAINER)),
+            "the runtime starts first: agentscd's startup probe waits for its Health"
+        );
+        // agentscd does not spawn a runtime of its own and holds the key; the runtime has no env
+        let env = |c: &Value, name: &str| {
+            c["env"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|e| e["name"] == name)
+                .cloned()
+        };
+        assert_eq!(
+            env(sidecar, "AGENTSC_NO_RUNTIME"),
+            Some(json!({"name": "AGENTSC_NO_RUNTIME", "value": "true"}))
+        );
+        assert!(env(sidecar, "ANTHROPIC_API_KEY").is_some());
+        assert!(runtime.get("env").is_none() && runtime.get("envFrom").is_none());
+        // the state directory (the workload key) is agentscd's own volume
+        let mounts = |c: &Value| -> Vec<String> {
+            c["volumeMounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(mounts(runtime), [RUN_VOLUME]);
+        assert_eq!(mounts(sidecar), [RUN_VOLUME, STATE_VOLUME, TOKEN_VOLUME]);
+        assert_eq!(
+            env(sidecar, "AGENTSC_STATE_DIR").unwrap()["value"],
+            STATE_DIR
+        );
+        // the runtime's flags name the sockets in the shared directory
+        for a in RUNTIME_ARGS.iter().filter(|a| a.starts_with("unix:")) {
+            assert!(a.starts_with(&format!("unix:{RUN_DIR}/")), "{a}");
+        }
+    }
+
+    /// The review finding: with the runtime in its own container, Helm's
+    /// `injection.mockFallback` reached agentscd only, so the demo's agents were refused.
+    #[test]
+    fn the_runtime_gets_the_mock_fallback_and_no_other_template_env() {
+        let template = InjectTemplate::parse(
+            r#"{"env": [{"name": "OTEL_EXPORTER_OTLP_ENDPOINT", "value": "http://otel:4317"},
+                        {"name": "AGENTSC_MOCK_FALLBACK", "value": "1"}]}"#,
+        )
+        .unwrap();
+        let d = mutate(&injector(template), &OFF, &create(pod(annotated())));
+        let [runtime, sidecar] = [&d.patch[1]["value"][0], &d.patch[1]["value"][1]];
+        assert_eq!(
+            runtime["env"],
+            json!([{"name": "AGENTSC_MOCK_FALLBACK", "value": "1"}])
+        );
+        let names: Vec<&str> = sidecar["env"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"OTEL_EXPORTER_OTLP_ENDPOINT"));
+        assert!(names.contains(&"AGENTSC_MOCK_FALLBACK"));
     }
 
     #[test]
@@ -1135,7 +1488,11 @@ mod tests {
         let mut p = pod(annotated());
         p["spec"]["initContainers"] = json!([{"name": "migrate", "image": "m:1"}]);
         p["spec"]["volumes"] = json!([{"name": "data", "emptyDir": {}}]);
-        let d = mutate(&injector(InjectTemplate::default()), &create(p.clone()));
+        let d = mutate(
+            &injector(InjectTemplate::default()),
+            &OFF,
+            &create(p.clone()),
+        );
         let paths: Vec<&str> = d
             .patch
             .iter()
@@ -1146,6 +1503,8 @@ mod tests {
             [
                 "/metadata/annotations/agentsc.io~1injected",
                 "/spec/initContainers/0",
+                "/spec/initContainers/1",
+                "/spec/volumes/-",
                 "/spec/volumes/-",
                 "/spec/volumes/-"
             ]
@@ -1157,8 +1516,12 @@ mod tests {
             .iter()
             .map(|c| c["name"].as_str().unwrap())
             .collect();
-        assert_eq!(init, ["agentscd", "migrate"], "the sidecar starts first");
-        assert_eq!(p["spec"]["volumes"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            init,
+            ["agentsc-runtime", "agentscd", "migrate"],
+            "the sidecars start first, the runtime before agentscd"
+        );
+        assert_eq!(p["spec"]["volumes"].as_array().unwrap().len(), 4);
         assert_eq!(p["spec"]["containers"][0]["name"], "app");
     }
 
@@ -1175,8 +1538,8 @@ mod tests {
         let mut ann = annotated();
         ann[ANTHROPIC_SECRET_ANNOTATION] = json!("agentsc-anthropic");
         ann[SIDECAR_IMAGE_ANNOTATION] = json!("registry.local/agentscd:dev");
-        let d = mutate(&injector(template), &create(pod(ann)));
-        let c = &d.patch[1]["value"][0];
+        let d = mutate(&injector(template), &OFF, &create(pod(ann)));
+        let c = &d.patch[1]["value"][1];
         let mut want = expected_container(&[
             json!({"name": "ANTHROPIC_API_KEY", "valueFrom": {"secretKeyRef": {"name": "agentsc-anthropic", "key": "ANTHROPIC_API_KEY", "optional": true}}}),
             json!({"name": "OTEL_EXPORTER_OTLP_ENDPOINT", "value": "http://otel:4318"}),
@@ -1187,6 +1550,13 @@ mod tests {
         want["resources"] = json!({"requests": {"cpu": "10m"}});
         want["securityContext"] = json!({"runAsNonRoot": true});
         assert_eq!(c, &want);
+        // the runtime gets the same image, pull policy, resources and securityContext, no env
+        let mut want = expected_runtime();
+        want["image"] = json!("registry.local/agentscd:dev");
+        want["imagePullPolicy"] = json!("Always");
+        want["resources"] = json!({"requests": {"cpu": "10m"}});
+        want["securityContext"] = json!({"runAsNonRoot": true});
+        assert_eq!(&d.patch[1]["value"][0], &want);
     }
 
     #[test]
@@ -1194,6 +1564,7 @@ mod tests {
         for bad in [
             r#"{"env":[{"name":"AGENTSC_CONTROL_PLANE","value":"evil:15012"}]}"#,
             r#"{"env":[{"name":"AGENTSC_SERVICE","value":"x"}]}"#,
+            r#"{"env":[{"name":"AGENTSC_NO_RUNTIME","value":"false"}]}"#,
             r#"{"command":["sh"]}"#,
             r#"{"imagePullPolicy":"Sometimes"}"#,
             r#"not json"#,
@@ -1209,45 +1580,160 @@ mod tests {
         );
     }
 
+    /// The audit finding: a pod could run its own "sidecar" by naming a container agentscd.
     #[test]
-    fn pods_with_an_agentscd_container_are_left_alone() {
-        let mut p = pod(annotated());
-        p["spec"]["containers"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({"name": "agentscd", "image": "agentsc/agentscd:0.1"}));
-        let d = mutate(&injector(InjectTemplate::default()), &create(p.clone()));
-        assert_eq!(
-            d.patch,
-            [
-                json!({"op": "add", "path": "/metadata/annotations/agentsc.io~1injected", "value": "skipped-existing"})
-            ]
-        );
-        apply(&mut p, &d.patch);
-        assert_eq!(
-            mutate(&injector(InjectTemplate::default()), &create(p)),
-            Decision::allow()
-        );
-        // without annotations at all (and without the required ones: they are not needed then)
+    fn pods_that_bring_their_own_sidecar_are_denied() {
+        let inj = injector(InjectTemplate::default());
+        for (list, name) in [
+            ("containers", SIDECAR_CONTAINER),
+            ("initContainers", SIDECAR_CONTAINER),
+            ("initContainers", RUNTIME_CONTAINER),
+            ("containers", RUNTIME_CONTAINER),
+        ] {
+            let mut p = pod(annotated());
+            let entry = json!({"name": name, "image": "evil.example/agentscd:1", "restartPolicy": "Always"});
+            match p["spec"][list].as_array_mut() {
+                Some(l) => l.push(entry),
+                None => p["spec"][list] = json!([entry]),
+            }
+            // the annotation is the pod owner's to write: it skips nothing
+            p["metadata"]["annotations"][INJECTED_ANNOTATION] = json!("true");
+            let d = mutate(&inj, &OFF, &create(p));
+            assert!(!d.allowed && d.patch.is_empty(), "{list} {name}");
+            let (code, msg) = d.status.unwrap();
+            assert_eq!(code, 400);
+            assert!(
+                msg.contains(&format!("the pod already has a container named {name:?}"))
+                    && msg.contains("may not bring its own"),
+                "{msg}"
+            );
+        }
+        // without the required annotations every problem is named
         let mut bare = pod(json!(null));
         bare["metadata"]
             .as_object_mut()
             .unwrap()
             .remove("annotations");
         bare["spec"]["initContainers"] = json!([{"name": "agentscd"}]);
-        let d = mutate(&injector(InjectTemplate::default()), &create(bare));
-        assert_eq!(
-            d.patch,
-            [
-                json!({"op": "add", "path": "/metadata/annotations", "value": {"agentsc.io/injected": "skipped-existing"}})
-            ]
+        let msg = mutate(&inj, &OFF, &create(bare)).status.unwrap().1;
+        assert!(
+            msg.contains("\"agentscd\"") && msg.contains("agentsc.io/service is required"),
+            "{msg}"
         );
+    }
+
+    #[test]
+    fn an_injected_pod_is_never_injected_twice() {
+        let inj = injector(InjectTemplate::default());
+        let mut p = pod(annotated());
+        let first = mutate(&inj, &OFF, &create(p.clone()));
+        apply(&mut p, &first.patch);
+        assert_eq!(p["metadata"]["annotations"][INJECTED_ANNOTATION], "true");
+        assert_eq!(p["spec"]["initContainers"][0], expected_runtime());
+        assert_eq!(p["spec"]["initContainers"][1], expected_container(&[]));
+        // the same pod again (an exported pod applied as it is): its sidecars are not ours to trust
+        let second = mutate(&inj, &OFF, &create(p.clone()));
+        assert!(!second.allowed && second.patch.is_empty());
+        let msg = second.status.unwrap().1;
+        for name in [RUNTIME_CONTAINER, SIDECAR_CONTAINER] {
+            assert!(msg.contains(&format!("container named {name:?}")), "{msg}");
+        }
+    }
+
+    /// A change to a test pod.
+    type PodChange = fn(&mut Value);
+
+    /// A projected service-account token volume for `audience`.
+    fn token_volume(audience: &str) -> Value {
+        json!({"name": "my-token", "projected": {"sources": [{"serviceAccountToken": {"audience": audience, "path": "t"}}]}})
+    }
+
+    #[test]
+    fn pods_may_not_weaken_the_sidecar() {
+        let inj = injector(InjectTemplate::default());
+        let cases: [(PodChange, &str); 11] = [
+            (
+                |p| p["spec"]["shareProcessNamespace"] = json!(true),
+                "spec.shareProcessNamespace is true",
+            ),
+            (
+                |p| p["spec"]["hostPID"] = json!(true),
+                "spec.hostPID is true",
+            ),
+            (
+                |p| {
+                    p["spec"]["containers"][0]["volumeMounts"] =
+                        json!([{"name": "agentsc-run", "mountPath": "/run/agentsc"}])
+                },
+                "container \"app\" mounts volume \"agentsc-run\"",
+            ),
+            (
+                |p| {
+                    p["spec"]["initContainers"] = json!([{"name": "steal", "image": "x",
+                        "volumeMounts": [{"name": "agentsc-token", "mountPath": "/t"}]}])
+                },
+                "container \"steal\" mounts volume \"agentsc-token\"",
+            ),
+            (
+                |p| {
+                    p["spec"]["containers"][0]["volumeMounts"] =
+                        json!([{"name": "agentsc-state", "mountPath": "/s"}])
+                },
+                "mounts volume \"agentsc-state\"",
+            ),
+            (
+                |p| p["spec"]["volumes"] = json!([token_volume("agentsc")]),
+                "volume \"my-token\" projects a service-account token for audience \"agentsc\"",
+            ),
+            (
+                |p| p["spec"]["volumes"] = json!([{"name": "agentsc-state", "emptyDir": {}}]),
+                "the pod already has a volume named \"agentsc-state\"",
+            ),
+            (
+                |p| {
+                    p["spec"]["hostAliases"] =
+                        json!([{"ip": "10.1.2.3", "hostnames": ["embassy-ca.agentsc-system.svc"]}])
+                },
+                "spec.hostAliases is set",
+            ),
+            (
+                |p| {
+                    p["spec"]["dnsPolicy"] = json!("None");
+                    p["spec"]["dnsConfig"] = json!({"nameservers": ["10.1.2.3"]});
+                },
+                "spec.dnsPolicy None is set",
+            ),
+            (
+                |p| p["spec"]["dnsConfig"] = json!({"nameservers": ["10.1.2.3"]}),
+                "spec.dnsConfig.nameservers is set",
+            ),
+            (
+                |p| p["spec"]["dnsConfig"] = json!({"searches": ["evil.example"]}),
+                "spec.dnsConfig.searches is set",
+            ),
+        ];
+        for (change, want) in cases {
+            let mut p = pod(annotated());
+            change(&mut p);
+            let d = mutate(&inj, &OFF, &create(p));
+            let msg = d.status.map(|s| s.1).unwrap_or_default();
+            assert!(!d.allowed && msg.contains(want), "{want}: {msg}");
+        }
+        // false flags and tokens for other audiences are fine
+        let mut p = pod(annotated());
+        p["spec"]["shareProcessNamespace"] = json!(false);
+        p["spec"]["hostPID"] = json!(false);
+        p["spec"]["volumes"] = json!([token_volume("vault")]);
+        // DNS options that redirect nothing
+        p["spec"]["dnsPolicy"] = json!("ClusterFirst");
+        p["spec"]["dnsConfig"] = json!({"options": [{"name": "ndots", "value": "2"}]});
+        assert!(mutate(&inj, &OFF, &create(p)).allowed);
     }
 
     #[test]
     fn missing_or_bad_annotations_are_denied_with_a_clear_message() {
         let inj = injector(InjectTemplate::default());
-        let d = mutate(&inj, &create(pod(json!({}))));
+        let d = mutate(&inj, &OFF, &create(pod(json!({}))));
         assert!(!d.allowed);
         let (code, msg) = d.status.unwrap();
         assert_eq!(code, 400);
@@ -1287,32 +1773,78 @@ mod tests {
                 "not an image reference",
             ),
         ] {
-            let d = mutate(&inj, &create(pod(ann.clone())));
+            let d = mutate(&inj, &OFF, &create(pod(ann.clone())));
             let msg = d.status.map(|s| s.1).unwrap_or_default();
             assert!(!d.allowed && msg.contains(want), "{ann}: {msg}");
         }
         // no image anywhere
         let mut no_image = injector(InjectTemplate::default());
         no_image.image = None;
-        let d = mutate(&no_image, &create(pod(annotated())));
+        let d = mutate(&no_image, &OFF, &create(pod(annotated())));
         assert!(d.status.unwrap().1.contains("--injector-image"));
         // a volume name the sidecar needs is taken
         let mut p = pod(annotated());
         p["spec"]["volumes"] = json!([{"name": "agentsc-run", "emptyDir": {}}]);
-        let d = mutate(&inj, &create(p));
+        let d = mutate(&inj, &OFF, &create(p));
         assert!(d.status.unwrap().1.contains("\"agentsc-run\""));
     }
 
+    /// The audit finding: annotation agentsc.io/sidecar-image could name any image.
     #[test]
-    fn injection_is_idempotent() {
-        let inj = injector(InjectTemplate::default());
-        let mut p = pod(annotated());
-        let first = mutate(&inj, &create(p.clone()));
-        apply(&mut p, &first.patch);
-        assert_eq!(p["metadata"]["annotations"][INJECTED_ANNOTATION], "true");
-        assert_eq!(p["spec"]["initContainers"][0], expected_container(&[]));
-        let second = mutate(&inj, &create(p.clone()));
-        assert_eq!(second, Decision::allow());
+    fn the_allow_list_decides_which_image_is_injected() {
+        let (a, b) = (digest('a'), digest('b'));
+        let on = SidecarImagesConfig {
+            allowed_digests: vec![a.clone()],
+        };
+        let pinned = |d: &str| format!("ghcr.io/f8fvwgzc/agent-sidecar/agentscd@{d}");
+        let mut inj = injector(InjectTemplate::default());
+        inj.image = Some(pinned(&a));
+        let image_of = |d: &Decision| d.patch[1]["value"][1]["image"].clone();
+        // the pinned --injector-image
+        let d = mutate(&inj, &on, &create(pod(annotated())));
+        assert!(d.allowed);
+        assert_eq!(image_of(&d), json!(pinned(&a)));
+        assert_eq!(d.patch[1]["value"][0]["image"], json!(pinned(&a)));
+        // an annotation pinned to an allowed digest (any registry: the digest names the content)
+        let mut ann = annotated();
+        ann[SIDECAR_IMAGE_ANNOTATION] = json!(format!("mirror.example/agentscd:0.2.0@{a}"));
+        let d = mutate(&inj, &on, &create(pod(ann)));
+        assert!(d.allowed, "{:?}", d.status);
+        assert_eq!(
+            image_of(&d),
+            json!(format!("mirror.example/agentscd:0.2.0@{a}"))
+        );
+        // another digest, or a tag only: refused, naming the image
+        for (image, want) in [
+            (
+                format!("evil.example/agentscd@{b}"),
+                format!("annotation agentsc.io/sidecar-image \"evil.example/agentscd@{b}\" is pinned to {b}, which is not in sidecar_images.allowed_digests"),
+            ),
+            (
+                "evil.example/agentscd:0.2.0".to_string(),
+                "annotation agentsc.io/sidecar-image \"evil.example/agentscd:0.2.0\" is not pinned to a digest".to_string(),
+            ),
+        ] {
+            let mut ann = annotated();
+            ann[SIDECAR_IMAGE_ANNOTATION] = json!(image);
+            let d = mutate(&inj, &on, &create(pod(ann)));
+            let msg = d.status.map(|s| s.1).unwrap_or_default();
+            assert!(!d.allowed && d.patch.is_empty() && msg.contains(&want), "{msg}");
+        }
+        // embassy's own image must be pinned too once the list is on
+        inj.image = Some(IMAGE.into());
+        let msg = mutate(&inj, &on, &create(pod(annotated())))
+            .status
+            .unwrap()
+            .1;
+        assert!(
+            msg.contains(&format!(
+                "embassy's --injector-image {IMAGE:?} is not pinned to a digest"
+            )),
+            "{msg}"
+        );
+        // off: as before, any image
+        assert!(mutate(&inj, &OFF, &create(pod(annotated()))).allowed);
     }
 
     #[test]
@@ -1320,16 +1852,16 @@ mod tests {
         let inj = injector(InjectTemplate::default());
         let mut unlabelled = pod(annotated());
         unlabelled["metadata"]["labels"][INJECT_LABEL] = json!("false");
-        assert_eq!(mutate(&inj, &create(unlabelled)), Decision::allow());
+        assert_eq!(mutate(&inj, &OFF, &create(unlabelled)), Decision::allow());
         let mut in_cp = create(pod(annotated()));
         in_cp.namespace = Some("agentsc-system".into());
-        assert_eq!(mutate(&inj, &in_cp), Decision::allow());
+        assert_eq!(mutate(&inj, &OFF, &in_cp), Decision::allow());
         let mut update = create(pod(annotated()));
         update.operation = "UPDATE".into();
-        assert_eq!(mutate(&inj, &update), Decision::allow());
+        assert_eq!(mutate(&inj, &OFF, &update), Decision::allow());
         let mut empty = create(pod(annotated()));
         empty.object = None;
-        assert!(!mutate(&inj, &empty).allowed);
+        assert!(!mutate(&inj, &OFF, &empty).allowed);
     }
 
     fn state(
@@ -1621,7 +2153,7 @@ mod tests {
     #[tokio::test]
     async fn the_router_speaks_admission_review_v1() {
         let (st, _rx) = state(None);
-        let app = router(st);
+        let app = router(st.clone());
         let (status, out) = post(
             app.clone(),
             "/mutate",
@@ -1649,7 +2181,30 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(patch[1]["value"][0]["name"], "agentscd");
+        assert_eq!(patch[1]["value"][0]["name"], "agentsc-runtime");
+        assert_eq!(patch[1]["value"][1]["name"], "agentscd");
+
+        // the allow-list comes from the live config: a reload that sets it applies at once
+        // (the test injector's image is pinned by tag only, so it is refused now)
+        let mut cfg = ControlPlaneConfig::clone(&st.config.load());
+        cfg.sidecar_images.allowed_digests = vec![digest('a')];
+        st.config.store(Arc::new(cfg));
+        let (_, out) = post(
+            app.clone(),
+            "/mutate",
+            review(json!({
+                "uid": "abd", "namespace": "shop", "operation": "CREATE",
+                "object": pod(annotated())
+            })),
+        )
+        .await;
+        assert_eq!(out["response"]["allowed"], false);
+        assert!(
+            out["response"]["status"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("--injector-image")
+        );
 
         let (_, out) = post(
             app.clone(),

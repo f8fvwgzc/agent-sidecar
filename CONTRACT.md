@@ -91,7 +91,7 @@ Flags / environment of `agentscd` (flag wins over env):
 | `--anthropic-api-key-file` | `AGENTSC_ANTHROPIC_API_KEY_FILE` | unset. The Anthropic API key, read by the sidecar's model gateway only (§4.4) |
 | —                 | `ANTHROPIC_API_KEY`      | the same key as text (env only, never a flag). Neither set → the gateway has no provider, and an agent whose `model` is not `mock` is refused (`FAILED_PRECONDITION`), unless `AGENTSC_MOCK_FALLBACK=1`. The runtime the sidecar starts never gets either, nor `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY` or `AGENTSC_APP_TOKEN` |
 | `--anthropic-base-url` | `AGENTSC_ANTHROPIC_BASE_URL` | `https://api.anthropic.com` |
-| —                 | `AGENTSC_MOCK_FALLBACK`  | unset. `1` = when the sidecar holds no key, every agent runs on the `mock` model (demos, CI); the runtime the sidecar starts inherits it |
+| —                 | `AGENTSC_MOCK_FALLBACK`  | unset. `1` = when the sidecar holds no key, every agent runs on the `mock` model (demos, CI); the runtime the sidecar starts inherits it (an injected pod's `agentsc-runtime` container gets it from the injector's template, Helm `injection.mockFallback`) |
 
 ## 3. `charter.yaml`
 
@@ -948,8 +948,33 @@ the values it remembered for open requests and its subscribers are unaffected.
   `optional: true`; without it every agent runs on the mock model.
 - Sidecar injection is **explicit** in the MVP: the `agentscd` container, the
   charter ConfigMap mount and the TLS Secret mount are written in each
-  Deployment. The mutating admission webhook keyed on
-  `agentsc.io/inject: "true"` is not implemented yet.
+  Deployment. The v0.2 Helm chart (`deploy/helm/agent-sidecar`, design §13)
+  injects instead, on the pod label `agentsc.io/inject: "true"`:
+  - two native sidecars, `agentsc-runtime` first (command `agentsc-runtime
+    --listen unix:/run/agentsc/runtime.sock --sidecar
+    unix:/run/agentsc/sidecar.sock`, only the `agentsc-run` emptyDir, no
+    env), then `agentscd` with `AGENTSC_NO_RUNTIME=true`, its state in its
+    own emptyDir `agentsc-state` (`AGENTSC_STATE_DIR`) and the only
+    `ANTHROPIC_API_KEY`. The runtime cannot read the sidecar's key or
+    environment;
+  - a pod that brings its own `agentscd` or `agentsc-runtime`, mounts the
+    sidecar's volumes elsewhere, projects another `agentsc`-audience token or
+    sets `shareProcessNamespace`/`hostPID` is refused at admission;
+  - with the sidecar image allow-list on (ControlPlaneConfig
+    `sidecar_images.allowed_digests`; Helm `images.agentscd.digest`,
+    `injection.allowedImageDigests`; empty = off, for development builds,
+    and embassy warns at start-up), only images pinned to an allowed digest
+    are injected, IssueCertificate and every renewal refuse pods whose
+    running sidecar `imageID` is not allowed, and the ValidatingAdmissionPolicy
+    `agentsc-sidecar-integrity` (Kubernetes 1.30+) refuses such pods, sidecar
+    image changes and ephemeral containers;
+  - with the allow-list on, IssueCertificate also refuses a pod whose sidecars
+    differ from the injected shape (`agentscd` env, `AGENTSC_CA_PEM` with other
+    certificates than the CA's roots, `envFrom`, lifecycle hooks, probes, mounts,
+    volume types, a missing `agentsc-runtime`, `hostAliases`, `dnsPolicy: None`,
+    `dnsConfig` nameservers or searches), and the policy
+    refuses sidecar containers in pods without the label
+    `agentsc.io/inject: "true"`, so the injector checks every pod that has them.
 
 ## 8. CLI
 
