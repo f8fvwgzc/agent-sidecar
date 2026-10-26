@@ -40,6 +40,8 @@ pub const RULE_HTTP_ERROR: &str = "http.error";
 pub const RULE_REPORT_REJECTED: &str = "runtime.report_rejected";
 /// On every `ReportEvent` answer once the agent's daily cost budget is spent (design §6.5).
 pub const RULE_COST_BUDGET: &str = "budget.max_cost_usd_per_day";
+/// The only model whose calls the runtime reports itself: it runs in the runtime and costs nothing.
+pub const MOCK_MODEL: &str = "mock";
 /// No charter is loaded yet (managed mode, before the control plane sent one).
 pub const RULE_NO_CHARTER: &str = "config.no_charter";
 /// Upper bound for a message the runtime sends us (tool bodies are small; prompts never come here).
@@ -1106,11 +1108,14 @@ impl SidecarTools for ToolsService {
         }
     }
 
-    /// Design §6.5: only `model_call` records, and — while the Execute runs — `tool_call` records
-    /// for `load_skill:<skill>` of that agent's skills, for an (agent, request id) whose Execute is
-    /// in flight or returned less than the run window ago. Anything else is refused with
-    /// `INVALID_ARGUMENT` and an `authz` record `runtime.report_rejected`. Once the agent's daily
-    /// cost budget is spent, every answer carries `x-agentsc-rule: budget.max_cost_usd_per_day`.
+    /// Design §6.5: only `model_call` records of the `mock` model (a provider's calls go through
+    /// the model gateway, which writes their records itself), and — while the Execute runs —
+    /// `tool_call` records for `load_skill:<skill>` of that agent's skills, for an (agent, request
+    /// id) whose Execute is in flight or returned less than the run window ago. Anything else is
+    /// refused with `INVALID_ARGUMENT` and an `authz` record `runtime.report_rejected`. The
+    /// record's `cost_usd` is the price table's, never the runtime's (`mock` costs nothing). Once
+    /// the agent's daily cost budget is spent, every answer carries
+    /// `x-agentsc-rule: budget.max_cost_usd_per_day`.
     async fn report_event(&self, request: Request<AuditEvent>) -> Result<Response<Empty>, Status> {
         let state = &self.state;
         let ev = request.into_inner();
@@ -1161,6 +1166,12 @@ impl SidecarTools for ToolsService {
         };
         let snap = state.loaded().ok_or_else(no_charter)?;
         match rec.kind {
+            Kind::ModelCall if rec.callee != MOCK_MODEL => {
+                return Err(reject(format!(
+                    "model calls to a provider ({:?}) go through the model gateway, which records them",
+                    rec.callee
+                )));
+            }
             Kind::ModelCall => {}
             Kind::ToolCall if !run.in_flight => {
                 return Err(reject(
@@ -1193,11 +1204,8 @@ impl SidecarTools for ToolsService {
         if rec.ts.is_empty() {
             rec.ts = agentsc_common::audit::now_rfc3339();
         }
-        if rec.kind == Kind::ModelCall
-            && let Some(cost) = rec.cost_usd
-            && cost > 0.0
-        {
-            state.budgets.add_cost(&agent, cost);
+        if rec.kind == Kind::ModelCall {
+            rec.cost_usd = Some(0.0);
         }
         state.audit.write(rec);
         let mut resp = Response::new(Empty {});

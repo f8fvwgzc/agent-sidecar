@@ -41,7 +41,7 @@ class Spy(MockModel):
         super().__init__()
         self.seen: list[dict[str, Any]] = []
 
-    def complete(self, system, messages, tools, max_tokens, timeout=None):
+    def complete(self, system, messages, tools, max_tokens, timeout=None, headers=None):
         self.seen.append({"system": system, "messages": [dict(m) for m in messages], "tools": tools})
         return super().complete(system, messages, tools, max_tokens, timeout)
 
@@ -51,7 +51,7 @@ class Scripted(MockModel):
         super().__init__()
         self.responses = list(responses)
 
-    def complete(self, system, messages, tools, max_tokens, timeout=None):
+    def complete(self, system, messages, tools, max_tokens, timeout=None, headers=None):
         return self.responses.pop(0)
 
 

@@ -738,7 +738,7 @@ If you also restrict egress, remember two things. The agent runtime calls the mo
 There is no team-level budget field. Budgets are set per agent, in each charter, and counted in memory by each sidecar replica. Each team owns the budgets of its own agents. A model call is counted in the sidecar where it runs, so a cross-service request is split across the teams it touches. To plan spend:
 
 - Worst case per agent per day is about `max_cost_usd_per_day` times the number of replicas. The check runs before each invocation, not during it. So runs that are already in progress can go over the limit.
-- Use `cost_usd` on `model_call` audit records in your log pipeline for per-team reports. The cost is an estimate from the price table in `runtime/src/agentsc_runtime/pricing.py`.
+- Use `cost_usd` on `model_call` audit records in your log pipeline for per-team reports. The sidecar computes it from the usage the provider reported and the price table in `crates/agentsc-common/src/pricing.rs`.
 
 ### Naming conventions
 

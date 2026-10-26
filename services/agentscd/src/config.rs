@@ -116,6 +116,22 @@ pub struct Config {
     )]
     pub mesh_cache_max_age: u64,
 
+    /// The Anthropic API key, read by the sidecar only (the model gateway, CONTRACT.md §4.4): a
+    /// file, re-read at start-up, e.g. a mounted Secret. Env `ANTHROPIC_API_KEY` is the other way.
+    #[arg(long, env = "AGENTSC_ANTHROPIC_API_KEY_FILE")]
+    pub anthropic_api_key_file: Option<PathBuf>,
+    /// The same as text, from env `ANTHROPIC_API_KEY` only: never a command-line flag. The runtime
+    /// is started without it (runtime.rs).
+    #[arg(skip = std::env::var(ANTHROPIC_KEY_ENV).ok())]
+    pub anthropic_api_key: Option<String>,
+    /// Where the model gateway sends Anthropic Messages API calls.
+    #[arg(
+        long,
+        env = "AGENTSC_ANTHROPIC_BASE_URL",
+        default_value = crate::gateway::anthropic::DEFAULT_BASE_URL
+    )]
+    pub anthropic_base_url: String,
+
     /// Intervals and windows of design §6; tests shorten them.
     #[arg(skip)]
     pub timing: Timing,
@@ -128,6 +144,16 @@ pub struct Config {
 
 /// The env variable that carries the app API token as text (design §6.1).
 pub const APP_TOKEN_ENV: &str = "AGENTSC_APP_TOKEN";
+/// The env variable that carries the Anthropic API key as text.
+pub const ANTHROPIC_KEY_ENV: &str = "ANTHROPIC_API_KEY";
+/// Secrets the sidecar may hold that the runtime it spawns never gets (runtime.rs).
+pub const RUNTIME_ENV_DENY: &[&str] = &[
+    ANTHROPIC_KEY_ENV,
+    "ANTHROPIC_AUTH_TOKEN",
+    "AGENTSC_ANTHROPIC_API_KEY_FILE",
+    "OPENAI_API_KEY",
+    APP_TOKEN_ENV,
+];
 
 /// The intervals and windows design §6 fixes. [`Default`] is the design's values.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,6 +225,9 @@ impl Config {
             otlp_endpoint_allow: Vec::new(),
             mesh_cache_bytes: crate::cache::DEFAULT_CAPACITY_BYTES,
             mesh_cache_max_age: crate::cache::DEFAULT_MAX_AGE_SECS,
+            anthropic_api_key_file: None,
+            anthropic_api_key: None,
+            anthropic_base_url: crate::gateway::anthropic::DEFAULT_BASE_URL.into(),
             timing: Timing::default(),
             otel_env: Some(BTreeMap::new()),
         }
@@ -276,6 +305,23 @@ impl Config {
             return Ok(Some(pem));
         }
         Ok(non_empty(&self.ca_pem).map(str::to_string))
+    }
+
+    /// The Anthropic API key, from `--anthropic-api-key-file` or `ANTHROPIC_API_KEY`; `None`: the
+    /// gateway has no Anthropic provider and the runtime runs every agent on the mock model.
+    pub fn anthropic_key(&self) -> anyhow::Result<Option<String>> {
+        if let Some(path) = &self.anthropic_api_key_file {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| anyhow::anyhow!("--anthropic-api-key-file {}: {e}", path.display()))?;
+            let key = text.trim().to_string();
+            anyhow::ensure!(
+                !key.is_empty(),
+                "--anthropic-api-key-file {} is empty",
+                path.display()
+            );
+            return Ok(Some(key));
+        }
+        Ok(non_empty(&self.anthropic_api_key).map(str::to_string))
     }
 
     /// The app API token, from `--app-token-file` or `AGENTSC_APP_TOKEN` (design §6.6).
@@ -399,5 +445,25 @@ mod tests {
             .render_long_help()
             .to_string();
         assert!(!help.contains("--app-token "), "{help}");
+    }
+
+    #[test]
+    fn the_provider_key_is_never_a_command_line_flag() {
+        let err = Config::try_parse_from(["agentscd", "--anthropic-api-key", "sk-x"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("key");
+        std::fs::write(&file, "sk-from-file\n").unwrap();
+        let mut c = Config::for_test("c".into(), "t".into(), "s".into());
+        assert_eq!(c.anthropic_key().unwrap(), None);
+        c.anthropic_api_key = Some("sk-from-env".into());
+        assert_eq!(c.anthropic_key().unwrap().as_deref(), Some("sk-from-env"));
+        c.anthropic_api_key_file = Some(file);
+        assert_eq!(
+            c.anthropic_key().unwrap().as_deref(),
+            Some("sk-from-file"),
+            "the file wins"
+        );
+        assert!(RUNTIME_ENV_DENY.contains(&ANTHROPIC_KEY_ENV));
     }
 }

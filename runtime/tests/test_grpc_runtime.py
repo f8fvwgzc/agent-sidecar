@@ -68,7 +68,7 @@ class Held(MockModel):
         super().__init__()
         self.release = threading.Event()
 
-    def complete(self, system, messages, tools, max_tokens, timeout=None):
+    def complete(self, system, messages, tools, max_tokens, timeout=None, headers=None):
         if system.startswith(REFLECTION_MARKER):
             assert self.release.wait(5)
         return super().complete(system, messages, tools, max_tokens, timeout)

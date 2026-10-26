@@ -31,7 +31,6 @@ pub fn client(socket: &Path) -> anyhow::Result<RuntimeClient<Channel>> {
 pub fn supervise(state: Arc<AppState>, config: Config) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let runtime_sock = config.socket_dir.join("runtime.sock");
-        let sidecar_sock = config.socket_dir.join("sidecar.sock");
         let mut backoff = Duration::from_secs(1);
         loop {
             let _ = std::fs::remove_file(&runtime_sock);
@@ -42,17 +41,7 @@ pub fn supervise(state: Arc<AppState>, config: Config) -> tokio::task::JoinHandl
                     return;
                 }
             };
-            let mut cmd = tokio::process::Command::new(&words[0]);
-            cmd.args(&words[1..])
-                .arg("--listen")
-                .arg(format!("unix:{}", runtime_sock.display()))
-                .arg("--sidecar")
-                .arg(format!("unix:{}", sidecar_sock.display()))
-                .env("AGENTSC_SERVICE", &state.service)
-                .env("AGENTSC_NAMESPACE", &state.namespace)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .kill_on_drop(true);
+            let mut cmd = command(&words, &config.socket_dir, &state.service, &state.namespace);
             tracing::info!(cmd = %config.runtime_cmd, "starting agent runtime");
             let mut child = match cmd.spawn() {
                 Ok(c) => c,
@@ -86,6 +75,42 @@ pub fn supervise(state: Arc<AppState>, config: Config) -> tokio::task::JoinHandl
     })
 }
 
+/// The runtime's command line and environment. It inherits the sidecar's environment except
+/// the secrets the sidecar holds ([`crate::config::RUNTIME_ENV_DENY`]): its model calls go
+/// through the gateway (`AGENTSC_MODEL_GATEWAY`), which adds the key.
+pub fn command(
+    words: &[String],
+    socket_dir: &Path,
+    service: &str,
+    namespace: &str,
+) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(&words[0]);
+    cmd.args(&words[1..])
+        .arg("--listen")
+        .arg(format!(
+            "unix:{}",
+            socket_dir.join("runtime.sock").display()
+        ))
+        .arg("--sidecar")
+        .arg(format!(
+            "unix:{}",
+            socket_dir.join("sidecar.sock").display()
+        ))
+        .env("AGENTSC_SERVICE", service)
+        .env("AGENTSC_NAMESPACE", namespace)
+        .env(
+            "AGENTSC_MODEL_GATEWAY",
+            format!("unix:{}", socket_dir.join(crate::gateway::SOCKET).display()),
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    for name in crate::config::RUNTIME_ENV_DENY {
+        cmd.env_remove(name);
+    }
+    cmd
+}
+
 async fn forward<R: tokio::io::AsyncRead + Unpin>(reader: R, prefix: &'static str) {
     let mut lines = BufReader::new(reader).lines();
     while let Ok(Some(line)) = lines.next_line().await {
@@ -111,5 +136,51 @@ pub async fn health_loop(state: Arc<AppState>) {
         };
         state.runtime_ready.store(ok, Ordering::Relaxed);
         tokio::time::sleep(Duration::from_secs(if ok { 10 } else { 1 })).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_runtime_never_inherits_the_sidecars_secrets() {
+        let cmd = command(
+            &["agentsc-runtime".into(), "-v".into()],
+            Path::new("/run/agentsc"),
+            "orders",
+            "shop",
+        );
+        let envs: Vec<(String, Option<String>)> = cmd
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        for secret in crate::config::RUNTIME_ENV_DENY {
+            assert!(
+                envs.contains(&(secret.to_string(), None)),
+                "{secret} is removed: {envs:?}"
+            );
+        }
+        assert!(envs.contains(&(
+            "AGENTSC_MODEL_GATEWAY".into(),
+            Some("unix:/run/agentsc/model.sock".into())
+        )));
+        let args: Vec<_> = cmd.as_std().get_args().collect();
+        assert_eq!(
+            args,
+            [
+                "-v",
+                "--listen",
+                "unix:/run/agentsc/runtime.sock",
+                "--sidecar",
+                "unix:/run/agentsc/sidecar.sock"
+            ]
+        );
     }
 }

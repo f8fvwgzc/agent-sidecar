@@ -120,6 +120,8 @@ dependencies = [
  "clap",
  "futures",
  "http",
+ "http-body-util",
+ "hyper",
  "hyper-util",
  "pprof",
  "prost",

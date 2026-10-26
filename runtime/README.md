@@ -20,7 +20,7 @@ uv run agentsc-runtime --listen unix:/tmp/rt.sock --sidecar unix:/tmp/sc.sock
 | `harness.py` | Which model errors are retried (by Anthropic SDK exception class), `retry-after` / `retry-after-ms`, backoff. |
 | `prompts.py` | The fixed texts: the "Skills" section, the `load_skill` tool, the `<notes>` block, the reflection prompt. |
 | `learning.py` | The reflection after a run and `ProposeLesson`; at most two at a time per process. |
-| `models.py` | The process-wide `anthropic.Anthropic(max_retries=0)` client, and the deterministic mock model. |
+| `models.py` | The process-wide `anthropic.Anthropic(max_retries=0)` client, pointed at the sidecar's model gateway on its unix socket (`AGENTSC_MODEL_GATEWAY`, else `model.sock` next to `--sidecar`; CONTRACT.md §4.4) with a placeholder key, and the deterministic mock model. The runtime holds no provider key and prices nothing. |
 | `sidecar.py` | The `SidecarTools` gRPC client. |
 
 ## Harness
@@ -67,16 +67,15 @@ Memory notes open the first user turn as their own text block:
 After the Execute response, a run is reflected on when learning is enabled for the agent, the
 caller is `local` (or a peer and `from_peers` is set), the run used a tool other than `load_skill`
 or ended `denied`/`error`, and the sidecar has not said the agent's daily cost budget is spent. The
-reflection is one model call (reported as `model_call` under the invocation span) on a transcript
+reflection is one model call (recorded as `model_call` under the invocation span: by the model
+gateway for a provider, through `ReportEvent` for the mock) on a transcript
 with each entry cut to 8 KiB; an answer other than `NONE` that fits `max_note_chars` goes to
 `SidecarTools.ProposeLesson`. At most two reflections run at once; a third is dropped.
 
 **The budget signal.** The runtime takes the daily cost budget as spent when the sidecar names
-`x-agentsc-rule: budget.max_cost_usd_per_day` on its answer to a `ReportEvent` of the run: in the
-response headers (what tonic sends for `Response::metadata`; a successful unary reply cannot carry
-custom trailers), in the trailers, or on an error status (e.g. `RESOURCE_EXHAUSTED`). Neither design
-§6.5 nor CONTRACT.md names this signal yet; it is the runtime's side of a channel still to be agreed
-with the sidecar.
+`x-agentsc-rule: budget.max_cost_usd_per_day` on the run's model gateway answers (or, for the mock,
+on its answer to a `ReportEvent`: in the response headers, in the trailers, or on an error status).
+The sidecar enforces the budget itself; the signal only spares a reflection it would refuse.
 
 **A sidecar that keeps to design §6.5** accepts `ReportEvent` records only for an Execute still in
 flight, and the reflection's record comes after its Execute has returned (§12). When the sidecar
@@ -89,8 +88,9 @@ reported); until then learning does not get past such a sidecar.
 
 ## Mock model
 
-An agent with `model: mock` runs on a deterministic mock. Without `ANTHROPIC_API_KEY` any other agent is refused,
-unless `AGENTSC_MOCK_FALLBACK=1` (set by the demos and CI) runs it on the mock too:
+An agent with `model: mock` runs on a deterministic mock. When the sidecar holds no provider key (its
+model gateway lists none) any other agent is refused, unless `AGENTSC_MOCK_FALLBACK=1` (set by the demos
+and CI) runs it on the mock too:
 
 1. When `load_skill` is offered and a skill's name and description share words with the input,
    it loads that skill first (once).

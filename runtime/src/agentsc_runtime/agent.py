@@ -3,6 +3,11 @@
 Every model call goes through the harness: the agent's model with up to `harness.max_retries`
 retries of retryable failures, then one attempt with `harness.fallback_model`. All of that is one
 step of `budgets.max_steps`; each attempt is its own `model_call` record and `steps[]` entry.
+
+A provider's calls go through the sidecar's model gateway (models.py), bound to this run by
+headers; the gateway writes their `model_call` records and counts their cost, so the runtime
+reports records only for the `mock` model, which costs nothing. The runtime does not price
+anything: what a run cost is the sidecar's measurement.
 """
 
 from __future__ import annotations
@@ -16,7 +21,6 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from . import pricing
 from .harness import RETRY_AFTER_CAP_NO_DEADLINE, is_retryable, retry_delay
 from .models import Model, ModelError, ModelResponse
 from .prompts import load_skill_tool, notes_block, system_prompt
@@ -50,7 +54,6 @@ class ExecuteResult:
     output: str = ""
     input_tokens: int = 0
     output_tokens: int = 0
-    cost_usd: float = 0.0
     steps: list[Step] = field(default_factory=list)
     rule: str = ""
     reason: str = ""
@@ -59,6 +62,26 @@ class ExecuteResult:
     messages: list[dict[str, Any]] = field(default_factory=list)
     tools_used: list[str] = field(default_factory=list)  # tools other than load_skill the model called
     cost_budget_exhausted: bool = False  # the sidecar said the agent's daily cost budget is spent
+
+
+# The run binding and attempt label a gateway call carries (CONTRACT.md §4.4).
+HEADER_REQUEST_ID = "x-agentsc-request-id"
+HEADER_AGENT = "x-agentsc-agent"
+HEADER_ATTEMPT = "x-agentsc-attempt"
+HEADER_PURPOSE = "x-agentsc-purpose"
+
+
+def gateway_headers(ctx: CallContext, agent: str, meta: dict[str, Any] | None) -> dict[str, str]:
+    """The headers that bind a model call to its run: `attempt n` / `fallback`, or `reflection`."""
+    headers = {HEADER_REQUEST_ID: ctx.request_id, HEADER_AGENT: agent}
+    meta = meta or {}
+    if meta.get("purpose"):
+        headers[HEADER_PURPOSE] = str(meta["purpose"])
+    elif meta.get("fallback"):
+        headers[HEADER_ATTEMPT] = "fallback"
+    elif "attempt" in meta:
+        headers[HEADER_ATTEMPT] = str(meta["attempt"])
+    return headers
 
 
 def _now() -> str:
@@ -88,8 +111,9 @@ def model_call_record(
     meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """`meta` adds fields to `input`: `attempt` (1-based) and `fallback` for harness attempts, or
-    `purpose: "reflection"` for the learning reflection (design §6.5, §11.1, §12)."""
-    callee = model.name if model.provider == "mock" else f"{model.provider}:{model.name}"
+    `purpose: "reflection"` for the learning reflection (design §6.5, §11.1, §12). Only the mock's
+    records are sent (a provider's calls are recorded by the gateway), and the mock costs nothing."""
+    callee = "mock" if model.provider == "mock" else f"{model.provider}:{model.name}"
     denied = stop_reason == "refusal"
     return {
         "ts": _now(),
@@ -110,7 +134,7 @@ def model_call_record(
         "input_sha256": None,
         "output_sha256": None,
         "tokens": {"input": input_tokens, "output": output_tokens},
-        "cost_usd": pricing.cost_usd(model.name, input_tokens, output_tokens),
+        "cost_usd": 0.0 if model.provider == "mock" else None,
         "latency_ms": latency_ms,
         "decision": "deny" if denied else "allow",
         "rule": "model.refusal" if denied else None,
@@ -194,20 +218,27 @@ async def _model_turn(
     abandoned: asyncio.Event,
     meta: dict[str, Any] | None = None,
 ) -> _Turn:
-    """One model call and its ReportEvent. The provider bills the call whether or not anyone still waits
-    for it, so this runs to the end even when the Execute that started it is cancelled."""
+    """One model call and, for the mock, its ReportEvent. The provider bills the call whether or not
+    anyone still waits for it, so this runs to the end even when the Execute that started it is
+    cancelled (the gateway does the same on its side)."""
     started = time.monotonic()
+    headers = gateway_headers(ctx, spec.name, meta)
+    rule: str | None = None
     try:
-        resp = await asyncio.to_thread(model.complete, system, messages, tools, max_tokens, timeout)
+        resp = await asyncio.to_thread(model.complete, system, messages, tools, max_tokens, timeout, headers)
     except Exception as e:  # noqa: BLE001 — surfaced to the sidecar as an error envelope
         cause = e.cause if isinstance(e, ModelError) else e
         used = (e.input_tokens, e.output_tokens) if isinstance(e, ModelError) else (0, 0)
+        rule = e.rule if isinstance(e, ModelError) else None
         turn = _Turn(None, cause, *used, _ms(started))
         content, stop_reason, error = None, "error", str(cause)
     else:
         turn = _Turn(resp, None, resp.input_tokens, resp.output_tokens, _ms(started))
-        content, stop_reason = resp.content, resp.stop_reason
+        content, stop_reason, rule = resp.content, resp.stop_reason, resp.rule
         error = CANCELLED if abandoned.is_set() else None
+    if model.provider != "mock":
+        turn.sidecar_rule = rule  # the gateway took, recorded and counted the call
+        return turn
     record = model_call_record(
         spec,
         ctx,
@@ -320,7 +351,6 @@ class _Run:
         r = self.result
         r.input_tokens += turn.input_tokens
         r.output_tokens += turn.output_tokens
-        r.cost_usd = round(r.cost_usd + pricing.cost_usd(model.name, turn.input_tokens, turn.output_tokens), 6)
         if turn.sidecar_rule == RULE_COST_BUDGET:
             r.cost_budget_exhausted = True
         if turn.error is not None:

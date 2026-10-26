@@ -3,7 +3,6 @@ import threading
 
 import pytest
 
-from agentsc_runtime import pricing
 from agentsc_runtime.agent import run_agent
 from agentsc_runtime.models import MockModel, ModelError, ModelResponse
 
@@ -54,7 +53,7 @@ def test_service_tool_substitutes_path_params(ops_assistant, sidecar, ctx):
 
 def test_max_steps_is_enforced(ops_assistant, sidecar, ctx):
     class LoopingModel(MockModel):
-        def complete(self, system, messages, tools, max_tokens, timeout=None):
+        def complete(self, system, messages, tools, max_tokens, timeout=None, headers=None):
             r = super().complete(system, messages, tools, max_tokens)
             # never finish: keep asking for the stock analyst
             r.content = [{"type": "tool_use", "id": "t", "name": "stock_analyst", "input": {"input": "again"}}]
@@ -70,7 +69,7 @@ def test_max_steps_is_enforced(ops_assistant, sidecar, ctx):
 
 def test_refusal_becomes_denied(ops_assistant, sidecar, ctx):
     class RefusingModel(MockModel):
-        def complete(self, system, messages, tools, max_tokens, timeout=None):
+        def complete(self, system, messages, tools, max_tokens, timeout=None, headers=None):
             r = super().complete(system, messages, tools, max_tokens)
             r.content, r.stop_reason = [], "refusal"
             return r
@@ -84,7 +83,7 @@ def test_context_is_appended_to_the_first_message(ops_assistant, sidecar, ctx):
     captured = {}
 
     class Spy(MockModel):
-        def complete(self, system, messages, tools, max_tokens, timeout=None):
+        def complete(self, system, messages, tools, max_tokens, timeout=None, headers=None):
             captured["first"] = messages[0]["content"]
             r = super().complete(system, messages, tools, max_tokens)
             r.content, r.stop_reason = [{"type": "text", "text": "ok"}], "end_turn"
@@ -95,11 +94,12 @@ def test_context_is_appended_to_the_first_message(ops_assistant, sidecar, ctx):
 
 
 def test_a_model_call_in_flight_when_execute_is_cancelled_is_still_reported(ops_assistant, sidecar, ctx):
-    """The provider bills a call nobody waits for any more, so its cost still reaches the budget (§9)."""
+    """A call nobody waits for any more still finishes and is reported (§9): the provider bills it.
+    For a provider the gateway does the same on its side; here the mock reports its own record."""
     started, release = threading.Event(), threading.Event()
 
     class Slow(MockModel):
-        def complete(self, system, messages, tools, max_tokens, timeout=None):
+        def complete(self, system, messages, tools, max_tokens, timeout=None, headers=None):
             started.set()
             release.wait(5)
             return ModelResponse([{"type": "text", "text": "too late"}], "end_turn", 1200, 345)
@@ -125,17 +125,17 @@ def test_a_model_call_in_flight_when_execute_is_cancelled_is_still_reported(ops_
     asyncio.run(cancel_mid_call())
     [ev] = sidecar.events
     assert ev["kind"] == "model_call" and ev["tokens"] == {"input": 1200, "output": 345}
-    assert ev["cost_usd"] == pricing.cost_usd("claude-opus-5-5", 1200, 345) > 0
+    assert ev["cost_usd"] == 0.0 and ev["callee"] == "mock", "the runtime prices nothing"
     assert ev["output"] == [{"type": "text", "text": "too late"}] and ev["error"].startswith("cancelled: ")
 
 
 def test_a_failed_model_call_reports_the_usage_it_was_billed_for(ops_assistant, sidecar, ctx):
     class Broken(MockModel):
-        def complete(self, system, messages, tools, max_tokens, timeout=None):
+        def complete(self, system, messages, tools, max_tokens, timeout=None, headers=None):
             raise ModelError(ConnectionError("stream reset"), 900, 40)
 
     res = run(run_agent(ops_assistant, "stock?", "", ctx, Broken("claude-opus-5-5"), sidecar))
     assert res.status == "error" and res.rule == "model.error" and res.reason == "ConnectionError: stream reset"
     [ev] = sidecar.events
     assert ev["tokens"] == {"input": 900, "output": 40} and ev["error"] == "stream reset"
-    assert (res.input_tokens, res.output_tokens) == (900, 40) and res.cost_usd == ev["cost_usd"] > 0
+    assert (res.input_tokens, res.output_tokens) == (900, 40)

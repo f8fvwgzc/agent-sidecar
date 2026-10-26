@@ -6,11 +6,11 @@ answer is `NONE` or one note; a note goes to the sidecar with `SidecarTools.Prop
 checks, scrubs, audits and forwards it — the runtime never writes memory itself. Reflections run in
 the background, at most two at a time per process; a run that finds both slots busy is not reflected on.
 
-The reflection's `model_call` record is what counts its cost in the agent's budgets. It carries the
-run's request id but reaches the sidecar after that Execute has returned, and design §6.5 has the
-sidecar accept ReportEvent records only for an Execute still in flight. A sidecar that refuses the
-record has not counted the cost, so the note is not proposed and this process reflects no more:
-every further reflection would be spend outside the budgets (and a `runtime.report_rejected` denial).
+A provider's reflection goes through the sidecar's model gateway like any model call: the gateway
+lets one through per run in the run window after its Execute returned, records it and counts its
+cost. For the mock, the runtime reports the reflection's `model_call` record itself. It carries the
+run's request id but reaches the sidecar after that Execute has returned; a sidecar that refuses the
+record (design §6.5) gets no proposal, and this process reflects no more.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from .agent import ExecuteResult, model_call_record, warn_unreported
+from .agent import ExecuteResult, gateway_headers, model_call_record, warn_unreported
 from .models import Model, ModelError
 from .prompts import NONE, TRANSCRIPT_CLOSE, TRANSCRIPT_OPEN, reflection_system
 from .spec import LOAD_SKILL_TOOL, AgentSpec
@@ -163,8 +163,11 @@ async def _report(
     latency_ms: int,
     error: str | None = None,
 ) -> None:
-    """Report the reflection's `model_call` record: the run's request and trace, parent = the
-    invocation span. Raises ReflectionRefused when the sidecar refuses it."""
+    """Report the mock reflection's `model_call` record: the run's request and trace, parent = the
+    invocation span. Raises ReflectionRefused when the sidecar refuses it. A provider's reflection
+    is recorded by the gateway: nothing to send."""
+    if job.model.provider != "mock":
+        return
     record = model_call_record(
         job.spec,
         job.ctx,
@@ -198,8 +201,9 @@ async def reflect(job: Reflection) -> str | None:
     max_tokens = max(1, spec.budgets.max_tokens_per_call)
     timeout = float(max(1, spec.harness.request_timeout_seconds))  # one attempt, no retries: the run is over
     started = time.monotonic()
+    headers = gateway_headers(ctx, spec.name, {"purpose": "reflection"})
     try:
-        resp = await asyncio.to_thread(job.model.complete, system, messages, [], max_tokens, timeout)
+        resp = await asyncio.to_thread(job.model.complete, system, messages, [], max_tokens, timeout, headers)
     except Exception as e:  # noqa: BLE001 — reported like any failed model call, then given up
         cause = e.cause if isinstance(e, ModelError) else e
         used = (e.input_tokens, e.output_tokens) if isinstance(e, ModelError) else (0, 0)
