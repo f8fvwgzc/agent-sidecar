@@ -597,10 +597,13 @@ default `model.sock` next to `--sidecar`) with a placeholder key.
     server tool (a `tools[]` entry with a `type` other than `custom`, billed
     outside the token price) — `model.request_invalid` (HTTP 400);
   - with less than 500 ms left of the Execute's deadline — `deadline.exceeded`;
+  - a content block whose `source` is a URL (the provider would fetch it,
+    outside the tool policy, at a size nobody knows yet) — `model.request_invalid`;
   - when the agent's spend today, plus what its calls in flight hold, plus the
-    most this call can cost (its request bytes + 4096 input tokens, priced as
-    1-hour cache writes, and `max_tokens` output tokens) would exceed
-    `max_cost_usd_per_day` — `budget.max_cost_usd_per_day`.
+    most this call can cost (its request bytes + 4096 input tokens, or the
+    model's whole context window when the request carries an image or a
+    document, priced as 1-hour cache writes, and `max_tokens` output tokens)
+    would exceed `max_cost_usd_per_day` — `budget.max_cost_usd_per_day`.
 
   A refusal is HTTP 403 (400 for a request it cannot take) with the provider's
   error body (`permission_error` / `invalid_request_error`, message
@@ -617,7 +620,13 @@ default `model.sock` next to `--sidecar`) with a placeholder key.
   input, output, cache read and cache write tokens) and content, prices it
   from the one table in `crates/agentsc-common/src/pricing.rs` (per 1M tokens;
   cache reads and writes at their own rates; unknown model ids at the top tier),
-  replaces the call's hold with that cost, and writes its `model_call` record
+  replaces the call's hold with that cost, and writes its `model_call` record.
+  Only a whole answer (a stream that reached `message_stop` without an `error`
+  event, or a non-streamed body with its `usage`) is counted at its usage; an
+  error status or a connection never made counts nothing; an answer cut before
+  it completed (the deadline, a timeout, a broken connection, a mid-stream
+  error) is counted at its hold, since the provider may bill more than it had
+  reported. The record
   (§9 shape; `callee: anthropic:<model>`, `parent_span_id` = the invocation's
   span). A call whose runtime went away is read to the end and counted (the
   provider bills it), with `error: "cancelled: …"`. A failed call counts what
