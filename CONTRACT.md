@@ -969,8 +969,10 @@ the values it remembered for open requests and its subscribers are unaffected.
     `agentsc-sidecar-integrity` (Kubernetes 1.30+) refuses such pods, sidecar
     image changes and ephemeral containers;
   - with the allow-list on, IssueCertificate also refuses a pod whose sidecars
-    differ from the injected shape (`agentscd` env, `envFrom`, lifecycle hooks,
-    probes, mounts, volume types, a missing `agentsc-runtime`), and the policy
+    differ from the injected shape (`agentscd` env, `AGENTSC_CA_PEM` with other
+    certificates than the CA's roots, `envFrom`, lifecycle hooks, probes, mounts,
+    volume types, a missing `agentsc-runtime`, `hostAliases`, `dnsPolicy: None`,
+    `dnsConfig` nameservers or searches), and the policy
     refuses sidecar containers in pods without the label
     `agentsc.io/inject: "true"`, so the injector checks every pod that has them.
 

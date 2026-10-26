@@ -27,8 +27,8 @@
 //!   `agentscd` must run its image's entrypoint (no `command`, no `args`) and `agentsc-runtime`
 //!   exactly the injected command line ([`crate::webhook::RUNTIME_COMMAND`]): an allowed image
 //!   started with another command runs any program (the image has `python3`) as the sidecar;
-//!   and the pod must have the injected shape ([`shape_problem`]: the sidecars' env, mounts,
-//!   probes and volumes), since a pod without the injection label brings its own `agentscd`
+//!   and the pod must have the injected shape ([`shape_problem`]: the sidecars' env, its CA
+//!   bundle among them, mounts, probes and volumes, and no DNS overrides), since a pod without the injection label brings its own `agentscd`
 //!   past the injector, and every `agentscd` flag has an env form;
 //! - the chart's ValidatingAdmissionPolicy `agentsc-sidecar-integrity` applies the same image and
 //!   command rules to the pod spec (`deploy/helm/agent-sidecar/templates/sidecar-policy.yaml`),
@@ -157,9 +157,23 @@ fn keys_are(v: &Value, keys: &[&str]) -> bool {
         .is_some_and(|o| o.len() == keys.len() && keys.iter().all(|k| o.contains_key(*k)))
 }
 
+/// Does `pem` hold only roots of `roots_pem`, at least one? The injector sets `AGENTSC_CA_PEM`
+/// to the CA's roots; a pod injected before a CA rotation added a root holds fewer of them.
+/// Any other certificate would let `agentscd` trust another server at the control-plane
+/// addresses, and hand it the token.
+fn only_roots_of(pem: &str, roots_pem: &str) -> bool {
+    let (Ok(certs), Ok(roots)) = (
+        agentsc_pki::certs_from_pem(pem),
+        agentsc_pki::certs_from_pem(roots_pem),
+    ) else {
+        return false;
+    };
+    !certs.is_empty() && certs.iter().all(|c| roots.contains(c))
+}
+
 /// Is `e` one of the env entries the injector gives `agentscd` (module docs)? `fixed`: the
 /// names with one possible value.
-fn sidecar_env_ok(e: &EnvVar, fixed: &[(&str, String)]) -> bool {
+fn sidecar_env_ok(e: &EnvVar, fixed: &[(&str, String)], expected: &Expected) -> bool {
     let literal = e
         .value_from
         .is_none()
@@ -168,6 +182,8 @@ fn sidecar_env_ok(e: &EnvVar, fixed: &[(&str, String)]) -> bool {
     let name = e.name.as_str();
     if let Some((_, want)) = fixed.iter().find(|(n, _)| *n == name) {
         literal == Some(want.as_str())
+    } else if name == "AGENTSC_CA_PEM" {
+        literal.is_some_and(|pem| only_roots_of(pem, expected.ca_roots_pem))
     } else if INJECTED_LITERAL_ENV.contains(&name) {
         literal.is_some()
     } else if let Some((_, path)) = INJECTED_FIELD_ENV.iter().find(|(n, _)| *n == name) {
@@ -185,12 +201,17 @@ fn sidecar_env_ok(e: &EnvVar, fixed: &[(&str, String)]) -> bool {
 }
 
 /// `agentscd` env the injector sets to a literal that depends on the pod.
-const INJECTED_LITERAL_ENV: [&str; 4] = [
-    "AGENTSC_SERVICE",
-    "AGENTSC_NAMESPACE",
-    "AGENTSC_APP_PORT",
-    "AGENTSC_CA_PEM",
-];
+const INJECTED_LITERAL_ENV: [&str; 3] =
+    ["AGENTSC_SERVICE", "AGENTSC_NAMESPACE", "AGENTSC_APP_PORT"];
+
+/// What embassy's injector puts in every pod, which [`shape_problem`] compares the pod with.
+#[derive(Debug, Clone, Copy)]
+pub struct Expected<'a> {
+    /// The control plane's namespace, which the injected addresses name.
+    pub cp_namespace: &'a str,
+    /// The CA's roots (`AGENTSC_CA_PEM`).
+    pub ca_roots_pem: &'a str,
+}
 /// `agentscd` env the injector takes from the pod's own fields.
 const INJECTED_FIELD_ENV: [(&str, &str); 2] = [
     ("POD_NAME", "metadata.name"),
@@ -198,8 +219,7 @@ const INJECTED_FIELD_ENV: [(&str, &str); 2] = [
 ];
 
 /// How `pod` differs from what the injector makes ([`crate::webhook`] module docs), in what
-/// matters for the workload key and the program that runs; `cp_namespace`: the control plane's
-/// namespace, which the injected addresses name. A pod can bring its own `agentscd`: without
+/// matters for the workload key and the program that runs. A pod can bring its own `agentscd`: without
 /// the label `agentsc.io/inject` the injector never sees it, and while the injector is bypassed
 /// (`failurePolicy: Ignore`) nothing at admission may check it. Every `agentscd` flag has an env
 /// form, so the allowed image with no `command` can still keep its key in a volume the app
@@ -208,7 +228,8 @@ const INJECTED_FIELD_ENV: [(&str, &str); 2] = [
 ///
 /// - `agentscd` has exactly the injector's env: `AGENTSC_CONTROL_PLANE`,
 ///   `AGENTSC_CA_ADDRESS`, `AGENTSC_K8S_TOKEN_FILE`, `AGENTSC_STATE_DIR` and
-///   `AGENTSC_NO_RUNTIME=true` with the injected values, the pod-specific literals
+///   `AGENTSC_NO_RUNTIME=true` with the injected values, `AGENTSC_CA_PEM` with roots of the
+///   CA only ([`only_roots_of`]), the pod-specific literals
 ///   ([`INJECTED_LITERAL_ENV`]) and fields ([`INJECTED_FIELD_ENV`]), `ANTHROPIC_API_KEY` from
 ///   a Secret's key `ANTHROPIC_API_KEY`, and the template's [`TEMPLATE_ENV_ALLOWED`];
 ///   `agentsc-runtime` only the template's [`RUNTIME_TEMPLATE_ENV`]; neither has `envFrom` or
@@ -219,11 +240,30 @@ const INJECTED_FIELD_ENV: [(&str, &str); 2] = [
 ///   [`RUN_VOLUME`]), which no other container mounts;
 /// - [`RUN_VOLUME`] and [`STATE_VOLUME`] are `emptyDir`s and [`TOKEN_VOLUME`] projects only
 ///   the service-account token for audience [`TOKEN_AUDIENCE`]; no other volume projects one;
-/// - no ephemeral containers, `shareProcessNamespace` or `hostPID`.
-pub fn shape_problem(pod: &Pod, cp_namespace: &str) -> Option<String> {
+/// - no ephemeral containers, `shareProcessNamespace` or `hostPID`;
+/// - no `hostAliases`, `dnsPolicy: None`, or `dnsConfig` nameservers or search domains: each
+///   could resolve the control-plane addresses (`embassy-ca.<cp-ns>.svc`, not a fully
+///   qualified name, so search domains come first) to another container, which would get
+///   `agentscd`'s token and could ask for a certificate with a key of its own.
+pub fn shape_problem(pod: &Pod, expected: &Expected) -> Option<String> {
+    let cp_namespace = expected.cp_namespace;
     let Some(spec) = pod.spec.as_ref() else {
         return Some("the pod has no spec".into());
     };
+    let dns = spec.dns_config.as_ref();
+    if spec.host_aliases.as_ref().is_some_and(|h| !h.is_empty())
+        || spec.dns_policy.as_deref() == Some("None")
+        || dns.is_some_and(|d| {
+            d.nameservers.as_ref().is_some_and(|n| !n.is_empty())
+                || d.searches.as_ref().is_some_and(|s| !s.is_empty())
+        })
+    {
+        return Some(
+            "hostAliases, dnsPolicy None, or dnsConfig nameservers or searches are set: the \
+             control-plane addresses could resolve to another container"
+                .into(),
+        );
+    }
     if spec.share_process_namespace == Some(true) || spec.host_pid == Some(true) {
         return Some(
             "shareProcessNamespace or hostPID is set: another container could read the sidecar's \
@@ -265,7 +305,7 @@ pub fn shape_problem(pod: &Pod, cp_namespace: &str) -> Option<String> {
         ("AGENTSC_NO_RUNTIME", "true".to_string()),
     ];
     let env: Vec<&EnvVar> = sidecar.env.iter().flatten().collect();
-    if let Some(e) = env.iter().find(|e| !sidecar_env_ok(e, &fixed)) {
+    if let Some(e) = env.iter().find(|e| !sidecar_env_ok(e, &fixed, expected)) {
         return Some(format!(
             "container {SIDECAR_CONTAINER:?} sets env {:?}, which the injector does not set so",
             e.name
@@ -389,11 +429,12 @@ pub fn shape_problem(pod: &Pod, cp_namespace: &str) -> Option<String> {
 }
 
 /// `IssueCertificate`'s check of a pod's running sidecar containers (module docs); `Ok` when
-/// the allow-list is not enforced. `cp_namespace`: the control plane's ([`shape_problem`]).
+/// the allow-list is not enforced. `expected`: what the injector puts in every pod
+/// ([`shape_problem`]).
 pub fn check_running_pod(
     cfg: &SidecarImagesConfig,
     pod: &Pod,
-    cp_namespace: &str,
+    expected: &Expected,
 ) -> Result<(), Refusal> {
     if !cfg.enforced() {
         return Ok(());
@@ -412,7 +453,7 @@ pub fn check_running_pod(
     if let Some(problem) = sidecars
         .iter()
         .find_map(|c| program_problem(c))
-        .or_else(|| shape_problem(pod, cp_namespace))
+        .or_else(|| shape_problem(pod, expected))
     {
         return Err(Refusal::Refused(format!("pod {name}: {problem}")));
     }
@@ -602,8 +643,19 @@ mod tests {
         assert!(injector_image_problem(&off, Some("r/agentscd:0.2.0")).is_none());
     }
 
-    /// The control plane's namespace in [`crate::webhook::injected_pod`].
-    const CP: &str = "agentsc-system";
+    /// A CA's roots, the bundle of [`crate::webhook::injected_pod`] in these tests.
+    fn test_ca() -> &'static str {
+        static CA: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        CA.get_or_init(|| agentsc_pki::ca_init().unwrap().cert_pem)
+    }
+
+    /// What the injector of [`crate::webhook::injected_pod`] puts in the pod.
+    fn expected() -> Expected<'static> {
+        Expected {
+            cp_namespace: "agentsc-system",
+            ca_roots_pem: test_ca(),
+        }
+    }
 
     fn status(name: &str, image_id: &str) -> ContainerStatus {
         ContainerStatus {
@@ -615,8 +667,14 @@ mod tests {
 
     /// The injector's pod with images reported for `statuses`.
     fn running(image: &str, statuses: Vec<ContainerStatus>) -> Pod {
-        let mut p =
-            crate::webhook::injected_pod("shop", "orders-0", "orders", image, Default::default());
+        let mut p = crate::webhook::injected_pod(
+            "shop",
+            "orders-0",
+            "orders",
+            image,
+            Default::default(),
+            test_ca(),
+        );
         p.status = Some(PodStatus {
             init_container_statuses: Some(statuses),
             container_statuses: Some(vec![status("app", "docker.io/app@sha256:x")]),
@@ -641,11 +699,11 @@ mod tests {
                 ],
             )
         };
-        assert_eq!(check_running_pod(&on, &good(), CP), Ok(()));
+        assert_eq!(check_running_pod(&on, &good(), &expected()), Ok(()));
         // off: anything goes
         let mut evil = good();
         evil.status = None;
-        assert_eq!(check_running_pod(&allow(&[]), &evil, CP), Ok(()));
+        assert_eq!(check_running_pod(&allow(&[]), &evil, &expected()), Ok(()));
 
         // the agentscd image is another one
         let mut p = good();
@@ -656,7 +714,7 @@ mod tests {
             .as_mut()
             .unwrap()[1]
             .image_id = format!("ghcr.io/evil/agentscd@{}", d('b'));
-        let Err(Refusal::Refused(m)) = check_running_pod(&on, &p, CP) else {
+        let Err(Refusal::Refused(m)) = check_running_pod(&on, &p, &expected()) else {
             panic!()
         };
         assert!(
@@ -673,7 +731,7 @@ mod tests {
             .unwrap()[0]
             .image_id = format!("ghcr.io/evil/agentscd@{}", d('b'));
         assert!(
-            matches!(check_running_pod(&on, &p, CP), Err(Refusal::Refused(m)) if m.contains("agentsc-runtime"))
+            matches!(check_running_pod(&on, &p, &expected()), Err(Refusal::Refused(m)) if m.contains("agentsc-runtime"))
         );
         // agentscd as a regular container (an explicit sidecar), reported in containerStatuses
         let mut p = good();
@@ -686,7 +744,7 @@ mod tests {
             .as_mut()
             .unwrap()
             .push(status(SIDECAR_CONTAINER, &a));
-        assert_eq!(check_running_pod(&on, &p, CP), Ok(()));
+        assert_eq!(check_running_pod(&on, &p, &expected()), Ok(()));
         // a tag-only image id names no digest
         st_set(
             &mut p,
@@ -694,7 +752,7 @@ mod tests {
             "docker-pullable://agentsc/agentscd:dev",
         );
         assert!(
-            matches!(check_running_pod(&on, &p, CP), Err(Refusal::Refused(m)) if m.contains("names no sha256 digest"))
+            matches!(check_running_pod(&on, &p, &expected()), Err(Refusal::Refused(m)) if m.contains("names no sha256 digest"))
         );
         // not reported yet: retryable
         let mut p = good();
@@ -706,12 +764,12 @@ mod tests {
             .unwrap()[1]
             .image_id = String::new();
         assert!(
-            matches!(check_running_pod(&on, &p, CP), Err(Refusal::NotReported(m)) if m.contains("has not reported"))
+            matches!(check_running_pod(&on, &p, &expected()), Err(Refusal::NotReported(m)) if m.contains("has not reported"))
         );
         let mut p = good();
         p.status = None;
         assert!(matches!(
-            check_running_pod(&on, &p, CP),
+            check_running_pod(&on, &p, &expected()),
             Err(Refusal::NotReported(_))
         ));
 
@@ -732,7 +790,7 @@ mod tests {
             let c = init.iter_mut().find(|c| c.name == name).unwrap();
             c.command = command.map(|v| v.into_iter().map(String::from).collect());
             c.args = args.map(|v| v.into_iter().map(String::from).collect());
-            let Err(Refusal::Refused(m)) = check_running_pod(&on, &p, CP) else {
+            let Err(Refusal::Refused(m)) = check_running_pod(&on, &p, &expected()) else {
                 panic!("{name}")
             };
             assert!(m.contains(name) && m.contains("must run"), "{m}");
@@ -755,6 +813,24 @@ mod tests {
 
     /// A weakened pod: what it does, the change, and the problem named.
     type ShapeCase = (&'static str, fn(&mut Value), &'static str);
+
+    /// Another CA's roots.
+    fn other_ca() -> &'static str {
+        static CA: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        CA.get_or_init(|| agentsc_pki::ca_init().unwrap().cert_pem)
+    }
+
+    /// agentscd's `AGENTSC_CA_PEM` in the JSON of a pod.
+    fn set_ca_pem(p: &mut Value, pem: String) {
+        for e in p["spec"]["initContainers"][1]["env"]
+            .as_array_mut()
+            .unwrap()
+        {
+            if e["name"] == "AGENTSC_CA_PEM" {
+                e["value"] = Value::String(pem.clone());
+            }
+        }
+    }
 
     /// `p` changed as JSON (`initContainers[0]` is agentsc-runtime, `[1]` agentscd).
     fn edited(p: &Pod, change: fn(&mut Value)) -> Pod {
@@ -780,7 +856,7 @@ mod tests {
                 status(SIDECAR_CONTAINER, &image),
             ],
         );
-        assert_eq!(shape_problem(&good, CP), None);
+        assert_eq!(shape_problem(&good, &expected()), None);
         // with the template's env (Helm otlp.* and injection.mockFallback)
         let template = crate::webhook::InjectTemplate::parse(
             r#"{"env": [{"name": "OTEL_EXPORTER_OTLP_ENDPOINT", "value": "http://otel:4317"},
@@ -788,16 +864,29 @@ mod tests {
         )
         .unwrap();
         let templated =
-            crate::webhook::injected_pod("shop", "orders-0", "orders", &image, template);
-        assert_eq!(shape_problem(&templated, CP), None);
+            crate::webhook::injected_pod("shop", "orders-0", "orders", &image, template, test_ca());
+        assert_eq!(shape_problem(&templated, &expected()), None);
+        // a pod injected before a CA rotation added a root holds the old bundle only
+        let rotated = format!("{}{}", other_ca(), test_ca());
+        let during_rotation = Expected {
+            ca_roots_pem: &rotated,
+            ..expected()
+        };
+        assert_eq!(shape_problem(&good, &during_rotation), None);
         assert!(
-            shape_problem(&good, "elsewhere")
-                .unwrap()
-                .contains("AGENTSC_CONTROL_PLANE"),
+            shape_problem(
+                &good,
+                &Expected {
+                    cp_namespace: "elsewhere",
+                    ..expected()
+                }
+            )
+            .unwrap()
+            .contains("AGENTSC_CONTROL_PLANE"),
             "the addresses name the control plane's namespace"
         );
 
-        let cases: [ShapeCase; 21] = [
+        let cases: [ShapeCase; 26] = [
             (
                 "the key in a volume the app mounts (the review's pod)",
                 |p| {
@@ -851,6 +940,39 @@ mod tests {
                         )
                 },
                 "sets env \"AGENTSC_CONTROL_PLANE\"",
+            ),
+            (
+                "an attacker's CA (the fix check's relay)",
+                |p| set_ca_pem(p, other_ca().to_string()),
+                "sets env \"AGENTSC_CA_PEM\"",
+            ),
+            (
+                "the CA and another root",
+                |p| set_ca_pem(p, format!("{}{}", test_ca(), other_ca())),
+                "sets env \"AGENTSC_CA_PEM\"",
+            ),
+            (
+                "the control plane's name pointed at another address",
+                |p| {
+                    p["spec"]["hostAliases"] = json!([{
+                        "ip": "10.1.2.3",
+                        "hostnames": ["embassy-ca.agentsc-system.svc"],
+                    }])
+                },
+                "hostAliases",
+            ),
+            (
+                "another name server",
+                |p| {
+                    p["spec"]["dnsPolicy"] = json!("None");
+                    p["spec"]["dnsConfig"] = json!({"nameservers": ["10.1.2.3"]});
+                },
+                "hostAliases, dnsPolicy None",
+            ),
+            (
+                "a search domain first",
+                |p| p["spec"]["dnsConfig"] = json!({"searches": ["evil.example"]}),
+                "dnsConfig nameservers or searches",
             ),
             (
                 "a fixed value from a ConfigMap",
@@ -1007,23 +1129,28 @@ mod tests {
         ];
         for (case, change, want) in cases {
             let p = edited(&good, change);
-            let problem = shape_problem(&p, CP).unwrap_or_else(|| panic!("{case}: no problem"));
+            let problem =
+                shape_problem(&p, &expected()).unwrap_or_else(|| panic!("{case}: no problem"));
             assert!(problem.contains(want), "{case}: {problem}");
             // IssueCertificate refuses it, while the allow-list is on
-            let Err(Refusal::Refused(m)) = check_running_pod(&on, &p, CP) else {
+            let Err(Refusal::Refused(m)) = check_running_pod(&on, &p, &expected()) else {
                 panic!("{case}")
             };
             assert!(
                 m.starts_with("pod shop/orders-0: ") && m.contains(want),
                 "{case}: {m}"
             );
-            assert_eq!(check_running_pod(&allow(&[]), &p, CP), Ok(()), "{case}");
+            assert_eq!(
+                check_running_pod(&allow(&[]), &p, &expected()),
+                Ok(()),
+                "{case}"
+            );
         }
         let debug = edited(&good, |p| {
             p["spec"]["ephemeralContainers"] = json!([{"name": "debugger", "image": "busybox"}]);
         });
         assert!(
-            shape_problem(&debug, CP)
+            shape_problem(&debug, &expected())
                 .unwrap()
                 .contains("ephemeral containers")
         );

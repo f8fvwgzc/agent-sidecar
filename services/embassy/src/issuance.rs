@@ -455,7 +455,10 @@ impl Issuer {
         let images = crate::sidecar_images::check_running_pod(
             &self.config.load().sidecar_images,
             &pod,
-            &self.cp_namespace,
+            &crate::sidecar_images::Expected {
+                cp_namespace: &self.cp_namespace,
+                ca_roots_pem: self.ca.roots_pem(),
+            },
         );
         match images {
             Ok(()) => {}
@@ -1153,7 +1156,11 @@ mod tests {
 
     /// The injector's pod as the kubelet reports it: the `imageID` of agentsc-runtime and
     /// agentscd (`None`: not reported yet).
-    fn running_pod(agentscd_image_id: Option<&str>, runtime_image_id: Option<&str>) -> Pod {
+    fn running_pod(
+        ca: &CaMaterial,
+        agentscd_image_id: Option<&str>,
+        runtime_image_id: Option<&str>,
+    ) -> Pod {
         use crate::webhook::RUNTIME_CONTAINER;
         use k8s_openapi::api::core::v1::{ContainerStatus, PodStatus};
         let mut p = crate::webhook::injected_pod(
@@ -1162,6 +1169,7 @@ mod tests {
             "orders",
             "ghcr.io/f8fvwgzc/agent-sidecar/agentscd:0.2.0",
             Default::default(),
+            ca.roots_pem(),
         );
         p.metadata.uid = Some(POD_UID.into());
         let status = |name: &str, id: Option<&str>| ContainerStatus {
@@ -1199,6 +1207,7 @@ mod tests {
 
         // allowed images (containerd's and cri-dockerd's imageID forms): issued
         r.cluster.put_pod(running_pod(
+            &r.ca,
             Some(&pulled(&a)),
             Some(&format!("ghcr.io/f8fvwgzc/agent-sidecar/agentscd@{a}")),
         ));
@@ -1211,7 +1220,7 @@ mod tests {
         // the image is swapped under the running pod: the renewal is refused
         let cases: Vec<(Pod, Code, String)> = vec![
             (
-                running_pod(Some(&pulled(&b)), Some(&pulled(&a))),
+                running_pod(&r.ca, Some(&pulled(&b)), Some(&pulled(&a))),
                 Code::PermissionDenied,
                 format!(
                     "container \"agentscd\" of pod shop/orders-0 runs image {b}, which is not in \
@@ -1219,12 +1228,13 @@ mod tests {
                 ),
             ),
             (
-                running_pod(Some(&pulled(&a)), Some(&pulled(&b))),
+                running_pod(&r.ca, Some(&pulled(&a)), Some(&pulled(&b))),
                 Code::PermissionDenied,
                 "container \"agentsc-runtime\" of pod shop/orders-0 runs image".into(),
             ),
             (
                 running_pod(
+                    &r.ca,
                     Some("docker-pullable://agentsc/agentscd:dev"),
                     Some(&pulled(&a)),
                 ),
@@ -1234,7 +1244,7 @@ mod tests {
             (
                 // an allowed image started with another program
                 {
-                    let mut p = running_pod(Some(&pulled(&a)), Some(&pulled(&a)));
+                    let mut p = running_pod(&r.ca, Some(&pulled(&a)), Some(&pulled(&a)));
                     p.spec.as_mut().unwrap().init_containers.as_mut().unwrap()[1].command =
                         Some(vec!["python3".into(), "/tmp/evil.py".into()]);
                     p
@@ -1243,7 +1253,7 @@ mod tests {
                 "container \"agentscd\" must run its image's entrypoint".into(),
             ),
             (
-                running_pod(None, Some(&pulled(&a))),
+                running_pod(&r.ca, None, Some(&pulled(&a))),
                 Code::Unavailable,
                 "the kubelet has not reported the image of container \"agentscd\"".into(),
             ),
@@ -1275,7 +1285,7 @@ mod tests {
         // brings agentscd with an allowed image and no command, and keeps the workload key in
         // a volume the app mounts; and a pod without the runtime container (agentscd would
         // spawn its own runtime next to the key)
-        let mut loot = running_pod(Some(&pulled(&a)), Some(&pulled(&a)));
+        let mut loot = running_pod(&r.ca, Some(&pulled(&a)), Some(&pulled(&a)));
         loot.metadata.labels = None;
         let spec = loot.spec.as_mut().unwrap();
         spec.volumes.as_mut().unwrap().push(Volume {
@@ -1298,7 +1308,7 @@ mod tests {
             value: Some("/loot".into()),
             ..Default::default()
         });
-        let mut single = running_pod(Some(&pulled(&digest('c'))), None);
+        let mut single = running_pod(&r.ca, Some(&pulled(&digest('c'))), None);
         single
             .spec
             .as_mut()
@@ -1307,7 +1317,38 @@ mod tests {
             .as_mut()
             .unwrap()
             .remove(0);
+        // the fix check's relay: the control-plane address resolves to the app container, or
+        // agentscd trusts another CA; either way the app gets agentscd's token and asks for a
+        // certificate with a key of its own
+        let mut relay = running_pod(&r.ca, Some(&pulled(&a)), Some(&pulled(&a)));
+        relay.spec.as_mut().unwrap().host_aliases =
+            Some(vec![k8s_openapi::api::core::v1::HostAlias {
+                ip: "10.1.2.3".into(),
+                hostnames: Some(vec!["embassy-ca.agentsc-system.svc".into()]),
+            }]);
+        let mut other_ca = running_pod(&r.ca, Some(&pulled(&a)), Some(&pulled(&a)));
+        let attacker = agentsc_pki::ca_init().unwrap().cert_pem;
+        for e in other_ca
+            .spec
+            .as_mut()
+            .unwrap()
+            .init_containers
+            .as_mut()
+            .unwrap()[1]
+            .env
+            .as_mut()
+            .unwrap()
+        {
+            if e.name == "AGENTSC_CA_PEM" {
+                e.value = Some(attacker.clone());
+            }
+        }
         for (p, reason) in [
+            (relay, "hostAliases"),
+            (
+                other_ca,
+                "container \"agentscd\" sets env \"AGENTSC_CA_PEM\"",
+            ),
             (
                 loot,
                 "container \"agentscd\" sets env \"AGENTSC_STATE_DIR\"",
@@ -1337,7 +1378,7 @@ mod tests {
         c.sidecar_images.allowed_digests.clear();
         r.issuer.config.store(Arc::new(c));
         r.cluster
-            .put_pod(running_pod(Some(&pulled(&b)), Some(&pulled(&b))));
+            .put_pod(running_pod(&r.ca, Some(&pulled(&b)), Some(&pulled(&b))));
         r.issuer
             .issue(k8s_request("shop", "orders", "tok"))
             .await
