@@ -129,13 +129,19 @@ checked this way: an older sidecar rejects the charter as having unknown fields
   writes.
 - **Labels are per tool, not per field.** A tool that returns a trusted order with an untrusted
   customer note is either one or the other. Label it `untrusted`, or split the endpoint.
-- **The runtime is trusted to pass the run's `request_id`.** The model can't choose it, but a
-  compromised runtime could use a fresh one. The runtime still shares the sidecar's container,
-  and moving it into its own container is on the gaps list.
+- **Tool calls are bound to runs.** The sidecar refuses a tool call whose `request_id` and agent
+  name no Execute it has in flight (`tool.unbound`), so a runtime can't start a fresh, clean run
+  of its own. A compromised runtime could still pass the id of another run of the same agent
+  that is in flight at the same time: it holds them all. Runs in separate runtime processes would
+  close that.
 - **The model provider is not a tool.** The runtime sends sensitive data to the model API as it
   does today. `sensitive_egress` covers `http` tools only.
-- **Inbound service calls aren't checked.** A peer's `Mesh.InvokeService` call to this app is
-  held to `authz.services` only. The taint rules apply where the calling agent runs, so the
-  caller needs its own `taint` block.
+- **Inbound service calls are checked only with `authz.taint`.** A peer's `Mesh.InvokeService`
+  call carries the run's labels; with `authz.taint` in this charter a write from a run that read
+  untrusted data is refused (`enforce`) or recorded (`audit`). Without it the call is held to
+  `authz.services` only, and the caller needs its own `taint` block.
+- **Lessons from untrusted runs wait for a person.** Memory outlives the run, so a note drawn from
+  injected text would reach every later run. With an enforcing policy such a lesson is refused
+  (`taint.untrusted_learning`); otherwise `learning.mode: auto` falls back to review for it.
 - **State is in memory, per sidecar replica.** It lasts 15 minutes after the run's last change.
   A run that spans replicas only shares labels through the header on agent calls.

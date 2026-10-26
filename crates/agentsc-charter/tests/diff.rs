@@ -582,3 +582,23 @@ fn a_first_charter_needs_editor_to_adopt_and_admin_to_put() {
     assert_eq!(reasons, ["a first charter written with PUT requires admin"]);
     assert!(reasons.iter().all(|r| r.ends_with("requires admin")));
 }
+
+#[test]
+fn the_inbound_taint_rule_needs_admin_and_loosening_it_is_weakening() {
+    let mut old = v02();
+    old.authz.taint = Some(InboundTaintSpec {
+        mode: TaintMode::Enforce,
+    });
+    let mut audit = old.clone();
+    audit.authz.taint = Some(InboundTaintSpec {
+        mode: TaintMode::Audit,
+    });
+    assert_eq!(weakened(&old, &audit), ["authz.taint.mode"]);
+    let mut off = old.clone();
+    off.authz.taint = None;
+    assert_eq!(weakened(&old, &off), ["authz.taint"]);
+    assert!(weakened(&off, &old).is_empty(), "turning it on is not");
+    let (role, reasons) = required_role(&off, &old);
+    assert_eq!(role, Role::Admin);
+    assert!(reasons.iter().any(|r| r == "authz.taint requires admin"));
+}

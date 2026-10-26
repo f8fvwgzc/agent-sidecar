@@ -87,6 +87,7 @@ Flags / environment of `agentscd` (flag wins over env):
 | `--no-runtime`    | `AGENTSC_NO_RUNTIME`     | off. `1/true/yes/on` = do not spawn the runtime; something else serves `runtime.sock`, and readiness still follows its `Health` |
 | `--mesh-cache-bytes` | `AGENTSC_MESH_CACHE_BYTES` | `16777216`. Bytes of service-call responses the response cache keeps (`GET`/`HEAD` the app marked with `Cache-Control: max-age`; docs/adr/0002-response-caching.md); `0` disables it |
 | `--mesh-cache-max-age` | `AGENTSC_MESH_CACHE_MAX_AGE` | `300`. The longest, in seconds, a cached service-call response is served, whatever the app's `max-age` says |
+| `--max-response-bytes` | `AGENTSC_MAX_RESPONSE_BYTES` | `3145728` (3 MiB). The largest response body a tool or mesh call reads from the app, a peer or an http tool's origin, read as it streams; a longer one fails the call (`http.response_too_large`) |
 | `--anthropic-api-key-file` | `AGENTSC_ANTHROPIC_API_KEY_FILE` | unset. The Anthropic API key, read by the sidecar's model gateway only (§4.4) |
 | —                 | `ANTHROPIC_API_KEY`      | the same key as text (env only, never a flag). Neither set → the gateway has no provider, and an agent whose `model` is not `mock` is refused (`FAILED_PRECONDITION`), unless `AGENTSC_MOCK_FALLBACK=1`. The runtime the sidecar starts never gets either, nor `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY` or `AGENTSC_APP_TOKEN` |
 | `--anthropic-base-url` | `AGENTSC_ANTHROPIC_BASE_URL` | `https://api.anthropic.com` |
@@ -177,6 +178,8 @@ authz:
       service: inventory                                     # target service (self when evaluated inbound)
       allow: ["GET /stock", "GET /stock/*"]
       deny:  ["* /admin", "* /admin/*"]
+  taint:                       # schema level 4, optional; absent = off (§5.2)
+    mode: enforce              # enforce | audit: a peer's write whose run read untrusted data
 audit:
   sink: stdout                 # stdout | file
   file: /var/log/agentsc/audit.jsonl   # only with sink: file; the image makes /var/log/agentsc writable
@@ -485,6 +488,10 @@ restrictions, so a peer gains nothing by lying.
 for every tool call so the sidecar can authorize and audit it):
 
 The sidecar does not trust the runtime (it is driven by a model). Every call
+must belong to an Execute of `ctx.agent` for `ctx.request_id` that is in flight
+(else `PERMISSION_DENIED`, rule `tool.unbound`: a made-up request id, another
+agent's run, or a run that returned); the run's trace id and agent-call depth
+replace the ones the runtime sent. Every call
 must name a tool the agent declared and may use (`guardrail.allowed_tools`)
 and must match that tool's declaration — same service and method (compared
 uppercased), same agent target, same http origin, and a path that fits the
@@ -753,6 +760,21 @@ method), never the request's. With `mode: enforce` the call is denied
 untrusted data (from read_ticket) and tool issue_refund writes`). With `mode:
 audit` it goes on, after a `guardrail` record with decision `allow` and rule
 `taint.would_deny.untrusted_write` / `taint.would_deny.sensitive_egress`.
+
+Learning: a lesson (`ProposeLesson`) from a run that has read `untrusted` data
+never becomes a note on its own. With an enforcing `taint` block it is refused
+(`learning` record, decision `deny`, rule `taint.untrusted_learning`); with
+`mode: audit` a `guardrail` record names `taint.would_deny.untrusted_learning`;
+in every case `learning.mode: auto` falls back to review for that lesson
+(`learning.proposed`, the reason names the sources).
+
+Inbound (callee side, schema level 4): with `authz.taint` in the callee's
+charter, a peer's `Mesh.InvokeService` that carries `x-agentsc-taint` with
+`untrusted` and a method other than GET, HEAD or OPTIONS is checked after
+`authz.services`: `enforce` refuses it (`PERMISSION_DENIED`, a `service_call`
+deny record, rule `taint.untrusted_write`); `audit` lets it through after a
+`guardrail` record with rule `taint.would_deny.untrusted_write`. The caller's
+sidecar sends the run's labels on every mesh call.
 
 ## 6. Audit record
 

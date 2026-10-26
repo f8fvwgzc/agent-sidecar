@@ -681,6 +681,7 @@ mod tests {
             trace_id: String::new(),
             span_id: String::new(),
             deadline: None,
+            depth: 0,
             meter: Default::default(),
         };
         let l = limits(&spec, Some(&local));

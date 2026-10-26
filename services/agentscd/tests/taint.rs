@@ -91,6 +91,10 @@ async fn a_run_that_read_untrusted_text_cannot_write() {
     )
     .await;
     let mut tools = tools(&rig.sock).await;
+    let _runs = (
+        in_flight(&rig.sidecar, "clean", "ops-assistant"),
+        in_flight(&rig.sidecar, "injected", "ops-assistant"),
+    );
 
     // a clean run may refund
     let r = tools
@@ -129,6 +133,7 @@ async fn audit_mode_records_what_it_would_deny() {
     )
     .await;
     let mut tools = tools(&rig.sock).await;
+    let _run = in_flight(&rig.sidecar, "shadow", "ops-assistant");
     tools
         .invoke_service(call("read_ticket", "GET", "/tickets/7", "shadow"))
         .await

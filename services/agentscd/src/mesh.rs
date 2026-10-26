@@ -239,6 +239,7 @@ impl Mesh for MeshService {
             let body = request.get_ref();
             inbound(&request, &body.traceparent, &body.request_id, &body.agent)
         };
+        let peer_taint = meta(&request, crate::taint::HEADER);
         let req = request.into_inner();
         let me = self.state.service.clone();
         let raw_callee = format!("{me} {} {}", req.method, req.path);
@@ -308,6 +309,18 @@ impl Mesh for MeshService {
                 .write(record(&callee, &input, Value::Null).verdict(&v));
             return Err(deny_status(&v));
         }
+        // `authz.taint` (taint.rs): a peer's run that read untrusted data may not write here.
+        if let Some(tv) =
+            crate::taint::check_inbound(&snap.charter, peer_taint.as_deref(), &method, &caller)
+        {
+            let mut rec = record(&callee, &input, Value::Null).verdict(&tv);
+            if !tv.allow {
+                self.state.audit.write(rec);
+                return Err(deny_status(&tv));
+            }
+            rec.kind = Kind::Guardrail;
+            self.state.audit.write(rec);
+        }
 
         // The response cache (cache.rs), after authz: a fresh copy answers a read without the
         // app; a write empties this service's entries first, so the peer's next read sees it.
@@ -366,8 +379,18 @@ impl Mesh for MeshService {
             started,
         );
         let sent = match hreq.send().await {
-            Ok(resp) => Ok(crate::tools::to_service_response(resp).await),
-            Err(e) => Err(e),
+            Ok(resp) => {
+                crate::tools::to_service_response(
+                    resp,
+                    self.state.config.max_response_bytes,
+                    crate::tools::RULE_APP_UNAVAILABLE,
+                )
+                .await
+            }
+            Err(e) => Err(crate::tools::BodyError {
+                rule: crate::tools::RULE_APP_UNAVAILABLE,
+                reason: format!("app unreachable at {url}: {e}"),
+            }),
         };
         pending.disarm();
         match sent {
@@ -385,12 +408,12 @@ impl Mesh for MeshService {
             }
             Err(e) => {
                 let mut rec = record(&callee, &input, Value::Null).verdict(&v);
-                rec.error = Some(format!("app unreachable at {url}: {e}"));
+                rec.error = Some(e.reason.clone());
                 self.state.audit.write(rec);
                 Err(crate::tools::status_with_rule(
                     tonic::Code::Unavailable,
-                    crate::tools::RULE_APP_UNAVAILABLE,
-                    &format!("{me} app unreachable: {e}"),
+                    e.rule,
+                    &format!("{me}: {}", e.reason),
                 ))
             }
         }

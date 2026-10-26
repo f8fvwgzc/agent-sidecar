@@ -9,6 +9,11 @@
 //! control plane (the only writer of memory) as a `LearningProposal`; unmanaged with
 //! `mode: auto` it becomes a local note (persisted in the state dir); unmanaged with
 //! `mode: review` it is only audited.
+//!
+//! A run that read untrusted data (taint.rs) never teaches on its own: memory outlives the run,
+//! so an instruction injected into it would reach every later run. Its lesson is refused under
+//! an enforcing taint policy (`taint.untrusted_learning`), and otherwise waits for review even
+//! in `mode: auto` (an audit-mode policy also records `taint.would_deny.untrusted_learning`).
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
@@ -29,6 +34,17 @@ pub const RULE_APPLIED: &str = "learning.applied";
 pub const RULE_DENIED: &str = "learning.denied";
 pub const RULE_RATE_LIMITED: &str = "learning.rate_limited";
 const HOUR: Duration = Duration::from_secs(3600);
+
+/// `learning.proposed`, saying why an `auto` lesson waits for review when its run read untrusted data.
+fn proposed(untrusted: &Option<String>, mode: LearningMode) -> Verdict {
+    let mut v = Verdict::allow(RULE_PROPOSED);
+    if let (Some(sources), LearningMode::Auto) = (untrusted, mode) {
+        v.reason = format!(
+            "the run read untrusted data (from {sources}): the lesson waits for review instead of becoming a note"
+        );
+    }
+    v
+}
 
 fn response(v: &Verdict) -> LessonResponse {
     LessonResponse {
@@ -180,7 +196,18 @@ pub fn propose(state: &AppState, req: LessonRequest) -> Result<LessonResponse, S
         }
     }
 
-    let auto = learning.mode == LearningMode::Auto;
+    // The taint rule (taint.rs): a lesson from a run that read untrusted data.
+    let untrusted = state.taint.untrusted(&run_request_id);
+    if let Some(v) = state.taint.check_learning(spec, &run_request_id) {
+        if !v.allow {
+            state.audit.write(record(&v));
+            return Ok(response(&v));
+        }
+        let mut would = record(&v);
+        would.kind = Kind::Guardrail;
+        state.audit.write(would);
+    }
+    let auto = learning.mode == LearningMode::Auto && untrusted.is_none();
     let v = if state.managed {
         state.outbox.propose(LearningProposal {
             dedup_key: uuid::Uuid::new_v4().to_string(),
@@ -191,7 +218,7 @@ pub fn propose(state: &AppState, req: LessonRequest) -> Result<LessonResponse, S
             trace_id: trace_id.clone(),
             auto,
         });
-        Verdict::allow(RULE_PROPOSED)
+        proposed(&untrusted, learning.mode)
     } else if auto {
         let now = chrono::Utc::now();
         let expires = now + chrono::Duration::days(i64::from(learning.note_ttl_days));
@@ -219,7 +246,7 @@ pub fn propose(state: &AppState, req: LessonRequest) -> Result<LessonResponse, S
         });
         Verdict::allow(RULE_APPLIED)
     } else {
-        Verdict::allow(RULE_PROPOSED)
+        proposed(&untrusted, learning.mode)
     };
     state.audit.write(record(&v));
     Ok(response(&v))

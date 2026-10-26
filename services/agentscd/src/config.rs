@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use clap::Parser;
 
+/// The default of `--max-response-bytes`: 3 MiB.
+pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 3 * 1024 * 1024;
 /// The default of `--peer-address-template` (design §6.1).
 pub const DEFAULT_PEER_ADDRESS_TEMPLATE: &str = "{service}.{namespace}.svc.cluster.local:{port}";
 
@@ -116,6 +118,15 @@ pub struct Config {
     )]
     pub mesh_cache_max_age: u64,
 
+    /// The largest response body a tool or mesh call reads from the app, a peer or an http tool's
+    /// origin; a longer one fails the call (`http.response_too_large`). The default fits the
+    /// mesh's 4 MiB gRPC messages.
+    #[arg(
+        long,
+        env = "AGENTSC_MAX_RESPONSE_BYTES",
+        default_value_t = DEFAULT_MAX_RESPONSE_BYTES
+    )]
+    pub max_response_bytes: usize,
     /// The Anthropic API key, read by the sidecar only (the model gateway, CONTRACT.md §4.4): a
     /// file, re-read at start-up, e.g. a mounted Secret. Env `ANTHROPIC_API_KEY` is the other way.
     #[arg(long, env = "AGENTSC_ANTHROPIC_API_KEY_FILE")]
@@ -225,6 +236,7 @@ impl Config {
             otlp_endpoint_allow: Vec::new(),
             mesh_cache_bytes: crate::cache::DEFAULT_CAPACITY_BYTES,
             mesh_cache_max_age: crate::cache::DEFAULT_MAX_AGE_SECS,
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             anthropic_api_key_file: None,
             anthropic_api_key: None,
             anthropic_base_url: crate::gateway::anthropic::DEFAULT_BASE_URL.into(),

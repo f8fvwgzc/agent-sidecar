@@ -115,6 +115,18 @@ async fn fake_app(hits: Arc<Hits>) -> SocketAddr {
                     tokio::time::sleep(Duration::from_secs(10)).await;
                     return "late".into_response();
                 }
+                // bigger than the sidecar reads (--max-response-bytes, 3 MiB): with a length,
+                // and streamed without one
+                if id == "huge" {
+                    return "x".repeat(HUGE).into_response();
+                }
+                if id == "huge-stream" {
+                    let chunks = (0..HUGE / 65536).map(|_| {
+                        Ok::<_, std::io::Error>(axum::body::Bytes::from(vec![b'x'; 65536]))
+                    });
+                    return axum::body::Body::from_stream(futures::stream::iter(chunks))
+                        .into_response();
+                }
                 // e.g. a trailing-slash or legacy-path redirect, into a path authz never allowed
                 redirect(StatusCode::TEMPORARY_REDIRECT, "/admin/reset".into())
             }),
@@ -128,6 +140,9 @@ async fn fake_app(hits: Arc<Hits>) -> SocketAddr {
         );
     serve(app).await
 }
+
+/// A response body bigger than the sidecar's default limit.
+const HUGE: usize = 4 * 1024 * 1024;
 
 /// The demo orders charter on the fake app, with two http tools and an output rule.
 fn charter(app: SocketAddr, audit: &Path) -> Charter {
@@ -265,6 +280,19 @@ impl Rig {
     }
 }
 
+impl Rig {
+    /// Hold an Execute of ops-assistant for `request_id` in flight, as the pipeline does while
+    /// the runtime runs, so the test may make that run's tool calls (tools.rs refuses others).
+    fn in_flight(&self, request_id: &str) -> agentscd::runs::RunGuard<'_> {
+        self.sidecar.state.runs.start(
+            request_id,
+            "ops-assistant",
+            "local",
+            "4bf92f3577b34da6a3ce929d0e0e4736",
+        )
+    }
+}
+
 fn ctx(tool: &str, request_id: &str) -> Option<ToolContext> {
     Some(ToolContext {
         request_id: request_id.into(),
@@ -291,6 +319,7 @@ fn slow_lookup(request_id: &str) -> ToolServiceRequest {
 async fn redirects_go_back_to_the_caller_unfollowed() {
     let rig = rig(None).await;
     let mut tools = rig.tools().await;
+    let _run = rig.in_flight("req-redirect");
 
     // An http tool's origin answers 302/307 to another origin: the runtime gets the 3xx, nothing
     // is fetched there, and the POST body is not replayed.
@@ -393,6 +422,8 @@ async fn content_guardrail_denials_log_the_hash_not_the_payload() {
         .unwrap();
     let v: Value = r.json().await.unwrap();
     let run = v["request_id"].as_str().unwrap().to_string();
+    // the runtime's own nested call, made while that Execute is (again) in flight
+    let _in_flight = rig.in_flight(&run);
     let mut tools = rig.tools().await;
     let nested = "triage this: password = sk-NESTED-456";
     let err = tools
@@ -568,6 +599,7 @@ async fn invocations_are_audited_when_dropped_and_their_deadline_reaches_the_run
 async fn tool_calls_are_audited_when_dropped_and_fail_cleanly_at_their_deadline() {
     let rig = rig(None).await;
     let mut tools = rig.tools().await;
+    let _runs = (rig.in_flight("req-dropped"), rig.in_flight("req-deadline"));
 
     // 1. The runtime gives up on a call the app is still serving: both records, as cancelled.
     let call = tools.invoke_service(slow_lookup("req-dropped"));
@@ -608,5 +640,40 @@ async fn tool_calls_are_audited_when_dropped_and_fail_cleanly_at_their_deadline(
         let e = r["error"].as_str().unwrap();
         assert!(e != CANCELLED && !e.is_empty(), "{e}");
     }
+    rig.sidecar.abort();
+}
+
+#[tokio::test]
+async fn a_response_bigger_than_the_limit_fails_the_call_instead_of_filling_memory() {
+    let rig = rig(None).await;
+    let mut tools = rig.tools().await;
+    let _run = rig.in_flight("req-huge");
+    for id in ["huge", "huge-stream"] {
+        let err = tools
+            .invoke_service(ToolServiceRequest {
+                ctx: ctx("lookup_order", "req-huge"),
+                service: "orders".into(),
+                method: "GET".into(),
+                path: format!("/orders/{id}"),
+                headers: Default::default(),
+                body: vec![],
+            })
+            .await
+            .expect_err("the body is over the limit");
+        assert_eq!(err.code(), tonic::Code::Unavailable, "{id}: {err:?}");
+        assert_eq!(
+            err.metadata().get("x-agentsc-rule").unwrap(),
+            "http.response_too_large",
+            "{id}"
+        );
+    }
+    let recs = rig.records(|v| v["request_id"] == "req-huge" && v["kind"] == "service_call");
+    assert_eq!(recs.len(), 2);
+    assert!(recs.iter().all(|v| {
+        v["error"]
+            .as_str()
+            .unwrap()
+            .contains("more than the 3145728 bytes")
+    }));
     rig.sidecar.abort();
 }

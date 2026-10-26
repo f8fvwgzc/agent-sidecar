@@ -649,6 +649,17 @@
             "$ref": "#/$defs/ServiceRule"
           },
           "default": []
+        },
+        "taint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InboundTaintSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The taint rule for inbound service calls (docs/design/taint-policy.md): a peer's call\nwhose run read untrusted data (its sidecar's `x-agentsc-taint`) may not write to this\nservice. Absent = off."
         }
       }
     },
@@ -730,6 +741,17 @@
         "name",
         "service"
       ]
+    },
+    "InboundTaintSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/TaintMode",
+          "default": "enforce"
+        }
+      },
+      "description": "`authz.taint`: `enforce` refuses a write (any method but GET, HEAD and OPTIONS) from a peer\nrun that read untrusted data; `audit` lets it through and records what it would refuse."
     },
     "AuditSpec": {
       "type": "object",

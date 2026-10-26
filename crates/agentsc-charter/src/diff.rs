@@ -107,6 +107,15 @@ pub fn weakened(old: &Charter, new: &Charter) -> Vec<String> {
         &mut out,
     );
     // taint policy: off or audit where it enforced, a label's protection dropped, writes made reads
+    if let Some(ot) = &old.authz.taint {
+        match &new.authz.taint {
+            None => out.push("authz.taint".into()),
+            Some(nt) if ot.mode == TaintMode::Enforce && nt.mode == TaintMode::Audit => {
+                out.push("authz.taint.mode".into())
+            }
+            Some(_) => {}
+        }
+    }
     for o in &old.agents {
         let Some(n) = new.agent(&o.name) else {
             continue;
@@ -215,6 +224,7 @@ pub fn required_role(old: &Charter, new: &Charter) -> (Role, Vec<String>) {
     // authz: default and services are admin; callers per the local / non-local split
     need(old.authz.default != new.authz.default, "authz.default");
     need(old.authz.services != new.authz.services, "authz.services");
+    need(old.authz.taint != new.authz.taint, "authz.taint");
     let deleted: BTreeSet<&str> = old
         .agents
         .iter()

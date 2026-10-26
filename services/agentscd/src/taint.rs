@@ -3,7 +3,13 @@
 //! a rule forbids:
 //!
 //! - `taint.untrusted_write`: after untrusted data, no tool whose effect is `write`;
-//! - `taint.sensitive_egress`: after sensitive data, no `http` tool (data leaving).
+//! - `taint.sensitive_egress`: after sensitive data, no `http` tool (data leaving);
+//! - `taint.untrusted_learning`: a lesson drawn from a run that read untrusted data is refused
+//!   (with an enforcing policy) and never becomes a note on its own: `learning.mode: auto` waits
+//!   for review for such a run (learning.rs). Memory outlives the run, so an injected note would
+//!   reach every later run;
+//! - inbound, with `authz.taint` in the callee's charter: a peer's `Mesh.InvokeService` whose run
+//!   read untrusted data may not write ([`check_inbound`], mesh.rs).
 //!
 //! The labels travel with agent-to-agent calls in the `x-agentsc-taint` gRPC metadata, both ways,
 //! so a run's taint is the union over every pod it touched. Labels only ever accumulate.
@@ -11,13 +17,14 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use agentsc_charter::{AgentSpec, TaintLabel, TaintMode, ToolEffect, ToolSpec, ToolType};
+use agentsc_charter::{AgentSpec, Charter, TaintLabel, TaintMode, ToolEffect, ToolSpec, ToolType};
 use agentsc_common::authz::Verdict;
 
 /// gRPC metadata key carrying a run's labels between sidecars: `untrusted,sensitive`.
 pub const HEADER: &str = "x-agentsc-taint";
 pub const RULE_UNTRUSTED_WRITE: &str = "taint.untrusted_write";
 pub const RULE_SENSITIVE_EGRESS: &str = "taint.sensitive_egress";
+pub const RULE_UNTRUSTED_LEARNING: &str = "taint.untrusted_learning";
 /// A run's labels are forgotten this long after their last change.
 const TTL: Duration = Duration::from_secs(15 * 60);
 const PRUNE_EVERY: Duration = Duration::from_secs(1);
@@ -131,15 +138,60 @@ impl TaintStore {
             self.sources(request_id, label),
             tool.name
         );
-        Some(match policy.mode {
-            TaintMode::Enforce => Verdict::deny(rule, reason),
-            TaintMode::Audit => Verdict {
-                allow: true,
-                rule: rule.replacen("taint.", "taint.would_deny.", 1),
-                reason,
-            },
-        })
+        Some(verdict(policy.mode, rule, reason))
     }
+}
+
+impl TaintStore {
+    /// Where `request_id`'s run read untrusted data from, if it did.
+    pub fn untrusted(&self, request_id: &str) -> Option<String> {
+        self.labels(request_id)
+            .contains(&TaintLabel::Untrusted)
+            .then(|| self.sources(request_id, TaintLabel::Untrusted))
+    }
+
+    /// The verdict on a lesson from `request_id`'s run: `None` when the run is clean or the
+    /// agent has no taint policy; else a deny (`enforce`) or an allow naming
+    /// `taint.would_deny.untrusted_learning` (`audit`).
+    pub fn check_learning(&self, agent: &AgentSpec, request_id: &str) -> Option<Verdict> {
+        let policy = agent.taint.as_ref()?;
+        let sources = self.untrusted(request_id)?;
+        let reason = format!(
+            "this run read untrusted data (from {sources}); a lesson drawn from it could carry an injected instruction into every later run"
+        );
+        Some(verdict(policy.mode, RULE_UNTRUSTED_LEARNING, reason))
+    }
+}
+
+fn verdict(mode: TaintMode, rule: &str, reason: String) -> Verdict {
+    match mode {
+        TaintMode::Enforce => Verdict::deny(rule, reason),
+        TaintMode::Audit => Verdict {
+            allow: true,
+            rule: rule.replacen("taint.", "taint.would_deny.", 1),
+            reason,
+        },
+    }
+}
+
+/// The verdict of `authz.taint` on an inbound service call from `caller` whose sidecar sent
+/// `header` (`x-agentsc-taint`): `None` without the rule, from a clean run, or for a read (GET,
+/// HEAD, OPTIONS); else a deny (`enforce`) or an allow naming
+/// `taint.would_deny.untrusted_write` (`audit`).
+pub fn check_inbound(
+    charter: &Charter,
+    header: Option<&str>,
+    method: &str,
+    caller: &str,
+) -> Option<Verdict> {
+    let policy = charter.authz.taint.as_ref()?;
+    if !parse(header?).contains(&TaintLabel::Untrusted)
+        || matches!(method, "GET" | "HEAD" | "OPTIONS")
+    {
+        return None;
+    }
+    let reason = format!("the calling run ({caller}) read untrusted data and {method} writes");
+    Some(verdict(policy.mode, RULE_UNTRUSTED_WRITE, reason))
 }
 
 /// The labels in an `x-agentsc-taint` value; unknown words are ignored.
@@ -230,6 +282,51 @@ mod tests {
             .expect("a would-deny verdict");
         assert!(v.allow);
         assert_eq!(v.rule, "taint.would_deny.untrusted_write");
+    }
+
+    #[test]
+    fn lessons_and_inbound_writes_after_untrusted_data() {
+        let s = TaintStore::default();
+        let enforce = agent(Some(TaintMode::Enforce));
+        assert!(s.check_learning(&enforce, "r1").is_none(), "clean run");
+        s.add("r1", TaintLabel::Untrusted, "read_ticket");
+        let v = s.check_learning(&enforce, "r1").unwrap();
+        assert_eq!((v.allow, v.rule.as_str()), (false, RULE_UNTRUSTED_LEARNING));
+        assert!(v.reason.contains("read_ticket"));
+        let v = s
+            .check_learning(&agent(Some(TaintMode::Audit)), "r1")
+            .unwrap();
+        assert_eq!(
+            (v.allow, v.rule.as_str()),
+            (true, "taint.would_deny.untrusted_learning")
+        );
+        assert!(s.check_learning(&agent(None), "r1").is_none());
+        assert!(s.untrusted("r1").is_some() && s.untrusted("r2").is_none());
+
+        let mut c: Charter = serde_json::from_value(serde_json::json!({
+            "apiVersion": "agentsc.io/v1alpha1", "kind": "Charter",
+            "service": {"name": "inventory", "namespace": "n", "app_port": 8000}
+        }))
+        .unwrap();
+        let caller = "spiffe://agentsc/ns/n/svc/orders";
+        assert!(
+            check_inbound(&c, Some("untrusted"), "POST", caller).is_none(),
+            "no rule"
+        );
+        c.authz.taint = Some(agentsc_charter::InboundTaintSpec {
+            mode: TaintMode::Enforce,
+        });
+        let v = check_inbound(&c, Some("sensitive,untrusted"), "POST", caller).unwrap();
+        assert_eq!((v.allow, v.rule.as_str()), (false, RULE_UNTRUSTED_WRITE));
+        assert!(
+            check_inbound(&c, Some("untrusted"), "GET", caller).is_none(),
+            "reads pass"
+        );
+        assert!(check_inbound(&c, Some("sensitive"), "POST", caller).is_none());
+        assert!(
+            check_inbound(&c, None, "DELETE", caller).is_none(),
+            "a clean run"
+        );
     }
 
     #[test]
