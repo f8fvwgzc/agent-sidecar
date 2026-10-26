@@ -23,6 +23,7 @@ use crate::api::types::CpAuditRecord;
 use crate::config::Role;
 
 pub mod file;
+pub mod postgres;
 pub mod sqlite;
 
 /// The plain charter document inside a stored charter: `spec` for the custom-resource form

@@ -23,6 +23,22 @@ jobs:
     name: Rust (fmt, clippy, test, schema drift)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    # The PostgreSQL store's tests (services/embassy/tests/postgres_store.rs) run against it;
+    # without AGENTSC_TEST_POSTGRES_URL they pass without running.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: agentsc
+          POSTGRES_PASSWORD: agentsc
+          POSTGRES_DB: agentsc_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U agentsc -d agentsc_test"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      # the service has no TLS: plaintext is allowed to loopback only (store/postgres.rs tls_policy)
+      AGENTSC_TEST_POSTGRES_URL: postgres://agentsc:agentsc@127.0.0.1:5432/agentsc_test?sslmode=disable
     steps:
       - uses: actions/checkout@v7
 
