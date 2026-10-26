@@ -171,6 +171,11 @@ pub struct Config {
         default_value = crate::gateway::anthropic::DEFAULT_BASE_URL
     )]
     pub anthropic_base_url: String,
+    /// The LLM connection contract v1 (`LLM_*`, docs/LLM-CONNECTION.md), read by `main` from the
+    /// environment: the model gateway's upstream when no Anthropic key is configured above
+    /// (`LLM_PROVIDER=anthropic`, or gateway mode, so the pod holds no provider key).
+    #[arg(skip)]
+    pub llm_contract: Option<agentsc_common::llm_contract::Contract>,
 
     /// Intervals and windows of design §6; tests shorten them.
     #[arg(skip)]
@@ -193,6 +198,10 @@ pub const RUNTIME_ENV_DENY: &[&str] = &[
     "AGENTSC_ANTHROPIC_API_KEY_FILE",
     "OPENAI_API_KEY",
     APP_TOKEN_ENV,
+    // the LLM connection contract's secrets (agentsc_common::llm_contract::SECRET_VARIABLES)
+    "LLM_API_KEY",
+    "LLM_API_KEY_FILE",
+    "LLM_GATEWAY_TOKEN_FILE",
 ];
 
 /// The intervals and windows design §6 fixes. [`Default`] is the design's values.
@@ -272,6 +281,7 @@ impl Config {
             anthropic_api_key_file: None,
             anthropic_api_key: None,
             anthropic_base_url: crate::gateway::anthropic::DEFAULT_BASE_URL.into(),
+            llm_contract: None,
             timing: Timing::default(),
             otel_env: Some(BTreeMap::new()),
         }
@@ -522,5 +532,8 @@ mod tests {
             "the file wins"
         );
         assert!(RUNTIME_ENV_DENY.contains(&ANTHROPIC_KEY_ENV));
+        for secret in agentsc_common::llm_contract::SECRET_VARIABLES {
+            assert!(RUNTIME_ENV_DENY.contains(&secret), "{secret}");
+        }
     }
 }

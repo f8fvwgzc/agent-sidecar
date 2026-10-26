@@ -1,6 +1,59 @@
 //! The one price table (CONTRACT.md §9): USD per 1M tokens, Anthropic API list prices (cached
 //! 2026-10-06). The sidecar's model gateway prices every call from the usage the provider itself
 //! reported; nothing the runtime says about cost is used. `mock` costs nothing.
+//!
+//! An operator adds the models of other providers, or corrects a price, with [`add_prices`]
+//! (`agentsc-gateway --prices-file`, docs/LLM-CONNECTION.md): those entries are looked up first.
+//! A model in neither is priced at the top tier, so a budget never under-counts.
+
+use std::sync::RwLock;
+
+/// A model's price an operator added: USD per 1M tokens, and cache reads as a fraction of the
+/// input rate (0.1 when not given).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Price {
+    pub input: f64,
+    pub output: f64,
+    #[serde(default)]
+    pub cache_read: Option<f64>,
+}
+
+/// [`add_prices`]: looked up before the built-in table.
+static ADDED: RwLock<Vec<(String, Price)>> = RwLock::new(Vec::new());
+
+/// Add (or replace) the prices of `prices` in this process's table. Every rate must be a finite
+/// number `>= 0` (`cache_read` at most 1); the error names the model.
+pub fn add_prices(prices: impl IntoIterator<Item = (String, Price)>) -> Result<(), String> {
+    let prices: Vec<(String, Price)> = prices.into_iter().collect();
+    for (model, p) in &prices {
+        let ok = |x: f64| x.is_finite() && x >= 0.0;
+        if model.trim().is_empty()
+            || !ok(p.input)
+            || !ok(p.output)
+            || p.cache_read.is_some_and(|c| !ok(c) || c > 1.0)
+        {
+            return Err(format!("the price of model {model:?} is invalid"));
+        }
+    }
+    let mut added = ADDED
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (model, p) in prices {
+        added.retain(|(m, _)| *m != model);
+        added.push((model, p));
+    }
+    Ok(())
+}
+
+fn added(model: &str) -> Option<Price> {
+    ADDED
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .find(|(m, _)| m == model)
+        .map(|(_, p)| *p)
+}
 
 /// (input, output) USD per 1M tokens.
 const PRICES: &[(&str, (f64, f64))] = &[
@@ -68,9 +121,9 @@ fn lookup<T: Copy>(table: &[(&str, T)], model: &str) -> Option<T> {
     table.iter().find(|(m, _)| *m == model).map(|(_, v)| *v)
 }
 
-/// Is `model` in the price table (`mock` included)?
+/// Is `model` in the price table (`mock` and [`add_prices`] included)?
 pub fn is_priced(model: &str) -> bool {
-    lookup(PRICES, model).is_some()
+    added(model).is_some() || lookup(PRICES, model).is_some()
 }
 
 /// Context windows other than the 1M tokens of current models.
@@ -85,6 +138,9 @@ pub fn context_window(model: &str) -> u64 {
 
 /// (input, output) USD per 1M tokens for `model` with a prompt of `prompt_tokens`.
 pub fn rates(model: &str, prompt_tokens: u64) -> (f64, f64) {
+    if let Some(p) = added(model) {
+        return (p.input, p.output);
+    }
     if let Some((_, threshold, long)) = LONG_PROMPT.iter().find(|(m, _, _)| *m == model)
         && prompt_tokens > *threshold
     {
@@ -96,7 +152,10 @@ pub fn rates(model: &str, prompt_tokens: u64) -> (f64, f64) {
 /// The cost of one call, rounded to a millionth of a dollar.
 pub fn cost_usd(model: &str, u: &Usage) -> f64 {
     let (inp, out) = rates(model, u.prompt_tokens());
-    let read = lookup(CACHE_READ, model).unwrap_or(CACHE_READ_DEFAULT);
+    let read = match added(model) {
+        Some(p) => p.cache_read.unwrap_or(CACHE_READ_DEFAULT),
+        None => lookup(CACHE_READ, model).unwrap_or(CACHE_READ_DEFAULT),
+    };
     let input_equivalent = u.input as f64
         + u.cache_read as f64 * read
         + u.cache_write_5m as f64 * CACHE_WRITE_5M
@@ -145,6 +204,41 @@ mod tests {
             "unknown models are priced at the top tier"
         );
         assert!(is_priced("mock") && !is_priced("unknown-model"));
+    }
+
+    #[test]
+    fn added_prices_are_looked_up_first() {
+        let model = "test-added-model-7f3a";
+        assert_eq!(
+            cost_usd(model, &io(1_000_000, 0)),
+            10.0,
+            "unknown: the top tier"
+        );
+        add_prices([(
+            model.to_string(),
+            Price {
+                input: 1.25,
+                output: 10.0,
+                cache_read: Some(0.5),
+            },
+        )])
+        .unwrap();
+        assert!(is_priced(model));
+        assert_eq!(cost_usd(model, &io(1_000_000, 1_000_000)), 11.25);
+        let read = Usage {
+            cache_read: 1_000_000,
+            ..Usage::default()
+        };
+        assert_eq!(cost_usd(model, &read), 0.625);
+        let bad = Price {
+            input: -1.0,
+            output: 0.0,
+            cache_read: None,
+        };
+        assert_eq!(
+            add_prices([("x".to_string(), bad)]).unwrap_err(),
+            "the price of model \"x\" is invalid"
+        );
     }
 
     #[test]

@@ -27,17 +27,19 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/src/target,id=agentsc-target-${TARGETARCH} \
     cargo build --release --locked -p agentscd -p agentsc-cli -p embassy \
-    && mkdir -p /out && cp target/release/agentscd target/release/agentsc target/release/embassy /out/
+    && mkdir -p /out && cp target/release/agentscd target/release/agentsc-gateway target/release/agentsc target/release/embassy /out/
 
 FROM scratch AS binaries-prebuilt
 ARG TARGETARCH
-COPY --chmod=0755 dist/linux-${TARGETARCH}/agentscd dist/linux-${TARGETARCH}/agentsc dist/linux-${TARGETARCH}/embassy /out/
+COPY --chmod=0755 dist/linux-${TARGETARCH}/agentscd dist/linux-${TARGETARCH}/agentsc-gateway dist/linux-${TARGETARCH}/agentsc dist/linux-${TARGETARCH}/embassy /out/
 
 # hadolint ignore=DL3006
 FROM binaries-${BINARIES} AS binaries
 
 # ---------------------------------------------------------------------------------------------
-# agentscd: the sidecar binary plus the Python agent runtime it spawns (CONTRACT.md §2, §7).
+# agentscd: the sidecar binary plus the Python agent runtime it spawns (CONTRACT.md §2, §7), and
+# the standalone model gateway (agentsc-gateway, docs/LLM-CONNECTION.md: run it with
+# --entrypoint agentsc-gateway).
 # In managed mode it keeps its key, certificate, CA and last charter in /run/agentsc/state
 # (--state-dir default <socket-dir>/state), which is writable by the non-root user.
 FROM python:3.12-slim-bookworm AS agentscd
@@ -52,7 +54,7 @@ COPY runtime/pyproject.toml runtime/uv.lock runtime/README.md ./
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked --no-dev --no-install-project
 COPY runtime/src ./src
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked --no-dev --no-editable
-COPY --from=binaries /out/agentscd /out/agentsc /usr/local/bin/
+COPY --from=binaries /out/agentscd /out/agentsc-gateway /out/agentsc /usr/local/bin/
 COPY --chmod=0755 docker/agentsc-ready /usr/local/bin/agentsc-ready
 RUN groupadd --gid 10001 agentsc && useradd --uid 10001 --gid 10001 --create-home agentsc \
     && install -d -o 10001 -g 10001 -m 0755 /run/agentsc /var/log/agentsc \

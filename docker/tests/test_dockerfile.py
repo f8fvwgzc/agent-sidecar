@@ -63,8 +63,9 @@ def test_stages_and_binary_sources() -> None:
     # embassy embeds ui/ at compile time: the source stage must have it
     assert "ui ui" in instruction(s["binaries-source"], "COPY")
     prebuilt = " ".join(instruction(s["binaries-prebuilt"], "COPY"))
-    for binary in ("agentscd", "agentsc", "embassy"):
+    for binary in ("agentscd", "agentsc-gateway", "agentsc", "embassy"):
         assert f"dist/linux-${{TARGETARCH}}/{binary}" in prebuilt
+        assert f"target/release/{binary}" in build
 
 
 def test_rust_toolchain_matches_the_release_workflow() -> None:
@@ -83,7 +84,7 @@ def test_agentscd_image_is_unchanged_plus_a_writable_state_dir() -> None:
     assert "install -d -o 10001 -g 10001 -m 0700 /run/agentsc/state" in run
     assert "/var/log/agentsc" in run
     copies = " ".join(instruction(s, "COPY"))
-    assert "--from=binaries /out/agentscd /out/agentsc /usr/local/bin/" in copies
+    assert "--from=binaries /out/agentscd /out/agentsc-gateway /out/agentsc /usr/local/bin/" in copies
     assert "docker/agentsc-ready" in copies
 
 
@@ -237,7 +238,7 @@ def test_binaries_cover_the_three_targets(workflow: dict) -> None:
         assert f"-p {crate}" in build
     assert "cargo zigbuild" in build
     package = next(s for _, s in steps(workflow) if s.get("name") == "Package")["run"]
-    assert "for bin in agentscd agentsc embassy" in package
+    assert "for bin in agentscd agentsc-gateway agentsc embassy" in package
 
 
 def test_images_are_multi_arch_on_ghcr(workflow: dict) -> None:
