@@ -619,9 +619,12 @@ default `model.sock` next to `--sidecar`) with a placeholder key.
   - more than `max_steps × (1 + max_retries + 1 if a fallback)` calls in the run,
     or a request that already has `max_steps` assistant turns — `budget.max_steps`;
   - a request field outside `model, max_tokens, messages, system, tools,
-    tool_choice, stream, stop_sequences, metadata, thinking, output_config`, or a
-    server tool (a `tools[]` entry with a `type` other than `custom`, billed
-    outside the token price) — `model.request_invalid` (HTTP 400);
+    tool_choice, stream, stop_sequences, metadata, thinking, output_config,
+    temperature, top_p, top_k` (the sampling fields do not change the price;
+    `fallbacks` is refused, since it may answer with, and bill, another model:
+    onto-intelli sets `llm.fallbacks = false` in gateway mode), or a server tool
+    (a `tools[]` entry with a `type` other than `custom`, billed outside the
+    token price) — `model.request_invalid` (HTTP 400);
   - with less than 500 ms left of the Execute's deadline — `deadline.exceeded`;
   - a content block whose `source` is a URL (the provider would fetch it,
     outside the tool policy, at a size nobody knows yet) — `model.request_invalid`;

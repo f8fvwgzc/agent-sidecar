@@ -664,7 +664,9 @@ async fn keys_sort_bytewise_and_bad_keys_are_not_found() {
 
 /// TLS against a real server (`AGENTSC_TEST_POSTGRES_TLS_URL`, `sslmode=require` to a name its
 /// certificate carries, and `AGENTSC_TEST_POSTGRES_TLS_CA`, the CA that signed it): verified with
-/// the CA file; refused against the system roots, which do not know that CA.
+/// the CA file; refused against the system roots, which do not know that CA. With
+/// `channel_binding=require` (the server authenticating with scram-sha-256) the login is
+/// SCRAM-SHA-256-PLUS, whatever hash the server's certificate is signed with.
 #[tokio::test]
 async fn tls_is_verified_against_a_real_server() {
     let (Ok(url), Ok(ca)) = (
@@ -688,4 +690,12 @@ async fn tls_is_verified_against_a_real_server() {
         e.contains("certificate") || e.contains("TLS") || e.contains("tls"),
         "{e}"
     );
+    let sep = if url.contains('?') { '&' } else { '?' };
+    let bound = PgStore::open(PgOptions {
+        url: format!("{url}{sep}channel_binding=require"),
+        ..opts(Some(ca.into()))
+    })
+    .await
+    .unwrap();
+    assert!(bound.list_services().await.is_ok());
 }

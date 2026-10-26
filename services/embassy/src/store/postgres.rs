@@ -296,21 +296,80 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for RustlsStream<S> {
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> TlsStream for RustlsStream<S> {
-    /// `tls-server-end-point` (RFC 5929): the SHA-256 of the server's certificate, so SCRAM's
-    /// `-PLUS` binds the password exchange to this TLS session.
+    /// `tls-server-end-point` (RFC 5929): the hash of the server's certificate
+    /// ([`tls_server_end_point`]), so SCRAM's `-PLUS` binds the password exchange to this TLS
+    /// session. None for a certificate whose signature names no hash (Ed25519): then
+    /// `channel_binding=require` cannot connect, as against PostgreSQL itself.
     fn channel_binding(&self) -> ChannelBinding {
-        use sha2::Digest;
-        match self
-            .0
+        self.0
             .get_ref()
             .1
             .peer_certificates()
             .and_then(|c| c.first())
-        {
-            Some(cert) => ChannelBinding::tls_server_end_point(sha2::Sha256::digest(cert).to_vec()),
-            None => ChannelBinding::none(),
-        }
+            .and_then(|cert| tls_server_end_point(cert))
+            .map_or_else(ChannelBinding::none, ChannelBinding::tls_server_end_point)
     }
+}
+
+/// The hash `tls-server-end-point` uses for a certificate (RFC 5929 §4.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EndPointHash {
+    Sha224,
+    Sha256,
+    Sha384,
+    Sha512,
+}
+
+/// The hash of a certificate signed with `signature` (the algorithm's OID, dotted; `pss_hash`
+/// is the hash OID of RSASSA-PSS parameters): the signature's own hash, except MD5 and SHA-1,
+/// which become SHA-256 (RFC 5929 §4.1). `None` for an algorithm with no single hash
+/// (Ed25519, Ed448) or one this does not know.
+pub fn end_point_hash(signature: &str, pss_hash: Option<&str>) -> Option<EndPointHash> {
+    use EndPointHash::*;
+    let hash = |oid: &str| match oid {
+        // MD5, SHA-1: SHA-256
+        "1.2.840.113549.2.5" | "1.3.14.3.2.26" | "2.16.840.1.101.3.4.2.1" => Some(Sha256),
+        "2.16.840.1.101.3.4.2.2" => Some(Sha384),
+        "2.16.840.1.101.3.4.2.3" => Some(Sha512),
+        "2.16.840.1.101.3.4.2.4" => Some(Sha224),
+        _ => None,
+    };
+    match signature {
+        // RSA with MD5, SHA-1 (and its OIW alias); ECDSA and DSA with SHA-1
+        "1.2.840.113549.1.1.4"
+        | "1.2.840.113549.1.1.5"
+        | "1.3.14.3.2.29"
+        | "1.2.840.10045.4.1"
+        | "1.2.840.10040.4.3" => Some(Sha256),
+        // RSA, ECDSA, DSA with SHA-256
+        "1.2.840.113549.1.1.11" | "1.2.840.10045.4.3.2" | "2.16.840.1.101.3.4.3.2" => Some(Sha256),
+        "1.2.840.113549.1.1.12" | "1.2.840.10045.4.3.3" => Some(Sha384),
+        "1.2.840.113549.1.1.13" | "1.2.840.10045.4.3.4" => Some(Sha512),
+        "1.2.840.113549.1.1.14" | "1.2.840.10045.4.3.1" | "2.16.840.1.101.3.4.3.1" => Some(Sha224),
+        // RSASSA-PSS: the hash of its parameters (SHA-1 when absent)
+        "1.2.840.113549.1.1.10" => hash(pss_hash.unwrap_or("1.3.14.3.2.26")),
+        _ => None,
+    }
+}
+
+/// `tls-server-end-point` channel-binding data for a DER certificate: its hash under
+/// [`end_point_hash`], or `None` when it cannot be parsed or names no hash.
+pub fn tls_server_end_point(cert: &[u8]) -> Option<Vec<u8>> {
+    use sha2::Digest;
+    use x509_parser::signature_algorithm::SignatureAlgorithm;
+    let (_, parsed) = x509_parser::parse_x509_certificate(cert).ok()?;
+    let alg = &parsed.signature_algorithm;
+    let signature = alg.algorithm.to_id_string();
+    let pss_hash = match SignatureAlgorithm::try_from(alg) {
+        Ok(SignatureAlgorithm::RSASSA_PSS(p)) => Some(p.hash_algorithm_oid().to_id_string()),
+        _ => None,
+    };
+    Some(match end_point_hash(&signature, pss_hash.as_deref())? {
+        EndPointHash::Sha224 => sha2::Sha224::digest(cert).to_vec(),
+        EndPointHash::Sha256 => sha2::Sha256::digest(cert).to_vec(),
+        EndPointHash::Sha384 => sha2::Sha384::digest(cert).to_vec(),
+        EndPointHash::Sha512 => sha2::Sha512::digest(cert).to_vec(),
+    })
 }
 
 /// The connection's TLS (module docs): an `sslmode` the string does not name becomes `require`;
@@ -338,7 +397,10 @@ pub fn tls_policy(
             "postgres: --postgres-ca-file needs sslmode=require".into(),
         ));
     }
+    // `hostaddr` is where a connection goes (`host` then only names the server): it must be
+    // loopback too.
     let local = !config.get_hosts().is_empty()
+        && config.get_hostaddrs().iter().all(|ip| ip.is_loopback())
         && config.get_hosts().iter().all(|h| match h {
             Host::Tcp(name) => {
                 name == "localhost"
@@ -1639,11 +1701,25 @@ mod tests {
                 "{url}: allowed explicitly"
             );
         }
+        // a loopback `host` whose `hostaddr` sends the connection elsewhere
+        for url in [
+            "host=localhost hostaddr=10.0.0.5 user=u sslmode=disable",
+            "host=127.0.0.1 hostaddr=192.0.2.1 user=u sslmode=prefer",
+            "postgres://u@localhost/x?hostaddr=10.0.0.5&sslmode=disable",
+        ] {
+            let e = policy(url, false, false).unwrap_err().to_string();
+            assert!(e.contains("plaintext"), "{url}: {e}");
+            assert!(
+                policy(url, false, true).is_ok(),
+                "{url}: allowed explicitly"
+            );
+        }
         for url in [
             "postgres://u@127.0.0.1:5432/x?sslmode=disable",
             "postgres://u@localhost/x?sslmode=prefer",
             "postgres://u@[::1]/x?sslmode=disable",
             "host=/run/postgresql user=u sslmode=disable",
+            "host=localhost hostaddr=127.0.0.1 user=u sslmode=disable",
         ] {
             assert!(
                 policy(url, false, false).is_ok(),
@@ -1656,6 +1732,55 @@ mod tests {
                 .to_string()
                 .contains("--postgres-ca-file needs sslmode=require")
         );
+    }
+
+    /// RFC 5929 §4.1: the certificate's own signature hash, MD5 and SHA-1 as SHA-256.
+    #[test]
+    fn channel_binding_hashes_with_the_certificates_signature_hash() {
+        use EndPointHash::*;
+        use sha2::Digest;
+        for (signature, want) in [
+            ("1.2.840.113549.1.1.4", Some(Sha256)), // md5WithRSAEncryption
+            ("1.2.840.113549.1.1.5", Some(Sha256)), // sha1WithRSAEncryption
+            ("1.2.840.10045.4.1", Some(Sha256)),    // ecdsa-with-SHA1
+            ("1.2.840.113549.1.1.11", Some(Sha256)), // sha256WithRSAEncryption
+            ("1.2.840.113549.1.1.12", Some(Sha384)), // sha384WithRSAEncryption
+            ("1.2.840.113549.1.1.13", Some(Sha512)), // sha512WithRSAEncryption
+            ("1.2.840.10045.4.3.3", Some(Sha384)),  // ecdsa-with-SHA384
+            ("1.2.840.10045.4.3.4", Some(Sha512)),  // ecdsa-with-SHA512
+            ("1.3.101.112", None),                  // Ed25519: no hash
+        ] {
+            assert_eq!(end_point_hash(signature, None), want, "{signature}");
+        }
+        let pss = "1.2.840.113549.1.1.10";
+        assert_eq!(
+            end_point_hash(pss, Some("2.16.840.1.101.3.4.2.3")),
+            Some(Sha512)
+        );
+        assert_eq!(
+            end_point_hash(pss, None),
+            Some(Sha256),
+            "SHA-1 by default, so SHA-256"
+        );
+        // real certificates
+        let cert = |alg: &'static rcgen::SignatureAlgorithm| {
+            let key = rcgen::KeyPair::generate_for(alg).unwrap();
+            let params = rcgen::CertificateParams::new(vec!["db.example".to_string()]).unwrap();
+            params.self_signed(&key).unwrap().der().to_vec()
+        };
+        let p256 = cert(&rcgen::PKCS_ECDSA_P256_SHA256);
+        assert_eq!(
+            tls_server_end_point(&p256),
+            Some(sha2::Sha256::digest(&p256).to_vec())
+        );
+        let p384 = cert(&rcgen::PKCS_ECDSA_P384_SHA384);
+        assert_eq!(
+            tls_server_end_point(&p384),
+            Some(sha2::Sha384::digest(&p384).to_vec()),
+            "not SHA-256: the server would refuse the binding"
+        );
+        assert_eq!(tls_server_end_point(&cert(&rcgen::PKCS_ED25519)), None);
+        assert_eq!(tls_server_end_point(b"not a certificate"), None);
     }
 
     /// `require` verifies the server: a certificate of an unknown CA is refused, the same with

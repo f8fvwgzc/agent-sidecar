@@ -163,7 +163,9 @@ The same as the sidecar's (CONTRACT.md §4.4), per tenant:
 - Responses stores answers under the key that made them. On the platform's key, which every
   tenant using it shares, a call is sent with `store: false`, and `previous_response_id` or an
   `item_reference` input (stored state, another tenant's as likely as the caller's) is refused
-  (`400 model.request_invalid`): send the items themselves. On a tenant's own key, storing is the
+  (`400 model.request_invalid`): send the items themselves. An item reference's `type` is
+  optional, so an input item with an `id` and no `type` (or `"type": null`) counts as one; give
+  replayed items their `type`. On a tenant's own key, storing is the
   tenant's choice, and a call that refers to stored state reserves the model's whole context
   window, since its size is not in the request.
 - The most the call can cost is reserved against the tenant's `max_cost_usd_per_day` before it
@@ -214,6 +216,19 @@ OpenAI's `{"error": {"type", "code", "message"}}`) with header `x-agentsc-rule`:
 
 The provider's own answers (including its errors, `429` and `retry-after`) pass through
 unchanged, so clients retry as against the provider.
+
+## Upgrading
+
+- **Responses on the platform's key (agentsc-gateway, PR #18 onwards).** A call on the platform's
+  key is sent with `store: false`, and one that uses `previous_response_id`, or an item reference
+  (`{"type": "item_reference", "id": ...}`, or an untyped `{"id": ...}`), now gets
+  `400 model.request_invalid` instead of reaching OpenAI. Clients that continue conversations on
+  the platform's key must send the earlier items themselves (stateless use), or move the tenant to
+  its own OpenAI key (`providers` in the tenants file), where stored state is the tenant's own and
+  reserves the model's whole context window against its budget.
+- **Messages fields.** `temperature`, `top_p` and `top_k` pass; `fallbacks` stays refused, since it
+  may answer with, and bill, another model: set onto-intelli's `llm.fallbacks = false` in gateway
+  mode.
 
 ## Not in v1
 
