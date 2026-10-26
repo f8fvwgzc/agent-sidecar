@@ -33,12 +33,14 @@
 //!   (audience `agentsc`, `expirationSeconds: 3600`) at `/var/run/secrets/agentsc/token`, and has
 //!   containerPort 50002 `mesh`;
 //! - `agentsc-runtime`: the same image, command [`RUNTIME_COMMAND`] with [`RUNTIME_ARGS`] only,
-//!   no env (no secret, no `ANTHROPIC_API_KEY`), and only the `/run/agentsc` mount;
+//!   no env but the template's [`RUNTIME_TEMPLATE_ENV`] (no secret, no `ANTHROPIC_API_KEY`), and
+//!   only the `/run/agentsc` mount;
 //! - image from annotation `agentsc.io/sidecar-image`, else `--injector-image`; with
 //!   `sidecar_images.allowed_digests` set it must be pinned to an allowed digest
 //!   ([`crate::sidecar_images`]), else the pod is denied with a message naming the image;
 //! - `imagePullPolicy`, `resources` and `securityContext` (both containers) and the env
-//!   `OTEL_EXPORTER_OTLP_ENDPOINT` / `AGENTSC_OTLP_ENDPOINT_ALLOW` (`agentscd`) from env
+//!   `OTEL_EXPORTER_OTLP_ENDPOINT` / `AGENTSC_OTLP_ENDPOINT_ALLOW` (`agentscd`) and
+//!   `AGENTSC_MOCK_FALLBACK` (both containers: the runtime reads it) from env
 //!   `AGENTSC_INJECT_TEMPLATE` (the chart → injector contract, [`InjectTemplate`]); without it,
 //!   the chart's defaults;
 //! - annotation `agentsc.io/injected: "true"`.
@@ -152,11 +154,14 @@ pub const TEMPLATE_ENV_ALLOWED: [&str; 3] = [
     "AGENTSC_OTLP_ENDPOINT_ALLOW",
     "AGENTSC_MOCK_FALLBACK",
 ];
+/// The template env the `agentsc-runtime` container gets too: the runtime's own opt-in to the
+/// mock model (not a secret). Every other template env is `agentscd`'s only.
+pub const RUNTIME_TEMPLATE_ENV: [&str; 1] = ["AGENTSC_MOCK_FALLBACK"];
 
 // ---- the chart → injector template -----------------------------------------------------------------
 
 /// `AGENTSC_INJECT_TEMPLATE`: Kubernetes `Container` fields applied to the generated `agentscd`
-/// container (and, except `env`, to `agentsc-runtime`). Any other field, or an env name outside
+/// container (and, except `env` outside [`RUNTIME_TEMPLATE_ENV`], to `agentsc-runtime`). Any other field, or an env name outside
 /// [`TEMPLATE_ENV_ALLOWED`], is an error at start-up. A field left out keeps the built-in
 /// default (the chart's default values).
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -812,8 +817,17 @@ fn run_mount() -> VolumeMount {
 }
 
 /// The `agentsc-runtime` container for `p`: `agentscd`'s image, pull policy, resources and
-/// securityContext; its command line and the socket directory only (no env, no secret).
+/// securityContext; its command line, the socket directory and the template's
+/// [`RUNTIME_TEMPLATE_ENV`] only (no secret).
 fn runtime_container(inj: &Injector, p: &PodRequest) -> Container {
+    let env: Vec<EnvVar> = inj
+        .template
+        .env
+        .iter()
+        .flatten()
+        .filter(|e| RUNTIME_TEMPLATE_ENV.contains(&e.name.as_str()))
+        .cloned()
+        .collect();
     Container {
         name: RUNTIME_CONTAINER.into(),
         image: Some(p.image.clone()),
@@ -821,10 +835,62 @@ fn runtime_container(inj: &Injector, p: &PodRequest) -> Container {
         restart_policy: Some("Always".into()),
         command: Some(vec![RUNTIME_COMMAND.into()]),
         args: Some(RUNTIME_ARGS.iter().map(|a| a.to_string()).collect()),
+        env: (!env.is_empty()).then_some(env),
         volume_mounts: Some(vec![run_mount()]),
         resources: Some(inj.template.resources()),
         security_context: Some(inj.template.security_context()),
         ..Default::default()
+    }
+}
+
+/// A pod as the injector leaves it (service account and `agentsc.io/service` = `service`, the
+/// Anthropic Secret named), for the shape checks' tests in [`crate::sidecar_images`] and
+/// [`crate::issuance`].
+#[cfg(test)]
+pub(crate) fn injected_pod(
+    namespace: &str,
+    name: &str,
+    service: &str,
+    image: &str,
+    template: InjectTemplate,
+) -> k8s_openapi::api::core::v1::Pod {
+    use k8s_openapi::api::core::v1::{Pod, PodSpec};
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    let inj = Injector {
+        image: Some(image.into()),
+        template,
+        cp_namespace: "agentsc-system".into(),
+        ca_bundle: CaBundle::Fixed("CA PEM".into()),
+    };
+    let p = PodRequest {
+        service: service.into(),
+        app_port: 8080,
+        namespace: namespace.into(),
+        image: image.into(),
+        anthropic_secret: Some("agentsc-anthropic".into()),
+    };
+    Pod {
+        metadata: ObjectMeta {
+            name: Some(name.into()),
+            namespace: Some(namespace.into()),
+            labels: Some([(INJECT_LABEL.to_string(), "true".to_string())].into()),
+            ..Default::default()
+        },
+        spec: Some(PodSpec {
+            service_account_name: Some(service.into()),
+            init_containers: Some(vec![
+                runtime_container(&inj, &p),
+                sidecar_container(&inj, &p),
+            ]),
+            containers: vec![Container {
+                name: "app".into(),
+                image: Some("orders:1".into()),
+                ..Default::default()
+            }],
+            volumes: Some(sidecar_volumes()),
+            ..Default::default()
+        }),
+        status: None,
     }
 }
 
@@ -1357,6 +1423,31 @@ mod tests {
         for a in RUNTIME_ARGS.iter().filter(|a| a.starts_with("unix:")) {
             assert!(a.starts_with(&format!("unix:{RUN_DIR}/")), "{a}");
         }
+    }
+
+    /// The review finding: with the runtime in its own container, Helm's
+    /// `injection.mockFallback` reached agentscd only, so the demo's agents were refused.
+    #[test]
+    fn the_runtime_gets_the_mock_fallback_and_no_other_template_env() {
+        let template = InjectTemplate::parse(
+            r#"{"env": [{"name": "OTEL_EXPORTER_OTLP_ENDPOINT", "value": "http://otel:4317"},
+                        {"name": "AGENTSC_MOCK_FALLBACK", "value": "1"}]}"#,
+        )
+        .unwrap();
+        let d = mutate(&injector(template), &OFF, &create(pod(annotated())));
+        let [runtime, sidecar] = [&d.patch[1]["value"][0], &d.patch[1]["value"][1]];
+        assert_eq!(
+            runtime["env"],
+            json!([{"name": "AGENTSC_MOCK_FALLBACK", "value": "1"}])
+        );
+        let names: Vec<&str> = sidecar["env"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"OTEL_EXPORTER_OTLP_ENDPOINT"));
+        assert!(names.contains(&"AGENTSC_MOCK_FALLBACK"));
     }
 
     #[test]

@@ -92,7 +92,7 @@ Flags / environment of `agentscd` (flag wins over env):
 | `--anthropic-api-key-file` | `AGENTSC_ANTHROPIC_API_KEY_FILE` | unset. The Anthropic API key, read by the sidecar's model gateway only (§4.4) |
 | —                 | `ANTHROPIC_API_KEY`      | the same key as text (env only, never a flag). Neither set → the gateway has no provider, and an agent whose `model` is not `mock` is refused (`FAILED_PRECONDITION`), unless `AGENTSC_MOCK_FALLBACK=1`. The runtime the sidecar starts never gets either, nor `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY` or `AGENTSC_APP_TOKEN` |
 | `--anthropic-base-url` | `AGENTSC_ANTHROPIC_BASE_URL` | `https://api.anthropic.com` |
-| —                 | `AGENTSC_MOCK_FALLBACK`  | unset. `1` = when the sidecar holds no key, every agent runs on the `mock` model (demos, CI); the runtime the sidecar starts inherits it |
+| —                 | `AGENTSC_MOCK_FALLBACK`  | unset. `1` = when the sidecar holds no key, every agent runs on the `mock` model (demos, CI); the runtime the sidecar starts inherits it (an injected pod's `agentsc-runtime` container gets it from the injector's template, Helm `injection.mockFallback`) |
 
 ## 3. `charter.yaml`
 
@@ -603,10 +603,13 @@ default `model.sock` next to `--sidecar`) with a placeholder key.
     server tool (a `tools[]` entry with a `type` other than `custom`, billed
     outside the token price) — `model.request_invalid` (HTTP 400);
   - with less than 500 ms left of the Execute's deadline — `deadline.exceeded`;
+  - a content block whose `source` is a URL (the provider would fetch it,
+    outside the tool policy, at a size nobody knows yet) — `model.request_invalid`;
   - when the agent's spend today, plus what its calls in flight hold, plus the
-    most this call can cost (its request bytes + 4096 input tokens, priced as
-    1-hour cache writes, and `max_tokens` output tokens) would exceed
-    `max_cost_usd_per_day` — `budget.max_cost_usd_per_day`.
+    most this call can cost (its request bytes + 4096 input tokens, or the
+    model's whole context window when the request carries an image or a
+    document, priced as 1-hour cache writes, and `max_tokens` output tokens)
+    would exceed `max_cost_usd_per_day` — `budget.max_cost_usd_per_day`.
 
   A refusal is HTTP 403 (400 for a request it cannot take) with the provider's
   error body (`permission_error` / `invalid_request_error`, message
@@ -623,7 +626,13 @@ default `model.sock` next to `--sidecar`) with a placeholder key.
   input, output, cache read and cache write tokens) and content, prices it
   from the one table in `crates/agentsc-common/src/pricing.rs` (per 1M tokens;
   cache reads and writes at their own rates; unknown model ids at the top tier),
-  replaces the call's hold with that cost, and writes its `model_call` record
+  replaces the call's hold with that cost, and writes its `model_call` record.
+  Only a whole answer (a stream that reached `message_stop` without an `error`
+  event, or a non-streamed body with its `usage`) is counted at its usage; an
+  error status or a connection never made counts nothing; an answer cut before
+  it completed (the deadline, a timeout, a broken connection, a mid-stream
+  error) is counted at its hold, since the provider may bill more than it had
+  reported. The record
   (§9 shape; `callee: anthropic:<model>`, `parent_span_id` = the invocation's
   span). A call whose runtime went away is read to the end and counted (the
   provider bills it), with `error: "cancelled: …"`. A failed call counts what
@@ -992,7 +1001,12 @@ the values it remembered for open requests and its subscribers are unaffected.
     are injected, IssueCertificate and every renewal refuse pods whose
     running sidecar `imageID` is not allowed, and the ValidatingAdmissionPolicy
     `agentsc-sidecar-integrity` (Kubernetes 1.30+) refuses such pods, sidecar
-    image changes and ephemeral containers.
+    image changes and ephemeral containers;
+  - with the allow-list on, IssueCertificate also refuses a pod whose sidecars
+    differ from the injected shape (`agentscd` env, `envFrom`, lifecycle hooks,
+    probes, mounts, volume types, a missing `agentsc-runtime`), and the policy
+    refuses sidecar containers in pods without the label
+    `agentsc.io/inject: "true"`, so the injector checks every pod that has them.
 
 ## 8. CLI
 
