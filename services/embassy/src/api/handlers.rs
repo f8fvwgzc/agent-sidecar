@@ -122,9 +122,12 @@ pub async fn login(
         role: None,
     };
     if let Err(wait) = hub.auth.limiter.check(ip, now) {
+        // a flood of these must not push the store's records out (cp_audit.rs)
         let mut rec = CpAudit::entry(CpAction::LoginFailed, &unknown, CpResult::Denied);
         rec.reason = Some(format!("rate limited: too many failed logins from {ip}"));
-        hub.cp_audit.record(rec).await;
+        hub.cp_audit
+            .record_unauthenticated("login rate limited", rec)
+            .await;
         let mut f = Fail::new(
             ErrorCode::RateLimited,
             [format!("too many failed logins; retry in {wait} s")],

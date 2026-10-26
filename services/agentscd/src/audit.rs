@@ -502,6 +502,19 @@ impl Audit {
         out
     }
 
+    /// `text` as the audit writer writes a free-text field (`callee`, `reason`, `error`): the
+    /// values remembered or withheld for `request_id` replaced, and PII redacted with
+    /// `guardrails.pii_redact`. For text that leaves the pod outside an audit record: the span
+    /// starts sent to the control plane (`outbox::span`).
+    pub fn redact_text(&self, request_id: &str, text: &str) -> String {
+        let out = self.scrub_text(request_id, text);
+        if self.writer.redaction().1 {
+            agentsc_common::guardrails::redact_pii(&out).0
+        } else {
+            out
+        }
+    }
+
     fn remember_record(&self, record: &AuditRecord) {
         if record.request_id.is_empty() {
             return;

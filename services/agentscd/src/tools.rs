@@ -359,7 +359,8 @@ impl<'a> Call<'a> {
     /// The attempt begins: a span start for the timeline (design §6.4, its span = the attempt
     /// record's), then the `tool_call` and attempt records owed while the call is awaited — if the
     /// runtime drops it (gone, or its deadline passed) they are written as cancelled; the target
-    /// may have acted.
+    /// may have acted. The span start leaves the pod outside the audit writer, so its callee
+    /// (an http tool's URL with its query) is redacted like the records' first.
     fn begin(
         &self,
         kind: Kind,
@@ -369,6 +370,8 @@ impl<'a> Call<'a> {
         input: &Value,
         v: &Verdict,
     ) -> OnCancel<'a> {
+        let audit = &self.svc.state.audit;
+        audit.remember(&self.c.request_id, "input", input);
         self.svc.state.outbox.span_start(outbox::span(
             kind.as_str(),
             &self.c.request_id,
@@ -376,7 +379,7 @@ impl<'a> Call<'a> {
             &self.c.agent,
             "local",
             Some(&self.c.agent),
-            callee,
+            &audit.redact_text(&self.c.request_id, callee),
             dir,
         ));
         let tool = self

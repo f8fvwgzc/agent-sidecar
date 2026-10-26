@@ -4,7 +4,10 @@
 //!
 //! **`/mutate`** (`agentsc-sidecar-injector`, pods labelled `agentsc.io/inject: "true"`): adds
 //! two native sidecars (init containers with `restartPolicy: Always`) with a JSONPatch, first
-//! `agentsc-runtime` (the agent runtime), then `agentscd` with a `startupProbe` on its `/readyz`.
+//! `agentsc-runtime` (the agent runtime), then `agentscd` with a `startupProbe` and a
+//! `readinessProbe` on its `/readyz` (after start-up a failing `/readyz` takes the pod out of its
+//! Service's endpoints: no charter, an expired certificate, the runtime down, or, with
+//! `AGENTSC_AUDIT_FAIL_CLOSED`, a failing audit sink).
 //! The runtime has a container of its own so that it cannot read what `agentscd` holds (the
 //! provider API key in its environment, the workload key in its state directory): containers
 //! do not share a process namespace (`/proc/<pid>/environ`), and the runtime mounts only the
@@ -39,7 +42,8 @@
 //!   `sidecar_images.allowed_digests` set it must be pinned to an allowed digest
 //!   ([`crate::sidecar_images`]), else the pod is denied with a message naming the image;
 //! - `imagePullPolicy`, `resources` and `securityContext` (both containers) and the env
-//!   `OTEL_EXPORTER_OTLP_ENDPOINT` / `AGENTSC_OTLP_ENDPOINT_ALLOW` (`agentscd`) and
+//!   `OTEL_EXPORTER_OTLP_ENDPOINT` / `AGENTSC_OTLP_ENDPOINT_ALLOW` / `AGENTSC_AUDIT_FAIL_CLOSED`
+//!   (`agentscd`) and
 //!   `AGENTSC_MOCK_FALLBACK` (both containers: the runtime reads it) from env
 //!   `AGENTSC_INJECT_TEMPLATE` (the chart → injector contract, [`InjectTemplate`]); without it,
 //!   the chart's defaults;
@@ -136,8 +140,11 @@ pub const TOKEN_EXPIRATION_SECONDS: i64 = 3600;
 /// The volumes the injector adds: no other container may mount them.
 pub const SIDECAR_VOLUMES: [&str; 3] = [RUN_VOLUME, STATE_VOLUME, TOKEN_VOLUME];
 pub const MESH_PORT: i32 = 50002;
-/// The startup probe's command (see the module docs for the image contract).
+/// The startup and readiness probes' command (see the module docs for the image contract).
 pub const READY_COMMAND: &str = "agentsc-ready";
+/// The readiness probe after start-up: unready after 3 × 10 s of a failing `/readyz`.
+const READY_PROBE_PERIOD: i32 = 10;
+const READY_PROBE_FAILURES: i32 = 3;
 /// Probe period and failures before the sidecar is restarted: 2 s × 150 = 300 s for the first
 /// certificate, the charter and the agent runtime.
 const STARTUP_PROBE_PERIOD: i32 = 2;
@@ -147,12 +154,13 @@ pub const STARTUP_PROBE_SECONDS: i32 = STARTUP_PROBE_PERIOD * STARTUP_PROBE_FAIL
 pub const CONTROL_PLANE_PORT: u16 = 15012;
 /// The env var with the chart → injector template.
 pub const TEMPLATE_ENV: &str = "AGENTSC_INJECT_TEMPLATE";
-/// The only env names the template may set (the sidecar's own telemetry settings, and the agent
-/// runtime's opt-in to the mock model without `ANTHROPIC_API_KEY`).
-pub const TEMPLATE_ENV_ALLOWED: [&str; 3] = [
+/// The only env names the template may set (the sidecar's own telemetry and audit settings, and
+/// the agent runtime's opt-in to the mock model without `ANTHROPIC_API_KEY`).
+pub const TEMPLATE_ENV_ALLOWED: [&str; 4] = [
     "OTEL_EXPORTER_OTLP_ENDPOINT",
     "AGENTSC_OTLP_ENDPOINT_ALLOW",
     "AGENTSC_MOCK_FALLBACK",
+    "AGENTSC_AUDIT_FAIL_CLOSED",
 ];
 /// The template env the `agentsc-runtime` container gets too: the runtime's own opt-in to the
 /// mock model (not a secret). Every other template env is `agentscd`'s only.
@@ -792,18 +800,24 @@ fn sidecar_container(inj: &Injector, p: &PodRequest) -> Container {
                 ..Default::default()
             },
         ]),
-        // /readyz listens on loopback only: an exec probe (module docs, image contract)
-        startup_probe: Some(Probe {
-            exec: Some(ExecAction {
-                command: Some(vec![READY_COMMAND.into()]),
-            }),
-            period_seconds: Some(STARTUP_PROBE_PERIOD),
-            timeout_seconds: Some(3),
-            failure_threshold: Some(STARTUP_PROBE_FAILURES),
-            ..Default::default()
-        }),
+        // /readyz listens on loopback only: exec probes (module docs, image contract)
+        startup_probe: Some(ready_probe(STARTUP_PROBE_PERIOD, STARTUP_PROBE_FAILURES)),
+        readiness_probe: Some(ready_probe(READY_PROBE_PERIOD, READY_PROBE_FAILURES)),
         resources: Some(inj.template.resources()),
         security_context: Some(inj.template.security_context()),
+        ..Default::default()
+    }
+}
+
+/// An exec probe of [`READY_COMMAND`].
+fn ready_probe(period: i32, failures: i32) -> Probe {
+    Probe {
+        exec: Some(ExecAction {
+            command: Some(vec![READY_COMMAND.into()]),
+        }),
+        period_seconds: Some(period),
+        timeout_seconds: Some(3),
+        failure_threshold: Some(failures),
         ..Default::default()
     }
 }
@@ -1326,6 +1340,7 @@ mod tests {
                 {"name": "agentsc-token", "mountPath": "/var/run/secrets/agentsc", "readOnly": true}
             ],
             "startupProbe": {"exec": {"command": ["agentsc-ready"]}, "periodSeconds": 2, "timeoutSeconds": 3, "failureThreshold": 150},
+            "readinessProbe": {"exec": {"command": ["agentsc-ready"]}, "periodSeconds": 10, "timeoutSeconds": 3, "failureThreshold": 3},
             "resources": resources(),
             "securityContext": security_context()
         })
@@ -1448,6 +1463,30 @@ mod tests {
             .collect();
         assert!(names.contains(&"OTEL_EXPORTER_OTLP_ENDPOINT"));
         assert!(names.contains(&"AGENTSC_MOCK_FALLBACK"));
+    }
+
+    /// The review finding: `--audit-fail-closed` could not reach an injected sidecar (the
+    /// template refused the name), and the pod's readiness would not have followed `/readyz`.
+    #[test]
+    fn fail_closed_audit_reaches_the_injected_sidecar_and_readiness_follows_it() {
+        let template = InjectTemplate::parse(
+            r#"{"env": [{"name": "AGENTSC_AUDIT_FAIL_CLOSED", "value": "true"}]}"#,
+        )
+        .unwrap();
+        let d = mutate(&injector(template), &OFF, &create(pod(annotated())));
+        let [runtime, sidecar] = [&d.patch[1]["value"][0], &d.patch[1]["value"][1]];
+        assert!(
+            sidecar["env"]
+                .as_array()
+                .unwrap()
+                .contains(&json!({"name": "AGENTSC_AUDIT_FAIL_CLOSED", "value": "true"}))
+        );
+        assert!(runtime.get("env").is_none(), "agentscd's setting only");
+        assert_eq!(
+            sidecar["readinessProbe"]["exec"]["command"],
+            json!([READY_COMMAND])
+        );
+        assert!(runtime.get("readinessProbe").is_none());
     }
 
     #[test]

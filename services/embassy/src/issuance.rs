@@ -534,6 +534,11 @@ impl Issuer {
         key_sha256: Option<String>,
         result: Result<String, &Denial>,
     ) {
+        // refused before any credential was verified: anyone can send these (cp_audit.rs)
+        let unauthenticated = match &result {
+            Err(d) if who.is_none() => Some(format!("IssueCertificate {:?}", d.code)),
+            _ => None,
+        };
         let (action, outcome, reason) = match result {
             Ok(reason) => (CpAction::CertIssue, CpResult::Ok, reason),
             Err(d) => (CpAction::CertDenied, CpResult::Denied, d.message.clone()),
@@ -548,7 +553,10 @@ impl Issuer {
         }
         rec.sha256_after = key_sha256;
         rec.reason = Some(reason);
-        self.cp_audit.record(rec).await;
+        match unauthenticated {
+            Some(kind) => self.cp_audit.record_unauthenticated(&kind, rec).await,
+            None => self.cp_audit.record(rec).await,
+        }
     }
 
     /// Decide and sign; every outcome is audited.
@@ -710,8 +718,34 @@ mod tests {
         issuer: Issuer,
         cluster: Arc<FakeCluster>,
         audit: tokio::sync::broadcast::Receiver<Arc<CpAuditRecord>>,
+        /// The audit's stdout lines: every record, also the ones held back from the store.
+        lines: Lines,
         ca: Arc<CaMaterial>,
         store: Arc<KubeStore>,
+    }
+
+    /// A shared buffer standing in for stdout.
+    #[derive(Clone, Default)]
+    struct Lines(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Lines {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Lines {
+        fn records(&self) -> Vec<CpAuditRecord> {
+            String::from_utf8(self.0.lock().unwrap().clone())
+                .unwrap()
+                .lines()
+                .map(|l| serde_json::from_str(l).unwrap())
+                .collect()
+        }
     }
 
     fn config(join: Vec<JoinTokenEntry>) -> ControlPlaneConfig {
@@ -745,7 +779,8 @@ mod tests {
             cluster.clone(),
             Box::new(std::io::sink()),
         ));
-        let cp_audit = Arc::new(CpAudit::with_writer(None, Box::new(std::io::sink())));
+        let lines = Lines::default();
+        let cp_audit = Arc::new(CpAudit::with_writer(None, Box::new(lines.clone())));
         let audit = cp_audit.subscribe();
         let issuer = Issuer::new(
             ca.clone(),
@@ -759,6 +794,7 @@ mod tests {
             issuer,
             cluster,
             audit,
+            lines,
             ca,
             store,
         }
@@ -1469,10 +1505,17 @@ mod tests {
             let err = r.issuer.issue(req).await.unwrap_err();
             assert_eq!(err.code(), Code::InvalidArgument, "{ns}/{svc}");
             assert!(err.message().contains(reason), "{}", err.message());
-            let rec = r.audit.recv().await.unwrap();
+            let rec = r.lines.records().pop().unwrap();
             assert_eq!(rec.action, CpAction::CertDenied);
+            assert_eq!(rec.reason.as_deref(), Some(err.message()));
             assert!(rec.sha256_after.is_none());
         }
+        // refused before any credential was checked: all on stdout, the first to subscribers
+        // (and the store) only, so a flood of them cannot push the store's records out
+        assert_eq!(r.lines.records().len(), 5);
+        let first = r.audit.recv().await.unwrap();
+        assert!(first.reason.as_deref().unwrap().contains("\"Demo\""));
+        assert!(r.audit.try_recv().is_err());
         // a garbage name never reaches the audit record verbatim as an identity
         let pod = Caller::Pod {
             namespace: "shop".into(),
@@ -1532,10 +1575,13 @@ mod tests {
                 "{reason}: {}",
                 err.message()
             );
-            let rec = r.audit.recv().await.unwrap();
+            let rec = r.lines.records().pop().unwrap();
             assert_eq!(rec.action, CpAction::CertDenied);
             assert!(rec.sha256_after.is_none());
         }
+        assert_eq!(r.lines.records().len(), 4);
+        assert!(r.audit.recv().await.is_ok());
+        assert!(r.audit.try_recv().is_err(), "one per kind and window");
     }
 
     #[tokio::test]

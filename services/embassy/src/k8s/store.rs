@@ -929,7 +929,7 @@ impl Inner {
                 tracing::error!(error = %e, "serializing a control-plane audit record failed")
             }
         }
-        if let Err(e) = self.cp_audit.append(&record).await {
+        if let Err(e) = self.cp_audit.append(&record) {
             tracing::error!(
                 error = %e,
                 action = ?record.action,
@@ -1946,7 +1946,15 @@ impl Store for KubeStore {
     }
 
     async fn append_cp_audit(&self, record: &CpAuditRecord) -> Result<(), StoreError> {
-        self.inner.cp_audit.append(record).await
+        self.inner.cp_audit.append(record)
+    }
+
+    async fn flush_cp_audit(&self) {
+        self.inner.cp_audit.flush().await;
+    }
+
+    fn cp_audit_write_failures(&self) -> (u64, Option<String>) {
+        self.inner.cp_audit.failures()
     }
 
     async fn cp_audit(&self, limit: usize) -> Result<Vec<CpAuditRecord>, StoreError> {

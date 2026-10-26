@@ -668,6 +668,11 @@ def test_injection_defaults_reach_embassy_ca_as_one_container_template(default: 
     assert inject_template(render("--set", "injection.mockFallback=true"))["env"] == [
         {"name": "AGENTSC_MOCK_FALLBACK", "value": "1"}
     ]
+    # fail-closed audit for the injected sidecars (off by default)
+    assert "env" not in inject_template(render())
+    assert inject_template(render("--set", "injection.auditFailClosed=true"))["env"] == [
+        {"name": "AGENTSC_AUDIT_FAIL_CLOSED", "value": "true"}
+    ]
 
 
 @needs_helm
