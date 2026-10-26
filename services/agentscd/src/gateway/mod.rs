@@ -77,7 +77,8 @@ pub const MAX_REQUEST_BYTES: usize = 32 * 1024 * 1024;
 /// The longest a model request may take (CONTRACT.md §4.3).
 pub const MODEL_TIMEOUT: Duration = Duration::from_secs(600);
 /// Added to a request's size in bytes for the most input tokens it can bill: the provider adds
-/// its own system prompt for tool use. A text token is at least one byte.
+/// its own system prompt for tool use. A text token is at least one byte. A request with images
+/// or documents is bounded by the model's context window instead (`pricing::context_window`).
 pub const PROMPT_OVERHEAD_TOKENS: u64 = 4096;
 /// The `error` of a call whose runtime went away before the answer was read (cf. audit.rs).
 pub const CANCELLED: &str = "cancelled: the runtime went away before the answer was read; the call ran to the end and is counted";
@@ -90,12 +91,30 @@ pub struct Checked {
     pub stream: bool,
     /// Assistant turns already in the conversation: the step this request is (0-based).
     pub assistant_turns: u32,
+    /// Images or documents in the request: their tokens are not bounded by its bytes.
+    pub has_media: bool,
+}
+
+/// How an answer ended, which decides what it is counted at.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Ended {
+    /// The provider's answer arrived whole: its usage is what the provider bills.
+    Completed,
+    /// The provider refused the request (an error status) or it never reached the provider (no
+    /// connection): nothing was generated, nothing is billed.
+    Refused,
+    /// Cut before it completed (the deadline, a timeout, a broken connection, a mid-stream
+    /// error): the provider may bill more than it had reported, so the call is counted at its
+    /// reservation, the most it could cost.
+    #[default]
+    Cut,
 }
 
 /// What a meter read from one answer.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Metered {
     pub usage: Usage,
+    pub ended: Ended,
     /// The content blocks as the provider sent them (`Null` when none arrived).
     pub content: Value,
     pub stop_reason: Option<String>,
@@ -494,11 +513,13 @@ async fn messages(
     }
 
     // Hold the most this call can cost, then send it.
-    let worst = pricing::worst_case_usd(
-        &checked.model,
-        bytes.len() as u64 + PROMPT_OVERHEAD_TOKENS,
-        checked.max_tokens,
-    );
+    let text_bound = bytes.len() as u64 + PROMPT_OVERHEAD_TOKENS;
+    let prompt_bound = if checked.has_media {
+        text_bound.max(pricing::context_window(&checked.model))
+    } else {
+        text_bound
+    };
+    let worst = pricing::worst_case_usd(&checked.model, prompt_bound, checked.max_tokens);
     let reservation = match state
         .budgets
         .reserve(&agent, worst, spec.budgets.max_cost_usd_per_day)
@@ -524,6 +545,12 @@ async fn messages(
                 let abandoned = head_tx.send(Err(reason)).is_err();
                 let metered = Metered {
                     error: Some(format!("upstream unreachable: {e}")),
+                    // a connection never made sent nothing; a timeout may have been billed
+                    ended: if e.is_connect() {
+                        Ended::Refused
+                    } else {
+                        Ended::Cut
+                    },
                     ..Metered::default()
                 };
                 (StatusCode::BAD_GATEWAY, metered, abandoned)
@@ -563,7 +590,12 @@ async fn messages(
                 (status, meter.finish(status), abandoned)
             }
         };
-        let cost = pricing::cost_usd(&model, &metered.usage);
+        let metered_cost = pricing::cost_usd(&model, &metered.usage);
+        let held = reservation.usd();
+        let cost = match metered.ended {
+            Ended::Cut => metered_cost.max(held),
+            Ended::Completed | Ended::Refused => metered_cost,
+        };
         state.budgets.settle(reservation, cost);
         state.runs.add_usage(
             &call.request_id,
@@ -588,8 +620,16 @@ async fn messages(
             (Some(e), _) => Some(e.clone()),
             (None, false) => Some(format!("HTTP {}", status.as_u16())),
             (None, true) if abandoned => Some(CANCELLED.into()),
+            (None, true) if metered.ended == Ended::Cut => Some("the answer broke off".into()),
             (None, true) => None,
         };
+        if metered.ended == Ended::Cut
+            && let Some(e) = rec.error.as_mut()
+        {
+            e.push_str(&format!(
+                "; cut before it completed: counted at its reservation, ${held:.6}"
+            ));
+        }
         state.audit.write(rec);
     });
 

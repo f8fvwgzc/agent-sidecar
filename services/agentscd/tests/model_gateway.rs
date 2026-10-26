@@ -31,7 +31,7 @@ const KEY: &str = "sk-ant-sidecar-only";
 struct Canned {
     status: u16,
     headers: Vec<(&'static str, String)>,
-    /// Sent one after the other, `delay` apart.
+    /// Sent one after the other: the first at once, then `delay` apart.
     chunks: Vec<String>,
     delay: Duration,
 }
@@ -98,8 +98,10 @@ async fn upstream_handler(
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<String, std::io::Error>>(8);
     let (chunks, delay) = (c.chunks.clone(), c.delay);
     tokio::spawn(async move {
-        for chunk in chunks {
-            tokio::time::sleep(delay).await;
+        for (i, chunk) in chunks.into_iter().enumerate() {
+            if i > 0 {
+                tokio::time::sleep(delay).await;
+            }
             if tx.send(Ok(chunk)).await.is_err() {
                 return;
             }
@@ -680,7 +682,134 @@ async fn a_model_call_ends_at_the_runs_deadline() {
     })
     .await;
     assert!(recs[0]["error"].is_string(), "{}", recs[0]);
+    assert_cut_at_reservation(&rig, &recs[0]);
     drop(done);
+    let _ = call.await;
+    rig.sidecar.abort();
+}
+
+/// A call cut before its answer completed is counted at its reservation, the most it could
+/// cost (request bytes + 4096 input tokens as 1-hour cache writes, plus max_tokens of output),
+/// never at the little the provider had reported: the provider may bill the rest.
+fn assert_cut_at_reservation(rig: &Rig, rec: &Value) {
+    let cost = rec["cost_usd"].as_f64().unwrap();
+    let worst = agentsc_common::pricing::worst_case_usd(
+        MODEL,
+        request(64).to_string().len() as u64 + agentscd::gateway::PROMPT_OVERHEAD_TOKENS,
+        64,
+    );
+    assert!(
+        cost >= worst * 0.99,
+        "counted at {cost}, the reservation is {worst}: {rec}"
+    );
+    assert!(
+        rec["error"]
+            .as_str()
+            .unwrap()
+            .contains("counted at its reservation"),
+        "{rec}"
+    );
+    let spent = rig.sidecar.state.budgets.spent_today("ops-assistant");
+    assert!(
+        (spent - cost).abs() < 1e-9,
+        "the budget counts it too: {spent}"
+    );
+}
+
+/// The review finding: a non-streamed answer cut by the deadline used to settle at $0 (its
+/// body never parsed), a streamed one at its message_start input only.
+#[tokio::test]
+async fn an_answer_cut_by_the_deadline_is_counted_at_its_reservation() {
+    use agentsc_proto::InvokeAgentRequest;
+    use agentsc_proto::app_api_client::AppApiClient;
+    for stream in [false, true] {
+        let (rig, up, mut gate) = gateway_rig(|c| priced(c, 5.0)).await;
+        let mut app = AppApiClient::connect(format!("http://{}", rig.sidecar.grpc_addr))
+            .await
+            .unwrap();
+        let mut inv = tonic::Request::new(InvokeAgentRequest {
+            agent: "ops-assistant".into(),
+            input: "stalls".into(),
+            ..Default::default()
+        });
+        inv.set_timeout(Duration::from_secs(3));
+        let call = tokio::spawn(async move { app.invoke_agent(inv).await });
+        let (req, done) = gate.recv().await.unwrap();
+        // the provider starts answering, then stalls past the run's deadline
+        up.push(Canned {
+            status: 200,
+            headers: vec![(
+                "content-type",
+                if stream { "text/event-stream" } else { "application/json" }.into(),
+            )],
+            chunks: if stream {
+                vec![
+                    format!(
+                        "event: message_start\ndata: {}\n\n",
+                        json!({"type": "message_start", "message": {"usage": {"input_tokens": 10, "output_tokens": 1}}})
+                    ),
+                    "event: ping\ndata: {\"type\": \"ping\"}\n\n".into(),
+                ]
+            } else {
+                vec!["{\"id\": \"msg_1\", \"content\": [".into(), "]}".into()]
+            },
+            // the first chunk at once, the next after the deadline
+            delay: Duration::from_secs(10),
+        });
+        let mut body = request(64);
+        body["stream"] = json!(stream);
+        let a = model_call(&rig.sock, &bound(&req.request_id, "ops-assistant"), &body).await;
+        assert!(
+            a.status == 200 && a.broken,
+            "stream={stream}: the answer started, then was cut"
+        );
+        let recs = wait_audit(&rig.audit, 1, |v| {
+            v["request_id"] == req.request_id.as_str() && v["kind"] == "model_call"
+        })
+        .await;
+        assert_cut_at_reservation(&rig, &recs[0]);
+        drop(done);
+        let _ = call.await;
+        rig.sidecar.abort();
+    }
+}
+
+/// The review finding: an image or document bills tokens its bytes do not bound, so such a
+/// request reserves a whole context window ($8 of input on claude-opus-5-5): a $5 budget
+/// refuses it before it goes out, where the same request with text passes.
+#[tokio::test]
+async fn a_request_with_media_reserves_a_whole_context_window() {
+    let (rig, up, mut gate) = gateway_rig(|c| priced(c, 5.0)).await;
+    let (req, done, call) = start_run(&rig, &mut gate, "look at this").await;
+    let h = bound(&req.request_id, "ops-assistant");
+    let mut image = request(64);
+    image["messages"] = json!([{"role": "user", "content": [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}},
+        {"type": "text", "text": "what is this?"}]}]);
+    let a = model_call(&rig.sock, &h, &image).await;
+    assert_eq!(
+        (a.status, rule(&a).as_str()),
+        (403, "budget.max_cost_usd_per_day"),
+        "{}",
+        a.body
+    );
+    let mut url = request(64);
+    url["messages"] = json!([{"role": "user", "content": [
+        {"type": "document", "source": {"type": "url", "url": "https://example.com/big.pdf"}}]}]);
+    let b = model_call(&rig.sock, &h, &url).await;
+    assert_eq!(
+        (b.status, rule(&b).as_str()),
+        (400, "model.request_invalid"),
+        "{}",
+        b.body
+    );
+    assert!(up.seen().is_empty(), "neither left the pod");
+    assert_eq!(
+        model_call(&rig.sock, &h, &request(64)).await.status,
+        200,
+        "text passes"
+    );
+    done.send(ok("done")).unwrap();
     let _ = call.await;
     rig.sidecar.abort();
 }
