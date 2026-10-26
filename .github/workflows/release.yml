@@ -1,4 +1,4 @@
-# Release on a v* tag: the agentscd, agentsc and embassy binaries for Linux (x86_64 and aarch64,
+# Release on a v* tag: the agentscd, agentsc-gateway, agentsc and embassy binaries for Linux (x86_64 and aarch64,
 # glibc 2.28 or newer, cross-built with cargo-zigbuild) and macOS (Apple silicon); multi-arch
 # (linux/amd64, linux/arm64) agentscd and embassy images on GHCR, assembled from those binaries; and
 # a GitHub release with the archives, their SHA-256 checksums and the images' digests
@@ -187,7 +187,7 @@ jobs:
         run: |
           name="agent-sidecar-$VERSION-$TARGET"
           mkdir -p "dist/$name"
-          for bin in agentscd agentsc embassy; do
+          for bin in agentscd agentsc-gateway agentsc embassy; do
             cp "target/$TARGET/release/$bin" "dist/$name/"
           done
           cp LICENSE README.md "dist/$name/"
@@ -227,7 +227,7 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      # docker/Dockerfile with BINARIES=prebuilt copies dist/linux-<TARGETARCH>/{agentscd,agentsc,embassy}.
+      # docker/Dockerfile with BINARIES=prebuilt copies dist/linux-<TARGETARCH>/{agentscd,agentsc-gateway,agentsc,embassy}.
       - name: Lay out the Linux binaries per architecture
         env:
           VERSION: ${{ needs.version.outputs.version }}

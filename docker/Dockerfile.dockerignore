@@ -19,7 +19,7 @@
 !runtime/src
 !docker/agentsc-ready
 !docker/agentsc-http-ready
-# BINARIES=prebuilt: dist/linux-<arch>/{agentscd,agentsc,embassy}
+# BINARIES=prebuilt: dist/linux-<arch>/{agentscd,agentsc-gateway,agentsc,embassy}
 !dist/linux-*
 
 **/target

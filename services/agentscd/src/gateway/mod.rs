@@ -25,11 +25,16 @@
 //! `--audit-fail-closed` and a failing audit sink, every call is refused with `503` and
 //! `audit.unavailable` before anything else (audit.rs).
 //!
-//! Providers are adapters ([`Provider`]): the Anthropic Messages API (`POST /v1/messages`,
-//! anthropic.rs) today. An OpenAI-compatible adapter (`POST /v1/chat/completions`) implements
-//! the same trait: its own request check (`max_completion_tokens`, `stream_options.include_usage`
-//! forced on), upstream request and usage meter (the final chunk's `usage`).
+//! Providers are adapters ([`Provider`]), each for one wire format ([`Wire`]): the Anthropic
+//! Messages API (`POST /v1/messages`, anthropic.rs), OpenAI Chat Completions and Responses
+//! (`POST /v1/chat/completions`, `POST /v1/responses`, openai.rs), and the platform's model
+//! gateway itself (chain.rs: the LLM connection contract's gateway mode, so the pod holds no
+//! provider key). The runtime speaks Messages; the standalone gateway (standalone.rs,
+//! `agentsc-gateway`, docs/LLM-CONNECTION.md) serves all three.
 pub mod anthropic;
+pub mod chain;
+pub mod openai;
+pub mod standalone;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -37,6 +42,7 @@ use std::time::{Duration, Instant};
 use agentsc_charter::AgentSpec;
 use agentsc_common::audit::{AuditRecord, Direction, Kind, Tokens};
 use agentsc_common::authz::Verdict;
+use agentsc_common::llm_contract::{Contract, ProviderKind, SecretSource, Upstream};
 use agentsc_common::pricing::{self, Usage};
 use agentsc_common::trace::TraceContext;
 use axum::Router;
@@ -85,11 +91,73 @@ pub const PROMPT_OVERHEAD_TOKENS: u64 = 4096;
 /// The `error` of a call whose runtime went away before the answer was read (cf. audit.rs).
 pub const CANCELLED: &str = "cancelled: the runtime went away before the answer was read; the call ran to the end and is counted";
 
+/// The API shape of a request: the path it arrives on, how its body is checked and how its
+/// answer is metered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Wire {
+    /// Anthropic Messages (`/v1/messages`).
+    Messages,
+    /// OpenAI Chat Completions (`/v1/chat/completions`).
+    ChatCompletions,
+    /// OpenAI Responses (`/v1/responses`).
+    Responses,
+}
+
+impl Wire {
+    pub const ALL: [Wire; 3] = [Wire::Messages, Wire::ChatCompletions, Wire::Responses];
+
+    /// The request path, from the API root.
+    pub fn path(&self) -> &'static str {
+        match self {
+            Wire::Messages => "/v1/messages",
+            Wire::ChatCompletions => "/v1/chat/completions",
+            Wire::Responses => "/v1/responses",
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Wire::Messages => "anthropic-messages",
+            Wire::ChatCompletions => "openai-chat-completions",
+            Wire::Responses => "openai-responses",
+        }
+    }
+
+    /// Check a request body of this shape; `Err` is why it is refused (`model.request_invalid`).
+    pub fn check(&self, body: &Map<String, Value>) -> Result<Checked, String> {
+        match self {
+            Wire::Messages => anthropic::check(body),
+            Wire::ChatCompletions => openai::check_chat(body),
+            Wire::Responses => openai::check_responses(body),
+        }
+    }
+
+    /// Change a checked body before it goes out (Chat Completions: ask for the usage of a
+    /// stream); `true` when it changed.
+    pub fn rewrite(&self, body: &mut Map<String, Value>) -> bool {
+        match self {
+            Wire::ChatCompletions => openai::rewrite_chat(body),
+            Wire::Messages | Wire::Responses => false,
+        }
+    }
+
+    /// A meter for one answer.
+    pub fn meter(&self, stream: bool) -> Box<dyn Meter> {
+        match self {
+            Wire::Messages => anthropic::meter(stream),
+            Wire::ChatCompletions => openai::chat_meter(stream),
+            Wire::Responses => openai::responses_meter(stream),
+        }
+    }
+}
+
 /// What a provider adapter made of a request body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Checked {
     pub model: String,
-    pub max_tokens: u64,
+    /// The most output tokens the request asks for (`None`: it names no limit, which only the
+    /// OpenAI shapes allow).
+    pub max_tokens: Option<u64>,
     pub stream: bool,
     /// Assistant turns already in the conversation: the step this request is (0-based).
     pub assistant_turns: u32,
@@ -131,48 +199,114 @@ pub trait Meter: Send {
     fn finish(self: Box<Self>, status: StatusCode) -> Metered;
 }
 
-/// One upstream model API.
+/// One upstream model API, in one wire format.
 pub trait Provider: Send + Sync {
     /// `anthropic`: the prefix of `model_call` callees (`anthropic:claude-opus-5-5`).
     fn name(&self) -> &'static str;
+    /// The wire format it speaks.
+    fn wire(&self) -> Wire;
     /// Check a request body; `Err` is the reason it is refused (`model.request_invalid`).
-    fn check(&self, body: &Map<String, Value>) -> Result<Checked, String>;
-    /// The upstream request for `body`, with the provider's credentials.
+    fn check(&self, body: &Map<String, Value>) -> Result<Checked, String> {
+        self.wire().check(body)
+    }
+    /// See [`Wire::rewrite`].
+    fn rewrite(&self, body: &mut Map<String, Value>) -> bool {
+        self.wire().rewrite(body)
+    }
+    /// The upstream request for `body`, with the provider's credentials (read now: a key file
+    /// may have been rotated); `Err` when there is no credential to send.
     fn request(
         &self,
         client: &reqwest::Client,
         body: Vec<u8>,
         incoming: &HeaderMap,
-    ) -> reqwest::RequestBuilder;
+    ) -> Result<reqwest::RequestBuilder, String>;
     /// A meter for one answer.
-    fn meter(&self, stream: bool) -> Box<dyn Meter>;
+    fn meter(&self, stream: bool) -> Box<dyn Meter> {
+        self.wire().meter(stream)
+    }
 }
 
 /// The providers the sidecar has keys for, and the client their calls go out on.
 pub struct Providers {
+    /// Where the runtime's Messages calls go: Anthropic, or the platform's model gateway.
     pub anthropic: Option<Arc<dyn Provider>>,
     /// No redirects, the environment's proxy, a connect timeout; each call sets its own deadline.
     pub client: reqwest::Client,
+    /// `LLM_TIMEOUT_SECS`: no call takes longer.
+    pub timeout: Option<Duration>,
+    /// `LLM_MAX_RETRIES`: retries of a connection that could not be made.
+    pub retries: u32,
+}
+
+/// The client every upstream call goes out on.
+pub fn client() -> anyhow::Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(10))
+        .build()?)
 }
 
 impl Providers {
     pub fn from_config(config: &crate::Config) -> anyhow::Result<Self> {
-        let anthropic = config.anthropic_key()?.map(|key| {
-            Arc::new(anthropic::Anthropic::new(key, &config.anthropic_base_url))
-                as Arc<dyn Provider>
-        });
+        let contract = config.llm_contract.as_ref();
+        let anthropic = match (config.anthropic_key()?, contract) {
+            (Some(key), _) => Some(Arc::new(anthropic::Anthropic::new(
+                key,
+                &config.anthropic_base_url,
+            )) as Arc<dyn Provider>),
+            (None, Some(c)) => Some(sidecar_upstream(c)?),
+            (None, None) => None,
+        };
         Ok(Self {
             anthropic,
-            client: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .connect_timeout(Duration::from_secs(10))
-                .build()?,
+            client: client()?,
+            timeout: contract.and_then(|c| c.timeout),
+            retries: contract.and_then(|c| c.max_retries).unwrap_or(0),
         })
     }
 
-    /// The names of the providers this sidecar can call (`GET /v1/agentsc/providers`).
+    /// The wire formats this sidecar can call, by the name the runtime knows them by
+    /// (`GET /v1/agentsc/providers`): `anthropic` for Messages, whether to Anthropic itself or
+    /// through the platform's gateway.
     pub fn names(&self) -> Vec<&'static str> {
-        self.anthropic.iter().map(|p| p.name()).collect()
+        self.anthropic.iter().map(|_| "anthropic").collect()
+    }
+}
+
+/// The sidecar's upstream from the LLM connection contract. Its runtime speaks Anthropic
+/// Messages, so the contract must name Anthropic, or the platform's gateway (whose Messages
+/// endpoint it then calls).
+fn sidecar_upstream(c: &Contract) -> anyhow::Result<Arc<dyn Provider>> {
+    match &c.upstream {
+        Upstream::Provider(p) if p.kind == ProviderKind::Anthropic => {
+            let key = p.key.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LLM_API_KEY or LLM_API_KEY_FILE is required with LLM_PROVIDER=anthropic"
+                )
+            })?;
+            Ok(Arc::new(anthropic::Anthropic::with_key(key, &p.base_url)))
+        }
+        Upstream::Provider(p) => anyhow::bail!(
+            "LLM_PROVIDER={}: the agent runtime speaks Anthropic Messages; set LLM_PROVIDER=anthropic, or use the model gateway (LLM_GATEWAY_URL)",
+            p.kind
+        ),
+        Upstream::Gateway {
+            root,
+            token_file,
+            wire,
+        } => {
+            if *wire != ProviderKind::Anthropic {
+                tracing::warn!(
+                    "LLM_PROVIDER={wire} in gateway mode: the agent runtime speaks Anthropic Messages, so the sidecar calls the gateway's /v1/messages"
+                );
+            }
+            Ok(Arc::new(chain::Gateway::new(
+                root,
+                SecretSource::File(token_file.clone()),
+                Wire::Messages,
+            )))
+        }
     }
 }
 
@@ -452,15 +586,16 @@ async fn messages(
         );
     }
     let max_tokens = u64::from(spec.budgets.max_tokens_per_call.max(1));
-    if checked.max_tokens > max_tokens {
+    // the Messages check requires max_tokens
+    let asked = checked.max_tokens.unwrap_or(u64::MAX);
+    if asked > max_tokens {
         return call.refuse(
             &state,
             StatusCode::FORBIDDEN,
             Verdict::deny(
                 RULE_MAX_TOKENS,
                 format!(
-                    "max_tokens {} exceeds agent {agent}'s budgets.max_tokens_per_call={max_tokens}",
-                    checked.max_tokens
+                    "max_tokens {asked} exceeds agent {agent}'s budgets.max_tokens_per_call={max_tokens}"
                 ),
             ),
         );
@@ -507,6 +642,7 @@ async fn messages(
             harness.request_timeout_seconds,
         ))),
     };
+    let timeout = state.providers.timeout.map_or(timeout, |t| timeout.min(t));
     if timeout.is_zero() {
         return call.refuse(
             &state,
@@ -525,7 +661,7 @@ async fn messages(
     } else {
         text_bound
     };
-    let worst = pricing::worst_case_usd(&checked.model, prompt_bound, checked.max_tokens);
+    let worst = pricing::worst_case_usd(&checked.model, prompt_bound, asked);
     let reservation = match state
         .budgets
         .reserve(&agent, worst, spec.budgets.max_cost_usd_per_day)
@@ -534,21 +670,178 @@ async fn messages(
         Err(v) => return call.refuse(&state, StatusCode::FORBIDDEN, v),
     };
     let input = record_input(&body, &headers, kind);
-    let upstream = provider
-        .request(&state.providers.client, bytes.to_vec(), &headers)
-        .timeout(timeout);
+    let upstream = match provider.request(&state.providers.client, bytes.to_vec(), &headers) {
+        Ok(r) => r.timeout(timeout),
+        Err(why) => {
+            return call.refuse(
+                &state,
+                StatusCode::FORBIDDEN,
+                Verdict::deny(RULE_NO_PROVIDER, format!("{}: {why}", provider.name())),
+            );
+        }
+    };
+    let model = checked.model.clone();
+    let callee = call.callee.clone();
+    let task_state = state.clone();
+    let retries = state.providers.retries;
+    let relayed = relay(
+        upstream,
+        retries,
+        provider,
+        checked.stream,
+        callee,
+        move |o| {
+            let state = task_state;
+            let metered = o.metered;
+            let metered_cost = pricing::cost_usd(&model, &metered.usage);
+            let held = reservation.usd();
+            let cost = match metered.ended {
+                Ended::Cut => metered_cost.max(held),
+                Ended::Completed | Ended::Refused => metered_cost,
+            };
+            state.budgets.settle(reservation, cost);
+            state.runs.add_usage(
+                &call.request_id,
+                &call.agent,
+                metered.usage.prompt_tokens(),
+                metered.usage.output,
+                cost,
+            );
+            let mut rec = call.record(Kind::ModelCall, input, metered.content.clone());
+            rec.tokens = Some(Tokens {
+                input: u32::try_from(metered.usage.prompt_tokens()).unwrap_or(u32::MAX),
+                output: u32::try_from(metered.usage.output).unwrap_or(u32::MAX),
+            });
+            rec.cost_usd = Some(cost);
+            if metered.stop_reason.as_deref() == Some("refusal") {
+                rec = rec.verdict(&Verdict::deny(
+                    "model.refusal",
+                    "the model refused the request",
+                ));
+            }
+            rec.error = outcome_error(o.status, &metered, o.abandoned, held);
+            state.audit.write(rec);
+        },
+    )
+    .await;
+
+    match relayed {
+        Relayed::Answer {
+            status,
+            mut headers,
+            body,
+        } => {
+            if !state
+                .budgets
+                .check_cost(&agent, spec.budgets.max_cost_usd_per_day)
+                .allow
+            {
+                headers.insert(
+                    HEADER_RULE,
+                    HeaderValue::from_static(agentsc_common::budget::RULE_COST),
+                );
+            }
+            let mut resp = Response::new(body);
+            *resp.status_mut() = status;
+            *resp.headers_mut() = headers;
+            resp
+        }
+        Relayed::Unreachable(reason) => refusal(StatusCode::BAD_GATEWAY, RULE_UPSTREAM, &reason),
+        Relayed::Ended => refusal(
+            StatusCode::BAD_GATEWAY,
+            RULE_UPSTREAM,
+            "the model call ended before it answered",
+        ),
+    }
+}
+
+/// The `error` of a call's record: the provider's, the HTTP status, or how it was cut. A cut
+/// call is counted at its reservation (`held`), and its error says so.
+pub(crate) fn outcome_error(
+    status: StatusCode,
+    metered: &Metered,
+    abandoned: bool,
+    held: f64,
+) -> Option<String> {
+    let mut error = match (&metered.error, status.is_success()) {
+        (Some(e), _) => Some(e.clone()),
+        (None, false) => Some(format!("HTTP {}", status.as_u16())),
+        (None, true) if abandoned => Some(CANCELLED.into()),
+        (None, true) if metered.ended == Ended::Cut => Some("the answer broke off".into()),
+        (None, true) => None,
+    };
+    if metered.ended == Ended::Cut
+        && let Some(e) = error.as_mut()
+    {
+        e.push_str(&format!(
+            "; cut before it completed: counted at its reservation, ${held:.6}"
+        ));
+    }
+    error
+}
+
+/// How a relayed call ended, for its record and its budget.
+pub struct Outcome {
+    pub status: StatusCode,
+    pub metered: Metered,
+    /// The caller went away before it read the whole answer (which was read to the end anyway).
+    pub abandoned: bool,
+}
+
+/// What [`relay`] got back first.
+pub enum Relayed {
+    /// The answer: its status and headers now, its body as it arrives.
+    Answer {
+        status: StatusCode,
+        headers: HeaderMap,
+        body: Body,
+    },
+    /// The upstream could not be reached (the reason names the callee and the error).
+    Unreachable(String),
+    /// The call ended before it answered.
+    Ended,
+}
+
+/// The pause before retry `attempt` (1-based) of a connection that could not be made.
+fn backoff(attempt: u32) -> Duration {
+    Duration::from_millis(250u64.saturating_mul(1 << attempt.saturating_sub(1).min(5)))
+        .min(Duration::from_secs(8))
+}
+
+/// Send `upstream`, stream the answer back as it arrives through `provider`'s meter, and call
+/// `done` once it ended. A connection that cannot be made is tried again up to `retries` times
+/// (nothing was sent, so nothing is billed); an answer is never retried here. The answer is read
+/// to the end even when the caller goes away: the provider bills it.
+pub async fn relay(
+    upstream: reqwest::RequestBuilder,
+    retries: u32,
+    provider: Arc<dyn Provider>,
+    stream: bool,
+    callee: String,
+    done: impl FnOnce(Outcome) + Send + 'static,
+) -> Relayed {
     let (head_tx, head_rx) =
         tokio::sync::oneshot::channel::<Result<(StatusCode, HeaderMap), String>>();
     let (body_tx, body_rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(64);
-    let model = checked.model.clone();
-    let stream = checked.stream;
-    let task_state = state.clone();
     tokio::spawn(async move {
-        let state = task_state;
-        let (status, metered, abandoned) = match upstream.send().await {
+        let mut attempt = 0;
+        let sent = loop {
+            let this = match upstream.try_clone() {
+                Some(r) if attempt < retries => r,
+                _ => break upstream.send().await,
+            };
+            match this.send().await {
+                Err(e) if e.is_connect() => {
+                    attempt += 1;
+                    tracing::warn!(callee = %callee, attempt, error = %e, "model upstream unreachable; retrying");
+                    tokio::time::sleep(backoff(attempt)).await;
+                }
+                other => break other,
+            }
+        };
+        let (status, metered, abandoned) = match sent {
             Err(e) => {
-                let reason = format!("{}: {e}", call.callee);
-                let abandoned = head_tx.send(Err(reason)).is_err();
+                let abandoned = head_tx.send(Err(format!("{callee}: {e}"))).is_err();
                 let metered = Metered {
                     error: Some(format!("upstream unreachable: {e}")),
                     // a connection never made sent nothing; a timeout may have been billed
@@ -596,74 +889,20 @@ async fn messages(
                 (status, meter.finish(status), abandoned)
             }
         };
-        let metered_cost = pricing::cost_usd(&model, &metered.usage);
-        let held = reservation.usd();
-        let cost = match metered.ended {
-            Ended::Cut => metered_cost.max(held),
-            Ended::Completed | Ended::Refused => metered_cost,
-        };
-        state.budgets.settle(reservation, cost);
-        state.runs.add_usage(
-            &call.request_id,
-            &call.agent,
-            metered.usage.prompt_tokens(),
-            metered.usage.output,
-            cost,
-        );
-        let mut rec = call.record(Kind::ModelCall, input, metered.content.clone());
-        rec.tokens = Some(Tokens {
-            input: u32::try_from(metered.usage.prompt_tokens()).unwrap_or(u32::MAX),
-            output: u32::try_from(metered.usage.output).unwrap_or(u32::MAX),
+        done(Outcome {
+            status,
+            metered,
+            abandoned,
         });
-        rec.cost_usd = Some(cost);
-        if metered.stop_reason.as_deref() == Some("refusal") {
-            rec = rec.verdict(&Verdict::deny(
-                "model.refusal",
-                "the model refused the request",
-            ));
-        }
-        rec.error = match (&metered.error, status.is_success()) {
-            (Some(e), _) => Some(e.clone()),
-            (None, false) => Some(format!("HTTP {}", status.as_u16())),
-            (None, true) if abandoned => Some(CANCELLED.into()),
-            (None, true) if metered.ended == Ended::Cut => Some("the answer broke off".into()),
-            (None, true) => None,
-        };
-        if metered.ended == Ended::Cut
-            && let Some(e) = rec.error.as_mut()
-        {
-            e.push_str(&format!(
-                "; cut before it completed: counted at its reservation, ${held:.6}"
-            ));
-        }
-        state.audit.write(rec);
     });
-
     match head_rx.await {
-        Ok(Ok((status, mut out))) => {
-            if !state
-                .budgets
-                .check_cost(&agent, spec.budgets.max_cost_usd_per_day)
-                .allow
-            {
-                out.insert(
-                    HEADER_RULE,
-                    HeaderValue::from_static(agentsc_common::budget::RULE_COST),
-                );
-            }
-            let mut resp = Response::new(Body::from_stream(
-                tokio_stream::wrappers::ReceiverStream::new(body_rx),
-            ));
-            *resp.status_mut() = status;
-            *resp.headers_mut() = out;
-            resp
-        }
-        Ok(Err(reason)) => refusal(StatusCode::BAD_GATEWAY, RULE_UPSTREAM, &reason),
-        Err(_) => refusal(
-            StatusCode::BAD_GATEWAY,
-            RULE_UPSTREAM,
-            "the model call ended before it answered",
-        ),
+        Ok(Ok((status, headers))) => Relayed::Answer {
+            status,
+            headers,
+            body: Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(body_rx)),
+        },
+        Ok(Err(reason)) => Relayed::Unreachable(reason),
+        Err(_) => Relayed::Ended,
     }
 }
 

@@ -101,6 +101,7 @@ Flags / environment of `agentscd` (flag wins over env):
 | —                 | `ANTHROPIC_API_KEY`      | the same key as text (env only, never a flag). Neither set → the gateway has no provider, and an agent whose `model` is not `mock` is refused (`FAILED_PRECONDITION`), unless `AGENTSC_MOCK_FALLBACK=1`. The runtime the sidecar starts never gets either, nor `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY` or `AGENTSC_APP_TOKEN` |
 | `--anthropic-base-url` | `AGENTSC_ANTHROPIC_BASE_URL` | `https://api.anthropic.com` |
 | —                 | `AGENTSC_MOCK_FALLBACK`  | unset. `1` = when the sidecar holds no key, every agent runs on the `mock` model (demos, CI); the runtime the sidecar starts inherits it (an injected pod's `agentsc-runtime` container gets it from the injector's template, Helm `injection.mockFallback`) |
+| —                 | `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_API_KEY_FILE`, `LLM_API_KEY`, `LLM_MODEL`, `LLM_MODEL_SMALL`, `LLM_TIMEOUT_SECS`, `LLM_MAX_RETRIES`, `LLM_GATEWAY_URL`, `LLM_GATEWAY_TOKEN_FILE` | unset. The LLM connection contract v1 (docs/LLM-CONNECTION.md), used when no Anthropic key is set the sidecar's own way: `LLM_PROVIDER=anthropic` with a key, or gateway mode (the model gateway's `/v1/messages` with the token: the pod holds no provider key). `LLM_TIMEOUT_SECS` caps every model call; `LLM_MAX_RETRIES` retries a connection that could not be made. An invalid value stops the sidecar naming the variable; the runtime never gets the key or token variables |
 
 ## 3. `charter.yaml`
 
@@ -602,7 +603,9 @@ reports no cost. The runtime's Anthropic SDK is pointed at the socket
 default `model.sock` next to `--sidecar`) with a placeholder key.
 
 - `GET /v1/agentsc/providers` → `{"providers": ["anthropic"]}`: the providers
-  the sidecar holds a key for. Empty → the runtime runs every agent on `mock`.
+  the sidecar can call (a key, or the platform's model gateway in the LLM
+  connection contract's gateway mode, docs/LLM-CONNECTION.md). Empty → the
+  runtime runs every agent on `mock`.
 - `POST /v1/messages` — the Anthropic Messages API. The call names its run with
   `x-agentsc-request-id` and `x-agentsc-agent`; `x-agentsc-attempt` (`1`, `2`,
   …, `fallback`) and `x-agentsc-purpose: reflection` only label its record. The

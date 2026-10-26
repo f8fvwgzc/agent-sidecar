@@ -16,6 +16,11 @@ path = "src/lib.rs"
 name = "agentscd"
 path = "src/main.rs"
 
+# The standalone model gateway (docs/LLM-CONNECTION.md).
+[[bin]]
+name = "agentsc-gateway"
+path = "src/bin/agentsc-gateway.rs"
+
 [dependencies]
 agentsc-proto.workspace = true
 agentsc-charter.workspace = true
@@ -45,6 +50,8 @@ url.workspace = true
 rcgen.workspace = true
 x509-parser.workspace = true
 sha2.workspace = true
+hex.workspace = true
+serde_yaml_ng.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 rand.workspace = true

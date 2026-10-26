@@ -14,7 +14,8 @@
 use axum::http::{HeaderMap, StatusCode};
 use serde_json::{Map, Value, json};
 
-use super::{Checked, Ended, Meter, Metered, Provider};
+use super::{Checked, Ended, Meter, Metered, Provider, Wire};
+use agentsc_common::llm_contract::SecretSource;
 use agentsc_common::pricing::Usage;
 
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -38,12 +39,18 @@ pub const ALLOWED_FIELDS: &[&str] = &[
 const MAX_BODY_METERED: usize = 16 * 1024 * 1024;
 
 pub struct Anthropic {
-    key: String,
+    key: SecretSource,
     base_url: String,
 }
 
 impl Anthropic {
     pub fn new(key: String, base_url: &str) -> Self {
+        Self::with_key(SecretSource::Text(key), base_url)
+    }
+
+    /// The key from `key`, read again for every request (a key file's rotation applies to the
+    /// next call).
+    pub fn with_key(key: SecretSource, base_url: &str) -> Self {
         Self {
             key,
             base_url: base_url.trim_end_matches('/').to_string(),
@@ -51,73 +58,22 @@ impl Anthropic {
     }
 }
 
+/// The `anthropic-version` of an incoming request, if it is a plain version name.
+pub(crate) fn version(incoming: &HeaderMap) -> &str {
+    incoming
+        .get("anthropic-version")
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+        .unwrap_or(DEFAULT_VERSION)
+}
+
 impl Provider for Anthropic {
     fn name(&self) -> &'static str {
         "anthropic"
     }
 
-    fn check(&self, body: &Map<String, Value>) -> Result<Checked, String> {
-        if let Some(f) = body.keys().find(|k| !ALLOWED_FIELDS.contains(&k.as_str())) {
-            return Err(format!(
-                "request field {f:?} is not one the gateway forwards"
-            ));
-        }
-        let model = body
-            .get("model")
-            .and_then(Value::as_str)
-            .filter(|m| !m.is_empty())
-            .ok_or("the request names no model")?
-            .to_string();
-        let max_tokens = body
-            .get("max_tokens")
-            .and_then(Value::as_u64)
-            .ok_or("max_tokens must be a non-negative integer")?;
-        let stream = match body.get("stream") {
-            None | Some(Value::Null) => false,
-            Some(Value::Bool(b)) => *b,
-            Some(_) => return Err("stream must be a boolean".into()),
-        };
-        for t in body
-            .get("tools")
-            .map(|t| t.as_array().ok_or("tools must be an array"))
-            .transpose()?
-            .into_iter()
-            .flatten()
-        {
-            match t.get("type").and_then(Value::as_str) {
-                None | Some("custom") => {}
-                Some(other) => {
-                    return Err(format!(
-                        "tool type {other:?} is a server tool, billed outside the token price"
-                    ));
-                }
-            }
-            if t.get("name").and_then(Value::as_str).is_none() {
-                return Err("every tool needs a name".into());
-            }
-        }
-        let messages = body
-            .get("messages")
-            .and_then(Value::as_array)
-            .ok_or("messages must be an array")?;
-        let mut has_media = false;
-        for part in [body.get("messages"), body.get("system")]
-            .into_iter()
-            .flatten()
-        {
-            scan_media(part, &mut has_media)?;
-        }
-        let assistant_turns = messages
-            .iter()
-            .filter(|m| m.get("role").and_then(Value::as_str) == Some("assistant"))
-            .count();
-        Ok(Checked {
-            model,
-            max_tokens,
-            stream,
-            assistant_turns: u32::try_from(assistant_turns).unwrap_or(u32::MAX),
-            has_media,
-        })
+    fn wire(&self) -> Wire {
+        Wire::Messages
     }
 
     fn request(
@@ -125,27 +81,89 @@ impl Provider for Anthropic {
         client: &reqwest::Client,
         body: Vec<u8>,
         incoming: &HeaderMap,
-    ) -> reqwest::RequestBuilder {
-        let version = incoming
-            .get("anthropic-version")
-            .and_then(|v| v.to_str().ok())
-            .filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
-            .unwrap_or(DEFAULT_VERSION);
-        client
+    ) -> Result<reqwest::RequestBuilder, String> {
+        let key = self.key.read()?;
+        Ok(client
             .post(format!("{}/v1/messages", self.base_url))
-            .header("x-api-key", &self.key)
-            .header("anthropic-version", version)
+            .header("x-api-key", key)
+            .header("anthropic-version", version(incoming))
             .header("content-type", "application/json")
             .header("accept", "application/json, text/event-stream")
-            .body(body)
+            .body(body))
     }
+}
 
-    fn meter(&self, stream: bool) -> Box<dyn Meter> {
-        Box::new(SseMeter {
-            stream,
-            ..SseMeter::default()
-        })
+/// Check a Messages request body; `Err` is the reason it is refused (`model.request_invalid`).
+pub fn check(body: &Map<String, Value>) -> Result<Checked, String> {
+    if let Some(f) = body.keys().find(|k| !ALLOWED_FIELDS.contains(&k.as_str())) {
+        return Err(format!(
+            "request field {f:?} is not one the gateway forwards"
+        ));
     }
+    let model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|m| !m.is_empty())
+        .ok_or("the request names no model")?
+        .to_string();
+    let max_tokens = body
+        .get("max_tokens")
+        .and_then(Value::as_u64)
+        .ok_or("max_tokens must be a non-negative integer")?;
+    let stream = match body.get("stream") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err("stream must be a boolean".into()),
+    };
+    for t in body
+        .get("tools")
+        .map(|t| t.as_array().ok_or("tools must be an array"))
+        .transpose()?
+        .into_iter()
+        .flatten()
+    {
+        match t.get("type").and_then(Value::as_str) {
+            None | Some("custom") => {}
+            Some(other) => {
+                return Err(format!(
+                    "tool type {other:?} is a server tool, billed outside the token price"
+                ));
+            }
+        }
+        if t.get("name").and_then(Value::as_str).is_none() {
+            return Err("every tool needs a name".into());
+        }
+    }
+    let messages = body
+        .get("messages")
+        .and_then(Value::as_array)
+        .ok_or("messages must be an array")?;
+    let mut has_media = false;
+    for part in [body.get("messages"), body.get("system")]
+        .into_iter()
+        .flatten()
+    {
+        scan_media(part, &mut has_media)?;
+    }
+    let assistant_turns = messages
+        .iter()
+        .filter(|m| m.get("role").and_then(Value::as_str) == Some("assistant"))
+        .count();
+    Ok(Checked {
+        model,
+        max_tokens: Some(max_tokens),
+        stream,
+        assistant_turns: u32::try_from(assistant_turns).unwrap_or(u32::MAX),
+        has_media,
+    })
+}
+
+/// A meter for one Messages answer.
+pub fn meter(stream: bool) -> Box<dyn Meter> {
+    Box::new(SseMeter {
+        stream,
+        ..SseMeter::default()
+    })
 }
 
 /// Content blocks whose tokens their bytes do not bound (a page of a PDF bills its text and an
@@ -343,7 +361,7 @@ impl SseMeter {
 }
 
 /// The end (exclusive, past the blank line) of the first complete SSE event in `buf`.
-fn find_event_end(buf: &[u8]) -> Option<usize> {
+pub(crate) fn find_event_end(buf: &[u8]) -> Option<usize> {
     for i in 0..buf.len() {
         if buf[i..].starts_with(b"\n\n") {
             return Some(i + 2);
@@ -460,7 +478,7 @@ mod tests {
             ok,
             Checked {
                 model: "claude-opus-5-5".into(),
-                max_tokens: 64,
+                max_tokens: Some(64),
                 stream: true,
                 assistant_turns: 1,
                 has_media: false

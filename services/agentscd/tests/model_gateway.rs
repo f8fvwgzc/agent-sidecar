@@ -813,3 +813,123 @@ async fn a_request_with_media_reserves_a_whole_context_window() {
     let _ = call.await;
     rig.sidecar.abort();
 }
+
+/// The LLM connection contract's gateway mode (docs/LLM-CONNECTION.md): the sidecar holds no
+/// provider key. Its calls go to the standalone gateway with the gateway token, the gateway adds
+/// its own key, and both write their records: the sidecar's for the run, the gateway's for the
+/// tenant.
+#[tokio::test]
+async fn a_sidecar_in_gateway_mode_holds_no_provider_key() {
+    use agentsc_common::llm_contract::{
+        Contract, ProviderConnection, ProviderKind, SecretSource, Upstream,
+    };
+    use agentscd::gateway::standalone::{self, Gateway, Settings};
+    use sha2::Digest;
+
+    let (up, base) = upstream().await;
+    let keys = tempfile::tempdir().unwrap();
+    let platform_key = keys.path().join("platform-key");
+    std::fs::write(&platform_key, "sk-ant-platform").unwrap();
+    let token_file = keys.path().join("gateway-token");
+    std::fs::write(&token_file, "tok-orders-sidecar\n").unwrap();
+    let records = Arc::new(Mutex::new(Vec::<u8>::new()));
+    #[derive(Clone)]
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Sink {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let tenants = serde_yaml_ng::from_str(&format!(
+        "tenants: [{{name: orders-sidecar, token_sha256: {}}}]",
+        hex::encode(sha2::Sha256::digest(b"tok-orders-sidecar"))
+    ))
+    .unwrap();
+    let gw = Gateway::new(Settings {
+        tenants,
+        contract: Some(Contract {
+            upstream: Upstream::Provider(ProviderConnection {
+                kind: ProviderKind::Anthropic,
+                base_url: base,
+                key: Some(SecretSource::File(platform_key)),
+            }),
+            model: MODEL.into(),
+            model_small: None,
+            timeout: None,
+            max_retries: None,
+        }),
+        audit_payloads: false,
+        audit: agentsc_common::audit::AuditWriter::with_sink(
+            standalone::SERVICE,
+            "",
+            vec![],
+            Box::new(Sink(records.clone())),
+        ),
+    })
+    .unwrap();
+    let (gw_addr, _) = standalone::serve(gw, "127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+
+    let (runtime, mut gate) = FakeRuntime::gated();
+    let rig = rig(
+        runtime,
+        |c| priced(c, 5.0),
+        move |cfg| {
+            cfg.anthropic_api_key = None;
+            cfg.llm_contract = Some(Contract {
+                upstream: Upstream::Gateway {
+                    root: format!("http://{gw_addr}"),
+                    token_file,
+                    wire: ProviderKind::Anthropic,
+                },
+                model: MODEL.into(),
+                model_small: None,
+                timeout: None,
+                max_retries: None,
+            });
+        },
+    )
+    .await;
+    let (req, done, call) = start_run(&rig, &mut gate, "through the gateway").await;
+    let id = req.request_id.clone();
+    let a = model_call(&rig.sock, &bound(&id, "ops-assistant"), &request(256)).await;
+    assert_eq!(a.status, 200, "{}", a.body);
+    let (headers, _) = up.seen().remove(0);
+    assert_eq!(headers["x-api-key"], "sk-ant-platform", "the gateway's key");
+    assert!(
+        headers.get("authorization").is_none(),
+        "the gateway token stops at the gateway"
+    );
+    done.send(ok("done")).unwrap();
+    assert_eq!(call.await.unwrap().0, 200);
+
+    eventually("the sidecar's model_call record", || {
+        !model_records(&rig, &id).is_empty()
+    })
+    .await;
+    eventually("the gateway's record", || {
+        !records.lock().unwrap().is_empty()
+    })
+    .await;
+    let mine = model_records(&rig, &id);
+    assert_eq!(mine[0]["callee"], format!("gateway:{MODEL}"));
+    assert_eq!(mine[0]["tokens"], json!({"input": 10, "output": 2}));
+    let gateway_records: Vec<Value> = String::from_utf8(records.lock().unwrap().clone())
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(gateway_records.len(), 1);
+    assert_eq!(gateway_records[0]["caller"], "tenant:orders-sidecar");
+    assert_eq!(
+        gateway_records[0]["request_id"],
+        id.as_str(),
+        "the run's request id travels on"
+    );
+    assert_eq!(gateway_records[0]["callee"], format!("anthropic:{MODEL}"));
+}
