@@ -888,6 +888,7 @@ Every store keeps the control-plane audit (who changed which charter, approvals,
 | --- | --- | --- |
 | `file:<dir>` | `<dir>/.audit.jsonl` | `tail <dir>/.audit.jsonl` |
 | `sqlite:<path>` | table `cp_audit` (append-only) | `sqlite3 -readonly` (below) |
+| `postgres` | table `cp_audit` (append-only: triggers refuse `UPDATE`, `DELETE` and `TRUNCATE`) | `psql` (below) |
 | `kubernetes` | ConfigMaps `agentsc-cp-audit-0` … `agentsc-cp-audit-15` in the control-plane namespace, JSON lines in `records.jsonl`, about 256 KiB each; the newest ~4 MiB are kept, the oldest segment is reused | `kubectl -n agentsc-system get cm -l agentsc.io/cp-audit -o jsonpath='{range .items[*]}{.data.records\.jsonl}{end}' \| jq -c -s 'sort_by(.ts)[]'` (the segments come in name order, so sort by `ts`) |
 
 The kubernetes store needs the chart's Role `agentsc-embassy-cp-audit` (`get`/`update` on those 16 names, `create`). If a record cannot be stored (RBAC, quota, the API server), the action still happens and its line is still on stdout; embassy logs `persisting a control-plane audit record failed` and counts it: `GET /api/v1/readyz` answers `"cp_audit": {"persisted": true, "append_failures": 1, "last_error": "..."}`. Alert on `append_failures` above 0. The ring is bounded: ship embassy's stdout to append-only storage for longer retention.
@@ -903,3 +904,16 @@ Refusals that anyone can cause cheaply (a login while rate limited; an `IssueCer
 ```bash
 sqlite3 -readonly /var/lib/agentsc/embassy.db "SELECT ts, actor, action, namespace, service, result FROM cp_audit ORDER BY seq DESC LIMIT 20"
 ```
+
+### The PostgreSQL store
+
+`embassy serve --store postgres` keeps what the SQLite store keeps in PostgreSQL, for one or many embassy replicas on one database (docs/design/agentsecops-merge.md §7). SQLite stays the store for one process and development.
+
+- **Connection.** The connection string comes from `--postgres-url-file` (a mounted Secret, e.g. `postgres://embassy:...@db:5432/agentsc?sslmode=require`) or env `AGENTSC_POSTGRES_URL`, never a flag value: it holds a password. With `sslmode=require` (or `prefer`) the server is verified against the system roots, or only against `--postgres-ca-file`'s certificates (a private CA, your cloud provider's bundle). `--postgres-pool-size` (8) bounds the connections of each replica, plus one for listening.
+- **Migrations** run on start, each in a transaction, under an advisory lock, so replicas starting together apply each once; `agentsc_schema_migrations` lists them. A database migrated by a newer embassy is refused at start-up. Grant the role `CREATE` on its schema for the first start.
+- **Replicas.** Every write locks its service's row and checks its precondition inside one transaction: two replicas writing one charter serialize, and the second gets the usual `409`. Each replica sends what changed with `NOTIFY agentsc_store` and listens on a connection of its own (application name `agentsc-embassy-listen`). Sidecars connected to any replica get a change made through any other. A replica whose listen connection breaks reconnects (backoff up to 10 s) and then pushes every service's charter and memory again. Pending adoptions are a table, so any replica can approve one.
+
+```bash
+psql "$AGENTSC_POSTGRES_URL" -c "SELECT ts, actor, action, namespace, service, result FROM cp_audit ORDER BY seq DESC LIMIT 20"
+```
+

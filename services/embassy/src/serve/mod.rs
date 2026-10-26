@@ -131,12 +131,15 @@ impl std::fmt::Display for ComponentSet {
     }
 }
 
-/// `--store file:<dir> | sqlite:<path> | kubernetes`.
+/// `--store file:<dir> | sqlite:<path> | postgres | kubernetes`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreSpec {
     File(PathBuf),
     /// One SQLite database file (docs/adr/0003-sqlite-store-schema.md).
     Sqlite(PathBuf),
+    /// PostgreSQL, for one or many replicas (store/postgres.rs); the connection string comes
+    /// from `--postgres-url-file` or env `AGENTSC_POSTGRES_URL`.
+    Postgres,
     Kubernetes,
 }
 
@@ -144,7 +147,7 @@ impl StoreSpec {
     /// The stores this process owns outright (no external editor, no API server): the ones
     /// `--auto-adopt` may write to.
     pub fn is_local(&self) -> bool {
-        matches!(self, Self::File(_) | Self::Sqlite(_))
+        matches!(self, Self::File(_) | Self::Sqlite(_) | Self::Postgres)
     }
 }
 
@@ -154,6 +157,9 @@ impl std::str::FromStr for StoreSpec {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s == "kubernetes" {
             return Ok(Self::Kubernetes);
+        }
+        if s == "postgres" {
+            return Ok(Self::Postgres);
         }
         if let Some(dir) = s.strip_prefix("file:") {
             return if dir.is_empty() {
@@ -170,7 +176,7 @@ impl std::str::FromStr for StoreSpec {
             };
         }
         Err(format!(
-            "{s:?} is not a store (expected file:<dir>, sqlite:<path> or kubernetes)"
+            "{s:?} is not a store (expected file:<dir>, sqlite:<path>, postgres or kubernetes)"
         ))
     }
 }
@@ -210,9 +216,20 @@ pub struct ServeArgs {
     /// Where the controlplane component reads the serving certificate (mounted Secret).
     #[arg(long)]
     pub tls_dir: Option<PathBuf>,
-    /// file:<dir> or kubernetes.
+    /// file:<dir>, sqlite:<path>, postgres or kubernetes.
     #[arg(long)]
     pub store: Option<StoreSpec>,
+    /// `--store postgres`: a file holding the connection string (a mounted Secret); without it,
+    /// env `AGENTSC_POSTGRES_URL`. Never the string itself as a flag: it holds a password.
+    #[arg(long, env = "AGENTSC_POSTGRES_URL_FILE")]
+    pub postgres_url_file: Option<PathBuf>,
+    /// `--store postgres`: CA certificates (PEM) the server's must chain to with
+    /// `sslmode=require`, instead of the system roots.
+    #[arg(long, env = "AGENTSC_POSTGRES_CA_FILE")]
+    pub postgres_ca_file: Option<PathBuf>,
+    /// `--store postgres`: connections per replica.
+    #[arg(long, env = "AGENTSC_POSTGRES_POOL_SIZE", default_value_t = crate::store::postgres::DEFAULT_POOL_SIZE)]
+    pub postgres_pool_size: usize,
     /// ControlPlaneConfig file (reloaded on change).
     #[arg(long)]
     pub config: Option<PathBuf>,
@@ -390,7 +407,7 @@ impl ServeArgs {
         if self.auto_adopt {
             if !self.store.as_ref().is_some_and(StoreSpec::is_local) {
                 errs.push(
-                    "--auto-adopt works only with --store file:<dir> or --store sqlite:<path>"
+                    "--auto-adopt works only with --store file:<dir>, sqlite:<path> or postgres"
                         .into(),
                 );
             }
@@ -630,6 +647,29 @@ async fn open_store(
         Some(StoreSpec::Sqlite(path)) => {
             let db = crate::store::sqlite::SqliteStore::open(path.clone())
                 .with_context(|| format!("--store sqlite:{}", path.display()))?;
+            Some(db)
+        }
+        Some(StoreSpec::Postgres) => {
+            let url = match &args.postgres_url_file {
+                Some(path) => std::fs::read_to_string(path)
+                    .with_context(|| format!("--postgres-url-file {}", path.display()))?
+                    .trim()
+                    .to_string(),
+                None => std::env::var("AGENTSC_POSTGRES_URL").unwrap_or_default(),
+            };
+            if url.is_empty() {
+                anyhow::bail!(
+                    "--store postgres needs the connection string: --postgres-url-file or env AGENTSC_POSTGRES_URL"
+                );
+            }
+            let db = crate::store::postgres::PgStore::open(crate::store::postgres::PgOptions {
+                url,
+                ca_file: args.postgres_ca_file.clone(),
+                pool_size: args.postgres_pool_size,
+                application_name: "agentsc-embassy".into(),
+            })
+            .await
+            .context("--store postgres")?;
             Some(db)
         }
         Some(StoreSpec::Kubernetes) => Some(crate::k8s::open_store(args).await?),
@@ -1069,6 +1109,14 @@ mod tests {
             Some(StoreSpec::Kubernetes)
         );
         assert_eq!(
+            parse(&["--store", "postgres"]).unwrap().store,
+            Some(StoreSpec::Postgres)
+        );
+        assert!(
+            parse(&["--store", "postgres://u:p@db/x"]).is_err(),
+            "never a URL in argv"
+        );
+        assert_eq!(
             parse(&["--store", "sqlite:/var/lib/agentsc/embassy.db"])
                 .unwrap()
                 .store,
@@ -1104,6 +1152,7 @@ mod tests {
         .validate()
         .unwrap();
         assert!(StoreSpec::Sqlite("/x.db".into()).is_local());
+        assert!(StoreSpec::Postgres.is_local());
         assert!(StoreSpec::File("/x".into()).is_local());
         assert!(!StoreSpec::Kubernetes.is_local());
         let a = parse(&["--store", "sqlite:/data/embassy.db"]).unwrap();
