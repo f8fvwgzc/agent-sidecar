@@ -82,14 +82,14 @@ When the sink refuses a write or a flush, the sidecar:
 
 The control-plane export and the OpenTelemetry exporter still get every record, also one the sink did not take.
 
-**Fail-closed mode.** By default the sidecar goes on working while the sink fails: an audit outage is visible, but agents keep running. Start `agentscd` with `--audit-fail-closed` (or `AGENTSC_AUDIT_FAIL_CLOSED=true`) when no work may happen without a local audit record. Then, from the first failed write or flush until a write succeeds again:
+**Fail-closed mode.** By default the sidecar goes on working while the sink fails: an audit outage is visible, but agents keep running. Start `agentscd` with `--audit-fail-closed` (or `AGENTSC_AUDIT_FAIL_CLOSED=true`; Helm: `injection.auditFailClosed: true` for every injected sidecar) when no work may happen without a local audit record. Then, from the first failed write or flush until a write succeeds again:
 
 | What | Answer |
 | --- | --- |
 | `POST /v1/agents/{name}/invoke` | `503`, `status: denied`, rule `audit.unavailable` |
 | gRPC `AppApi.InvokeAgent`, mesh `InvokeAgent` / `InvokeService` | `UNAVAILABLE`, metadata `x-agentsc-rule: audit.unavailable` |
 | The runtime's `InvokeService`, `InvokeAgent`, `InvokeHttp`, `ProposeLesson` | `UNAVAILABLE`, rule `audit.unavailable` |
-| `GET /readyz` | `503`: the pod leaves its Service's endpoints |
+| `GET /readyz` | `503`: the pod leaves its Service's endpoints (the injected `agentscd` has a readiness probe on it; give a hand-written sidecar one too) |
 
 Every refusal writes its own record (`agent_invocation`, inbound `service_call` or `tool_call`, `decision: deny`, rule `audit.unavailable`, the error in `reason`), except a refused `ProposeLesson`. That write is also an attempt, as are the probes and the timer. The first attempt that writes the backlog ends the refusals, so the sidecar recovers by itself once the disk has room again, without a restart. Work that started before the failure finishes, and its records are written or kept. `ReportEvent` is never refused: the model call it reports already ran and was paid for.
 
@@ -228,7 +228,7 @@ The sidecar does these steps, in this order, for every record it writes:
 1. **Hash.** `input_sha256` and `output_sha256` are computed over the full original payload, before any redaction or truncation. For a string payload, the hash is SHA-256 of its UTF-8 bytes. For any other JSON value, it is SHA-256 of its compact JSON text. A `null` payload has a `null` hash. So you can prove later that a payload you hold is the one that passed, without the log storing it.
 2. **`audit.redact` paths.** Each path is a dotted path that starts with `input.` or `output.`, for example `output.body.warehouse_contact`. The value there becomes `"[redacted]"`. Arrays are walked. The path `input` or `output` alone redacts the whole payload. The charter validator does not check these paths. A path with another start does nothing.
 3. **Scrub repeated values.** The values found at those paths (strings and numbers of 4 or more characters) are remembered for that `request_id` for 15 minutes. They are replaced with `[redacted]` wherever they appear as text in later records of the same request in that sidecar, for example inside a model prompt. This covers `input`, `output`, `callee`, `reason` and `error`: a value can come back in a URL (`GET https://api.example.com/x?ssn=…`) or in an error message that echoes the input. A payload a content guardrail withheld (step 1) is scrubbed the same way.
-4. **PII.** With `guardrails.pii_redact: true`, emails become `[redacted:email]` and phone numbers become `[redacted:phone]`. This applies to every string in `input` and `output`, and to `callee`, `reason` and `error`.
+4. **PII.** With `guardrails.pii_redact: true`, emails become `[redacted:email]` and phone numbers become `[redacted:phone]`. This applies to every string in `input` and `output`, and to `callee`, `reason` and `error`. Steps 3 and 4 also apply to the callee of the span starts a managed sidecar sends the control plane for its trace views (an http tool's URL with its query), which leave the pod before the record is written.
 5. **Truncate.** A payload larger than 8 KiB is cut to 8 KiB plus `…(truncated, N bytes)`. Truncation comes after redaction, so a cut never shows part of a redacted value.
 
 This snippet is partial: it shows only the `audit` block of a charter.
@@ -891,6 +891,10 @@ Every store keeps the control-plane audit (who changed which charter, approvals,
 | `kubernetes` | ConfigMaps `agentsc-cp-audit-0` … `agentsc-cp-audit-15` in the control-plane namespace, JSON lines in `records.jsonl`, about 256 KiB each; the newest ~4 MiB are kept, the oldest segment is reused | `kubectl -n agentsc-system get cm -l agentsc.io/cp-audit -o jsonpath='{range .items[*]}{.data.records\.jsonl}{end}' \| jq -c -s 'sort_by(.ts)[]'` (the segments come in name order, so sort by `ts`) |
 
 The kubernetes store needs the chart's Role `agentsc-embassy-cp-audit` (`get`/`update` on those 16 names, `create`). If a record cannot be stored (RBAC, quota, the API server), the action still happens and its line is still on stdout; embassy logs `persisting a control-plane audit record failed` and counts it: `GET /api/v1/readyz` answers `"cp_audit": {"persisted": true, "append_failures": 1, "last_error": "..."}`. Alert on `append_failures` above 0. The ring is bounded: ship embassy's stdout to append-only storage for longer retention.
+
+The kubernetes store writes the ring in the background: a write replaces a whole segment (up to 256 KiB), so records are queued and written together after a second (or when the queue fills a segment), and no request waits for the API server. That is at most about one segment write per second per embassy process, plus one per segment filled, each an etcd revision until the API server compacts. A record queued but not yet written at a crash is on stdout only; `embassy serve` writes the queue before it exits. While the API server refuses the writes, the queue holds at most 4 MiB; beyond that, records are counted in `append_failures`.
+
+Refusals that anyone can cause without a credential (a login while rate limited, an `IssueCertificate` refused before its token was checked) go to stdout every time, but to the store and the console's `cp_audit` events only once per kind per minute: that record's `reason` ends with the number held back since the one before (`... more refusals like this one since the last recorded are on stdout only`). So a flood of them cannot push the ring's other records out.
 
 ### The SQLite store
 

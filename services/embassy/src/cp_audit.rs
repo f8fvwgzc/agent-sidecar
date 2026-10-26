@@ -12,12 +12,21 @@
 //! so a lost record is visible. Every store implements `append_cp_audit` (the trait has no
 //! default); a process without a store writes stdout only and says so (`persisted: false`).
 //!
+//! **Refusals of unauthenticated requests** ([`CpAudit::record_unauthenticated`]: a login while
+//! rate limited, an `IssueCertificate` refused before its credential was verified) cost nothing
+//! to send, so a flood of them would push a store's records out (the Kubernetes store keeps the
+//! newest 4 MiB). Each still writes its line on stdout; the store and subscribers get the first
+//! of each kind per [`UNAUTHENTICATED_WINDOW`], whose `reason` counts the ones before it that
+//! they did not get.
+//!
 //! The record type is [`CpAuditRecord`] of the API types (its JSON shape is the OpenAPI
 //! `CpAuditRecord`), re-exported here with its enums.
+use std::collections::HashMap;
 use std::fmt;
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use chrono::{SecondsFormat, Utc};
 use tokio::sync::broadcast;
@@ -27,6 +36,18 @@ use crate::store::{Actor, Store};
 
 /// Records a slow SSE subscriber may fall behind before it loses some (`RecvError::Lagged`).
 pub const SUBSCRIBER_CAPACITY: usize = 1024;
+/// Refusals of unauthenticated requests of one kind reach the store once per window (module
+/// docs).
+pub const UNAUTHENTICATED_WINDOW: Duration = Duration::from_secs(60);
+/// Kinds of unauthenticated refusals tracked at once; more start over the windows ended.
+const MAX_UNAUTHENTICATED_KINDS: usize = 256;
+
+/// One kind of unauthenticated refusal: when its window began, and how many the store did not
+/// get since.
+struct Window {
+    since: Instant,
+    held_back: u64,
+}
 
 /// The control-plane audit log.
 pub struct CpAudit {
@@ -36,6 +57,9 @@ pub struct CpAudit {
     /// Records the store refused, and the last refusal.
     append_failures: AtomicU64,
     last_error: Mutex<Option<String>>,
+    /// [`CpAudit::record_unauthenticated`], by kind, and its window.
+    unauthenticated: Mutex<HashMap<String, Window>>,
+    window: Duration,
 }
 
 impl fmt::Debug for CpAudit {
@@ -71,19 +95,41 @@ impl CpAudit {
             tx,
             append_failures: AtomicU64::new(0),
             last_error: Mutex::new(None),
+            unauthenticated: Mutex::new(HashMap::new()),
+            window: UNAUTHENTICATED_WINDOW,
         }
     }
 
-    /// Whether records are persisted, and the store's refusals so far (`GET /readyz`).
+    /// Another window for [`CpAudit::record_unauthenticated`] (tests).
+    #[cfg(test)]
+    pub fn with_unauthenticated_window(mut self, window: Duration) -> Self {
+        self.window = window;
+        self
+    }
+
+    /// Whether records are persisted, and the records the store refused or lost so far, at
+    /// once or in a background write ([`Store::cp_audit_write_failures`]) (`GET /readyz`).
     pub fn health(&self) -> CpAuditHealth {
+        let (lost, lost_error) = self
+            .store
+            .as_ref()
+            .map_or((0, None), |s| s.cp_audit_write_failures());
+        let refused = self
+            .last_error
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
         CpAuditHealth {
             persisted: self.store.is_some(),
-            append_failures: self.append_failures.load(Ordering::Relaxed),
-            last_error: self
-                .last_error
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .clone(),
+            append_failures: self.append_failures.load(Ordering::Relaxed) + lost,
+            last_error: lost_error.or(refused),
+        }
+    }
+
+    /// Once the store has written the records so far ([`Store::flush_cp_audit`]).
+    pub async fn flush(&self) {
+        if let Some(store) = &self.store {
+            store.flush_cp_audit().await;
         }
     }
 
@@ -113,7 +159,65 @@ impl CpAudit {
     /// the caller.
     pub async fn record(&self, record: CpAuditRecord) {
         let record = Arc::new(record);
-        match serde_json::to_string(&*record) {
+        self.write_line(&record);
+        self.persist(record).await;
+    }
+
+    /// [`CpAudit::record`] for the refusal of a request nobody authenticated (module docs):
+    /// `kind` names what was refused, without anything the caller chose.
+    pub async fn record_unauthenticated(&self, kind: &str, mut record: CpAuditRecord) {
+        self.write_line(&record);
+        let now = Instant::now();
+        let held_back = {
+            let mut windows = self
+                .unauthenticated
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            match windows.get_mut(kind) {
+                Some(w) if now.duration_since(w.since) < self.window => {
+                    w.held_back += 1;
+                    return;
+                }
+                Some(w) => {
+                    std::mem::replace(
+                        w,
+                        Window {
+                            since: now,
+                            held_back: 0,
+                        },
+                    )
+                    .held_back
+                }
+                None => {
+                    if windows.len() >= MAX_UNAUTHENTICATED_KINDS {
+                        windows.retain(|_, w| now.duration_since(w.since) < self.window);
+                    }
+                    windows.insert(
+                        kind.to_string(),
+                        Window {
+                            since: now,
+                            held_back: 0,
+                        },
+                    );
+                    0
+                }
+            }
+        };
+        if held_back > 0 {
+            let note = format!(
+                "{held_back} more refusals like this one since the last recorded are on stdout only"
+            );
+            record.reason = Some(match record.reason.take() {
+                Some(r) => format!("{r}; {note}"),
+                None => note,
+            });
+        }
+        self.persist(Arc::new(record)).await;
+    }
+
+    /// The JSON line on stdout.
+    fn write_line(&self, record: &CpAuditRecord) {
+        match serde_json::to_string(record) {
             Ok(mut line) => {
                 line.push('\n');
                 // one write per line, under the lock, so concurrent records never interleave
@@ -126,6 +230,10 @@ impl CpAudit {
                 tracing::error!(error = %e, "serializing a control-plane audit record failed")
             }
         }
+    }
+
+    /// The store, then subscribers.
+    async fn persist(&self, record: Arc<CpAuditRecord>) {
         if let Some(store) = &self.store
             && let Err(e) = store.append_cp_audit(&record).await
         {
@@ -441,5 +549,61 @@ mod tests {
         for line in lines {
             serde_json::from_str::<CpAuditRecord>(&line).unwrap();
         }
+    }
+
+    /// The review finding: anyone can send refusals of unauthenticated requests (a login while
+    /// rate limited, an IssueCertificate with a bad name), and one store record each let a flood
+    /// push the store's records out. Every one is on stdout; the store and subscribers get the
+    /// first of each kind per window, which counts the ones they did not get.
+    #[tokio::test]
+    async fn unauthenticated_refusals_reach_the_store_once_per_window() {
+        let store = AuditOnly::new(false);
+        let out = Capture::default();
+        let audit = CpAudit::with_writer(Some(store.clone()), Box::new(out.clone()))
+            .with_unauthenticated_window(Duration::from_millis(200));
+        let mut rx = audit.subscribe();
+        let refused = |reason: &str| {
+            let mut r = CpAudit::entry(CpAction::LoginFailed, &alice(), CpResult::Denied);
+            r.reason = Some(reason.into());
+            r
+        };
+        for i in 0..5 {
+            audit
+                .record_unauthenticated("login rate limited", refused(&format!("flood {i}")))
+                .await;
+        }
+        audit
+            .record_unauthenticated("IssueCertificate InvalidArgument", refused("other kind"))
+            .await;
+        assert_eq!(out.lines().len(), 6, "every one on stdout");
+        let kept = |s: &AuditOnly| -> Vec<String> {
+            s.records
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|r| r.reason.clone().unwrap())
+                .collect()
+        };
+        assert_eq!(kept(&store), ["flood 0", "other kind"]);
+        assert_eq!(rx.recv().await.unwrap().reason.as_deref(), Some("flood 0"));
+        assert_eq!(
+            rx.recv().await.unwrap().reason.as_deref(),
+            Some("other kind")
+        );
+        assert!(rx.try_recv().is_err());
+        // the next window: recorded, with the count of the ones held back
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        audit
+            .record_unauthenticated("login rate limited", refused("flood 5"))
+            .await;
+        assert_eq!(
+            kept(&store).last().unwrap(),
+            "flood 5; 4 more refusals like this one since the last recorded are on stdout only"
+        );
+        // record() is never held back
+        for _ in 0..3 {
+            audit.record(refused("authenticated")).await;
+        }
+        assert_eq!(kept(&store).len(), 6);
     }
 }

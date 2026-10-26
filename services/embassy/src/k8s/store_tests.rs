@@ -1463,7 +1463,8 @@ fn the_last_manager_skips_embassy_and_status_writers() {
 // ---- control-plane audit (cp_audit_log.rs) -------------------------------------------------------
 
 use crate::k8s::cp_audit_log::{
-    RECORDS_KEY, SEGMENT_BYTES, SEGMENT_LABEL, SEGMENTS, SEQ_ANNOTATION, segment_name,
+    MAX_QUEUED_BYTES, RECORDS_KEY, SEGMENT_BYTES, SEGMENT_LABEL, SEGMENTS, SEQ_ANNOTATION,
+    segment_name,
 };
 
 const CP_NS: &str = "agentsc-cp";
@@ -1507,6 +1508,7 @@ async fn control_plane_audit_is_persisted_in_the_cp_namespace_and_read_back() {
     let b = cp_record(CpAction::ProposalApprove, "approved");
     store.append_cp_audit(&a).await.unwrap();
     store.append_cp_audit(&b).await.unwrap();
+    store.flush_cp_audit().await;
     // one segment, in the control-plane namespace and nowhere else
     assert_eq!(cluster.config_map_names(CP_NS), [segment_name(0)]);
     assert!(cluster.config_map_names("shop").is_empty());
@@ -1550,6 +1552,7 @@ async fn the_audit_ring_rotates_within_its_bounds_and_keeps_the_newest() {
             .await
             .unwrap();
     }
+    store.flush_cp_audit().await;
     // exactly SEGMENTS objects, never more; each within the bound; sequence n in slot n % SEGMENTS
     assert_eq!(cluster.config_map_names(CP_NS).len(), SEGMENTS as usize);
     let mut seqs: Vec<u64> = (0..SEGMENTS).map(|slot| seq(&cluster, slot)).collect();
@@ -1595,6 +1598,8 @@ async fn two_processes_share_the_ring_without_losing_or_repeating_a_line() {
             .append_cp_audit(&cp_record(CpAction::Connect, &format!("{i:02} {big}")))
             .await
             .unwrap();
+        // one write each, in this order
+        store.flush_cp_audit().await;
     }
     let got: Vec<usize> = b
         .cp_audit(usize::MAX)
@@ -1636,22 +1641,24 @@ async fn a_refused_append_is_an_error_that_cp_audit_counts_never_a_silent_drop()
     let forbidden = "configmaps is forbidden: User \"system:serviceaccount:agentsc-system:embassy\" \
                      cannot create resource \"configmaps\"";
     cluster.refuse_config_maps(Some(forbidden));
-    let e = store
+    // queued; the write fails in the background and is counted
+    store
         .append_cp_audit(&cp_record(CpAction::CharterPut, "lost?"))
         .await
-        .unwrap_err();
-    assert!(
-        matches!(&e, StoreError::Invalid(m) if m[0].contains("forbidden")),
-        "{e:?}"
-    );
+        .unwrap();
+    store.flush_cp_audit().await;
+    let (lost, e) = store.cp_audit_write_failures();
+    assert_eq!(lost, 1);
+    assert!(e.unwrap().contains("forbidden"));
 
     let out = Capture::default();
     let audit = CpAudit::with_writer(Some(store.clone()), Box::new(out.clone()));
     let mut rx = audit.subscribe();
     let rec = cp_record(CpAction::DeleteService, "deleted");
     audit.record(rec.clone()).await;
+    audit.flush().await;
     let h = audit.health();
-    assert_eq!(h.append_failures, 1);
+    assert_eq!(h.append_failures, 2, "the store's count: both records");
     assert!(h.last_error.unwrap().contains("forbidden"));
     // the line and the SSE event still went out
     assert_eq!(out.records(), std::slice::from_ref(&rec));
@@ -1662,7 +1669,61 @@ async fn a_refused_append_is_an_error_that_cp_audit_counts_never_a_silent_drop()
     let next = cp_record(CpAction::Rollback, "kept");
     audit.record(next.clone()).await;
     assert_eq!(store.cp_audit(10).await.unwrap(), [next]);
-    assert_eq!(audit.health().append_failures, 1);
+    assert_eq!(audit.health().append_failures, 2);
+}
+
+/// The review finding: every record rewrote the head segment (up to 256 KiB), awaited by the
+/// request that was audited, so a flood of cheap requests wrote GBs to etcd and delayed the
+/// admission webhook. A burst is now one write that no request waits for, and the queue is
+/// bounded.
+#[tokio::test]
+async fn a_burst_of_records_is_one_write_and_the_queue_is_bounded() {
+    let cluster = Arc::new(FakeCluster::new());
+    let store = cp_store(&cluster);
+    let writes = |c: &FakeCluster| {
+        c.calls()
+            .iter()
+            .filter(|c| c.ends_with(" configmap agentsc-cp/agentsc-cp-audit-0"))
+            .count()
+    };
+    for i in 0..200 {
+        store
+            .append_cp_audit(&cp_record(CpAction::LoginFailed, &format!("attempt {i}")))
+            .await
+            .unwrap();
+    }
+    assert_eq!(writes(&cluster), 0, "appending writes nothing yet");
+    store.flush_cp_audit().await;
+    assert_eq!(writes(&cluster), 1, "{:?}", cluster.calls());
+    assert_eq!(segment_lines(&cluster, 0).len(), 200);
+
+    // while the writes cannot keep up, the queue holds at most MAX_QUEUED_BYTES
+    let big = "z".repeat(SEGMENT_BYTES / 2);
+    let mut queued = 0;
+    let refused = loop {
+        match store
+            .append_cp_audit(&cp_record(CpAction::Connect, &big))
+            .await
+        {
+            Ok(()) => queued += 1,
+            Err(e) => break e,
+        }
+        assert!(
+            queued <= MAX_QUEUED_BYTES / (SEGMENT_BYTES / 2),
+            "unbounded"
+        );
+    };
+    assert!(
+        matches!(&refused, StoreError::Io(m) if m.contains("wait to be written")),
+        "{refused:?}"
+    );
+    assert_eq!(queued, MAX_QUEUED_BYTES / (SEGMENT_BYTES / 2) - 1);
+    // once written, appends are taken again
+    store.flush_cp_audit().await;
+    store
+        .append_cp_audit(&cp_record(CpAction::Connect, "after"))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

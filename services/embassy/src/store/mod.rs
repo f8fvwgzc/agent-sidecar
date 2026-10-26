@@ -589,6 +589,16 @@ pub trait Store: Send + Sync {
     /// [`Store::append_cp_audit`] wrote, and the records the store produced itself).
     async fn cp_audit(&self, limit: usize) -> Result<Vec<CpAuditRecord>, StoreError>;
 
+    /// A store that writes the audit in the background (the Kubernetes store): once the records
+    /// appended so far are written or given up. The others write in `append_cp_audit`.
+    async fn flush_cp_audit(&self) {}
+
+    /// Records `append_cp_audit` accepted that a background write lost later, and the last
+    /// error ([`crate::cp_audit::CpAudit::health`] adds them to its own count).
+    fn cp_audit_write_failures(&self) -> (u64, Option<String>) {
+        (0, None)
+    }
+
     /// Changes from now on. Lagging receivers lose events (`RecvError::Lagged`) and must resync.
     fn subscribe(&self) -> broadcast::Receiver<StoreEvent>;
 }

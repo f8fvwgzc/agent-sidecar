@@ -554,6 +554,16 @@ impl Started {
         for b in self.background.drain(..) {
             b.abort();
         }
+        // the Kubernetes store writes its audit in the background (k8s/cp_audit_log.rs)
+        if tokio::time::timeout(STOP_GRACE, self.ctx.cp_audit.flush())
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                "the control-plane audit was not written within {STOP_GRACE:?}; the rest is on \
+                 stdout only"
+            );
+        }
         match first {
             Some(e) => Err(e),
             None => Ok(()),

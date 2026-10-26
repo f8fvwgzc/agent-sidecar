@@ -73,6 +73,16 @@ pub fn is_priced(model: &str) -> bool {
     lookup(PRICES, model).is_some()
 }
 
+/// Context windows other than the 1M tokens of current models.
+const CONTEXT_WINDOW: &[(&str, u64)] = &[("claude-haiku-4-5", 200_000), ("mock", 0)];
+const CONTEXT_WINDOW_DEFAULT: u64 = 1_000_000;
+
+/// The most input tokens one request to `model` can bill: its context window (unknown model ids
+/// get the largest, so a bound never under-counts).
+pub fn context_window(model: &str) -> u64 {
+    lookup(CONTEXT_WINDOW, model).unwrap_or(CONTEXT_WINDOW_DEFAULT)
+}
+
 /// (input, output) USD per 1M tokens for `model` with a prompt of `prompt_tokens`.
 pub fn rates(model: &str, prompt_tokens: u64) -> (f64, f64) {
     if let Some((_, threshold, long)) = LONG_PROMPT.iter().find(|(m, _, _)| *m == model)
@@ -174,6 +184,22 @@ mod tests {
             cost_usd("claude-opus-5-5", &w(0, 0, 1_000_000)),
             8.0,
             "a write without its TTL is priced as the dearer one"
+        );
+    }
+
+    #[test]
+    fn context_windows_bound_media_requests() {
+        assert_eq!(context_window("claude-opus-5-5"), 1_000_000);
+        assert_eq!(context_window("claude-haiku-4-5"), 200_000);
+        assert_eq!(
+            context_window("some-new-model"),
+            1_000_000,
+            "unknown: the largest"
+        );
+        // a whole window of input as 1-hour cache writes on claude-opus-5-5: $8
+        assert_eq!(
+            worst_case_usd("claude-opus-5-5", context_window("claude-opus-5-5"), 0),
+            8.0
         );
     }
 

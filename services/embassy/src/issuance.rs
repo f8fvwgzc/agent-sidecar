@@ -18,10 +18,12 @@
 //!      service is the `AGENTSC_SERVICE` env of the pod's `agentscd` container (init or
 //!      regular; container env is immutable) and equals the request's; the pod's
 //!      `serviceAccountName` is the token's; with `sidecar_images.allowed_digests` set, the pod's
-//!      sidecar containers (`agentscd`, and `agentsc-runtime` when there is one) run allowed
-//!      images with their own program ([`crate::sidecar_images::check_running_pod`]: the digest
-//!      of the `imageID` the kubelet reports in `status.initContainerStatuses[]` or
-//!      `status.containerStatuses[]`, `UNAVAILABLE` while it has reported none yet); and the
+//!      sidecar containers (`agentscd` and `agentsc-runtime`) run allowed images with their own
+//!      program, in the shape the injector gives the pod
+//!      ([`crate::sidecar_images::check_running_pod`]: the digest of the `imageID` the kubelet
+//!      reports in `status.initContainerStatuses[]` or `status.containerStatuses[]`,
+//!      `UNAVAILABLE` while it has reported none yet; [`crate::sidecar_images::shape_problem`]:
+//!      the sidecars' env, mounts, probes and volumes); and the
 //!      service account is the service's name or listed in the stored charter's
 //!      `service.service_accounts`.
 //!
@@ -460,8 +462,12 @@ impl Issuer {
             )));
         }
         // the image that runs, not the one the spec names (design §13, the allow-list)
-        let images =
-            crate::sidecar_images::check_running_pod(&self.config.load().sidecar_images, &pod);
+        let images = crate::sidecar_images::check_running_pod(
+            &self.config.load().sidecar_images,
+            &pod,
+            &self.cp_namespace,
+            self.ca.trust_domain(),
+        );
         match images {
             Ok(()) => {}
             Err(crate::sidecar_images::Refusal::Refused(why)) => return Err(refuse(why)),
@@ -546,6 +552,11 @@ impl Issuer {
         key_sha256: Option<String>,
         result: Result<String, &Denial>,
     ) {
+        // refused before any credential was verified: anyone can send these (cp_audit.rs)
+        let unauthenticated = match &result {
+            Err(d) if who.is_none() => Some(format!("IssueCertificate {:?}", d.code)),
+            _ => None,
+        };
         let (action, outcome, reason) = match result {
             Ok(reason) => (CpAction::CertIssue, CpResult::Ok, reason),
             Err(d) => (CpAction::CertDenied, CpResult::Denied, d.message.clone()),
@@ -562,7 +573,10 @@ impl Issuer {
         }
         rec.sha256_after = key_sha256;
         rec.reason = Some(reason);
-        self.cp_audit.record(rec).await;
+        match unauthenticated {
+            Some(kind) => self.cp_audit.record_unauthenticated(&kind, rec).await,
+            None => self.cp_audit.record(rec).await,
+        }
     }
 
     /// Decide and sign; every outcome is audited.
@@ -677,7 +691,9 @@ mod tests {
     use crate::k8s::store::KubeStore;
     use crate::store::{ChangeSource, CharterWrite, Precondition};
     use k8s_openapi::api::authentication::v1::{TokenReviewStatus, UserInfo};
-    use k8s_openapi::api::core::v1::{EnvVar, EnvVarSource, ObjectFieldSelector, PodSpec};
+    use k8s_openapi::api::core::v1::{
+        EnvVar, EnvVarSource, ObjectFieldSelector, PodSpec, Volume, VolumeMount,
+    };
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, Time};
     use std::collections::BTreeMap;
     use std::time::Duration;
@@ -743,8 +759,34 @@ mod tests {
         issuer: Issuer,
         cluster: Arc<FakeCluster>,
         audit: tokio::sync::broadcast::Receiver<Arc<CpAuditRecord>>,
+        /// The audit's stdout lines: every record, also the ones held back from the store.
+        lines: Lines,
         ca: Arc<CaMaterial>,
         store: Arc<KubeStore>,
+    }
+
+    /// A shared buffer standing in for stdout.
+    #[derive(Clone, Default)]
+    struct Lines(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Lines {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Lines {
+        fn records(&self) -> Vec<CpAuditRecord> {
+            String::from_utf8(self.0.lock().unwrap().clone())
+                .unwrap()
+                .lines()
+                .map(|l| serde_json::from_str(l).unwrap())
+                .collect()
+        }
     }
 
     fn config(join: Vec<JoinTokenEntry>) -> ControlPlaneConfig {
@@ -778,7 +820,8 @@ mod tests {
             cluster.clone(),
             Box::new(std::io::sink()),
         ));
-        let cp_audit = Arc::new(CpAudit::with_writer(None, Box::new(std::io::sink())));
+        let lines = Lines::default();
+        let cp_audit = Arc::new(CpAudit::with_writer(None, Box::new(lines.clone())));
         let audit = cp_audit.subscribe();
         let issuer = Issuer::new(
             ca.clone(),
@@ -792,6 +835,7 @@ mod tests {
             issuer,
             cluster,
             audit,
+            lines,
             ca,
             store,
         }
@@ -1237,23 +1281,19 @@ mod tests {
         format!("sha256:{}", std::iter::repeat_n(c, 64).collect::<String>())
     }
 
-    /// `pod` as the kubelet reports it: the injected runtime container next to agentscd, and
-    /// the `imageID` of each (`None`: not reported yet).
+    /// The injector's pod as the kubelet reports it: the `imageID` of agentsc-runtime and
+    /// agentscd (`None`: not reported yet).
     fn running_pod(agentscd_image_id: Option<&str>, runtime_image_id: Option<&str>) -> Pod {
-        use crate::webhook::{RUNTIME_ARGS, RUNTIME_COMMAND, RUNTIME_CONTAINER};
+        use crate::webhook::RUNTIME_CONTAINER;
         use k8s_openapi::api::core::v1::{ContainerStatus, PodStatus};
-        let mut p = pod("shop", "orders-0", "orders", "orders");
-        let spec = p.spec.as_mut().unwrap();
-        spec.init_containers.as_mut().unwrap().insert(
-            0,
-            Container {
-                name: RUNTIME_CONTAINER.into(),
-                restart_policy: Some("Always".into()),
-                command: Some(vec![RUNTIME_COMMAND.into()]),
-                args: Some(RUNTIME_ARGS.iter().map(|a| a.to_string()).collect()),
-                ..Default::default()
-            },
+        let mut p = crate::webhook::injected_pod(
+            "shop",
+            "orders-0",
+            "orders",
+            "ghcr.io/f8fvwgzc/agent-sidecar/agentscd:0.2.0",
+            Default::default(),
         );
+        p.metadata.uid = Some(POD_UID.into());
         let status = |name: &str, id: Option<&str>| ContainerStatus {
             name: name.into(),
             image_id: id.unwrap_or_default().into(),
@@ -1361,15 +1401,66 @@ mod tests {
             assert_eq!(rec.sha256_after.as_ref().map(String::len), Some(64));
         }
 
-        // a pod without the runtime container (agentscd spawns its own) needs agentscd only
-        let mut p = pod("shop", "orders-0", "orders", "orders");
-        p.status = running_pod(Some(&pulled(&digest('c'))), None).status;
-        r.cluster.put_pod(p);
-        r.issuer
-            .issue(k8s_request("shop", "orders", "tok"))
-            .await
-            .unwrap();
-        assert_eq!(r.audit.recv().await.unwrap().action, CpAction::CertIssue);
+        // the review's bypass: a pod without the injection label (the injector never saw it)
+        // brings agentscd with an allowed image and no command, and keeps the workload key in
+        // a volume the app mounts; and a pod without the runtime container (agentscd would
+        // spawn its own runtime next to the key)
+        let mut loot = running_pod(Some(&pulled(&a)), Some(&pulled(&a)));
+        loot.metadata.labels = None;
+        let spec = loot.spec.as_mut().unwrap();
+        spec.volumes.as_mut().unwrap().push(Volume {
+            name: "loot".into(),
+            empty_dir: Some(Default::default()),
+            ..Default::default()
+        });
+        let mount = VolumeMount {
+            name: "loot".into(),
+            mount_path: "/loot".into(),
+            ..Default::default()
+        };
+        spec.containers[0].volume_mounts = Some(vec![mount.clone()]);
+        let agentscd = &mut spec.init_containers.as_mut().unwrap()[1];
+        agentscd.volume_mounts.as_mut().unwrap().push(mount);
+        let env = agentscd.env.as_mut().unwrap();
+        env.retain(|e| e.name != "AGENTSC_STATE_DIR");
+        env.push(EnvVar {
+            name: "AGENTSC_STATE_DIR".into(),
+            value: Some("/loot".into()),
+            ..Default::default()
+        });
+        let mut single = running_pod(Some(&pulled(&digest('c'))), None);
+        single
+            .spec
+            .as_mut()
+            .unwrap()
+            .init_containers
+            .as_mut()
+            .unwrap()
+            .remove(0);
+        for (p, reason) in [
+            (
+                loot,
+                "container \"agentscd\" sets env \"AGENTSC_STATE_DIR\"",
+            ),
+            (
+                single,
+                "lacks the \"agentscd\" or \"agentsc-runtime\" container",
+            ),
+        ] {
+            r.cluster.put_pod(p);
+            let err = r
+                .issuer
+                .issue(k8s_request("shop", "orders", "tok"))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), Code::PermissionDenied, "{err:?}");
+            assert!(err.message().contains(reason), "{}", err.message());
+            let rec = r.audit.recv().await.unwrap();
+            assert_eq!(
+                (rec.action, rec.result),
+                (CpAction::CertDenied, CpResult::Denied)
+            );
+        }
 
         // allow-list off (the default): images are not looked at
         let mut c = ControlPlaneConfig::clone(&r.issuer.config.load());
@@ -1508,10 +1599,17 @@ mod tests {
             let err = r.issuer.issue(req).await.unwrap_err();
             assert_eq!(err.code(), Code::InvalidArgument, "{ns}/{svc}");
             assert!(err.message().contains(reason), "{}", err.message());
-            let rec = r.audit.recv().await.unwrap();
+            let rec = r.lines.records().pop().unwrap();
             assert_eq!(rec.action, CpAction::CertDenied);
+            assert_eq!(rec.reason.as_deref(), Some(err.message()));
             assert!(rec.sha256_after.is_none());
         }
+        // refused before any credential was checked: all on stdout, the first to subscribers
+        // (and the store) only, so a flood of them cannot push the store's records out
+        assert_eq!(r.lines.records().len(), 5);
+        let first = r.audit.recv().await.unwrap();
+        assert!(first.reason.as_deref().unwrap().contains("\"Demo\""));
+        assert!(r.audit.try_recv().is_err());
         // a garbage name never reaches the audit record verbatim as an identity
         let pod = Caller::Pod {
             namespace: "shop".into(),
@@ -1571,10 +1669,13 @@ mod tests {
                 "{reason}: {}",
                 err.message()
             );
-            let rec = r.audit.recv().await.unwrap();
+            let rec = r.lines.records().pop().unwrap();
             assert_eq!(rec.action, CpAction::CertDenied);
             assert!(rec.sha256_after.is_none());
         }
+        assert_eq!(r.lines.records().len(), 4);
+        assert!(r.audit.recv().await.is_ok());
+        assert!(r.audit.try_recv().is_err(), "one per kind and window");
     }
 
     #[tokio::test]

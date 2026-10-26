@@ -195,7 +195,7 @@ pub async fn invoke(state: &Arc<AppState>, inv: Invocation) -> InvokeAgentRespon
         &inv.agent,
         &inv.caller,
         inv.caller_agent.as_deref(),
-        &inv.agent,
+        &state.audit.redact_text(&inv.request_id, &inv.agent),
         Direction::Inbound,
     ));
     // Fail-closed (audit.rs): no new work while the audit sink fails. The refusal's own record

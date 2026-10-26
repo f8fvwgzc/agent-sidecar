@@ -14,7 +14,7 @@
 use axum::http::{HeaderMap, StatusCode};
 use serde_json::{Map, Value, json};
 
-use super::{Checked, Meter, Metered, Provider};
+use super::{Checked, Ended, Meter, Metered, Provider};
 use agentsc_common::pricing::Usage;
 
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -100,6 +100,13 @@ impl Provider for Anthropic {
             .get("messages")
             .and_then(Value::as_array)
             .ok_or("messages must be an array")?;
+        let mut has_media = false;
+        for part in [body.get("messages"), body.get("system")]
+            .into_iter()
+            .flatten()
+        {
+            scan_media(part, &mut has_media)?;
+        }
         let assistant_turns = messages
             .iter()
             .filter(|m| m.get("role").and_then(Value::as_str) == Some("assistant"))
@@ -109,6 +116,7 @@ impl Provider for Anthropic {
             max_tokens,
             stream,
             assistant_turns: u32::try_from(assistant_turns).unwrap_or(u32::MAX),
+            has_media,
         })
     }
 
@@ -140,6 +148,46 @@ impl Provider for Anthropic {
     }
 }
 
+/// Content blocks whose tokens their bytes do not bound (a page of a PDF bills its text and an
+/// image of it; an image bills by its pixels).
+const MEDIA_BLOCKS: &[&str] = &["image", "document", "search_result", "container_upload"];
+
+/// Find media blocks anywhere in `v` (tool results nest them too), and refuse a `source` the
+/// provider would fetch from a URL: that is egress outside the sidecar's tool policy, and its
+/// size, so its cost, is unknown until the provider has fetched it.
+fn scan_media(v: &Value, found: &mut bool) -> Result<(), String> {
+    match v {
+        Value::Object(m) => {
+            if m.get("source")
+                .and_then(|s| s.get("type"))
+                .and_then(Value::as_str)
+                == Some("url")
+            {
+                return Err(
+                    "a content block's source is a URL, which the provider would fetch outside the sidecar's tool policy"
+                        .into(),
+                );
+            }
+            if m.get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|t| MEDIA_BLOCKS.contains(&t))
+            {
+                *found = true;
+            }
+            for x in m.values() {
+                scan_media(x, found)?;
+            }
+        }
+        Value::Array(a) => {
+            for x in a {
+                scan_media(x, found)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Reads one answer: SSE events when `stream`, else the JSON body.
 #[derive(Default)]
 pub struct SseMeter {
@@ -151,6 +199,8 @@ pub struct SseMeter {
     partial: Vec<String>,
     stop_reason: Option<String>,
     error: Option<String>,
+    /// `message_stop` arrived: the stream ended as the provider meant it to.
+    stopped: bool,
 }
 
 fn n(v: &Value, key: &str) -> u64 {
@@ -270,6 +320,7 @@ impl SseMeter {
                 }
             }
             "error" => self.error = error_text(data),
+            "message_stop" => self.stopped = true,
             _ => {}
         }
     }
@@ -330,11 +381,22 @@ impl Meter for SseMeter {
     }
 
     fn finish(mut self: Box<Self>, status: StatusCode) -> Metered {
+        let mut ended = Ended::Cut;
+        if !status.is_success() {
+            // the provider answered with an error: it generated nothing
+            ended = Ended::Refused;
+        }
         if self.stream {
             self.buf.extend_from_slice(b"\n\n");
             self.drain_events();
+            if self.stopped && self.error.is_none() {
+                ended = Ended::Completed;
+            }
         } else if let Ok(v) = serde_json::from_slice::<Value>(&self.buf) {
             if status.is_success() {
+                if v.get("usage").is_some() {
+                    ended = Ended::Completed;
+                }
                 if let Some(u) = v.get("usage") {
                     self.usage(&u.clone());
                 }
@@ -358,6 +420,7 @@ impl Meter for SseMeter {
         };
         Metered {
             usage: self.usage,
+            ended,
             content,
             stop_reason: self.stop_reason,
             error: self.error,
@@ -399,7 +462,8 @@ mod tests {
                 model: "claude-opus-5-5".into(),
                 max_tokens: 64,
                 stream: true,
-                assistant_turns: 1
+                assistant_turns: 1,
+                has_media: false
             }
         );
         for (bad, why) in [
@@ -421,6 +485,85 @@ mod tests {
         ] {
             assert!(a.check(&body(bad)).is_err(), "{why}");
         }
+    }
+
+    #[test]
+    fn media_is_flagged_and_url_sources_are_refused() {
+        let a = Anthropic::new("k".into(), DEFAULT_BASE_URL);
+        let with = |content: Value| {
+            a.check(&body(json!({
+                "model": "m", "max_tokens": 8,
+                "messages": [{"role": "user", "content": content}]
+            })))
+        };
+        assert!(!with(json!("plain text")).unwrap().has_media);
+        let image = json!([{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AA=="}}]);
+        assert!(with(image).unwrap().has_media);
+        // nested in a tool result too
+        let nested = json!([{"type": "tool_result", "tool_use_id": "t", "content": [
+            {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "AA=="}}]}]);
+        assert!(with(nested).unwrap().has_media);
+        for url in [
+            json!([{"type": "document", "source": {"type": "url", "url": "https://example.com/big.pdf"}}]),
+            json!([{"type": "tool_result", "tool_use_id": "t", "content": [
+                {"type": "image", "source": {"type": "url", "url": "https://example.com/a.png"}}]}]),
+        ] {
+            assert!(with(url).unwrap_err().contains("URL"));
+        }
+    }
+
+    #[test]
+    fn only_a_whole_answer_is_completed() {
+        let a = Anthropic::new("k".into(), DEFAULT_BASE_URL);
+        let start = json!({"type": "message_start", "message": {"usage": {"input_tokens": 9, "output_tokens": 1}}});
+        let delta = json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 4}});
+        let ended = |stream: bool, status: StatusCode, bytes: Vec<u8>| {
+            let mut m = a.meter(stream);
+            m.feed(&bytes);
+            m.finish(status).ended
+        };
+        let whole = sse(&[
+            start.clone(),
+            delta.clone(),
+            json!({"type": "message_stop"}),
+        ]);
+        assert_eq!(ended(true, StatusCode::OK, whole), Ended::Completed);
+        // no message_stop: cut (the final usage may never have arrived)
+        assert_eq!(
+            ended(true, StatusCode::OK, sse(std::slice::from_ref(&start))),
+            Ended::Cut
+        );
+        let errored = sse(&[
+            start,
+            json!({"type": "error", "error": {"type": "overloaded_error", "message": "o"}}),
+            json!({"type": "message_stop"}),
+        ]);
+        assert_eq!(ended(true, StatusCode::OK, errored), Ended::Cut);
+        assert_eq!(
+            ended(
+                false,
+                StatusCode::OK,
+                br#"{"usage":{"input_tokens":5,"output_tokens":2},"content":[]}"#.to_vec()
+            ),
+            Ended::Completed
+        );
+        assert_eq!(
+            ended(
+                false,
+                StatusCode::OK,
+                br#"{"content":[{"type":"te"#.to_vec()
+            ),
+            Ended::Cut
+        );
+        assert_eq!(ended(false, StatusCode::OK, Vec::new()), Ended::Cut);
+        assert_eq!(
+            ended(
+                false,
+                StatusCode::TOO_MANY_REQUESTS,
+                br#"{"type":"error","error":{"type":"rate_limit_error","message":"s"}}"#.to_vec()
+            ),
+            Ended::Refused
+        );
     }
 
     #[test]

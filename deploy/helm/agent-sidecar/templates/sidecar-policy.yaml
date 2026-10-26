@@ -14,6 +14,10 @@ agentsc.io/injection=enabled; this policy does not, so a pod that brings its own
 namespace without injection is checked too.
 
 What it refuses (the sidecar containers are agentscd and agentsc-runtime):
+- on CREATE, a sidecar container in a pod without the label agentsc.io/inject: "true": only the
+  injector adds them, and only for labelled pods, so a pod that writes its own agentscd (the
+  allowed image, but env, mounts or probes of its own) is never checked by the injector;
+  IssueCertificate also refuses any pod whose sidecars differ from the injected shape;
 - on CREATE, a sidecar image that is not pinned to an allowed digest (only with the allow-list on,
   ControlPlaneConfig sidecar_images.allowed_digests, the same list embassy-ca applies);
 - on CREATE, a sidecar container running another program than the injector gives it (agentscd:
@@ -69,6 +73,14 @@ spec:
       expression: {{ $digests | toJson | quote }}
     {{- end }}
   validations:
+    - expression: >-
+        request.operation != 'CREATE' || size(variables.sidecars) == 0 ||
+        (has(object.metadata.labels) && 'agentsc.io/inject' in object.metadata.labels &&
+        object.metadata.labels['agentsc.io/inject'] == 'true')
+      message: >-
+        only the injector adds the agentscd and agentsc-runtime containers: a pod with either
+        must carry the label agentsc.io/inject: "true", so the injector checks it
+      reason: Forbidden
     {{- if $digests }}
     - expression: >-
         request.operation != 'CREATE' ||

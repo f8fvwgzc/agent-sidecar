@@ -59,8 +59,8 @@ app.kubernetes.io/component: {{ .component }}
 AGENTSC_INJECT_TEMPLATE for embassy-ca: Kubernetes Container fields the injector applies to the
 agentscd container it generates. Only imagePullPolicy, resources, securityContext and env; env
 holds only sidecar variables of design §6.1 and §9 (OTEL_EXPORTER_OTLP_ENDPOINT,
-AGENTSC_OTLP_ENDPOINT_ALLOW), AGENTSC_CLUSTER_DOMAIN when clusterDomain is not cluster.local, and the
-runtime's AGENTSC_MOCK_FALLBACK. The control-plane and CA addresses are not here: the injector derives
+AGENTSC_OTLP_ENDPOINT_ALLOW, AGENTSC_AUDIT_FAIL_CLOSED), AGENTSC_CLUSTER_DOMAIN when clusterDomain is
+not cluster.local, and the runtime's AGENTSC_MOCK_FALLBACK. The control-plane and CA addresses are not here: the injector derives
 them from --cp-namespace and the fixed Service names (embassy.<ns>.svc:15012,
 embassy-ca.<ns>.svc:15012); the trust domain neither: the injector hands the sidecar its own
 --trust-domain.
@@ -78,6 +78,9 @@ embassy-ca.<ns>.svc:15012); the trust domain neither: the injector hands the sid
 {{- end -}}
 {{- if .Values.injection.mockFallback -}}
 {{- $env = append $env (dict "name" "AGENTSC_MOCK_FALLBACK" "value" "1") -}}
+{{- end -}}
+{{- if .Values.injection.auditFailClosed -}}
+{{- $env = append $env (dict "name" "AGENTSC_AUDIT_FAIL_CLOSED" "value" "true") -}}
 {{- end -}}
 {{- $t := dict
   "imagePullPolicy" .Values.images.agentscd.pullPolicy

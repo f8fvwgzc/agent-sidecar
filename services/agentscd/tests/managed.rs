@@ -704,6 +704,76 @@ async fn renewal_swaps_the_mesh_certificate_without_a_restart() {
     m.sidecar.abort();
 }
 
+/// The review finding: a span start leaves the pod outside the audit writer, so its callee
+/// went to the control plane (and its trace views) as the runtime asked for it: a query with a
+/// remembered value and an email in it. It is now redacted like the record's.
+#[tokio::test]
+async fn span_starts_carry_the_redacted_callee() {
+    let ca = agentsc_pki::ca_init().unwrap();
+    let cp = FakeCp::start(ca.clone()).await;
+    let state_dir = tempfile::tempdir().unwrap();
+    let audit_dir = tempfile::tempdir().unwrap();
+    let audit = audit_dir.path().join("audit.jsonl");
+    let mut file = charter(&audit);
+    file.audit.redact = vec!["input.context.ssn".into()];
+    file.guardrails.pii_redact = true;
+    let m = start_managed(
+        cp.addr,
+        &ca,
+        state_dir.path(),
+        Some(&file),
+        |sock| {
+            FakeRuntime::with(move |req| {
+                let sock = sock.clone();
+                Box::pin(async move {
+                    // no app listens: the call fails, after it began
+                    let _ = tools(&sock)
+                        .await
+                        .invoke_service(ToolServiceRequest {
+                            ctx: ctx_for(&req, "ops-assistant", "lookup_order"),
+                            service: "orders".into(),
+                            method: "GET".into(),
+                            path: "/orders/1001?ssn=123-45-6789&by=ann@example.com".into(),
+                            headers: Default::default(),
+                            body: vec![],
+                        })
+                        .await;
+                    ok("done")
+                })
+            })
+        },
+        |_| {},
+    )
+    .await;
+    eventually("ready and connected", || {
+        m.state().is_ready() && !cp.hellos().is_empty()
+    })
+    .await;
+    let r = reqwest::Client::new()
+        .post(format!(
+            "http://{}/v1/agents/ops-assistant/invoke",
+            m.sidecar.http_addr
+        ))
+        .json(&json!({"input": "find my order", "context": {"ssn": "123-45-6789"}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    eventually("the service call's span start", || {
+        cp.span_starts().iter().any(|s| s.kind == "service_call")
+    })
+    .await;
+    let starts = cp.span_starts();
+    let svc = starts.iter().find(|s| s.kind == "service_call").unwrap();
+    assert_eq!(
+        svc.callee,
+        "orders GET /orders/1001?ssn=[redacted]&by=[redacted:email]"
+    );
+    let rec = wait_audit(&audit, 1, |v| v["kind"] == "service_call").await;
+    assert_eq!(rec[0]["callee"], svc.callee.as_str(), "as the record says");
+    m.sidecar.abort();
+}
+
 #[tokio::test]
 async fn span_starts_audit_batches_and_learning_proposals() {
     let ca = agentsc_pki::ca_init().unwrap();
