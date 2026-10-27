@@ -325,11 +325,15 @@ pub fn check_responses(body: &Map<String, Value>) -> Result<Checked, String> {
     })
 }
 
-/// An `item_reference` anywhere in `v`: an item the provider stored, pulled into the prompt.
+/// An `item_reference` anywhere in `v`: an item the provider stored, pulled into the prompt. Its
+/// `type` is optional (OpenAI's `ItemReference`), so an item with an `id` and no `type` (or a
+/// null one) is a reference too.
 fn refers_to_stored_items(v: &Value) -> bool {
     match v {
         Value::Object(m) => {
-            m.get("type").and_then(Value::as_str) == Some("item_reference")
+            let kind = m.get("type").filter(|t| !t.is_null());
+            kind.and_then(Value::as_str) == Some("item_reference")
+                || (kind.is_none() && m.contains_key("id"))
                 || m.values().any(refers_to_stored_items)
         }
         Value::Array(a) => a.iter().any(refers_to_stored_items),
@@ -733,6 +737,20 @@ mod tests {
             {"role": "user", "content": [{"type": "input_text", "text": "and now?"}]}]})))
         .unwrap();
         assert!(referenced.has_media && referenced.stored_state);
+        // `type` is optional on an item reference: an id alone, or a null type, refers too
+        for item in [json!({"id": "msg_x"}), json!({"type": null, "id": "msg_x"})] {
+            let untyped = check_responses(&body(json!({"model": "m", "input": [item.clone(),
+                {"role": "user", "content": "and now?"}]})))
+            .unwrap();
+            assert!(untyped.has_media && untyped.stored_state, "{item}");
+        }
+        // items of other types carry ids of their own and are in the request's bytes
+        let replayed = check_responses(&body(json!({"model": "m", "input": [
+            {"type": "message", "id": "msg_1", "role": "assistant",
+             "content": [{"type": "output_text", "text": "hi"}]},
+            {"role": "user", "content": "and now?"}]})))
+        .unwrap();
+        assert!(!replayed.stored_state);
         let plain = check_responses(&body(json!({"model": "m", "input": "hi"}))).unwrap();
         assert!(!plain.has_media && !plain.stored_state);
         for (bad, why) in [

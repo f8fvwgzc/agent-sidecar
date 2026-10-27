@@ -555,6 +555,8 @@ tenants:
         b
     };
     let referenced = json!({"input": [{"type": "item_reference", "id": "msg_other_tenant"}]});
+    // an item reference's `type` is optional
+    let untyped = json!({"input": [{"id": "msg_other_tenant"}]});
     let continued = json!({"previous_response_id": "resp_other_tenant"});
 
     // the platform's key: nothing stored, even when asked
@@ -565,7 +567,7 @@ tenants:
         assert_eq!(headers["authorization"], "Bearer sk-platform");
         assert_eq!(body["store"], false);
     }
-    for extra in [referenced.clone(), continued.clone()] {
+    for extra in [referenced.clone(), untyped.clone(), continued.clone()] {
         let a = call(&rig, "/v1/responses", shared, ask(extra)).await;
         assert_eq!(
             (a.status, a.rule()),
@@ -587,7 +589,7 @@ tenants:
     let (_, headers, body) = rig.seen.last();
     assert_eq!(headers["authorization"], "Bearer sk-own");
     assert!(body.get("store").is_none(), "left as the tenant sent it");
-    for extra in [referenced, continued] {
+    for extra in [referenced, untyped, continued] {
         let a = call(&rig, "/v1/responses", byo, ask(extra)).await;
         assert_eq!(
             (a.status, a.rule()),
