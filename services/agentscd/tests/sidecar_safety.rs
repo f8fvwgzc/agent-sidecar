@@ -168,6 +168,7 @@ fn charter(app: SocketAddr, audit: &Path) -> Charter {
             url: Some(format!("http://{app}/r")),
             label: None,
             effect: None,
+            approval: None,
         });
     }
     c.guardrails

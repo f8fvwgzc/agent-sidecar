@@ -329,6 +329,10 @@ impl Hub {
             tokio::spawn(graph_events(self.clone(), shutdown.clone())),
             tokio::spawn(minute_ticks(self.clone(), shutdown.clone())),
             tokio::spawn(expire_notes(self.clone(), shutdown.clone())),
+            tokio::spawn(crate::secops::approvals::expirer(
+                self.clone(),
+                shutdown.clone(),
+            )),
             tokio::spawn(crate::secops::ledger::sealer(
                 self.clone(),
                 self.opts.ledger_seal_after,
@@ -398,6 +402,9 @@ async fn on_store_event(hub: &Arc<Hub>, ev: StoreEvent) {
         }
         StoreEvent::AgentsChanged { key } => {
             crate::controlplane::push_agents(hub, &key).await;
+        }
+        StoreEvent::ApprovalDecided { key, id } => {
+            crate::secops::approvals::push_decision_of(hub, &key, &id).await;
         }
         StoreEvent::CpAudit(rec) => {
             let scope = cp_scope(&rec);

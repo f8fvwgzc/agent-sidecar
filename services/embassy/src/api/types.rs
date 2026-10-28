@@ -943,6 +943,10 @@ pub enum CpAction {
     AgentQuarantined,
     /// An agent's quarantine was lifted.
     AgentReleased,
+    /// A tool call was approved (`reason`: `<tool> in run <request_id>[: why]`).
+    ApprovalApprove,
+    /// A tool call was denied.
+    ApprovalDeny,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

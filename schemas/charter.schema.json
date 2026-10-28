@@ -350,6 +350,17 @@
             }
           ],
           "description": "What the call does (taint policy). Default from the method: GET, HEAD and OPTIONS read,\neverything else writes; `agent` tools read (the callee's sidecar enforces its own policy)."
+        },
+        "approval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApprovalSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A person must approve each call before it runs (schema level 7, CONTRACT.md §5.4). Absent\n= no approval."
         }
       },
       "required": [
@@ -393,6 +404,21 @@
         "write"
       ],
       "description": "What a tool call does to the world."
+    },
+    "ApprovalSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "timeout_s": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1,
+          "description": "Seconds a call waits for a decision before it is refused (`approval.expired`), 1 to\n86400; the run's own deadline may end the wait sooner.",
+          "maximum": 86400,
+          "default": 600
+        }
+      },
+      "description": "`tools[].approval`: each call waits for a person's decision (CONTRACT.md §5.4)."
     },
     "Budgets": {
       "type": "object",

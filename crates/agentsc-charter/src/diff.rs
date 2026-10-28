@@ -150,6 +150,9 @@ pub fn weakened(old: &Charter, new: &Charter) -> Vec<String> {
             {
                 out.push(format!("agents.{}.tools.{}.effect", o.name, ot.name));
             }
+            if ot.approval.is_some() && nt.approval.is_none() {
+                out.push(format!("agents.{}.tools.{}.approval", o.name, ot.name));
+            }
         }
         // agent practices: plain prose for warnings dropped, lessons without evidence allowed
         if o.practices_or_default().auto_clarity && !n.practices_or_default().auto_clarity {
@@ -293,6 +296,15 @@ pub fn required_role(old: &Charter, new: &Charter) -> (Role, Vec<String>) {
             if changed {
                 admin.push(format!(
                     "agents.{}.tools.{} label or effect requires admin",
+                    a.name, t.name
+                ));
+            }
+            // an approval is a person between the agent and the call: only an admin changes it
+            if before.map(|b| &b.approval) != Some(&t.approval)
+                && (before.is_some() || t.approval.is_some())
+            {
+                admin.push(format!(
+                    "agents.{}.tools.{} approval requires admin",
                     a.name, t.name
                 ));
             }

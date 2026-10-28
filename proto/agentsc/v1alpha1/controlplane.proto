@@ -20,7 +20,21 @@ message SidecarMessage {
     ConfigAck ack = 4;
     LearningProposal proposal = 5;
     SpanStart span_start = 6;
+    ApprovalRequest approval_request = 7;
   }
+}
+
+// A tool call that waits for a person's approval (CONTRACT.md §5.4). Sent when the call starts and
+// again after every reconnect until it is decided; embassy keeps the first and ignores the rest.
+message ApprovalRequest {
+  string id = 1;              // UUID, the sidecar's
+  string agent = 2;
+  string tool = 3;
+  string request_id = 4;
+  string trace_id = 5;
+  string args_sha256 = 6;     // of the call's arguments; never the arguments
+  uint32 timeout_s = 7;       // tools[].approval.timeout_s
+  string requested_at = 8;    // RFC 3339, UTC
 }
 
 message Hello {
@@ -90,7 +104,17 @@ message ControlMessage {
     MemoryUpdate memory = 2;
     AgentIds agent_ids = 3;
     Quarantine quarantine = 4;
+    ApprovalDecision approval_decision = 5;
   }
+}
+
+// The decision on an approval (CONTRACT.md §5.4), sent to every instance of the service; an
+// instance that does not wait on `id` ignores it.
+message ApprovalDecision {
+  string id = 1;
+  string decision = 2;        // approved | denied | expired
+  string decided_by = 3;
+  string reason = 4;
 }
 
 // The service's quarantined agents (CONTRACT.md §5.3): agent name → the reason. A full

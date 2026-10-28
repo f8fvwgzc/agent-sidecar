@@ -451,6 +451,12 @@ pub enum StoreEvent {
     AgentsChanged {
         key: ServiceKey,
     },
+    /// Approval `id` of `key` was decided or expired (crate::secops::approvals): the sidecars that
+    /// wait on it get the decision.
+    ApprovalDecided {
+        key: ServiceKey,
+        id: String,
+    },
     /// A control-plane audit record the store produced itself — `cr_external_edit` (an external
     /// edit of a file-store charter, or a Charter CR changed with kubectl, actor
     /// `k8s:<manager>`) — after [`Store::append_cp_audit`] persisted it. The API sends it to

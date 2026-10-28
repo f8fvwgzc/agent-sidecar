@@ -258,7 +258,7 @@ fn scope(key: &ServiceKey) -> Scope {
 
 /// Send to one instance without holding up the caller: a full outbox is waited on in the
 /// background (at most 30 s).
-fn send(outbox: &Outbox, msg: ControlMessage) {
+pub fn send(outbox: &Outbox, msg: ControlMessage) {
     match outbox.try_send(Ok(msg)) {
         Ok(()) => {}
         Err(mpsc::error::TrySendError::Full(m)) => {
@@ -578,6 +578,9 @@ async fn run_stream(
             Some(sidecar_message::Msg::Ack(ack)) => on_ack(hub, key, instance_id, ack),
             Some(sidecar_message::Msg::Proposal(p)) => ingest_proposal(hub, key, actor, p).await,
             Some(sidecar_message::Msg::SpanStart(s)) => ingest_span_start(hub, key, s),
+            Some(sidecar_message::Msg::ApprovalRequest(r)) => {
+                crate::secops::approvals::on_request(hub, key, r).await
+            }
             Some(sidecar_message::Msg::Hello(_)) | None => {
                 if !warned {
                     tracing::warn!(service = %key, instance_id, "ignoring an unexpected message");

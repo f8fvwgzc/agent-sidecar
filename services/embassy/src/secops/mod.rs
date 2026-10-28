@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::store::{Actor, ServiceKey, StoreError};
 
+pub mod approvals;
 pub mod ledger;
 pub mod registry;
 
@@ -201,6 +202,84 @@ pub struct ChainFilter {
     pub limit: usize,
 }
 
+/// Where an approval is (CONTRACT.md §5.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalStatus {
+    Pending,
+    Approved,
+    Denied,
+    Expired,
+}
+
+impl ApprovalStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ApprovalStatus::Pending => "pending",
+            ApprovalStatus::Approved => "approved",
+            ApprovalStatus::Denied => "denied",
+            ApprovalStatus::Expired => "expired",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<ApprovalStatus> {
+        [
+            ApprovalStatus::Pending,
+            ApprovalStatus::Approved,
+            ApprovalStatus::Denied,
+            ApprovalStatus::Expired,
+        ]
+        .into_iter()
+        .find(|v| v.as_str() == s)
+    }
+}
+
+/// One tool call that waits (or waited) for a person (CONTRACT.md §5.4). Never its arguments:
+/// their hash.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Approval {
+    pub id: String,
+    pub namespace: String,
+    pub service: String,
+    pub agent: String,
+    pub agent_id: Option<String>,
+    pub tool: String,
+    pub request_id: String,
+    pub trace_id: String,
+    pub args_sha256: String,
+    pub status: ApprovalStatus,
+    /// When embassy took the request in, and when it expires (embassy's clock).
+    pub requested_at: String,
+    pub expires_at: String,
+    pub decided_at: Option<String>,
+    pub decided_by: Option<String>,
+    pub reason: Option<String>,
+}
+
+/// Which approvals [`SecOpsStore::list_approvals`] returns, newest first.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ApprovalFilter {
+    pub status: Option<ApprovalStatus>,
+    pub namespace: Option<String>,
+    pub service: Option<String>,
+    pub limit: usize,
+}
+
+/// What [`SecOpsStore::put_approval`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApprovalPut {
+    Stored(Approval),
+    /// A request with this id is kept already (a sidecar asking again after a reconnect).
+    Existing(Approval),
+    /// The agent has [`PENDING_MAX`] pending approvals: refused.
+    TooMany,
+}
+
+/// The most approvals one agent may have pending (nexc-engine's).
+pub const PENDING_MAX: usize = 16;
+/// The longest decision reason, in characters.
+pub const MAX_DECISION_REASON: usize = 2000;
+
 /// The longest alias, in bytes.
 pub const MAX_ALIAS_BYTES: usize = 256;
 /// The most aliases one agent has.
@@ -279,6 +358,34 @@ pub trait SecOpsStore: Send + Sync {
     /// Release agent `id`. [`StoreError::Conflict`] (`"not quarantined"`) when it is not
     /// quarantined. Emits [`crate::store::StoreEvent::AgentsChanged`].
     async fn release_agent(&self, id: &str) -> Result<AgentEntry, StoreError>;
+
+    /// Keep a new pending approval (module `approvals`); see [`ApprovalPut`].
+    async fn put_approval(&self, a: &Approval) -> Result<ApprovalPut, StoreError>;
+
+    async fn get_approval(&self, id: &str) -> Result<Approval, StoreError>;
+
+    async fn list_approvals(&self, filter: &ApprovalFilter) -> Result<Vec<Approval>, StoreError>;
+
+    /// Decide pending approval `id` at `now`: approved or denied by `by`, with `reason`. One that
+    /// is past `expires_at` is expired instead. [`StoreError::Conflict`] (its status) when it is
+    /// decided already. Returns it as it is now; emits `ApprovalDecided` when it changed.
+    async fn decide_approval(
+        &self,
+        id: &str,
+        approve: bool,
+        by: &str,
+        reason: Option<&str>,
+        now: &str,
+    ) -> Result<Approval, StoreError>;
+
+    /// Expire the pending approvals past `expires_at` at `now`, or, with `agent` (namespace,
+    /// service, name), every pending approval of that agent. Returns them; emits
+    /// `ApprovalDecided` for each.
+    async fn expire_approvals(
+        &self,
+        now: &str,
+        agent: Option<(&str, &str, &str)>,
+    ) -> Result<Vec<Approval>, StoreError>;
 
     /// Append `records` to their chains, in order within each chain (chains in sorted order, so
     /// two replicas appending to the same chains never wait on each other in a cycle), all taken

@@ -8,9 +8,9 @@ use rusqlite::{OptionalExtension, Transaction, params};
 
 use super::{SqliteStore, checked_key, now_ts};
 use crate::secops::{
-    AgentChange, AgentEntry, AgentFilter, AgentStatus, ChainFilter, ChainHead, ChainService,
-    LedgerRecord, MAX_ALIASES, QuarantineState, RegistryChange, SecOpsStore, SyncPlan, by_chain,
-    check_alias, check_reason,
+    AgentChange, AgentEntry, AgentFilter, AgentStatus, Approval, ApprovalFilter, ApprovalPut,
+    ApprovalStatus, ChainFilter, ChainHead, ChainService, LedgerRecord, MAX_ALIASES, PENDING_MAX,
+    QuarantineState, RegistryChange, SecOpsStore, SyncPlan, by_chain, check_alias, check_reason,
 };
 use crate::store::StoreEvent;
 use crate::store::{Actor, ServiceKey, StoreError};
@@ -109,6 +109,39 @@ fn with_services(tx: &Transaction<'_>, mut h: ChainHead) -> Result<ChainHead, St
 
 fn heads(tx: &Transaction<'_>, rows: Vec<ChainHead>) -> Result<Vec<ChainHead>, StoreError> {
     rows.into_iter().map(|h| with_services(tx, h)).collect()
+}
+
+const APPROVAL_SELECT: &str = "SELECT id, namespace, service, agent, agent_id, tool, request_id, trace_id, args_sha256, status, requested_at, expires_at, decided_at, decided_by, decision_reason FROM approvals";
+
+fn approval_of(r: &rusqlite::Row<'_>) -> rusqlite::Result<Approval> {
+    let status: String = r.get(9)?;
+    Ok(Approval {
+        id: r.get(0)?,
+        namespace: r.get(1)?,
+        service: r.get(2)?,
+        agent: r.get(3)?,
+        agent_id: r.get(4)?,
+        tool: r.get(5)?,
+        request_id: r.get(6)?,
+        trace_id: r.get(7)?,
+        args_sha256: r.get(8)?,
+        status: ApprovalStatus::parse(&status).unwrap_or(ApprovalStatus::Expired),
+        requested_at: r.get(10)?,
+        expires_at: r.get(11)?,
+        decided_at: r.get(12)?,
+        decided_by: r.get(13)?,
+        reason: r.get(14)?,
+    })
+}
+
+fn approval_by_id(tx: &Transaction<'_>, id: &str) -> Result<Approval, StoreError> {
+    tx.query_row(
+        &format!("{APPROVAL_SELECT} WHERE id = ?1"),
+        params![id],
+        approval_of,
+    )
+    .optional()?
+    .ok_or(StoreError::NotFound)
 }
 
 #[async_trait]
@@ -331,6 +364,151 @@ impl SecOpsStore for SqliteStore {
         self.emit(StoreEvent::AgentsChanged {
             key: ServiceKey::new(&out.namespace, &out.service),
         });
+        Ok(out)
+    }
+
+    async fn put_approval(&self, a: &Approval) -> Result<ApprovalPut, StoreError> {
+        let a = a.clone();
+        self.run(move |conn| {
+            let tx = conn.transaction()?;
+            if let Ok(existing) = approval_by_id(&tx, &a.id) {
+                return Ok(ApprovalPut::Existing(existing));
+            }
+            let pending: i64 = tx.query_row(
+                "SELECT count(*) FROM approvals WHERE namespace = ?1 AND service = ?2 AND agent = ?3 \
+                 AND status = 'pending'",
+                params![a.namespace, a.service, a.agent],
+                |r| r.get(0),
+            )?;
+            if pending as usize >= PENDING_MAX {
+                return Ok(ApprovalPut::TooMany);
+            }
+            tx.execute(
+                "INSERT INTO approvals (id, namespace, service, agent, agent_id, tool, request_id, \
+                 trace_id, args_sha256, status, requested_at, expires_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', ?10, ?11)",
+                params![a.id, a.namespace, a.service, a.agent, a.agent_id, a.tool, a.request_id,
+                    a.trace_id, a.args_sha256, a.requested_at, a.expires_at],
+            )?;
+            let out = approval_by_id(&tx, &a.id)?;
+            tx.commit()?;
+            Ok(ApprovalPut::Stored(out))
+        })
+        .await
+    }
+
+    async fn get_approval(&self, id: &str) -> Result<Approval, StoreError> {
+        let id = id.to_string();
+        self.run(move |conn| {
+            let tx = conn.transaction()?;
+            approval_by_id(&tx, &id)
+        })
+        .await
+    }
+
+    async fn list_approvals(&self, filter: &ApprovalFilter) -> Result<Vec<Approval>, StoreError> {
+        let f = filter.clone();
+        self.run(move |conn| {
+            let mut stmt = conn.prepare_cached(&format!(
+                "{APPROVAL_SELECT} WHERE (?1 IS NULL OR status = ?1) AND (?2 IS NULL OR namespace = ?2) \
+                 AND (?3 IS NULL OR service = ?3) ORDER BY requested_at DESC, id LIMIT ?4"
+            ))?;
+            let rows = stmt
+                .query_map(
+                    params![f.status.map(ApprovalStatus::as_str), f.namespace, f.service, f.limit as i64],
+                    approval_of,
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .await
+    }
+
+    async fn decide_approval(
+        &self,
+        id: &str,
+        approve: bool,
+        by: &str,
+        reason: Option<&str>,
+        now: &str,
+    ) -> Result<Approval, StoreError> {
+        let (id, by, reason, now) = (
+            id.to_string(),
+            by.to_string(),
+            reason.map(str::to_string),
+            now.to_string(),
+        );
+        let out = self
+            .run(move |conn| {
+                let tx = conn.transaction()?;
+                let a = approval_by_id(&tx, &id)?;
+                if a.status != ApprovalStatus::Pending {
+                    return Err(StoreError::Conflict {
+                        current: a.status.as_str().into(),
+                    });
+                }
+                if now > a.expires_at {
+                    tx.execute(
+                        "UPDATE approvals SET status = 'expired', decided_at = ?2 WHERE id = ?1",
+                        params![id, now],
+                    )?;
+                } else {
+                    let status = if approve { "approved" } else { "denied" };
+                    tx.execute(
+                        "UPDATE approvals SET status = ?2, decided_at = ?3, decided_by = ?4, \
+                         decision_reason = ?5 WHERE id = ?1",
+                        params![id, status, now, by, reason],
+                    )?;
+                }
+                let out = approval_by_id(&tx, &id)?;
+                tx.commit()?;
+                Ok(out)
+            })
+            .await?;
+        self.emit(StoreEvent::ApprovalDecided {
+            key: ServiceKey::new(&out.namespace, &out.service),
+            id: out.id.clone(),
+        });
+        Ok(out)
+    }
+
+    async fn expire_approvals(
+        &self,
+        now: &str,
+        agent: Option<(&str, &str, &str)>,
+    ) -> Result<Vec<Approval>, StoreError> {
+        let now = now.to_string();
+        let agent = agent.map(|(n, s, a)| (n.to_string(), s.to_string(), a.to_string()));
+        let out = self
+            .run(move |conn| {
+                let tx = conn.transaction()?;
+                let ids: Vec<String> = {
+                    let mut stmt = tx.prepare_cached(
+                        "SELECT id FROM approvals WHERE status = 'pending' AND \
+                         ((?2 IS NULL AND expires_at < ?1) OR (namespace = ?2 AND service = ?3 AND agent = ?4))",
+                    )?;
+                    let (n, s, a) = agent.clone().map_or((None, None, None), |(n, s, a)| (Some(n), Some(s), Some(a)));
+                    stmt.query_map(params![now, n, s, a], |r| r.get(0))?
+                        .collect::<Result<_, _>>()?
+                };
+                let mut out = Vec::new();
+                for id in ids {
+                    tx.execute(
+                        "UPDATE approvals SET status = 'expired', decided_at = ?2 WHERE id = ?1",
+                        params![id, now],
+                    )?;
+                    out.push(approval_by_id(&tx, &id)?);
+                }
+                tx.commit()?;
+                Ok(out)
+            })
+            .await?;
+        for a in &out {
+            self.emit(StoreEvent::ApprovalDecided {
+                key: ServiceKey::new(&a.namespace, &a.service),
+                id: a.id.clone(),
+            });
+        }
         Ok(out)
     }
 

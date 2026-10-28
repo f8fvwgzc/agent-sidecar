@@ -469,6 +469,104 @@ impl<'a> Call<'a> {
         }
     }
 
+    /// A tool with `approval` waits for a person's decision (approvals.rs, CONTRACT.md §5.4):
+    /// approved, the call goes on after an `authz` record (`approval.granted`); denied, expired
+    /// or with no control plane to ask, it is refused like any other denial.
+    async fn approval_gate(&self, tool: &ToolSpec, input: &Value) -> Result<(), Status> {
+        use crate::approvals::{RULE_DENIED, RULE_EXPIRED, RULE_GRANTED, RULE_UNAVAILABLE};
+        let Some(a) = &tool.approval else {
+            return Ok(());
+        };
+        let state = &self.svc.state;
+        if !state.managed {
+            return Err(self.deny(
+                input,
+                Verdict::deny(
+                    RULE_UNAVAILABLE,
+                    format!(
+                        "{} needs an approval, and this sidecar has no control plane to ask",
+                        tool.name
+                    ),
+                ),
+            ));
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        let rx = state.approvals.ask(agentsc_proto::ApprovalRequest {
+            id: id.clone(),
+            agent: self.c.agent.clone(),
+            tool: tool.name.clone(),
+            request_id: self.c.request_id.clone(),
+            trace_id: self.trace.trace_id.clone(),
+            args_sha256: agentsc_common::audit::sha256_hex(&agentsc_common::audit::payload_bytes(
+                input,
+            )),
+            timeout_s: a.timeout_s,
+            requested_at: agentsc_common::audit::now_rfc3339(),
+        });
+        let wait = deadline::budget(
+            self.deadline,
+            std::time::Duration::from_secs(u64::from(a.timeout_s)),
+        );
+        let decided = tokio::time::timeout(wait, rx).await;
+        let who = |d: &agentsc_proto::ApprovalDecision| {
+            if d.decided_by.is_empty() {
+                "the control plane".to_string()
+            } else {
+                d.decided_by.clone()
+            }
+        };
+        match decided {
+            Ok(Ok(d)) if d.decision == "approved" => {
+                // a quarantine that arrived while the call waited wins (nexc-engine withholds it too)
+                self.quarantine_gate(input)?;
+                let reason = if d.reason.trim().is_empty() {
+                    format!("{} approved by {}", tool.name, who(&d))
+                } else {
+                    format!("{} approved by {}: {}", tool.name, who(&d), d.reason.trim())
+                };
+                let v = Verdict {
+                    allow: true,
+                    rule: RULE_GRANTED.into(),
+                    reason,
+                };
+                let rec = self
+                    .record(
+                        Kind::Authz,
+                        Direction::Internal,
+                        &self.trace,
+                        &self.c.tool,
+                        input,
+                        Value::Null,
+                    )
+                    .verdict(&v);
+                state.audit.write(rec);
+                Ok(())
+            }
+            Ok(Ok(d)) if d.decision == "denied" => Err(self.deny(
+                input,
+                Verdict::deny(
+                    RULE_DENIED,
+                    format!(
+                        "{} was denied by {}: {}",
+                        tool.name,
+                        who(&d),
+                        d.reason.trim()
+                    ),
+                ),
+            )),
+            _ => {
+                state.approvals.forget(&id);
+                Err(self.deny(
+                    input,
+                    Verdict::deny(
+                        RULE_EXPIRED,
+                        format!("{}: nobody decided before the approval expired", tool.name),
+                    ),
+                ))
+            }
+        }
+    }
+
     /// The call returned data to the run: the run now carries the tool's label.
     fn taint_mark(&self, tool: &ToolSpec) {
         self.svc
@@ -650,6 +748,7 @@ impl SidecarTools for ToolsService {
         };
         call.taint_gate(spec, tool, &input)?;
         call.quarantine_gate(&input)?;
+        call.approval_gate(tool, &input).await?;
         let method = req.method.to_ascii_uppercase();
         let mismatch = |path: &str| {
             Verdict::deny(
@@ -868,6 +967,7 @@ impl SidecarTools for ToolsService {
         };
         call.taint_gate(spec, tool, &input)?;
         call.quarantine_gate(&input)?;
+        call.approval_gate(tool, &input).await?;
         let remote = !self.is_self(Some(&req.target_service));
         let declared = tool.tool_type == ToolType::Agent
             && tool.agent.as_deref() == Some(req.target_agent.as_str())
@@ -1100,6 +1200,7 @@ impl SidecarTools for ToolsService {
         };
         call.taint_gate(spec, tool, &input)?;
         call.quarantine_gate(&input)?;
+        call.approval_gate(tool, &input).await?;
         let method = req.method.to_ascii_uppercase();
         let mismatch = |url: &str| {
             Verdict::deny(

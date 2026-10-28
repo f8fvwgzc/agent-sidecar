@@ -380,6 +380,7 @@ fn editors_may_change_agents_skills_and_local_callers() {
             url: None,
             label: None,
             effect: None,
+            approval: None,
         });
         c.agents[0].tools.push(ToolSpec {
             name: "stock".into(),
@@ -393,6 +394,7 @@ fn editors_may_change_agents_skills_and_local_callers() {
             url: None,
             label: None,
             effect: None,
+            approval: None,
         });
         c.guardrails.allowed_tools.remove("support");
     });

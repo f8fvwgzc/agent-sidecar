@@ -1,6 +1,7 @@
 //! `agentscd` — the sidecar. See CONTRACT.md and docs/design/agent-platform.md §6; module names
 //! follow their sections.
 pub mod app_auth;
+pub mod approvals;
 pub mod audit;
 pub mod cache;
 pub mod config;
