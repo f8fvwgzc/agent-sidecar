@@ -2,7 +2,8 @@
 //!
 //! mTLS with the workload certificate; the server must chain to the trust roots and carry the URI
 //! SAN `spiffe://<trust domain>/control-plane` (`--trust-domain`). The first message is `Hello`,
-//! then heartbeats every 10 s, audit batches, span starts and learning proposals. `CharterUpdate` and `MemoryUpdate` are
+//! then heartbeats every 10 s, audit batches, span starts and learning proposals. `AgentIds` (the agents'
+//! registry ids) is installed in the audit writer. `CharterUpdate` and `MemoryUpdate` are
 //! applied (charter: when the epoch differs or the version is greater) and acknowledged; a stale
 //! one is not applied and is acknowledged with the version in force, so the control plane shows
 //! what runs. Unknown message variants are ignored (logged once). A lost stream is reconnected
@@ -13,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use agentsc_common::authz::Verdict;
 use agentsc_proto::control_plane_client::ControlPlaneClient;
 use agentsc_proto::{
-    AuditBatch, CharterUpdate, ConfigAck, ControlMessage, Heartbeat, Hello, MemoryUpdate,
+    AgentIds, AuditBatch, CharterUpdate, ConfigAck, ControlMessage, Heartbeat, Hello, MemoryUpdate,
     SidecarMessage, control_message, sidecar_message,
 };
 use tokio_stream::wrappers::ReceiverStream;
@@ -196,11 +197,27 @@ pub fn apply_memory_update(state: &AppState, u: &MemoryUpdate) -> SidecarMessage
     reply(Ok(()))
 }
 
+/// Install the agents' registry ids (CONTRACT.md §5.3): from now on every audit record of one
+/// of these agents carries its `agent_id`. A full replacement; nothing is acknowledged.
+pub fn apply_agent_ids(state: &AppState, u: AgentIds) {
+    let ids: std::collections::HashMap<String, String> = u
+        .ids
+        .into_iter()
+        .filter(|(_, id)| agentsc_common::principal::AgentId::parse(id).is_ok())
+        .collect();
+    tracing::debug!(agents = ids.len(), "agent registry ids applied");
+    state.audit.writer().set_agent_ids(ids);
+}
+
 /// The reply to one control message, if any.
 pub fn handle(state: &AppState, msg: ControlMessage) -> Option<SidecarMessage> {
     match msg.msg {
         Some(control_message::Msg::Charter(u)) => Some(apply_charter_update(state, &u)),
         Some(control_message::Msg::Memory(u)) => Some(apply_memory_update(state, &u)),
+        Some(control_message::Msg::AgentIds(u)) => {
+            apply_agent_ids(state, u);
+            None
+        }
         None => {
             if !UNKNOWN_LOGGED.swap(true, Ordering::Relaxed) {
                 tracing::info!("ignoring a control message of a kind this sidecar does not know");

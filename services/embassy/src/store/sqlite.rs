@@ -1,7 +1,9 @@
 //! The `sqlite:<path>` store (docs/adr/0003-sqlite-store-schema.md).
 //!
 //! Everything the file store keeps, in one database file: the schema is `schema.sql`
-//! ([`SCHEMA`]), applied when the file is new (`PRAGMA user_version` 0 → [`SCHEMA_VERSION`]).
+//! ([`SCHEMA`]), applied when the file is new (`PRAGMA user_version` 0 → 1), then the
+//! [`MIGRATIONS`] up to [`SCHEMA_VERSION`]. Migration 2 adds the agent registry of
+//! [`crate::secops`] (`agents`, `agent_aliases`; implemented in `sqlite_secops.rs`).
 //!
 //! | Table | Key | What |
 //! | --- | --- | --- |
@@ -41,10 +43,13 @@ use crate::api::types::CpAuditRecord;
 use crate::config::Role;
 use crate::names::is_dns_label;
 
-/// The schema (`schema.sql`), applied to a new database.
+/// The schema (`schema.sql`), applied to a new database as version 1.
 pub const SCHEMA: &str = include_str!("schema.sql");
+/// The migrations after version 1, in order: `(version, SQL)`. 2 is the agent registry
+/// (`schema_v2.sql`, [`crate::secops`]).
+pub const MIGRATIONS: &[(i64, &str)] = &[(2, include_str!("schema_v2.sql"))];
 /// The `PRAGMA user_version` this code writes and expects.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 /// Store events a slow subscriber may fall behind before it loses some.
 pub const EVENTS_CAPACITY: usize = 1024;
 /// How long a statement waits for a lock held by another connection (a CLI reading the file).
@@ -393,27 +398,32 @@ fn prepare(conn: &Connection) -> Result<(), StoreError> {
     conn.pragma_update(None, "foreign_keys", true)?;
     conn.pragma_update(None, "busy_timeout", BUSY_TIMEOUT_MS as i64)?;
     conn.pragma_update(None, "temp_store", "MEMORY")?;
-    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    match version {
-        0 => {
-            conn.execute_batch(SCHEMA)?;
-            conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        }
-        v if v == SCHEMA_VERSION => {}
-        v if v < SCHEMA_VERSION => {
-            // future migrations go here, one per version, in order
-            return Err(StoreError::Io(format!(
-                "schema version {v} has no migration to {SCHEMA_VERSION}"
-            )));
-        }
-        v => {
-            return Err(StoreError::Io(format!(
-                "schema version {v} was written by a newer embassy (this one knows {SCHEMA_VERSION})"
-            )));
-        }
+    let mut version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version > SCHEMA_VERSION {
+        return Err(StoreError::Io(format!(
+            "schema version {version} was written by a newer embassy (this one knows {SCHEMA_VERSION})"
+        )));
+    }
+    if version == 0 {
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(SCHEMA)?;
+        tx.pragma_update(None, "user_version", 1)?;
+        tx.commit()?;
+        version = 1;
+    }
+    // each migration and its version in one transaction, so a crash leaves the old version
+    for (v, sql) in MIGRATIONS.iter().filter(|(v, _)| *v > version) {
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(sql)
+            .map_err(|e| StoreError::Io(format!("sqlite: migration {v}: {e}")))?;
+        tx.pragma_update(None, "user_version", v)?;
+        tx.commit()?;
     }
     Ok(())
 }
+
+#[path = "sqlite_secops.rs"]
+mod secops;
 
 /// The `sqlite:<path>` store; see the module docs.
 pub struct SqliteStore {
@@ -1031,6 +1041,8 @@ mod tests {
         assert_eq!(
             tables,
             [
+                "agent_aliases",
+                "agents",
                 "charter_versions",
                 "cp_audit",
                 "notes",

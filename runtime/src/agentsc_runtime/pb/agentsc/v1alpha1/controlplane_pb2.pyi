@@ -127,12 +127,27 @@ class LearningProposal(_message.Message):
     def __init__(self, dedup_key: _Optional[str] = ..., agent: _Optional[str] = ..., note: _Optional[str] = ..., rationale: _Optional[str] = ..., request_id: _Optional[str] = ..., trace_id: _Optional[str] = ..., auto: _Optional[bool] = ...) -> None: ...
 
 class ControlMessage(_message.Message):
-    __slots__ = ("charter", "memory")
+    __slots__ = ("charter", "memory", "agent_ids")
     CHARTER_FIELD_NUMBER: _ClassVar[int]
     MEMORY_FIELD_NUMBER: _ClassVar[int]
+    AGENT_IDS_FIELD_NUMBER: _ClassVar[int]
     charter: CharterUpdate
     memory: MemoryUpdate
-    def __init__(self, charter: _Optional[_Union[CharterUpdate, _Mapping]] = ..., memory: _Optional[_Union[MemoryUpdate, _Mapping]] = ...) -> None: ...
+    agent_ids: AgentIds
+    def __init__(self, charter: _Optional[_Union[CharterUpdate, _Mapping]] = ..., memory: _Optional[_Union[MemoryUpdate, _Mapping]] = ..., agent_ids: _Optional[_Union[AgentIds, _Mapping]] = ...) -> None: ...
+
+class AgentIds(_message.Message):
+    __slots__ = ("ids",)
+    class IdsEntry(_message.Message):
+        __slots__ = ("key", "value")
+        KEY_FIELD_NUMBER: _ClassVar[int]
+        VALUE_FIELD_NUMBER: _ClassVar[int]
+        key: str
+        value: str
+        def __init__(self, key: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
+    IDS_FIELD_NUMBER: _ClassVar[int]
+    ids: _containers.ScalarMap[str, str]
+    def __init__(self, ids: _Optional[_Mapping[str, str]] = ...) -> None: ...
 
 class CharterUpdate(_message.Message):
     __slots__ = ("epoch", "version", "charter_yaml")

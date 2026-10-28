@@ -56,8 +56,8 @@ They are nexc-engine's (PRODUCT-MIGRATION.md §2), seen from the receiving side:
 | Control plane | embassy: REST API, SSE, console, Connect streams to sidecars, admission webhooks, the sidecar integrity policy | shipped |
 | Stores | `file:`, `sqlite:`, `kubernetes` | shipped; single replica only for file and SQLite |
 
-What attache does not have yet: agents as principals of their own (an agent is a name inside a
-service's charter), human approvals of tool calls, risk scores and quarantine, DLP beyond regexes,
+What attache did not have when this was written: agents as principals of their own (an agent was
+a name inside a service's charter; now the agent registry, docs/design/agent-registry.md), human approvals of tool calls, risk scores and quarantine, DLP beyond regexes,
 injection screening, a hash-chained and signed evidence ledger, MCP and A2A, alert routing, and a
 store for many embassy replicas.
 
@@ -204,9 +204,10 @@ whole set.
 
 ## 8. Open questions
 
-- **Principals.** `agent:agt_<uuidv7>` from Tutela versus attache's SPIFFE IDs
-  (`spiffe://<trust>/ns/<ns>/svc/<svc>`) plus the agent name: the registry maps both, but which
-  one a decision record names first is to settle with Tutela.
+- **Principals.** Settled (docs/design/agent-registry.md): an agent's principal is
+  `agent:agt_<uuidv7>`, minted by embassy's registry; a workload stays
+  `spiffe://<trust>/ns/<ns>/svc/<svc>` (f8fvwgzc/tutela#29). Audit records name the agent by
+  name and `agent_id`.
 - **Policies versus charters.** Merge nexc's policy documents into the charter schema, or keep
   them as separate versioned objects that charters reference (this document assumes the second,
   because nexc's spans record a policy version).

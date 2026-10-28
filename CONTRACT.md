@@ -1002,6 +1002,46 @@ deny record, rule `taint.untrusted_write`); `audit` lets it through after a
 `guardrail` record with rule `taint.would_deny.untrusted_write`. The caller's
 sidecar sends the run's labels on every mesh call.
 
+### 5.3 Agent principals and the registry
+
+An agent is a principal of its own, named as Tutela names principals:
+`agent:agt_<uuidv7>` (`agt_` and a UUIDv7 in its 36-character lowercase form, version digit
+`7`, variant digit `8`, `9`, `a` or `b`; `agentsc_common::principal`). A workload principal is
+`workload:spiffe://<trust domain>/ns/<namespace>/svc/<service>`, the identity of §5: the path
+names a service, not a service account (Tutela's own examples use `/sa/<sa>`; f8fvwgzc/tutela#29).
+Design: [docs/design/agent-registry.md](docs/design/agent-registry.md).
+
+- **The registry is embassy's** (it is the system of record of agents). It keeps one row per
+  `(namespace, service, agent name)`: the id, `status` (`active` | `retired`), `created_at`,
+  `updated_at` and aliases. The SQLite and PostgreSQL stores keep it (migration 2); `--store
+  file:<dir>` keeps it in `<dir>/.secops.sqlite3`; `--store kubernetes` keeps it where
+  `--secops-store sqlite:<path> | postgres` says, and has none without it.
+- **Ids are minted by the charter.** When a stored charter (any write path: API, adoption,
+  rollback, a file-store edit, a Charter CR change, another replica) first declares an agent,
+  embassy mints its id. An agent the charter no longer declares (or whose service is deleted) is
+  `retired`; declared again, it is `active` again **with the same id**. An agent is never
+  deleted and an id never changes or names another agent (store triggers refuse it). A charter
+  that cannot be read retires nothing. Each change is a control-plane audit record
+  (`agent_registered`, `agent_reactivated`, `agent_retired`; `reason` = the principal), by the
+  charter write's actor (`embassy:registry` for the sync at start-up).
+- **Aliases.** An agent may have up to 16 aliases, `<scheme>://<name>` (a lowercase scheme, no
+  whitespace, at most 256 bytes; nexc-engine's `agent://<workspace>/<name>`), each naming one
+  agent. Adding or removing one needs admin and is audited (`agent_alias_put`,
+  `agent_alias_delete`).
+- **Sidecars get the ids.** After the charter and memory of a `Connect` stream, and whenever
+  the registry changes for its service, embassy sends `ControlMessage.agent_ids` (`AgentIds`:
+  agent name → id of the active agents; a full replacement, not acknowledged). The sidecar
+  writes the id as `agent_id` on every audit record of that agent (§6); embassy fills it on
+  records that arrive without it.
+- **API** (`/api/v1`, docs/api/openapi.yaml): `GET /agents?namespace=&service=&status=`,
+  `GET /agents/{id}`, `GET /principals?principal=` (an agent principal, an alias, or a workload
+  principal with its active agents), `POST /agents/{id}/aliases` `{"alias"}` and `DELETE
+  /agents/{id}/aliases?alias=` (admin). An agent outside the caller's namespaces is `404`;
+  without a registry the answer is `503 secops_unavailable`.
+- **Not yet:** creating and disabling the principal in Tutela (`tutela.admin.v1`, Tutela
+  phase B, #24) and delegated agent tokens (RFC 8693 token exchange at `tutelad`, #25); both
+  wait for `tutelad`.
+
 ## 6. Audit record
 
 One JSON object per line, written by `agentscd` only (sink `stdout`, readable
@@ -1041,6 +1081,7 @@ and was billed).
   "parent_span_id": "b7ad6b7169203331",    // or null
   "service": "orders", "namespace": "agentsc-demo",
   "agent": "ops-assistant",                // the agent this record belongs to (null for pure authz failures before resolution)
+  "agent_id": "agt_0193a1b2-c3d4-7b33-9c44-5d6e7f809102", // its registry id (§5.3); left out when the sidecar has none
   "caller": "local | spiffe://agentsc/ns/agentsc-demo/svc/orders",
   "caller_agent": "ops-assistant",         // when another agent made the call, else null
   "callee": "ops-assistant | anthropic:claude-opus-5-5 | mock | inventory/stock-analyst | inventory GET /stock | https://…",

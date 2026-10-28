@@ -629,6 +629,13 @@ See [Creating agents](guides/creating-agents.md) for what to put in a charter.
 
 ## Upgrade notes
 
+### Agent registry
+
+- **The SQL stores migrate on start**: SQLite to schema version 2, PostgreSQL to migration 2 (the `agents` and `agent_aliases` tables). An older embassy refuses a migrated database, so roll back by restoring a backup, not by starting the old version on it.
+- **The first start registers every agent** of every stored charter (control-plane audit `agent_registered`, actor `embassy:registry`).
+- **Audit consumers see a new field**, `agent_id`, on records of agents that have one. It is left out (not `null`) otherwise. Readers that keep unknown fields (CONTRACT.md §6.1) need no change.
+- **With the Helm chart** (`--store kubernetes`) the registry is off until you pass `--secops-store` (see [The agent registry and the AgentSecOps store](#the-agent-registry-and-the-agentsecops-store)).
+
 ### Agent practices (charter schema level 6)
 
 This build gives every agent the practices: a plan before its first tool call, questions to its caller when a decision blocks the task, and terse answers ([the design note](design/agent-practices.md)). They are on by default, so they need no charter change. Read these points before you roll it out:
@@ -928,5 +935,24 @@ sqlite3 -readonly /var/lib/agentsc/embassy.db "SELECT ts, actor, action, namespa
 
 ```bash
 psql "$AGENTSC_POSTGRES_URL" -c "SELECT ts, actor, action, namespace, service, result FROM cp_audit ORDER BY seq DESC LIMIT 20"
+```
+
+### The agent registry and the AgentSecOps store
+
+embassy gives every agent a principal of its own, `agent:agt_<uuidv7>`, the first time a stored charter declares it ([CONTRACT.md §5.3](../CONTRACT.md#53-agent-principals-and-the-registry), [the design note](design/agent-registry.md)). An agent removed from its charter is `retired` and keeps its id; declared again, it is active with the same id. Sidecars get their agents' ids over `Connect` and write them as `agent_id` on their audit records.
+
+The registry (and, in later releases, the evidence ledger, approvals and risk) lives in an SQL database, the "AgentSecOps store":
+
+| `--store` | Where the registry is |
+| --- | --- |
+| `sqlite:<path>` | the same database (schema version 2; a version 1 file is migrated on start) |
+| `postgres` | the same database (migration 2) |
+| `file:<dir>` | `<dir>/.secops.sqlite3`, a SQLite database beside the charters; back it up with the directory |
+| `kubernetes` | nowhere, unless `--secops-store sqlite:<path>` (a volume, one replica) or `--secops-store postgres` (the `--postgres-*` flags, many replicas) says where |
+
+`--secops-store` (env `AGENTSC_SECOPS_STORE`) also overrides the default of the other stores. Without a registry, `/api/v1/agents` and `/api/v1/principals` answer `503 secops_unavailable`, sidecars get no ids, and their records carry no `agent_id`. List the agents with `curl -H "Authorization: Bearer $TOKEN" https://embassy/api/v1/agents?service=orders`; every registration, retirement and reactivation is a control-plane audit record (`agent_registered`, `agent_retired`, `agent_reactivated`).
+
+```bash
+sqlite3 -readonly /var/lib/agentsc/embassy.db "SELECT id, namespace, service, name, status FROM agents ORDER BY namespace, service, name"
 ```
 

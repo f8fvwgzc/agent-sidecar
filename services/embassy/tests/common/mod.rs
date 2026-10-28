@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agentsc_proto::control_plane_client::ControlPlaneClient;
-use agentsc_proto::{ControlMessage, Hello, SidecarMessage, sidecar_message};
+use agentsc_proto::{ControlMessage, Hello, SidecarMessage, control_message, sidecar_message};
 use clap::Parser;
 use embassy::ca::CaMaterial;
 use embassy::config::{Anonymous, ControlPlaneConfig, PolicyConfig, Role, TokenEntry};
@@ -443,11 +443,34 @@ impl Sidecar {
             .unwrap();
     }
 
-    /// The next control message, or `None` after `wait`.
+    /// The next charter or memory message, or `None` after `wait`. `AgentIds` pushes (the agent
+    /// registry, tests/agent_registry.rs) are skipped: the tests that use this follow charters
+    /// and memory, and [`Sidecar::next_agent_ids`] reads them.
     pub async fn next_within(&mut self, wait: Duration) -> Option<ControlMessage> {
-        match tokio::time::timeout(wait, self.rx.message()).await {
-            Ok(Ok(m)) => m,
-            _ => None,
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            match tokio::time::timeout_at(deadline, self.rx.message()).await {
+                Ok(Ok(Some(ControlMessage {
+                    msg: Some(control_message::Msg::AgentIds(_)),
+                }))) => {}
+                Ok(Ok(m)) => return m,
+                _ => return None,
+            }
+        }
+    }
+
+    /// The ids of the next `AgentIds` push (agent name → `agt_<uuidv7>`); other messages are
+    /// skipped.
+    pub async fn next_agent_ids(&mut self) -> std::collections::HashMap<String, String> {
+        let deadline = tokio::time::Instant::now() + WAIT;
+        loop {
+            match tokio::time::timeout_at(deadline, self.rx.message()).await {
+                Ok(Ok(Some(ControlMessage {
+                    msg: Some(control_message::Msg::AgentIds(m)),
+                }))) => return m.ids,
+                Ok(Ok(Some(_))) => {}
+                other => panic!("no AgentIds push: {other:?}"),
+            }
         }
     }
 

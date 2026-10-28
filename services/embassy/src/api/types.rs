@@ -51,6 +51,9 @@ pub enum ErrorCode {
     RateLimited,
     #[serde(rename = "internal")]
     Internal,
+    /// This embassy keeps no AgentSecOps data (a Kubernetes store without `--secops-store`).
+    #[serde(rename = "secops_unavailable")]
+    SecopsUnavailable,
 }
 
 impl ErrorCode {
@@ -64,6 +67,7 @@ impl ErrorCode {
             ErrorCode::MisdirectedRequest => 421,
             ErrorCode::RateLimited => 429,
             ErrorCode::Internal => 500,
+            ErrorCode::SecopsUnavailable => 503,
         }
     }
 }
@@ -923,6 +927,16 @@ pub enum CpAction {
     Connect,
     ConnectDenied,
     CrExternalEdit,
+    /// The agent registry minted an id for a new agent (`reason`: its principal).
+    AgentRegistered,
+    /// A retired agent was declared again and is active with its old id.
+    AgentReactivated,
+    /// An agent is no longer declared by its service's charter.
+    AgentRetired,
+    /// An alias was given to an agent (`reason`: `<principal> <alias>`).
+    AgentAliasPut,
+    /// An alias was taken from an agent.
+    AgentAliasDelete,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

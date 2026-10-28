@@ -127,6 +127,7 @@ tags:
   - name: agents
   - name: memory
   - name: proposals
+  - name: registry
   - name: events
   - name: traces
   - name: health
@@ -887,6 +888,186 @@ paths:
         "421":
           $ref: "#/components/responses/MisdirectedRequest"
 
+  /agents:
+    get:
+      tags: [registry]
+      operationId: listRegistryAgents
+      summary: The agent registry (CONTRACT.md §5.3), in the caller's namespaces.
+      description: |
+        One entry per agent a stored charter ever declared, by namespace, service and name.
+        `active`: the stored charter declares it now; `retired`: it did once (an agent is never
+        deleted, and keeps its id when it is declared again).
+      x-required-role: viewer
+      parameters:
+        - name: namespace
+          in: query
+          schema:
+            $ref: "#/components/schemas/DnsLabel"
+        - name: service
+          in: query
+          schema:
+            $ref: "#/components/schemas/DnsLabel"
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, retired]
+      responses:
+        "200":
+          description: The agents.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RegistryAgent"
+        "400":
+          $ref: "#/components/responses/Invalid"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+        "503":
+          $ref: "#/components/responses/SecopsUnavailable"
+
+  /agents/{id}:
+    parameters:
+      - $ref: "#/components/parameters/AgentId"
+    get:
+      tags: [registry]
+      operationId: getRegistryAgent
+      summary: One agent of the registry. 404 outside the caller's namespaces.
+      x-required-role: viewer
+      responses:
+        "200":
+          description: The agent.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegistryAgent"
+        "400":
+          $ref: "#/components/responses/Invalid"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+        "503":
+          $ref: "#/components/responses/SecopsUnavailable"
+
+  /agents/{id}/aliases:
+    parameters:
+      - $ref: "#/components/parameters/AgentId"
+    post:
+      tags: [registry]
+      operationId: putAgentAlias
+      summary: Give the agent an alias (`<scheme>://<name>`, e.g. nexc-engine's `agent://<workspace>/<name>`).
+      description: |
+        At most 16 aliases per agent; an alias names one agent (409 `in_use` when another agent
+        has it). Adding an alias the agent has is a no-op. Audited as `agent_alias_put`.
+      x-required-role: admin
+      parameters:
+        - $ref: "#/components/parameters/Csrf"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [alias]
+              properties:
+                alias:
+                  type: string
+                  maxLength: 256
+      responses:
+        "200":
+          description: The agent, with its aliases.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegistryAgent"
+        "400":
+          $ref: "#/components/responses/Invalid"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+        "503":
+          $ref: "#/components/responses/SecopsUnavailable"
+    delete:
+      tags: [registry]
+      operationId: deleteAgentAlias
+      summary: Take an alias from the agent. Audited as `agent_alias_delete`.
+      x-required-role: admin
+      parameters:
+        - $ref: "#/components/parameters/Csrf"
+        - name: alias
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The agent, with its aliases.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegistryAgent"
+        "400":
+          $ref: "#/components/responses/Invalid"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+        "503":
+          $ref: "#/components/responses/SecopsUnavailable"
+
+  /principals:
+    get:
+      tags: [registry]
+      operationId: resolvePrincipal
+      summary: What a principal or an alias names.
+      description: |
+        `agent:agt_<uuidv7>` and an alias resolve to the agent; `workload:spiffe://<trust
+        domain>/ns/<namespace>/svc/<service>` (this embassy's trust domain) to the service and its
+        active agents. 404 when nothing does, or it is outside the caller's namespaces.
+      x-required-role: viewer
+      parameters:
+        - name: principal
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: What it names.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResolvedPrincipal"
+        "400":
+          $ref: "#/components/responses/Invalid"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+        "503":
+          $ref: "#/components/responses/SecopsUnavailable"
+
   /proposals:
     get:
       tags: [proposals]
@@ -1330,6 +1511,14 @@ components:
       description: Session cookie from `POST /login` (HMAC-SHA256 signed `{token_name, exp}`, 12 h).
 
   parameters:
+    AgentId:
+      name: id
+      in: path
+      required: true
+      description: An agent's registry id, `agt_<uuidv7>`.
+      schema:
+        type: string
+        pattern: "^agt_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     Namespace:
       name: ns
       in: path
@@ -1441,6 +1630,14 @@ components:
           example:
             error: unauthenticated
             details: []
+    SecopsUnavailable:
+      description: |
+        503 `secops_unavailable`: this embassy keeps no AgentSecOps data (a Kubernetes store
+        without `--secops-store`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
     Forbidden:
       description: The role is not enough for this request or this diff, or the CSRF header is missing.
       content:
@@ -1539,6 +1736,7 @@ components:
             - misdirected_request
             - rate_limited
             - internal
+            - secops_unavailable
         details:
           type: array
           items:
@@ -2546,6 +2744,59 @@ components:
     ProposalStatus:
       type: string
       enum: [pending, approved, rejected]
+    RegistryAgent:
+      type: object
+      description: One agent of the registry (CONTRACT.md §5.3).
+      required: [id, principal, namespace, service, name, status, created_at, updated_at, aliases]
+      properties:
+        id:
+          type: string
+          description: "`agt_<uuidv7>`, minted when a stored charter first declared the agent."
+        principal:
+          type: string
+          description: "`agent:<id>`, the agent's Tutela principal."
+        namespace:
+          $ref: "#/components/schemas/DnsLabel"
+        service:
+          $ref: "#/components/schemas/DnsLabel"
+        name:
+          type: string
+        status:
+          type: string
+          enum: [active, retired]
+        created_at:
+          type: string
+        updated_at:
+          type: string
+          description: When `status` last changed.
+        aliases:
+          type: array
+          items:
+            type: string
+    ResolvedPrincipal:
+      oneOf:
+        - type: object
+          required: [kind, agent]
+          properties:
+            kind:
+              const: agent
+            agent:
+              $ref: "#/components/schemas/RegistryAgent"
+        - type: object
+          required: [kind, principal, namespace, service, agents]
+          properties:
+            kind:
+              const: workload
+            principal:
+              type: string
+            namespace:
+              $ref: "#/components/schemas/DnsLabel"
+            service:
+              $ref: "#/components/schemas/DnsLabel"
+            agents:
+              type: array
+              items:
+                $ref: "#/components/schemas/RegistryAgent"
     Proposal:
       type: object
       additionalProperties: false
@@ -2774,6 +3025,11 @@ components:
             - connect
             - connect_denied
             - cr_external_edit
+            - agent_registered
+            - agent_reactivated
+            - agent_retired
+            - agent_alias_put
+            - agent_alias_delete
         namespace:
           oneOf:
             - type: string

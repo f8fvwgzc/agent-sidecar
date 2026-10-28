@@ -6,6 +6,7 @@ pub mod guardrails;
 pub mod identity;
 pub mod llm_contract;
 pub mod pricing;
+pub mod principal;
 pub mod trace;
 
 pub use audit::{AuditRecord, AuditWriter, Direction, Kind};
