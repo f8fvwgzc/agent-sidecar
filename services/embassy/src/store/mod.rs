@@ -447,6 +447,10 @@ pub enum StoreEvent {
         key: ServiceKey,
         sha256: String,
     },
+    /// The quarantine of an agent of `key` changed (crate::secops): its sidecars get the new list.
+    AgentsChanged {
+        key: ServiceKey,
+    },
     /// A control-plane audit record the store produced itself — `cr_external_edit` (an external
     /// edit of a file-store charter, or a Charter CR changed with kubectl, actor
     /// `k8s:<manager>`) — after [`Store::append_cp_audit`] persisted it. The API sends it to

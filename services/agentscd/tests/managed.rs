@@ -403,6 +403,39 @@ async fn issuance_hello_heartbeats_and_updates() {
     })
     .await;
     assert_eq!(cp.acks().len(), acks_before, "AgentIds is not acknowledged");
+
+    // 9c. Quarantine: the agent's invocations are refused until a list without it arrives
+    let quarantine = |agents: &[(&str, &str)]| ControlMessage {
+        msg: Some(agentsc_proto::control_message::Msg::Quarantine(
+            agentsc_proto::Quarantine {
+                agents: agents
+                    .iter()
+                    .map(|(a, r)| (a.to_string(), r.to_string()))
+                    .collect(),
+            },
+        )),
+    };
+    cp.push(quarantine(&[("ops-assistant", "manual: under review")]))
+        .await;
+    eventually("the quarantine applied", || {
+        !m.state().quarantined().is_empty()
+    })
+    .await;
+    let (status, v) = m.invoke("ops-assistant", "hi").await;
+    assert_eq!(
+        (status, v["rule"].as_str()),
+        (403, Some("quarantine.active")),
+        "{v}"
+    );
+    cp.push(quarantine(&[])).await;
+    eventually("released", || m.state().quarantined().is_empty()).await;
+    let (status, _) = m.invoke("ops-assistant", "hi").await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        cp.acks().len(),
+        acks_before,
+        "Quarantine is not acknowledged"
+    );
     let before = cp.acks().len();
     cp.push(memory_update("0", &[])).await;
     eventually("the stale memory ack", || cp.acks().len() > before).await;

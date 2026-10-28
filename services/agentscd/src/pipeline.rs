@@ -329,6 +329,13 @@ pub async fn invoke(state: &Arc<AppState>, inv: Invocation) -> InvokeAgentRespon
         state.audit.write(rec);
         return errored(&inv, RULE_UNKNOWN_AGENT, v.reason, vec![]);
     };
+    // a quarantined agent does nothing until embassy releases it (CONTRACT.md §5.3)
+    if let Some(v) = state.quarantine_verdict(&inv.agent) {
+        state
+            .audit
+            .write(record(Value::Null).verdict(&v).latency(started));
+        return denied(&inv, &v, vec![step("authz", &inv.agent, &v, 0, "")]);
+    }
     if inv.depth > MAX_DEPTH {
         let v = Verdict::deny(
             "budget.max_depth",

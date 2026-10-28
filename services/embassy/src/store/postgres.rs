@@ -3,7 +3,7 @@
 //!
 //! **Schema.** Numbered migrations ([`MIGRATIONS`]; 1 is `postgres_schema_v1.sql`: the SQLite
 //! tables in PostgreSQL types with the same invariants as triggers, plus `pending_adoptions`; 2
-//! is the agent registry and 3 the evidence ledger of [`crate::secops`], implemented in
+//! is the agent registry, 3 the evidence ledger and 4 quarantines of [`crate::secops`], implemented in
 //! `postgres_secops.rs`).
 //! [`PgStore::open`] applies the missing ones, each in its own transaction, under an advisory lock
 //! (per schema), so replicas that start together apply each once. The applied ones are in
@@ -56,6 +56,7 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("postgres_schema_v1.sql")),
     (2, include_str!("postgres_schema_v2.sql")),
     (3, include_str!("postgres_schema_v3.sql")),
+    (4, include_str!("postgres_schema_v4.sql")),
 ];
 /// The channel of the store's notifications.
 pub const CHANNEL: &str = "agentsc_store";
@@ -684,6 +685,9 @@ enum WireEvent {
         key: ServiceKey,
         sha256: String,
     },
+    AgentsChanged {
+        key: ServiceKey,
+    },
     /// The event did not fit a notification: re-read everything.
     Resync,
 }
@@ -708,6 +712,7 @@ impl WireEvent {
             StoreEvent::MemoryChanged { key, version } => Self::MemoryChanged { key, version },
             StoreEvent::ProposalChanged { key, id } => Self::ProposalChanged { key, id },
             StoreEvent::AdoptionPending { key, sha256 } => Self::AdoptionPending { key, sha256 },
+            StoreEvent::AgentsChanged { key } => Self::AgentsChanged { key },
             // this store writes no record of its own
             StoreEvent::CpAudit(_) => return None,
         })
@@ -732,6 +737,7 @@ impl WireEvent {
             Self::MemoryChanged { key, version } => StoreEvent::MemoryChanged { key, version },
             Self::ProposalChanged { key, id } => StoreEvent::ProposalChanged { key, id },
             Self::AdoptionPending { key, sha256 } => StoreEvent::AdoptionPending { key, sha256 },
+            Self::AgentsChanged { key } => StoreEvent::AgentsChanged { key },
             Self::Resync => return None,
         })
     }

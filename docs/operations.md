@@ -629,6 +629,11 @@ See [Creating agents](guides/creating-agents.md) for what to put in a charter.
 
 ## Upgrade notes
 
+### Quarantine
+
+- **The SQL stores migrate on start** to SQLite schema version 4 and PostgreSQL migration 4 (three columns on `agents`).
+- **Sidecars of an older version ignore `ControlMessage.quarantine`**, as they ignore any message they do not know. Upgrade the sidecars before you rely on a quarantine.
+
 ### Evidence ledger
 
 - **The SQL stores migrate on start** to SQLite schema version 3 and PostgreSQL migration 3 (the `ledger_*` tables).
@@ -961,6 +966,17 @@ The registry (and, in later releases, the evidence ledger, approvals and risk) l
 ```bash
 sqlite3 -readonly /var/lib/agentsc/embassy.db "SELECT id, namespace, service, name, status FROM agents ORDER BY namespace, service, name"
 ```
+
+### Quarantining an agent
+
+An admin can stop an agent at once without editing its charter:
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "X-Agentsc-CSRF: 1" -H "Content-Type: application/json" \
+  -d '{"reason":"suspected prompt injection, under review"}' https://embassy/api/v1/agents/$AGENT_ID/quarantine
+```
+
+Its sidecars refuse every invocation (`403`, rule `quarantine.active`) and every further tool call of its runs in flight, within the time a push takes. Other agents of the service go on. Find the agent's id with `GET /api/v1/agents?service=<svc>`. Lift it with `POST /api/v1/agents/$AGENT_ID/release`; nothing else does. Both are in the control-plane audit (`agent_quarantined`, `agent_released`). `agentsc logs <svc> --rule quarantine.active` shows what was refused.
 
 ### The evidence ledger
 

@@ -24,13 +24,15 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n#agentsc/v1alpha1/controlplane.proto\x12\x10\x61gentsc.v1alpha1\"\xb9\x02\n\x0eSidecarMessage\x12(\n\x05hello\x18\x01 \x01(\x0b\x32\x17.agentsc.v1alpha1.HelloH\x00\x12\x30\n\theartbeat\x18\x02 \x01(\x0b\x32\x1b.agentsc.v1alpha1.HeartbeatH\x00\x12-\n\x05\x61udit\x18\x03 \x01(\x0b\x32\x1c.agentsc.v1alpha1.AuditBatchH\x00\x12*\n\x03\x61\x63k\x18\x04 \x01(\x0b\x32\x1b.agentsc.v1alpha1.ConfigAckH\x00\x12\x36\n\x08proposal\x18\x05 \x01(\x0b\x32\".agentsc.v1alpha1.LearningProposalH\x00\x12\x31\n\nspan_start\x18\x06 \x01(\x0b\x32\x1b.agentsc.v1alpha1.SpanStartH\x00\x42\x05\n\x03msg\"\xf2\x01\n\x05Hello\x12\x0f\n\x07service\x18\x01 \x01(\t\x12\x11\n\tnamespace\x18\x02 \x01(\t\x12\x0b\n\x03pod\x18\x03 \x01(\t\x12\x17\n\x0fsidecar_version\x18\x04 \x01(\t\x12\x15\n\rcharter_epoch\x18\x05 \x01(\t\x12\x17\n\x0f\x63harter_version\x18\x06 \x01(\t\x12\x14\n\x0c\x63harter_yaml\x18\x07 \x01(\t\x12\x10\n\x08\x61pp_port\x18\x08 \x01(\r\x12\x11\n\tmesh_port\x18\t \x01(\r\x12\x1c\n\x14\x63harter_schema_level\x18\n \x01(\r\x12\x16\n\x0ememory_version\x18\x0b \x01(\t\"z\n\tHeartbeat\x12\x0b\n\x03seq\x18\x01 \x01(\x04\x12\x15\n\rruntime_ready\x18\x02 \x01(\x08\x12\x17\n\x0f\x63harter_version\x18\x03 \x01(\t\x12\x15\n\raudit_dropped\x18\x04 \x01(\x04\x12\x19\n\x11\x63\x65rt_expires_in_s\x18\x05 \x01(\x03\"\"\n\nAuditBatch\x12\x14\n\x0crecords_json\x18\x01 \x03(\t\"Y\n\tConfigAck\x12\r\n\x05\x65poch\x18\x01 \x01(\t\x12\x0f\n\x07version\x18\x02 \x01(\t\x12\x0f\n\x07\x61pplied\x18\x03 \x01(\x08\x12\r\n\x05\x65rror\x18\x04 \x01(\t\x12\x0c\n\x04kind\x18\x05 \x01(\t\"\xcc\x01\n\tSpanStart\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x10\n\x08trace_id\x18\x02 \x01(\t\x12\x0f\n\x07span_id\x18\x03 \x01(\t\x12\x16\n\x0eparent_span_id\x18\x04 \x01(\t\x12\x0c\n\x04kind\x18\x05 \x01(\t\x12\r\n\x05\x61gent\x18\x06 \x01(\t\x12\x0e\n\x06\x63\x61ller\x18\x07 \x01(\t\x12\x14\n\x0c\x63\x61ller_agent\x18\x08 \x01(\t\x12\x0e\n\x06\x63\x61llee\x18\t \x01(\t\x12\x11\n\tdirection\x18\n \x01(\t\x12\n\n\x02ts\x18\x0b \x01(\t\"\x89\x01\n\x10LearningProposal\x12\x11\n\tdedup_key\x18\x01 \x01(\t\x12\r\n\x05\x61gent\x18\x02 \x01(\t\x12\x0c\n\x04note\x18\x03 \x01(\t\x12\x11\n\trationale\x18\x04 \x01(\t\x12\x12\n\nrequest_id\x18\x05 \x01(\t\x12\x10\n\x08trace_id\x18\x06 \x01(\t\x12\x0c\n\x04\x61uto\x18\x07 \x01(\x08\"\xae\x01\n\x0e\x43ontrolMessage\x12\x32\n\x07\x63harter\x18\x01 \x01(\x0b\x32\x1f.agentsc.v1alpha1.CharterUpdateH\x00\x12\x30\n\x06memory\x18\x02 \x01(\x0b\x32\x1e.agentsc.v1alpha1.MemoryUpdateH\x00\x12/\n\tagent_ids\x18\x03 \x01(\x0b\x32\x1a.agentsc.v1alpha1.AgentIdsH\x00\x42\x05\n\x03msg\"h\n\x08\x41gentIds\x12\x30\n\x03ids\x18\x01 \x03(\x0b\x32#.agentsc.v1alpha1.AgentIds.IdsEntry\x1a*\n\x08IdsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"E\n\rCharterUpdate\x12\r\n\x05\x65poch\x18\x01 \x01(\t\x12\x0f\n\x07version\x18\x02 \x01(\t\x12\x14\n\x0c\x63harter_yaml\x18\x03 \x01(\t\"\x8b\x01\n\x04Note\x12\n\n\x02id\x18\x01 \x01(\t\x12\x0c\n\x04text\x18\x02 \x01(\t\x12\x0e\n\x06source\x18\x03 \x01(\t\x12\x12\n\nrequest_id\x18\x04 \x01(\t\x12\x10\n\x08trace_id\x18\x05 \x01(\t\x12\x13\n\x0b\x61pproved_by\x18\x06 \x01(\t\x12\n\n\x02ts\x18\x07 \x01(\t\x12\x12\n\nexpires_at\x18\x08 \x01(\t\"\xa6\x01\n\x0cMemoryUpdate\x12\x0f\n\x07version\x18\x01 \x01(\t\x12:\n\x06\x61gents\x18\x02 \x03(\x0b\x32*.agentsc.v1alpha1.MemoryUpdate.AgentsEntry\x1aI\n\x0b\x41gentsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12)\n\x05value\x18\x02 \x01(\x0b\x32\x1a.agentsc.v1alpha1.NoteList:\x02\x38\x01\"1\n\x08NoteList\x12%\n\x05notes\x18\x01 \x03(\x0b\x32\x16.agentsc.v1alpha1.Note\"w\n\x12\x43\x65rtificateRequest\x12\x0f\n\x07\x63sr_pem\x18\x01 \x01(\t\x12\x18\n\x10kubernetes_token\x18\x02 \x01(\t\x12\x12\n\njoin_token\x18\x03 \x01(\t\x12\x11\n\tnamespace\x18\x04 \x01(\t\x12\x0f\n\x07service\x18\x05 \x01(\t\"K\n\x13\x43\x65rtificateResponse\x12\x10\n\x08\x63\x65rt_pem\x18\x01 \x01(\t\x12\x0e\n\x06\x63\x61_pem\x18\x02 \x01(\t\x12\x12\n\nexpires_at\x18\x03 \x01(\t2a\n\x0c\x43ontrolPlane\x12Q\n\x07\x43onnect\x12 .agentsc.v1alpha1.SidecarMessage\x1a .agentsc.v1alpha1.ControlMessage(\x01\x30\x01\x32w\n\x14\x43\x65rtificateAuthority\x12_\n\x10IssueCertificate\x12$.agentsc.v1alpha1.CertificateRequest\x1a%.agentsc.v1alpha1.CertificateResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n#agentsc/v1alpha1/controlplane.proto\x12\x10\x61gentsc.v1alpha1\"\xb9\x02\n\x0eSidecarMessage\x12(\n\x05hello\x18\x01 \x01(\x0b\x32\x17.agentsc.v1alpha1.HelloH\x00\x12\x30\n\theartbeat\x18\x02 \x01(\x0b\x32\x1b.agentsc.v1alpha1.HeartbeatH\x00\x12-\n\x05\x61udit\x18\x03 \x01(\x0b\x32\x1c.agentsc.v1alpha1.AuditBatchH\x00\x12*\n\x03\x61\x63k\x18\x04 \x01(\x0b\x32\x1b.agentsc.v1alpha1.ConfigAckH\x00\x12\x36\n\x08proposal\x18\x05 \x01(\x0b\x32\".agentsc.v1alpha1.LearningProposalH\x00\x12\x31\n\nspan_start\x18\x06 \x01(\x0b\x32\x1b.agentsc.v1alpha1.SpanStartH\x00\x42\x05\n\x03msg\"\xf2\x01\n\x05Hello\x12\x0f\n\x07service\x18\x01 \x01(\t\x12\x11\n\tnamespace\x18\x02 \x01(\t\x12\x0b\n\x03pod\x18\x03 \x01(\t\x12\x17\n\x0fsidecar_version\x18\x04 \x01(\t\x12\x15\n\rcharter_epoch\x18\x05 \x01(\t\x12\x17\n\x0f\x63harter_version\x18\x06 \x01(\t\x12\x14\n\x0c\x63harter_yaml\x18\x07 \x01(\t\x12\x10\n\x08\x61pp_port\x18\x08 \x01(\r\x12\x11\n\tmesh_port\x18\t \x01(\r\x12\x1c\n\x14\x63harter_schema_level\x18\n \x01(\r\x12\x16\n\x0ememory_version\x18\x0b \x01(\t\"z\n\tHeartbeat\x12\x0b\n\x03seq\x18\x01 \x01(\x04\x12\x15\n\rruntime_ready\x18\x02 \x01(\x08\x12\x17\n\x0f\x63harter_version\x18\x03 \x01(\t\x12\x15\n\raudit_dropped\x18\x04 \x01(\x04\x12\x19\n\x11\x63\x65rt_expires_in_s\x18\x05 \x01(\x03\"\"\n\nAuditBatch\x12\x14\n\x0crecords_json\x18\x01 \x03(\t\"Y\n\tConfigAck\x12\r\n\x05\x65poch\x18\x01 \x01(\t\x12\x0f\n\x07version\x18\x02 \x01(\t\x12\x0f\n\x07\x61pplied\x18\x03 \x01(\x08\x12\r\n\x05\x65rror\x18\x04 \x01(\t\x12\x0c\n\x04kind\x18\x05 \x01(\t\"\xcc\x01\n\tSpanStart\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x10\n\x08trace_id\x18\x02 \x01(\t\x12\x0f\n\x07span_id\x18\x03 \x01(\t\x12\x16\n\x0eparent_span_id\x18\x04 \x01(\t\x12\x0c\n\x04kind\x18\x05 \x01(\t\x12\r\n\x05\x61gent\x18\x06 \x01(\t\x12\x0e\n\x06\x63\x61ller\x18\x07 \x01(\t\x12\x14\n\x0c\x63\x61ller_agent\x18\x08 \x01(\t\x12\x0e\n\x06\x63\x61llee\x18\t \x01(\t\x12\x11\n\tdirection\x18\n \x01(\t\x12\n\n\x02ts\x18\x0b \x01(\t\"\x89\x01\n\x10LearningProposal\x12\x11\n\tdedup_key\x18\x01 \x01(\t\x12\r\n\x05\x61gent\x18\x02 \x01(\t\x12\x0c\n\x04note\x18\x03 \x01(\t\x12\x11\n\trationale\x18\x04 \x01(\t\x12\x12\n\nrequest_id\x18\x05 \x01(\t\x12\x10\n\x08trace_id\x18\x06 \x01(\t\x12\x0c\n\x04\x61uto\x18\x07 \x01(\x08\"\xe2\x01\n\x0e\x43ontrolMessage\x12\x32\n\x07\x63harter\x18\x01 \x01(\x0b\x32\x1f.agentsc.v1alpha1.CharterUpdateH\x00\x12\x30\n\x06memory\x18\x02 \x01(\x0b\x32\x1e.agentsc.v1alpha1.MemoryUpdateH\x00\x12/\n\tagent_ids\x18\x03 \x01(\x0b\x32\x1a.agentsc.v1alpha1.AgentIdsH\x00\x12\x32\n\nquarantine\x18\x04 \x01(\x0b\x32\x1c.agentsc.v1alpha1.QuarantineH\x00\x42\x05\n\x03msg\"u\n\nQuarantine\x12\x38\n\x06\x61gents\x18\x01 \x03(\x0b\x32(.agentsc.v1alpha1.Quarantine.AgentsEntry\x1a-\n\x0b\x41gentsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"h\n\x08\x41gentIds\x12\x30\n\x03ids\x18\x01 \x03(\x0b\x32#.agentsc.v1alpha1.AgentIds.IdsEntry\x1a*\n\x08IdsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"E\n\rCharterUpdate\x12\r\n\x05\x65poch\x18\x01 \x01(\t\x12\x0f\n\x07version\x18\x02 \x01(\t\x12\x14\n\x0c\x63harter_yaml\x18\x03 \x01(\t\"\x8b\x01\n\x04Note\x12\n\n\x02id\x18\x01 \x01(\t\x12\x0c\n\x04text\x18\x02 \x01(\t\x12\x0e\n\x06source\x18\x03 \x01(\t\x12\x12\n\nrequest_id\x18\x04 \x01(\t\x12\x10\n\x08trace_id\x18\x05 \x01(\t\x12\x13\n\x0b\x61pproved_by\x18\x06 \x01(\t\x12\n\n\x02ts\x18\x07 \x01(\t\x12\x12\n\nexpires_at\x18\x08 \x01(\t\"\xa6\x01\n\x0cMemoryUpdate\x12\x0f\n\x07version\x18\x01 \x01(\t\x12:\n\x06\x61gents\x18\x02 \x03(\x0b\x32*.agentsc.v1alpha1.MemoryUpdate.AgentsEntry\x1aI\n\x0b\x41gentsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12)\n\x05value\x18\x02 \x01(\x0b\x32\x1a.agentsc.v1alpha1.NoteList:\x02\x38\x01\"1\n\x08NoteList\x12%\n\x05notes\x18\x01 \x03(\x0b\x32\x16.agentsc.v1alpha1.Note\"w\n\x12\x43\x65rtificateRequest\x12\x0f\n\x07\x63sr_pem\x18\x01 \x01(\t\x12\x18\n\x10kubernetes_token\x18\x02 \x01(\t\x12\x12\n\njoin_token\x18\x03 \x01(\t\x12\x11\n\tnamespace\x18\x04 \x01(\t\x12\x0f\n\x07service\x18\x05 \x01(\t\"K\n\x13\x43\x65rtificateResponse\x12\x10\n\x08\x63\x65rt_pem\x18\x01 \x01(\t\x12\x0e\n\x06\x63\x61_pem\x18\x02 \x01(\t\x12\x12\n\nexpires_at\x18\x03 \x01(\t2a\n\x0c\x43ontrolPlane\x12Q\n\x07\x43onnect\x12 .agentsc.v1alpha1.SidecarMessage\x1a .agentsc.v1alpha1.ControlMessage(\x01\x30\x01\x32w\n\x14\x43\x65rtificateAuthority\x12_\n\x10IssueCertificate\x12$.agentsc.v1alpha1.CertificateRequest\x1a%.agentsc.v1alpha1.CertificateResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'agentsc.v1alpha1.controlplane_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
+  _globals['_QUARANTINE_AGENTSENTRY']._loaded_options = None
+  _globals['_QUARANTINE_AGENTSENTRY']._serialized_options = b'8\001'
   _globals['_AGENTIDS_IDSENTRY']._loaded_options = None
   _globals['_AGENTIDS_IDSENTRY']._serialized_options = b'8\001'
   _globals['_MEMORYUPDATE_AGENTSENTRY']._loaded_options = None
@@ -50,27 +52,31 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_LEARNINGPROPOSAL']._serialized_start=1077
   _globals['_LEARNINGPROPOSAL']._serialized_end=1214
   _globals['_CONTROLMESSAGE']._serialized_start=1217
-  _globals['_CONTROLMESSAGE']._serialized_end=1391
-  _globals['_AGENTIDS']._serialized_start=1393
-  _globals['_AGENTIDS']._serialized_end=1497
-  _globals['_AGENTIDS_IDSENTRY']._serialized_start=1455
-  _globals['_AGENTIDS_IDSENTRY']._serialized_end=1497
-  _globals['_CHARTERUPDATE']._serialized_start=1499
-  _globals['_CHARTERUPDATE']._serialized_end=1568
-  _globals['_NOTE']._serialized_start=1571
-  _globals['_NOTE']._serialized_end=1710
-  _globals['_MEMORYUPDATE']._serialized_start=1713
-  _globals['_MEMORYUPDATE']._serialized_end=1879
-  _globals['_MEMORYUPDATE_AGENTSENTRY']._serialized_start=1806
-  _globals['_MEMORYUPDATE_AGENTSENTRY']._serialized_end=1879
-  _globals['_NOTELIST']._serialized_start=1881
-  _globals['_NOTELIST']._serialized_end=1930
-  _globals['_CERTIFICATEREQUEST']._serialized_start=1932
-  _globals['_CERTIFICATEREQUEST']._serialized_end=2051
-  _globals['_CERTIFICATERESPONSE']._serialized_start=2053
-  _globals['_CERTIFICATERESPONSE']._serialized_end=2128
-  _globals['_CONTROLPLANE']._serialized_start=2130
-  _globals['_CONTROLPLANE']._serialized_end=2227
-  _globals['_CERTIFICATEAUTHORITY']._serialized_start=2229
-  _globals['_CERTIFICATEAUTHORITY']._serialized_end=2348
+  _globals['_CONTROLMESSAGE']._serialized_end=1443
+  _globals['_QUARANTINE']._serialized_start=1445
+  _globals['_QUARANTINE']._serialized_end=1562
+  _globals['_QUARANTINE_AGENTSENTRY']._serialized_start=1517
+  _globals['_QUARANTINE_AGENTSENTRY']._serialized_end=1562
+  _globals['_AGENTIDS']._serialized_start=1564
+  _globals['_AGENTIDS']._serialized_end=1668
+  _globals['_AGENTIDS_IDSENTRY']._serialized_start=1626
+  _globals['_AGENTIDS_IDSENTRY']._serialized_end=1668
+  _globals['_CHARTERUPDATE']._serialized_start=1670
+  _globals['_CHARTERUPDATE']._serialized_end=1739
+  _globals['_NOTE']._serialized_start=1742
+  _globals['_NOTE']._serialized_end=1881
+  _globals['_MEMORYUPDATE']._serialized_start=1884
+  _globals['_MEMORYUPDATE']._serialized_end=2050
+  _globals['_MEMORYUPDATE_AGENTSENTRY']._serialized_start=1977
+  _globals['_MEMORYUPDATE_AGENTSENTRY']._serialized_end=2050
+  _globals['_NOTELIST']._serialized_start=2052
+  _globals['_NOTELIST']._serialized_end=2101
+  _globals['_CERTIFICATEREQUEST']._serialized_start=2103
+  _globals['_CERTIFICATEREQUEST']._serialized_end=2222
+  _globals['_CERTIFICATERESPONSE']._serialized_start=2224
+  _globals['_CERTIFICATERESPONSE']._serialized_end=2299
+  _globals['_CONTROLPLANE']._serialized_start=2301
+  _globals['_CONTROLPLANE']._serialized_end=2398
+  _globals['_CERTIFICATEAUTHORITY']._serialized_start=2400
+  _globals['_CERTIFICATEAUTHORITY']._serialized_end=2519
 # @@protoc_insertion_point(module_scope)

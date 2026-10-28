@@ -15,7 +15,7 @@ use agentsc_common::authz::Verdict;
 use agentsc_proto::control_plane_client::ControlPlaneClient;
 use agentsc_proto::{
     AgentIds, AuditBatch, CharterUpdate, ConfigAck, ControlMessage, Heartbeat, Hello, MemoryUpdate,
-    SidecarMessage, control_message, sidecar_message,
+    Quarantine, SidecarMessage, control_message, sidecar_message,
 };
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -209,6 +209,26 @@ pub fn apply_agent_ids(state: &AppState, u: AgentIds) {
     state.audit.writer().set_agent_ids(ids);
 }
 
+/// Install the quarantined agents (CONTRACT.md §5.3): from now on their invocations and the tool
+/// calls of their runs are refused. A full replacement; nothing is acknowledged.
+pub fn apply_quarantine(state: &AppState, u: Quarantine) {
+    let now: std::collections::HashMap<String, String> = u.agents.into_iter().collect();
+    let before = state.quarantined();
+    for (agent, why) in &now {
+        if !before.contains_key(agent) {
+            tracing::warn!(
+                agent,
+                reason = why,
+                "agent quarantined by the control plane"
+            );
+        }
+    }
+    for agent in before.keys().filter(|a| !now.contains_key(*a)) {
+        tracing::info!(agent, "agent released by the control plane");
+    }
+    state.set_quarantined(now);
+}
+
 /// The reply to one control message, if any.
 pub fn handle(state: &AppState, msg: ControlMessage) -> Option<SidecarMessage> {
     match msg.msg {
@@ -216,6 +236,10 @@ pub fn handle(state: &AppState, msg: ControlMessage) -> Option<SidecarMessage> {
         Some(control_message::Msg::Memory(u)) => Some(apply_memory_update(state, &u)),
         Some(control_message::Msg::AgentIds(u)) => {
             apply_agent_ids(state, u);
+            None
+        }
+        Some(control_message::Msg::Quarantine(u)) => {
+            apply_quarantine(state, u);
             None
         }
         None => {

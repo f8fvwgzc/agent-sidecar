@@ -54,10 +54,17 @@ mints it, and how the rest of attache learns it.
 9. **Aliases for imported names.** nexc-engine names agents `agent://<workspace>/<name>`;
    such names become aliases (admin, audited), so imported traces resolve.
 
+10. **Quarantine is the registry's, not the charter's.** A quarantine is a state of one agent
+    (when, why, by whom), set and lifted by an admin (#33). It is not a charter edit, so it
+    needs no charter version or schema level, and the sidecars refuse everything the agent does
+    (nexc-engine refuses all of a quarantined agent's calls, not some). It is pushed as its own
+    `ControlMessage` variant, a full replacement per service, and every replica learns of a
+    change through PostgreSQL's `NOTIFY` (a new store event), so sidecars connected anywhere
+    get it. A run in flight is stopped at its next tool call, and a release is manual only.
+
 ## What it does not do yet
 
 - Create and disable the principal in Tutela (`tutela.admin.v1`) and delegated agent tokens
   (RFC 8693): both need `tutelad`, Tutela phase B (#24, #25). The audit records of every
   registration, retirement and reactivation are what a later sync replays.
-- Quarantine is step 4 ([agentsecops-merge.md](agentsecops-merge.md) §6); it adds to the
-  registry, not to the charter.
+- The risk score that quarantines by itself (#34) and human approvals (#35).

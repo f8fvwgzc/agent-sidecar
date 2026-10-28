@@ -231,3 +231,108 @@ pub async fn delete_alias(
     .await;
     Ok(Json(result?).into_response())
 }
+
+/// The body of `POST /agents/{id}/quarantine`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuarantineBody {
+    pub reason: String,
+}
+
+async fn audit_quarantine(
+    hub: &Hub,
+    action: CpAction,
+    ident: &Identity,
+    agent: &AgentEntry,
+    detail: &str,
+    result: &Result<AgentEntry, Fail>,
+) {
+    let res = match result {
+        Ok(_) => CpResult::Ok,
+        Err(f) if f.code() == ErrorCode::Invalid => CpResult::Invalid,
+        Err(_) => CpResult::Error,
+    };
+    let mut rec = CpAudit::entry(action, &ident.actor(), res);
+    rec.namespace = Some(agent.namespace.clone());
+    rec.service = Some(agent.service.clone());
+    rec.agent = Some(agent.name.clone());
+    rec.reason = Some(match result {
+        Ok(_) => format!("{}: {detail}", agent.principal),
+        Err(f) => format!("{}: {detail}: {}", agent.principal, f.reason()),
+    });
+    hub.cp_audit.record(rec).await;
+}
+
+/// `POST /agents/{id}/quarantine` `{reason}`: admin. The agent's sidecars refuse everything it
+/// does from the push on. 409 `version_conflict` when it is quarantined already.
+pub async fn quarantine(
+    State(hub): State<Arc<Hub>>,
+    Authed(ident): Authed,
+    Path(id): Path<String>,
+    JsonBody(body): JsonBody<QuarantineBody>,
+) -> Result<Response, Fail> {
+    require_role(&ident, Role::Admin)?;
+    let agent = visible_agent(&hub, &ident, &id).await?;
+    let result = secops(&hub)?
+        .quarantine_agent(
+            &id,
+            &body.reason,
+            &ident.actor(),
+            &crate::cp_audit::now_ts(),
+        )
+        .await
+        .map_err(|e| match e {
+            StoreError::Conflict { current } => {
+                Fail::conflict(current).with_detail(format!("agent {id} is quarantined already"))
+            }
+            e => Fail::store(e, &format!("no agent {id}")),
+        });
+    audit_quarantine(
+        &hub,
+        CpAction::AgentQuarantined,
+        &ident,
+        &agent,
+        body.reason.trim(),
+        &result,
+    )
+    .await;
+    let a = result?;
+    crate::controlplane::push_agents(
+        &hub,
+        &crate::store::ServiceKey::new(&a.namespace, &a.service),
+    )
+    .await;
+    Ok(Json(a).into_response())
+}
+
+/// `POST /agents/{id}/release`: admin. 409 when the agent is not quarantined.
+pub async fn release(
+    State(hub): State<Arc<Hub>>,
+    Authed(ident): Authed,
+    Path(id): Path<String>,
+) -> Result<Response, Fail> {
+    require_role(&ident, Role::Admin)?;
+    let agent = visible_agent(&hub, &ident, &id).await?;
+    let result = secops(&hub)?.release_agent(&id).await.map_err(|e| match e {
+        StoreError::Conflict { current } => {
+            Fail::conflict(current).with_detail(format!("agent {id} is not quarantined"))
+        }
+        e => Fail::store(e, &format!("no agent {id}")),
+    });
+    audit_quarantine(
+        &hub,
+        CpAction::AgentReleased,
+        &ident,
+        &agent,
+        "released",
+        &result,
+    )
+    .await;
+    let a = result?;
+    crate::controlplane::push_agents(
+        &hub,
+        &crate::store::ServiceKey::new(&a.namespace, &a.service),
+    )
+    .await;
+    Ok(Json(a).into_response())
+}

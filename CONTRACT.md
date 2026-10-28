@@ -1038,6 +1038,17 @@ Design: [docs/design/agent-registry.md](docs/design/agent-registry.md).
   principal with its active agents), `POST /agents/{id}/aliases` `{"alias"}` and `DELETE
   /agents/{id}/aliases?alias=` (admin). An agent outside the caller's namespaces is `404`;
   without a registry the answer is `503 secops_unavailable`.
+- **Quarantine.** An admin quarantines an agent (`POST /agents/{id}/quarantine` `{"reason"}`,
+  not blank, at most 2000 characters) and releases it (`POST /agents/{id}/release`); a second
+  quarantine, or a release of an agent that is not quarantined, is `409`. Both are audited
+  (`agent_quarantined`, `agent_released`), and the entry carries `quarantine: {at, reason, by}`
+  while it lasts (SQL migration 4). embassy sends `ControlMessage.quarantine` (`Quarantine`: agent
+  name → reason, a full replacement; after `AgentIds` on every stream, and on every change, to
+  the sidecars of every replica). A sidecar refuses every invocation of a quarantined agent
+  (`403`, `status: denied`, rule `quarantine.active`, the reason; an `agent_invocation` deny
+  record) and every tool call of its runs in flight (`PERMISSION_DENIED`, `x-agentsc-rule:
+  quarantine.active`, a `tool_call` deny record). Other agents of the service go on. Only a
+  release lifts it.
 - **Not yet:** creating and disabling the principal in Tutela (`tutela.admin.v1`, Tutela
   phase B, #24) and delegated agent tokens (RFC 8693 token exchange at `tutelad`, #25); both
   wait for `tutelad`.

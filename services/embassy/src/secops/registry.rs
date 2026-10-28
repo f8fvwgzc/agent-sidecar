@@ -66,7 +66,7 @@ pub async fn sync_service(hub: &Hub, key: &ServiceKey, actor: &Actor) {
             tracing::error!(service = %key, error = %e, "agent registry: sync failed");
         }
     }
-    crate::controlplane::push_agent_ids(hub, key).await;
+    crate::controlplane::push_agents(hub, key).await;
 }
 
 /// Sync every service with a stored charter, and retire the agents of services that have none

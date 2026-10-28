@@ -939,6 +939,10 @@ pub enum CpAction {
     AgentAliasDelete,
     /// A run's evidence bundle was exported (`reason`: the run, its entries and seals).
     LedgerExport,
+    /// An agent was quarantined (`reason`: `<principal>: <why>`).
+    AgentQuarantined,
+    /// An agent's quarantine was lifted.
+    AgentReleased,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

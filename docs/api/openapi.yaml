@@ -1035,6 +1035,84 @@ paths:
         "503":
           $ref: "#/components/responses/SecopsUnavailable"
 
+  /agents/{id}/quarantine:
+    parameters:
+      - $ref: "#/components/parameters/AgentId"
+    post:
+      tags: [registry]
+      operationId: quarantineAgent
+      summary: Quarantine the agent; its sidecars refuse every invocation and tool call of it.
+      description: |
+        `reason` is required (not blank, at most 2000 characters). 409 when the agent is
+        quarantined already. Audited as `agent_quarantined`. The quarantine reaches the sidecars
+        of every replica (`ControlMessage.quarantine`).
+      x-required-role: admin
+      parameters:
+        - $ref: "#/components/parameters/Csrf"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  maxLength: 2000
+      responses:
+        "200":
+          description: The agent, quarantined.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegistryAgent"
+        "400":
+          $ref: "#/components/responses/Invalid"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+        "503":
+          $ref: "#/components/responses/SecopsUnavailable"
+
+  /agents/{id}/release:
+    parameters:
+      - $ref: "#/components/parameters/AgentId"
+    post:
+      tags: [registry]
+      operationId: releaseAgent
+      summary: Lift the agent's quarantine. 409 when it is not quarantined. Audited as `agent_released`.
+      x-required-role: admin
+      parameters:
+        - $ref: "#/components/parameters/Csrf"
+      responses:
+        "200":
+          description: The agent, released.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegistryAgent"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+        "503":
+          $ref: "#/components/responses/SecopsUnavailable"
+
   /principals:
     get:
       tags: [registry]
@@ -2985,7 +3063,7 @@ components:
     RegistryAgent:
       type: object
       description: One agent of the registry (CONTRACT.md §5.3).
-      required: [id, principal, namespace, service, name, status, created_at, updated_at, aliases]
+      required: [id, principal, namespace, service, name, status, created_at, updated_at, aliases, quarantine]
       properties:
         id:
           type: string
@@ -3011,6 +3089,19 @@ components:
           type: array
           items:
             type: string
+        quarantine:
+          description: Set while the agent is quarantined.
+          oneOf:
+            - type: "null"
+            - type: object
+              required: [at, reason, by]
+              properties:
+                at:
+                  type: string
+                reason:
+                  type: string
+                by:
+                  type: string
     ResolvedPrincipal:
       oneOf:
         - type: object
@@ -3269,6 +3360,8 @@ components:
             - agent_alias_put
             - agent_alias_delete
             - ledger_export
+            - agent_quarantined
+            - agent_released
         namespace:
           oneOf:
             - type: string

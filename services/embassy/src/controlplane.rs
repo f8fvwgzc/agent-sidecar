@@ -28,8 +28,8 @@ use agentsc_common::identity::SpiffeId;
 use agentsc_proto::control_plane_server::{ControlPlane, ControlPlaneServer};
 use agentsc_proto::{
     AgentIds, AuditBatch, CharterUpdate, ConfigAck, ControlMessage, Heartbeat, Hello,
-    LearningProposal, MemoryUpdate, NoteList, SidecarMessage, SpanStart, control_message,
-    sidecar_message,
+    LearningProposal, MemoryUpdate, NoteList, Quarantine, SidecarMessage, SpanStart,
+    control_message, sidecar_message,
 };
 use chrono::Utc;
 use futures::StreamExt;
@@ -378,13 +378,41 @@ pub async fn agent_ids_message(hub: &Hub, key: &ServiceKey) -> Option<ControlMes
     })
 }
 
-/// Push the agents' registry ids to every instance of `key`.
-pub async fn push_agent_ids(hub: &Hub, key: &ServiceKey) {
+/// The `Quarantine` of `key`'s agents (CONTRACT.md §5.3, an empty list when none is); `None`
+/// without a SecOps store or when the registry cannot be read now.
+pub async fn quarantine_message(hub: &Hub, key: &ServiceKey) -> Option<ControlMessage> {
+    let store = hub.secops()?;
+    let agents = store
+        .list_agents(&crate::secops::AgentFilter {
+            namespace: Some(key.namespace.clone()),
+            service: Some(key.service.clone()),
+            status: None,
+        })
+        .await
+        .ok()?;
+    Some(ControlMessage {
+        msg: Some(control_message::Msg::Quarantine(Quarantine {
+            agents: agents
+                .into_iter()
+                .filter_map(|a| a.quarantine.map(|q| (a.name, q.reason)))
+                .collect(),
+        })),
+    })
+}
+
+/// Push the agents' registry ids and their quarantines to every instance of `key`.
+pub async fn push_agents(hub: &Hub, key: &ServiceKey) {
     let outboxes = hub.registry.outboxes(key);
     if outboxes.is_empty() {
         return;
     }
-    if let Some(msg) = agent_ids_message(hub, key).await {
+    for msg in [
+        agent_ids_message(hub, key).await,
+        quarantine_message(hub, key).await,
+    ]
+    .into_iter()
+    .flatten()
+    {
         for o in &outboxes {
             send(o, msg.clone());
         }
@@ -398,7 +426,7 @@ pub async fn push_all(hub: &Hub) {
     for key in keys {
         push_charter(hub, &key).await;
         push_memory(hub, &key).await;
-        push_agent_ids(hub, &key).await;
+        push_agents(hub, &key).await;
     }
 }
 
@@ -441,6 +469,9 @@ async fn on_hello(
                 send(tx, memory_message(&doc));
             }
             if let Some(msg) = agent_ids_message(hub, key).await {
+                send(tx, msg);
+            }
+            if let Some(msg) = quarantine_message(hub, key).await {
                 send(tx, msg);
             }
         }

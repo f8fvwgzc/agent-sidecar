@@ -443,18 +443,34 @@ impl Sidecar {
             .unwrap();
     }
 
-    /// The next charter or memory message, or `None` after `wait`. `AgentIds` pushes (the agent
-    /// registry, tests/agent_registry.rs) are skipped: the tests that use this follow charters
-    /// and memory, and [`Sidecar::next_agent_ids`] reads them.
+    /// The next charter or memory message, or `None` after `wait`. `AgentIds` and `Quarantine`
+    /// pushes (the agent registry, tests/agent_registry.rs) are skipped: the tests that use this
+    /// follow charters and memory, and [`Sidecar::next_agent_ids`] and
+    /// [`Sidecar::next_quarantine`] read them.
     pub async fn next_within(&mut self, wait: Duration) -> Option<ControlMessage> {
         let deadline = tokio::time::Instant::now() + wait;
         loop {
             match tokio::time::timeout_at(deadline, self.rx.message()).await {
                 Ok(Ok(Some(ControlMessage {
-                    msg: Some(control_message::Msg::AgentIds(_)),
+                    msg:
+                        Some(control_message::Msg::AgentIds(_) | control_message::Msg::Quarantine(_)),
                 }))) => {}
                 Ok(Ok(m)) => return m,
                 _ => return None,
+            }
+        }
+    }
+
+    /// The next `Quarantine` push (agent name → reason); other messages are skipped.
+    pub async fn next_quarantine(&mut self) -> std::collections::HashMap<String, String> {
+        let deadline = tokio::time::Instant::now() + WAIT;
+        loop {
+            match tokio::time::timeout_at(deadline, self.rx.message()).await {
+                Ok(Ok(Some(ControlMessage {
+                    msg: Some(control_message::Msg::Quarantine(m)),
+                }))) => return m.agents,
+                Ok(Ok(Some(_))) => {}
+                other => panic!("no Quarantine push: {other:?}"),
             }
         }
     }

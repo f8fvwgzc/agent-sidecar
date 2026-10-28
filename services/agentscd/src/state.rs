@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use agentsc_charter::Charter;
+use agentsc_common::authz::Verdict;
 use agentsc_common::budget::Budgets;
 use agentsc_pki::TlsMaterial;
 use agentsc_proto::mesh_client::MeshClient;
@@ -100,7 +101,13 @@ pub struct AppState {
     pub state_dir: StateDir,
     /// The bound mesh port (`Hello.mesh_port`).
     pub mesh_port: AtomicU16,
+    /// Quarantined agents of this service, name → reason (`ControlMessage.quarantine`, CONTRACT.md
+    /// §5.3): their invocations and tool calls are refused.
+    pub(crate) quarantined: Mutex<HashMap<String, String>>,
 }
+
+/// The rule of a refusal because the agent is quarantined (CONTRACT.md §5.3).
+pub const RULE_QUARANTINE: &str = "quarantine.active";
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -120,6 +127,26 @@ fn read_charter(path: &std::path::Path) -> anyhow::Result<Option<(Charter, Strin
 }
 
 impl AppState {
+    /// Replace the quarantined agents (a full replacement from the control plane).
+    pub fn set_quarantined(&self, agents: HashMap<String, String>) {
+        *lock(&self.quarantined) = agents;
+    }
+
+    /// The quarantined agents, name → reason.
+    pub fn quarantined(&self) -> HashMap<String, String> {
+        lock(&self.quarantined).clone()
+    }
+
+    /// The refusal of anything `agent` does while it is quarantined.
+    pub fn quarantine_verdict(&self, agent: &str) -> Option<Verdict> {
+        lock(&self.quarantined).get(agent).map(|why| {
+            Verdict::deny(
+                RULE_QUARANTINE,
+                format!("agent {agent} is quarantined: {why}"),
+            )
+        })
+    }
+
     /// Everything but the listeners and tasks. Returns the start-up charter to apply (through
     /// the reload path, so it is audited like every other) and the charter-file error, if any.
     pub async fn build(
@@ -280,6 +307,7 @@ impl AppState {
             loaded: ArcSwapOption::empty(),
             apply_lock: Mutex::new(()),
             pending_memory: Mutex::new(pending_memory),
+            quarantined: Mutex::new(HashMap::new()),
             file_yaml: Mutex::new(file_text),
             tls: Arc::new(ArcSwapOption::from(tls.map(Arc::new))),
             cert_not_after,
