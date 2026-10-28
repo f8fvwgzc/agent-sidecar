@@ -49,6 +49,9 @@ enum Cmd {
     },
     /// Tail and pretty-print the audit log of a service's sidecar.
     Logs(LogsArgs),
+    /// Verify an evidence bundle offline (CONTRACT.md §6.3): exit 0 when it verifies, 1 when a
+    /// check fails, 2 when the bundle or the keys cannot be read.
+    Verify(VerifyArgs),
     /// Print the version.
     Version,
 }
@@ -109,6 +112,50 @@ struct LogsArgs {
     tail: u32,
 }
 
+#[derive(clap::Args)]
+struct VerifyArgs {
+    /// The bundle (`GET /api/v1/ledger/runs/{request_id}/bundle`), or "-" for stdin.
+    bundle: String,
+    /// The published keys: a JWKS file (`GET /.well-known/jwks.json` of embassy).
+    #[arg(long, conflicts_with = "key", required_unless_present = "key")]
+    keys: Option<std::path::PathBuf>,
+    /// One public key (hex, base64 or base64url), instead of a JWKS.
+    #[arg(long)]
+    key: Option<String>,
+    /// Print the report as JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+/// `agentsc verify`: the report, and 0 / 1; an unreadable bundle or key is an error (exit 2).
+fn verify(args: &VerifyArgs) -> anyhow::Result<bool> {
+    use anyhow::Context;
+    let text = if args.bundle == "-" {
+        std::io::read_to_string(std::io::stdin()).context("reading the bundle from stdin")?
+    } else {
+        std::fs::read_to_string(&args.bundle).with_context(|| format!("reading {}", args.bundle))?
+    };
+    let bundle: agentsc_ledger::Bundle =
+        serde_json::from_str(&text).context("the bundle is not an evidence bundle")?;
+    let keys = match (&args.keys, &args.key) {
+        (Some(path), _) => {
+            let t = std::fs::read_to_string(path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            serde_json::from_str::<agentsc_ledger::Jwks>(&t)
+                .with_context(|| format!("{} is not a JWKS", path.display()))?
+        }
+        (None, Some(k)) => agentsc_ledger::Jwks::single(&agentsc_ledger::parse_public_key(k)?),
+        (None, None) => anyhow::bail!("--keys or --key is required"),
+    };
+    let report = agentsc_ledger::verify_bundle(&bundle, &keys);
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print!("{}", report.text());
+    }
+    Ok(report.ok)
+}
+
 fn main() {
     let cli = Cli::parse();
     let code = match cli.cmd {
@@ -164,6 +211,14 @@ fn main() {
             Err(e) => {
                 eprintln!("error: {e}");
                 1
+            }
+        },
+        Cmd::Verify(args) => match verify(&args) {
+            Ok(true) => 0,
+            Ok(false) => 1,
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                2
             }
         },
         Cmd::Version => {

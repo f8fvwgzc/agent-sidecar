@@ -17,6 +17,7 @@ agentsc-charter = { path = "crates/agentsc-charter" }
 agentsc-common = { path = "crates/agentsc-common" }
 agentsc-pki = { path = "crates/agentsc-pki" }
 agentsc-otel = { path = "crates/agentsc-otel" }
+agentsc-ledger = { path = "crates/agentsc-ledger" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
