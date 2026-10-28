@@ -24,6 +24,67 @@ export function isModelName(s) {
   return typeof s === 'string' && s.length > 0 && utf8Length(s) <= 128 && !/[\s\u0000-\u001f\u007f]/.test(s);
 }
 
+/** Tool names the runtime offers on its own (CONTRACT §3.2 rule 3): no charter tool may take one. */
+export const RESERVED_TOOL_NAMES = ['load_skill', 'ask_caller'];
+
+// ---- form values -------------------------------------------------------------------------------
+
+/**
+ * A number field's text as {value} or {error}. Empty text is `undefined` (the field is left
+ * out, so the default applies).
+ */
+export function parseNumber(raw, { min, max, int = true } = {}) {
+  const s = String(raw).trim();
+  if (s === '') return { value: undefined };
+  const n = Number(s);
+  if (!Number.isFinite(n)) return { error: 'a number' };
+  if (int && !Number.isInteger(n)) return { error: 'a whole number' };
+  if (min !== undefined && n < min) return { error: `at least ${min}` };
+  if (max !== undefined && n > max) return { error: `at most ${max}` };
+  return { value: n };
+}
+
+/**
+ * The value a checkbox writes. A key that was absent stays absent while the box shows its
+ * default; a key that was set stays set, so an explicit `false` (or `true`) survives a toggle.
+ */
+export function checkboxValue(checked, had, defaultChecked = false) {
+  return !had && checked === defaultChecked ? undefined : checked;
+}
+
+// ---- agent practices (agent-practices design, Charter; CONTRACT §3.3) ---------------------------
+
+/** What an absent `agents[].practices` block or field means. */
+export const PRACTICES_DEFAULTS = { plan: true, clarify: 'blocking', max_questions: 5, brevity: 'lite', agent_brevity: 'full', auto_clarity: true };
+/** What the absent level-6 `learning` fields mean. */
+export const LEARNING_DEFAULTS = { require_evidence: true, contrast_runs: 5, scopes: ['invariant', 'domain'] };
+export const CLARIFY_LEVELS = ['never', 'blocking', 'always'];
+export const BREVITY_LEVELS = ['normal', 'lite', 'full', 'ultra'];
+export const LESSON_SCOPES = ['invariant', 'domain'];
+/** The ranges of CONTRACT §3.2 (level 6). */
+export const MAX_QUESTIONS = { min: 1, max: 10 };
+export const CONTRAST_RUNS = { min: 0, max: 20 };
+
+/** The lesson scopes a `learning.scopes` value keeps; absent keeps every scope. */
+export function scopesKept(value) {
+  if (!Array.isArray(value)) return [...LEARNING_DEFAULTS.scopes];
+  return LESSON_SCOPES.filter((s) => value.includes(s));
+}
+
+/**
+ * The `learning.scopes` value for the scopes checked, as {value} or {error}. At least one scope
+ * must stay (CONTRACT §3.2). Every scope checked is the default, so a charter that left the
+ * field out keeps it out; a charter that spelled it out keeps its own order while the same
+ * scopes stay checked.
+ */
+export function lessonScopes(checked, original) {
+  const picked = LESSON_SCOPES.filter((s) => checked.includes(s));
+  if (!picked.length) return { error: 'keep invariant, domain or both' };
+  if (Array.isArray(original) && original.length === picked.length && picked.every((s) => original.includes(s))) return { value: [...original] };
+  if (original === undefined && picked.length === LESSON_SCOPES.length) return { value: undefined };
+  return { value: picked };
+}
+
 /** Splits a graph node id (design §3) into its parts; null for anything else. */
 export function parseNodeId(id) {
   if (typeof id !== 'string') return null;
@@ -421,14 +482,14 @@ export function visibleGraph(graph, filters = {}) {
   };
 }
 
-/** A tool name for a new agent link: the agent name with `-` → `_`, made unique. */
+/** A tool name for a new agent link: the agent name with `-` → `_`, made unique and never reserved. */
 export function suggestToolName(agentName, existing = []) {
   let base = String(agentName || 'agent')
     .replace(/[^a-zA-Z0-9_-]/g, '_')
     .replace(/-/g, '_')
     .slice(0, 60);
   if (!base) base = 'agent';
-  const taken = new Set(existing);
+  const taken = new Set([...existing, ...RESERVED_TOOL_NAMES]);
   if (!taken.has(base)) return base;
   for (let i = 2; i < 1000; i++) {
     if (!taken.has(`${base}_${i}`)) return `${base}_${i}`;

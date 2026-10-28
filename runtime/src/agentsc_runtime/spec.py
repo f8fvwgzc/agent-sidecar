@@ -1,9 +1,11 @@
 """The agent entry the sidecar sends in ExecuteRequest.agent_spec_json (CONTRACT.md §3, after allowed_tools).
 
 Since v0.2 the sidecar also sends the agent's resolved skills, its harness and learning settings
-(defaults filled) and its active memory notes (CONTRACT.md §4.3, `Charter::runtime_spec`). Every
-model here forbids unknown fields, so a sidecar/runtime mismatch fails loudly instead of being
-ignored.
+(defaults filled) and its active memory notes (CONTRACT.md §4.3, `Charter::runtime_spec`). Since
+charter schema level 6 it always sends the agent's practices, every field filled, and three more
+learning fields (`require_evidence`, `contrast_runs`, `scopes`; agent-practices design). The
+defaults here are the Rust defaults, so a spec without them means the same thing. Every model here
+forbids unknown fields, so a sidecar/runtime mismatch fails loudly instead of being ignored.
 """
 
 from __future__ import annotations
@@ -69,8 +71,14 @@ class Harness(BaseModel):
     tool_result_max_chars: int = 20000
 
 
+LessonScope = Literal["invariant", "domain"]
+Brevity = Literal["normal", "lite", "full", "ultra"]
+
+
 class Learning(BaseModel):
-    """Governed learning (charter `agents[].learning`, defaults filled)."""
+    """Governed learning (charter `agents[].learning`, defaults filled). `require_evidence`: a lesson
+    must cite the steps of the run it rests on; `contrast_runs`: how many digests of earlier runs the
+    reflection sees (0 = none); `scopes`: the lesson scopes that are kept."""
 
     model_config = ConfigDict(extra="forbid")
     enabled: bool = False
@@ -80,6 +88,24 @@ class Learning(BaseModel):
     note_ttl_days: int = 7
     from_peers: bool = False
     max_proposals_per_hour: int = 10
+    require_evidence: bool = True
+    contrast_runs: int = 5
+    scopes: list[LessonScope] = Field(default_factory=lambda: ["invariant", "domain"])
+
+
+class Practices(BaseModel):
+    """The working practices (charter `agents[].practices`, defaults filled; agent-practices design).
+    Only switches and levels: the texts are the runtime's own, so these settings carry no
+    instructions. `brevity` applies when the service's own app (or another local caller without a
+    calling agent) is the caller, `agent_brevity` when another agent is."""
+
+    model_config = ConfigDict(extra="forbid")
+    plan: bool = True
+    clarify: Literal["never", "blocking", "always"] = "blocking"
+    max_questions: int = 5
+    brevity: Brevity = "lite"
+    agent_brevity: Brevity = "full"
+    auto_clarity: bool = True
 
 
 class MemoryNote(BaseModel):
@@ -92,6 +118,9 @@ class MemoryNote(BaseModel):
 
 # The name of the tool the runtime offers for skills that are not inline (no charter tool may use it).
 LOAD_SKILL_TOOL = "load_skill"
+# The name of the tool the runtime offers when practices.clarify is not `never`: calling it ends the run
+# with questions for the caller (no charter tool may use it).
+ASK_CALLER_TOOL = "ask_caller"
 
 
 class AgentSpec(BaseModel):
@@ -105,6 +134,7 @@ class AgentSpec(BaseModel):
     skills: list[Skill] = Field(default_factory=list)
     harness: Harness = Field(default_factory=Harness)
     learning: Learning = Field(default_factory=Learning)
+    practices: Practices = Field(default_factory=Practices)
     memory: list[MemoryNote] = Field(default_factory=list)
 
     @model_validator(mode="after")

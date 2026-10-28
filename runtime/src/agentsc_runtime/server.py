@@ -87,6 +87,10 @@ class RuntimeServicer(runtime_pb2_grpc.RuntimeServicer):
             ],
             rule=result.rule,
             reason=result.reason,
+            # A run that ended with ask_caller (status ok); the sidecar checks them as model output (§4.3).
+            questions=[
+                common_pb2.Question(question=q["question"], recommended=q["recommended"]) for q in result.questions
+            ],
         )
         # The reflection, if any, runs after this handler has returned its response (design §12).
         self._learner.after_run(

@@ -3,7 +3,7 @@
 
 import { h, clear, icon, ICONS, toast, pill } from './dom.js';
 import { Form, grid, button, errorBox, nextId } from './forms.js';
-import { DNS_LABEL, TOOL_NAME, isModelName, parseNodeId, roleAtLeast, suggestToolName, linkRequirement, agentNodeId, shortId } from './util.js';
+import { DNS_LABEL, TOOL_NAME, RESERVED_TOOL_NAMES, isModelName, parseNodeId, roleAtLeast, suggestToolName, linkRequirement, agentNodeId, shortId } from './util.js';
 
 /** Opens the shared dialog; returns {close, body, footer, setError}. */
 export function openDialog({ title, subtitle, body, actions = [], wide = false, onClose } = {}) {
@@ -187,7 +187,7 @@ export function openLinkDialog(app, from, to) {
       mono: true,
       required: true,
       emptyUnset: false,
-      validate: (v) => (!TOOL_NAME.test(v || '') ? 'letters, digits, _ and -, at most 64' : v === 'load_skill' ? 'reserved' : existingTools.includes(v) ? `${from.label} already has this tool` : null),
+      validate: (v) => (!TOOL_NAME.test(v || '') ? 'letters, digits, _ and -, at most 64' : RESERVED_TOOL_NAMES.includes(v) ? 'reserved' : existingTools.includes(v) ? `${from.label} already has this tool` : null),
     }),
     form.textarea('Description', draft, ['description'], { rows: 3, emptyUnset: false, validate: (v) => (v ? null : 'required'), hint: 'The model reads this to decide when to call the agent.' }),
     h(

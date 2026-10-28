@@ -2,7 +2,7 @@
 // the draft on input and reports validation errors to its Form.
 
 import { h } from './dom.js';
-import { getIn, setIn, pathString } from './util.js';
+import { getIn, setIn, pathString, parseNumber, checkboxValue } from './util.js';
 
 let uid = 0;
 export const nextId = (prefix = 'f') => `${prefix}-${++uid}`;
@@ -110,23 +110,7 @@ export class Form {
       inputmode: int ? 'numeric' : 'decimal',
     });
     const f = this.field(label, input, { hint, id: nextId() });
-    this.bind(
-      input,
-      draft,
-      keys,
-      (raw) => {
-        const s = String(raw).trim();
-        if (s === '') return { value: undefined };
-        const n = Number(s);
-        if (!Number.isFinite(n)) return { error: 'a number' };
-        if (int && !Number.isInteger(n)) return { error: 'a whole number' };
-        if (min !== undefined && n < min) return { error: `at least ${min}` };
-        if (max !== undefined && n > max) return { error: `at most ${max}` };
-        return { value: n };
-      },
-      null,
-      f.err,
-    );
+    this.bind(input, draft, keys, (raw) => parseNumber(raw, { min, max, int }), null, f.err);
     return f.el;
   }
 
@@ -142,14 +126,15 @@ export class Form {
     return f.el;
   }
 
-  checkbox(label, draft, keys, { hint, onToggle } = {}) {
+  /** A checkbox; `defaultChecked` is what an absent key means, and the box shows it. */
+  checkbox(label, draft, keys, { hint, onToggle, defaultChecked = false } = {}) {
     const v = getIn(draft, keys);
-    const box = h('input', { type: 'checkbox', checked: !!v });
+    const box = h('input', { type: 'checkbox', checked: v === undefined ? defaultChecked : !!v });
     const id = nextId();
     box.id = id;
-    // An explicit `false` stays explicit; an absent key stays absent when unchecked.
+    // An explicit value stays explicit; an absent key stays absent while the box shows its default.
     const had = v !== undefined;
-    this.bind(box, draft, keys, (raw) => ({ value: raw ? true : had ? false : undefined }), null, null);
+    this.bind(box, draft, keys, (raw) => ({ value: checkboxValue(raw, had, defaultChecked) }), null, null);
     if (onToggle) box.addEventListener('change', () => onToggle(box.checked));
     return h('div', { class: 'field check' }, h('label', { class: 'check-label', for: id }, box, h('span', { text: label })), hint ? h('span', { class: 'field-hint', text: hint }) : null);
   }

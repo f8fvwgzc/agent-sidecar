@@ -11,6 +11,7 @@ subsystem works; a record here says why it is the way it is.
 | [0001](0001-http3-for-the-console.md) | implemented | The console reaches the control plane over HTTP/3 (`embassy serve --http3`); every other hop stays on HTTP/2 or HTTP/1.1 |
 | [0002](0002-response-caching.md) | implemented | Two revalidating caches: `ETag`/`304` between the console and the control plane, and a `Cache-Control`-driven response cache on both ends of a service-to-service call |
 | [0003](0003-sqlite-store-schema.md) | implemented | `--store sqlite:<path>`: one database with primary and foreign keys, covering indexes on every query path, and triggers that enforce what the file layout only promised |
+| [0004](0004-agent-practices-on-by-default.md) | implemented | Agent practices (plan, clarify, brevity) on by default with fixed texts in the runtime; questions keep status `ok` and add a field; lessons cite their evidence; learning stays off by default |
 
 ## Format
 

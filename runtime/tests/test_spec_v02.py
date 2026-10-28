@@ -1,4 +1,5 @@
-"""agent_spec_json since v0.2: resolved skills, harness, learning and memory (CONTRACT.md §4.3)."""
+"""agent_spec_json since v0.2: resolved skills, harness, learning and memory (CONTRACT.md §4.3), and since
+level 6 the practices and the evidence-backed learning fields (agent-practices design)."""
 
 from __future__ import annotations
 
@@ -9,7 +10,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from agentsc_runtime.spec import LOAD_SKILL_TOOL, AgentSpec, Harness, Learning
+from agentsc_runtime.spec import ASK_CALLER_TOOL, LOAD_SKILL_TOOL, AgentSpec, Harness, Learning, Practices
 
 # Written by the Rust side (`Charter::runtime_spec`, kept in sync by a cargo test): the same file
 # is what the sidecar sends, so the two sides cannot drift apart unnoticed.
@@ -57,6 +58,33 @@ def test_the_sidecars_v02_spec_parses():
     ], "oldest first, as sent"
     assert spec.tool("get_order") is not None
     assert LOAD_SKILL_TOOL not in {t.name for t in spec.tools}
+    assert ASK_CALLER_TOOL not in {t.name for t in spec.tools}
+    assert spec.practices == Practices()
+    assert (spec.learning.require_evidence, spec.learning.contrast_runs, spec.learning.scopes) == (
+        True,
+        5,
+        ["invariant", "domain"],
+    )
+
+
+def test_the_golden_spec_sends_every_practice_and_learning_field():
+    data = example()
+    assert data["practices"] == {
+        "plan": True,
+        "clarify": "blocking",
+        "max_questions": 5,
+        "brevity": "lite",
+        "agent_brevity": "full",
+        "auto_clarity": True,
+    }
+    assert data["practices"] == Practices().model_dump()
+    learning = data["learning"]
+    assert {k: learning[k] for k in ("require_evidence", "contrast_runs", "scopes")} == {
+        "require_evidence": True,
+        "contrast_runs": 5,
+        "scopes": ["invariant", "domain"],
+    }
+    assert learning == {**Learning().model_dump(), "enabled": True}
 
 
 def test_inline_follows_the_size_rule_in_the_example():
@@ -86,10 +114,38 @@ def test_a_v01_spec_gets_the_v02_defaults():
     ) == (False, "review", 20, 500, 7, False, 10)
 
 
+def test_a_spec_without_the_level_4_fields_gets_the_rust_defaults():
+    # the defaults of PracticesSpec and LearningSpec::*_or_default in crates/agentsc-charter
+    spec = AgentSpec.model_validate(V01)
+    assert spec.practices == Practices()
+    assert (
+        spec.practices.plan,
+        spec.practices.clarify,
+        spec.practices.max_questions,
+        spec.practices.brevity,
+        spec.practices.agent_brevity,
+        spec.practices.auto_clarity,
+    ) == (True, "blocking", 5, "lite", "full", True)
+    assert (spec.learning.require_evidence, spec.learning.contrast_runs, spec.learning.scopes) == (
+        True,
+        5,
+        ["invariant", "domain"],
+    )
+    # each spec gets its own list
+    other = AgentSpec.model_validate(V01)
+    other.learning.scopes.append("domain")
+    assert spec.learning.scopes == ["invariant", "domain"]
+    assert ASK_CALLER_TOOL == "ask_caller"
+
+
 def test_partial_blocks_are_filled_with_defaults():
     spec = AgentSpec.model_validate({**V01, "harness": {"max_retries": 5}, "learning": {"enabled": True}})
     assert spec.harness.max_retries == 5 and spec.harness.request_timeout_seconds == 120
     assert spec.learning.enabled and spec.learning.max_notes == 20
+    spec = AgentSpec.model_validate({**V01, "practices": {"brevity": "normal"}, "learning": {"scopes": ["domain"]}})
+    assert spec.practices == Practices(brevity="normal")
+    assert spec.practices.plan and spec.practices.clarify == "blocking" and spec.practices.auto_clarity
+    assert spec.learning.scopes == ["domain"] and spec.learning.contrast_runs == 5
 
 
 @pytest.mark.parametrize(
@@ -100,6 +156,9 @@ def test_partial_blocks_are_filled_with_defaults():
         ("harness", {"harness": {"max_retry": 1}}),
         ("learning", {"learning": {"auto": True}}),
         ("memory[]", {"memory": [{"id": "n1", "text": "t", "source": "auto"}]}),
+        ("practices", {"practices": {"plans": True}}),
+        ("practices", {"practices": {"text": "Be brief."}}),
+        ("learning", {"learning": {"evidence": True}}),
     ],
 )
 def test_unknown_fields_are_rejected(where: str, patch: dict[str, Any]):
@@ -114,6 +173,18 @@ def test_unknown_fields_are_rejected(where: str, patch: dict[str, Any]):
         {"skills": ["refund-policy"]},  # names only: the sidecar always resolves skills
         {"learning": {"mode": "always"}},
         {"memory": [{"id": "n1"}]},
+        {"practices": {"clarify": "sometimes"}},
+        {"practices": {"clarify": "off"}},  # the old name of never
+        {"practices": {"brevity": "caveman"}},
+        {"practices": {"agent_brevity": False}},
+        {"practices": {"brevity": "off"}},  # the old name of normal
+        {"practices": {"agent_brevity": "off"}},
+        {"practices": {"max_questions": "five"}},
+        {"practices": "on"},
+        {"learning": {"scopes": ["subject"]}},
+        {"learning": {"scopes": "invariant"}},
+        {"learning": {"contrast_runs": "many"}},
+        {"learning": {"require_evidence": "maybe"}},
     ],
 )
 def test_malformed_new_fields_are_rejected(patch: dict[str, Any]):
@@ -128,3 +199,5 @@ def test_round_trip_keeps_every_field():
     assert again == spec
     assert again.model_dump()["memory"] == data["memory"]
     assert again.model_dump()["skills"] == data["skills"]
+    assert again.model_dump()["practices"] == data["practices"]
+    assert again.model_dump()["learning"] == data["learning"]

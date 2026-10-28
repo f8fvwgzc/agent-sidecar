@@ -70,6 +70,7 @@ schema:
 validate:
 	cargo run -q -p agentsc-cli -- charter validate examples/charters/orders.charter.yaml
 	cargo run -q -p agentsc-cli -- charter validate examples/charters/inventory.charter.yaml
+	cargo run -q -p agentsc-cli -- charter validate examples/charters/support.charter.yaml
 	@echo "expecting a rejection:"
 	@! cargo run -q -p agentsc-cli -- charter validate examples/charters/invalid-unknown-field.charter.yaml
 

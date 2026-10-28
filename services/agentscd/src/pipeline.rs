@@ -3,11 +3,12 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use agentsc_charter::Clarify;
 use agentsc_common::audit::{AuditRecord, Direction, Kind, Tokens};
 use agentsc_common::authz::{self, Verdict};
-use agentsc_common::guardrails::INPUT_DENY;
+use agentsc_common::guardrails::{CompiledGuardrails, INPUT_DENY};
 use agentsc_common::trace::TraceContext;
-use agentsc_proto::{ExecuteRequest, ExecuteResponse, InvokeAgentResponse, Step, Usage};
+use agentsc_proto::{ExecuteRequest, ExecuteResponse, InvokeAgentResponse, Question, Step, Usage};
 use serde_json::{Value, json};
 
 use crate::deadline;
@@ -35,6 +36,74 @@ pub const RULE_RUNTIME: &str = "runtime.unavailable";
 pub const RULE_NO_CHARTER: &str = crate::tools::RULE_NO_CHARTER;
 /// Fail-closed mode refused the invocation: the audit sink is failing (audit.rs).
 pub const RULE_AUDIT_UNAVAILABLE: &str = crate::audit::RULE_UNAVAILABLE;
+/// On the `agent_invocation` record of a run that asked the caller (agent-practices design, Wire).
+pub const RULE_CLARIFY_ASKED: &str = "clarify.asked";
+/// The longest `question` or `recommended` the sidecar returns, in characters.
+pub const MAX_QUESTION_CHARS: usize = 1000;
+
+/// The first `max` characters of `s`, cut on a character boundary.
+fn cut_chars(s: &str, max: usize) -> &str {
+    match s.char_indices().nth(max) {
+        Some((i, _)) => &s[..i],
+        None => s,
+    }
+}
+
+/// The first line of the `output` of a run that asked (CONTRACT.md §9).
+pub const QUESTIONS_INTRO: &str = "I need these decisions from you before I go on:";
+
+/// The questions of a run that asked, as its `output` (CONTRACT.md §4.1, §9): the intro, then
+/// per question, after a blank line, `<k>. <question>` and `   Recommended: <recommended>`.
+/// It must match the runtime's `prompts.render_questions` byte for byte, so an app sees the same
+/// text whether the runtime or the sidecar wrote it.
+pub fn render_questions(questions: &[Question]) -> String {
+    let mut out = String::from(QUESTIONS_INTRO);
+    for (k, q) in questions.iter().enumerate() {
+        out.push_str(&format!(
+            "\n\n{}. {}\n   Recommended: {}",
+            k + 1,
+            q.question,
+            q.recommended
+        ));
+    }
+    out
+}
+
+/// The `question` and `recommended` strings of `questions`, in order.
+fn question_strings(questions: &[Question]) -> impl Iterator<Item = &str> {
+    questions
+        .iter()
+        .flat_map(|q| [q.question.as_str(), q.recommended.as_str()])
+}
+
+/// The first `output_deny` match in what the caller gets, with the payload it matched
+/// (agent-practices design, Wire). For a run that did not ask, `output` is the runtime's output.
+/// For a run that asked, `raw` holds the questions it keeps, `delivered` the same questions
+/// redacted and cut, and `output` the rendering of `delivered`, which the caller gets in place of
+/// the runtime's. Checked in turn: each raw string, the rendering of the raw strings, each
+/// delivered string and `output`. The raw texts catch a match that the redaction or the cut
+/// would hide, the delivered ones a match that they make, and each rendering a match that spans
+/// two strings.
+fn output_deny(
+    g: &CompiledGuardrails,
+    output: &str,
+    raw: &[Question],
+    delivered: &[Question],
+) -> Option<(Verdict, String)> {
+    if raw.is_empty() {
+        let v = g.check_output(output);
+        return (!v.allow).then(|| (v, output.to_string()));
+    }
+    let raw_output = render_questions(raw);
+    question_strings(raw)
+        .chain([raw_output.as_str()])
+        .chain(question_strings(delivered))
+        .chain([output])
+        .find_map(|text| {
+            let v = g.check_output(text);
+            (!v.allow).then(|| (v, text.to_string()))
+        })
+}
 
 fn denied(inv: &Invocation, v: &Verdict, steps: Vec<Step>) -> InvokeAgentResponse {
     InvokeAgentResponse {
@@ -47,6 +116,7 @@ fn denied(inv: &Invocation, v: &Verdict, steps: Vec<Step>) -> InvokeAgentRespons
         steps,
         rule: v.rule.clone(),
         reason: v.reason.clone(),
+        questions: Vec::new(),
     }
 }
 
@@ -61,6 +131,7 @@ fn errored(inv: &Invocation, rule: &str, reason: String, steps: Vec<Step>) -> In
         steps,
         rule: rule.into(),
         reason,
+        questions: Vec::new(),
     }
 }
 
@@ -135,9 +206,18 @@ pub fn response_json(resp: &InvokeAgentResponse) -> Value {
         "trace_id": resp.trace_id,
         "agent": resp.agent,
         "output": resp.output,
-        "usage": { "input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens, "cost_usd": usage.cost_usd },
-        "steps": steps,
     });
+    // only when the run asked (CONTRACT.md §4.1): an app that knows nothing of questions sees none
+    if !resp.questions.is_empty() {
+        let questions: Vec<Value> = resp
+            .questions
+            .iter()
+            .map(|q| json!({ "question": q.question, "recommended": q.recommended }))
+            .collect();
+        v["questions"] = json!(questions);
+    }
+    v["usage"] = json!({ "input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens, "cost_usd": usage.cost_usd });
+    v["steps"] = json!(steps);
     if resp.status != "ok" {
         v["rule"] = json!(resp.rule);
         v["reason"] = json!(resp.reason);
@@ -417,9 +497,39 @@ pub async fn invoke(state: &Arc<AppState>, inv: Invocation) -> InvokeAgentRespon
         return r;
     }
 
-    // 5. output guardrails
-    let v = snap.guardrails.check_output(&exec.output);
-    if !v.allow {
+    // 5. output guardrails, over the output or the questions of a run that asked: the questions
+    //    are model output too (CONTRACT.md §4.1, Questions). An agent with clarify: never
+    //    asks nothing, so its questions are dropped and its output passes as usual. Questions
+    //    over the agent's max_questions are dropped unseen. When questions remain, the caller
+    //    gets an output rendered from them, never the runtime's, so only texts built from them
+    //    are checked: every one the caller gets, before and after redaction and the cut.
+    let practices = agent.practices_or_default();
+    let mut raw = match practices.clarify {
+        Clarify::Never => Vec::new(),
+        Clarify::Blocking | Clarify::Always => exec.questions,
+    };
+    raw.truncate(practices.max_questions as usize);
+    let mut redactions = 0;
+    // Redacted before the cut, so a cut never leaves part of a value a rule would have caught.
+    let questions: Vec<Question> = raw
+        .iter()
+        .map(|q| {
+            let mut clean = |s: &str| {
+                let (s, n) = snap.guardrails.redact_pii(s);
+                redactions += n;
+                cut_chars(&s, MAX_QUESTION_CHARS).to_string()
+            };
+            Question {
+                question: clean(&q.question),
+                recommended: clean(&q.recommended),
+            }
+        })
+        .collect();
+    // The rendered output holds only the fixed frame and strings already redacted, so it is not
+    // redacted again: no PII value counts twice in the guardrail record.
+    let rendered = (!questions.is_empty()).then(|| render_questions(&questions));
+    let checked = rendered.as_deref().unwrap_or(&exec.output);
+    if let Some((v, payload)) = output_deny(&snap.guardrails, checked, &raw, &questions) {
         let rec = AuditRecord::new(
             Kind::Guardrail,
             Direction::Internal,
@@ -430,7 +540,7 @@ pub async fn invoke(state: &Arc<AppState>, inv: Invocation) -> InvokeAgentRespon
             inv.caller_agent.as_deref(),
             &inv.agent,
             Value::Null,
-            Value::String(exec.output.clone()),
+            Value::String(payload),
         )
         .verdict(&v)
         .withhold_output(&v.rule);
@@ -444,7 +554,14 @@ pub async fn invoke(state: &Arc<AppState>, inv: Invocation) -> InvokeAgentRespon
         r.usage = Some(usage);
         return r;
     }
-    let (output, redactions) = snap.guardrails.redact_pii(&exec.output);
+    let output = match rendered {
+        Some(output) => output,
+        None => {
+            let (output, n) = snap.guardrails.redact_pii(&exec.output);
+            redactions += n;
+            output
+        }
+    };
     if redactions > 0 {
         let v = Verdict::allow("guardrail.pii_redact");
         let mut rec = AuditRecord::new(
@@ -471,7 +588,12 @@ pub async fn invoke(state: &Arc<AppState>, inv: Invocation) -> InvokeAgentRespon
         ));
     }
 
+    // A run that asked is still allowed; the record holds the rendered `output`, so the log shows
+    // exactly the questions the caller got (CONTRACT.md §4.1, §6).
     let mut rec = record(Value::String(output.clone())).latency(started);
+    if !questions.is_empty() {
+        rec = rec.verdict(&Verdict::allow(RULE_CLARIFY_ASKED));
+    }
     rec.tokens = tokens;
     rec.cost_usd = Some(usage.cost_usd);
     state.audit.write(rec);
@@ -486,5 +608,6 @@ pub async fn invoke(state: &Arc<AppState>, inv: Invocation) -> InvokeAgentRespon
         steps,
         rule: String::new(),
         reason: String::new(),
+        questions,
     }
 }

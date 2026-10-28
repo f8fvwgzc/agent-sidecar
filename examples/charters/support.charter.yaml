@@ -1,0 +1,82 @@
+# charter.yaml for a `support` service (CONTRACT.md §3): an example of agent practices and
+# evidence-backed learning (charter schema level 6, docs/design/agent-practices.md). Not part of
+# the demo: the local demos and the Kubernetes manifests use orders and inventory only.
+apiVersion: agentsc.io/v1alpha1
+kind: Charter
+service:
+  name: support
+  namespace: agentsc-demo
+  app_port: 8000
+agents:
+  - name: helpdesk
+    type: agent
+    model: claude-opus-5-5
+    system: |
+      You are the help desk assistant of the support service. Use get_ticket to
+      read a ticket and add_reply to answer the customer on it.
+    tools:
+      - name: get_ticket
+        description: Get one support ticket with its history.
+        type: service
+        service: support
+        method: GET
+        path: /tickets/{ticket_id}
+        parameters:
+          type: object
+          properties:
+            ticket_id: { type: string, description: "Ticket id such as T-1042" }
+          required: [ticket_id]
+      - name: add_reply
+        description: Add a reply to a ticket; the customer sees it.
+        type: service
+        service: support
+        method: POST
+        path: /tickets/{ticket_id}/replies
+        parameters:
+          type: object
+          properties:
+            ticket_id: { type: string }
+            text: { type: string, description: "The reply, as the customer will read it" }
+          required: [ticket_id, text]
+    budgets:
+      max_tokens_per_call: 2048
+      max_calls_per_minute: 30
+      max_cost_usd_per_day: 5.0
+      max_steps: 6
+    # Switches and levels only: the texts are fixed in the runtime. Absent = every practice on with
+    # these defaults: plan true, clarify blocking, max_questions 5, brevity lite, agent_brevity full,
+    # auto_clarity true. clarify never and brevity normal turn a practice off.
+    practices:
+      plan: true             # plan before the first tool call and check each tool result
+      clarify: always        # a reply reaches the customer: ask before acting on any open decision; staff answer
+      max_questions: 3       # 1..=10 questions per round
+      brevity: full          # the help desk app shows answers to staff, not to customers
+      agent_brevity: ultra   # an agent reads the answer: a local orchestrator, or any caller over the mesh
+      auto_clarity: true     # plain prose for warnings, destructive and ordered steps
+    learning:
+      enabled: true
+      mode: review           # an editor decides on every lesson
+      max_notes: 20
+      max_note_chars: 400
+      require_evidence: true # a lesson must cite the steps of the run it rests on
+      contrast_runs: 10      # 0..=20 earlier runs the reflection sees as digests; 0 = none
+      scopes: [domain]       # keep lessons about the subject only, not about how to work
+guardrails:
+  max_input_bytes: 8192
+  pii_redact: true           # tickets carry customer names and email addresses
+  input_deny:
+    - name: no-secrets
+      regex: "(?i)(api[_-]?key|password|secret)\\s*[:=]"
+authz:
+  default: deny
+  callers:
+    - identity: local
+      agents: [helpdesk]
+  services:
+    - name: self-tickets
+      agent: helpdesk
+      service: support
+      allow: ["GET /tickets/*", "POST /tickets/*"]
+audit:
+  sink: stdout
+  redact: [input.context.email]

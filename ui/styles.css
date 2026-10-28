@@ -1713,6 +1713,13 @@ input[type="checkbox"] {
   color: var(--text-2);
 }
 
+/* a row of checkboxes under one field label (learning.scopes) */
+.check-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+}
+
 .tab-footer {
   position: sticky;
   bottom: 0;

@@ -15,7 +15,11 @@ fn examples(name: &str) -> String {
 
 #[test]
 fn validate_accepts_the_demo_charters() {
-    for f in ["orders.charter.yaml", "inventory.charter.yaml"] {
+    for f in [
+        "orders.charter.yaml",
+        "inventory.charter.yaml",
+        "support.charter.yaml",
+    ] {
         let out = agentsc()
             .args(["charter", "validate", &examples(f)])
             .output()

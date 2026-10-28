@@ -67,7 +67,21 @@
     "max_note_chars": 500,
     "note_ttl_days": 7,
     "from_peers": false,
-    "max_proposals_per_hour": 10
+    "max_proposals_per_hour": 10,
+    "require_evidence": true,
+    "contrast_runs": 5,
+    "scopes": [
+      "invariant",
+      "domain"
+    ]
+  },
+  "practices": {
+    "plan": true,
+    "clarify": "blocking",
+    "max_questions": 5,
+    "brevity": "lite",
+    "agent_brevity": "full",
+    "auto_clarity": true
   },
   "memory": [
     {

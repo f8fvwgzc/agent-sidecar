@@ -8,6 +8,10 @@ A provider's calls go through the sidecar's model gateway (models.py), bound to 
 headers; the gateway writes their `model_call` records and counts their cost, so the runtime
 reports records only for the `mock` model, which costs nothing. The runtime does not price
 anything: what a run cost is the sidecar's measurement.
+
+The practices (agent-practices design) add the `# Working method` and `# Output style` sections to
+the system prompt and, unless `clarify` is `never`, the `ask_caller` tool. A valid `ask_caller` call ends
+the run with status `ok` and the questions for the caller.
 """
 
 from __future__ import annotations
@@ -23,8 +27,17 @@ from typing import Any
 
 from .harness import RETRY_AFTER_CAP_NO_DEADLINE, is_retryable, retry_delay
 from .models import Model, ModelError, ModelResponse
-from .prompts import load_skill_tool, notes_block, system_prompt
-from .spec import LOAD_SKILL_TOOL, AgentSpec
+from .prompts import (
+    ask_caller_error,
+    ask_caller_tool,
+    clamp_questions,
+    load_skill_tool,
+    notes_block,
+    practices_prompt,
+    render_questions,
+    system_prompt,
+)
+from .spec import ASK_CALLER_TOOL, LOAD_SKILL_TOOL, AgentSpec
 from .tools import HOP_MARGIN, RULE_COST_BUDGET, CallContext, ReportOutcome, SidecarClient, run_tool, timeout_for
 
 log = logging.getLogger("agentsc-runtime")
@@ -57,10 +70,16 @@ class ExecuteResult:
     steps: list[Step] = field(default_factory=list)
     rule: str = ""
     reason: str = ""
+    # The questions of a run that ended with ask_caller, each {question, recommended}, trimmed
+    # (ExecuteResponse.questions, CONTRACT.md §4.3).
+    questions: list[dict[str, str]] = field(default_factory=list)
     # What the reflection after the run needs (design §12); none of it goes back to the sidecar.
     user_text: str = ""  # the input, with its context block, as the model got it (without memory notes)
     messages: list[dict[str, Any]] = field(default_factory=list)
-    tools_used: list[str] = field(default_factory=list)  # tools other than load_skill the model called
+    # The tools other than load_skill and ask_caller the model called, each once, in order.
+    tools_used: list[str] = field(default_factory=list)
+    # The id of the ask_caller tool_use whose questions ended the run. It gets no tool_result but did run.
+    ask_call_id: str = ""
     cost_budget_exhausted: bool = False  # the sidecar said the agent's daily cost budget is spent
 
 
@@ -294,6 +313,17 @@ def _ms(started: float) -> int:
     return int((time.monotonic() - started) * 1000)
 
 
+def _arguments(use: dict[str, Any]) -> Any:
+    """A tool_use block's input; a JSON string is decoded, and any other string becomes {"input": ...}."""
+    args = use.get("input") or {}
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except json.JSONDecodeError:
+            args = {"input": args}
+    return args
+
+
 class _Run:
     """One Execute: the conversation, the harness around each model call, and the tool calls."""
 
@@ -309,11 +339,17 @@ class _Run:
     ) -> None:
         self.spec, self.ctx, self.model, self.fallback, self.sidecar = spec, ctx, model, fallback, sidecar
         self.caller, self.caller_agent = caller, caller_agent
-        self.system = system_prompt(spec.system, spec.inline_skills())
+        practices = spec.practices
+        # The level is agent_brevity when another agent called; the plan needs a charter tool.
+        sections = practices_prompt(practices, caller_is_agent=bool(caller_agent), has_tools=bool(spec.tools))
+        self.system = system_prompt(spec.system, spec.inline_skills(), sections)
         self.loadable = spec.loadable_skills()
         self.tools = [t.anthropic_tool() for t in spec.tools]
         if self.loadable:
             self.tools.append(load_skill_tool(self.loadable))
+        self.asks = practices.clarify != "never"
+        if self.asks:
+            self.tools.append(ask_caller_tool(practices.max_questions))
         self.max_tokens = max(1, spec.budgets.max_tokens_per_call)
         # Tool calls carry the Execute's span, so the sidecar's tool spans nest under the invocation.
         self.tool_ctx = CallContext(ctx.request_id, ctx.trace_id, ctx.span_id, spec.name, ctx.depth, ctx.deadline)
@@ -414,17 +450,46 @@ class _Run:
         )
         return skill.instructions, False
 
+    def _questions(self, args: Any) -> list[dict[str, str]] | None:
+        """The questions of an `ask_caller` call, trimmed, or None when they are not 1 to max_questions
+        of them, each with a non-empty question and recommended answer."""
+        items = args.get("questions") if isinstance(args, dict) else None
+        if not isinstance(items, list) or not 1 <= len(items) <= clamp_questions(self.spec.practices.max_questions):
+            return None
+        questions: list[dict[str, str]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                return None
+            question, recommended = item.get("question"), item.get("recommended")
+            if not isinstance(question, str) or not isinstance(recommended, str):
+                return None
+            if not question.strip() or not recommended.strip():
+                return None
+            questions.append({"question": question.strip(), "recommended": recommended.strip()})
+        return questions
+
+    def _asked(self, tool_uses: list[dict[str, Any]]) -> tuple[str, list[dict[str, str]]] | None:
+        """The id and questions of the turn's first valid `ask_caller` call, if `ask_caller` is offered."""
+        if not self.asks:
+            return None
+        for use in tool_uses:
+            if str(use.get("name", "")) == ASK_CALLER_TOOL:
+                questions = self._questions(_arguments(use))
+                if questions is not None:
+                    return str(use.get("id", "")), questions
+        return None
+
     async def _use_tool(self, use: dict[str, Any]) -> tuple[str, bool]:
         name = str(use.get("name", ""))
-        args = use.get("input") or {}
-        if isinstance(args, str):
-            try:
-                args = json.loads(args)
-            except json.JSONDecodeError:
-                args = {"input": args}
+        args = _arguments(use)
         if name == LOAD_SKILL_TOOL and self.loadable:
             return await self._load_skill(args)
-        if name not in self.result.tools_used:
+        if name == ASK_CALLER_TOOL and self.asks:
+            # A valid call ended the run before any tool of its turn ran (run()), so this one is invalid.
+            # No tool_call record: the questions of a valid call reach the audit log in the output.
+            self.result.steps.append(Step("tool_call", ASK_CALLER_TOOL, "allow", "", 0, "error: invalid questions"))
+            return ask_caller_error(self.spec.practices.max_questions), True
+        if name not in self.result.tools_used and name != ASK_CALLER_TOOL:
             self.result.tools_used.append(name)
         tool = self.spec.tool(name)
         if tool is None:
@@ -496,6 +561,15 @@ class _Run:
                 return result
             if not tool_uses or resp.stop_reason in {"end_turn", "stop_sequence"}:
                 result.output = resp.text()
+                return result
+
+            if (ask := self._asked(tool_uses)) is not None:
+                # The run ends here: the caller answers in its next call. The other tool_use blocks of
+                # this turn are not run, and ask_caller is not a tool use for learning.
+                result.ask_call_id, questions = ask
+                result.questions, result.output = questions, render_questions(questions)
+                asked = f"{len(questions)} question{'' if len(questions) == 1 else 's'}"
+                result.steps.append(Step("tool_call", ASK_CALLER_TOOL, "allow", "", 0, asked))
                 return result
 
             tool_results: list[dict[str, Any]] = []

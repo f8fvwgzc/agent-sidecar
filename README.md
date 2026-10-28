@@ -21,6 +21,7 @@ agent-sidecar brings AgentSecOps to LLM agents: identity, policy, budgets, guard
 - **mTLS identity per service.** Each service gets `spiffe://agentsc/ns/<ns>/svc/<svc>`. The called sidecar decides which peers and which of their agents may call.
 - **Budgets and guardrails.** Tokens per model call, invocations per minute, cost per day, steps per run, input size, regex deny rules on input and output, and PII redaction of the agent's output.
 - **Prompt injection contained by design.** Taint rules track what each run has read. After untrusted text (a ticket, a web page), the run can't call a tool that writes. After sensitive data, it can't call out to the internet. [How it works](docs/design/taint-policy.md).
+- **Good working habits, on by default.** Every agent plans before its first tool call and checks each result, asks its caller when a decision blocks the task, and answers tersely at a level that suits who reads it. A lesson an agent learns must cite the steps of the run it rests on. The charter turns each practice off or tunes it. [How it works](docs/design/agent-practices.md).
 - **One JSONL audit line per action.** The sidecar writes them to stdout (or to a file with `audit.sink: file`). Read them with `kubectl logs` or `agentsc logs`.
 
 ```mermaid
@@ -63,6 +64,7 @@ curl -s localhost:3500/v1/agents/stock-analyst/invoke \
 ```
 
 The JSON response has `status`, `output`, `usage`, `steps`, `request_id` and `trace_id`.
+An agent that needs a decision from you answers with `status: ok` and a `questions` list; you answer in the `context` of your next call.
 A denied invocation returns 403. A budget limit (calls per minute, cost per day, or agent-call depth) returns 429. An unknown agent returns 404.
 A runtime or model error returns 502. Hitting `max_steps` or `max_tokens_per_call` also returns 502, with `status: error`.
 A tool call that is denied inside the run does not fail the request. It appears in `steps` with `decision: deny`.
@@ -107,7 +109,7 @@ Check a charter with `cargo run -p agentsc-cli -- charter validate <file>`.
 | [Monolith and monorepo](docs/guides/monolith-and-monorepo.md) | One service with many agents, and a monorepo layout. |
 | [Operations](docs/operations.md) | Audit logs, the CLI, troubleshooting, production checklist, limitations. |
 | [LLM connection](docs/LLM-CONNECTION.md) | The platform's `LLM_*` contract, and the standalone model gateway (`agentsc-gateway`): wire formats, tenants, own keys, budgets. |
-| [Decision records](docs/adr/README.md) | Why HTTP/3 for the console, the response caches and the SQLite store are built the way they are. |
+| [Decision records](docs/adr/README.md) | Why HTTP/3 for the console, the response caches, the SQLite store and the default-on agent practices are built the way they are. |
 | [CONTRACT.md](CONTRACT.md) | Full reference: wire protocol, charter, authz order, audit record. |
 
 ## Status

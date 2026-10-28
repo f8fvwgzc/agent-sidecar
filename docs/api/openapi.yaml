@@ -2232,6 +2232,8 @@ components:
           $ref: "#/components/schemas/Harness"
         learning:
           $ref: "#/components/schemas/Learning"
+        practices:
+          $ref: "#/components/schemas/Practices"
     CharterTool:
       type: object
       additionalProperties: false
@@ -2319,6 +2321,67 @@ components:
           type: integer
           minimum: 1
           maximum: 100
+        require_evidence:
+          type: boolean
+          default: true
+          description: Charter schema level 6. A lesson must cite at least one step of the run.
+        contrast_runs:
+          type: integer
+          minimum: 0
+          maximum: 20
+          default: 5
+          description: >-
+            Charter schema level 6. How many payload-free digests of earlier runs the reflection
+            sees; 0 = none.
+        scopes:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          default: [invariant, domain]
+          description: >-
+            Charter schema level 6. The lesson scopes that are kept: `invariant` (how to work) and
+            `domain` (the agent's subject).
+          items:
+            type: string
+            enum: [invariant, domain]
+    Practices:
+      type: object
+      additionalProperties: false
+      description: |
+        `agents[].practices` (CONTRACT.md §3.3, charter schema level 6): switches and levels for
+        the working method and output style the runtime puts in front of the model; the texts are
+        fixed in the runtime. An absent block or field takes the default, so every practice is on
+        unless turned off (`clarify: never`, `brevity: normal`, `plan: false`).
+      properties:
+        plan:
+          type: boolean
+          default: true
+          description: A short plan before the first tool call; each result checked against its step.
+        clarify:
+          type: string
+          enum: [never, blocking, always]
+          default: blocking
+          description: When the agent asks its caller with the `ask_caller` tool; `never` offers no `ask_caller`.
+        max_questions:
+          type: integer
+          minimum: 1
+          maximum: 10
+          default: 5
+          description: Questions per round.
+        brevity:
+          type: string
+          enum: [normal, lite, full, ultra]
+          default: lite
+          description: The answer's style when the service's own app (or another local caller without a calling agent) is the caller; `normal` is no output style.
+        agent_brevity:
+          type: string
+          enum: [normal, lite, full, ultra]
+          default: full
+          description: The answer's style when an agent is the caller, locally or over the mesh (every mesh call comes from an agent tool).
+        auto_clarity:
+          type: boolean
+          default: true
+          description: Plain prose for warnings, destructive and ordered steps.
     Skill:
       type: object
       additionalProperties: false

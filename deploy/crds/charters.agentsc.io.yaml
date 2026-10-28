@@ -165,7 +165,7 @@ spec:
                             type: string
                             description: |-
                               The name the model sees, unique per agent: `^[a-zA-Z0-9_-]{1,64}$`, and never
-                              `load_skill` (the runtime's tool for skills).
+                              `load_skill` or `ask_caller` (the runtime's own tools).
                             pattern: ^[a-zA-Z0-9_-]{1,64}$
                           description:
                             type: string
@@ -306,6 +306,71 @@ spec:
                           description: Lessons the agent may propose per hour, 1..=100.
                           minimum: 1
                           maximum: 100
+                        require_evidence:
+                          type: boolean
+                          description: A lesson must cite the steps of the run it rests on (agent-practices design). Absent = true.
+                          nullable: true
+                        contrast_runs:
+                          type: integer
+                          description: Earlier runs the reflection sees as digests, 0..=20; 0 = none. Absent = 5.
+                          nullable: true
+                          minimum: 0
+                          maximum: 20
+                        scopes:
+                          type: array
+                          description: The lesson scopes that are kept, each at most once. Absent = `[invariant, domain]`.
+                          nullable: true
+                          minItems: 1
+                          items:
+                            type: string
+                            description: What a lesson is about (agent-practices design, from Harness²).
+                            enum:
+                            - invariant
+                            - domain
+                      x-kubernetes-preserve-unknown-fields: true
+                      nullable: true
+                    practices:
+                      type: object
+                      description: |-
+                        Working practices: plan, clarify, brevity (agent-practices design). Absent = the
+                        defaults, all on.
+                      properties:
+                        plan:
+                          type: boolean
+                          description: Write a short plan before the first tool call and check each tool result against it.
+                        clarify:
+                          type: string
+                          description: 'When to ask the caller: `never`, `blocking` (a decision blocks the task) or `always`.'
+                          enum:
+                          - never
+                          - blocking
+                          - always
+                        max_questions:
+                          type: integer
+                          description: Questions per round, 1..=10.
+                          minimum: 1
+                          maximum: 10
+                        brevity:
+                          type: string
+                          description: |-
+                            How tersely the agent answers when the service's own app (or another local caller without
+                            a calling agent) is the caller.
+                          enum:
+                          - normal
+                          - lite
+                          - full
+                          - ultra
+                        agent_brevity:
+                          type: string
+                          description: How tersely the agent answers when another agent is the caller.
+                          enum:
+                          - normal
+                          - lite
+                          - full
+                          - ultra
+                        auto_clarity:
+                          type: boolean
+                          description: Plain prose for security warnings, destructive or irreversible actions and ordered steps.
                       x-kubernetes-preserve-unknown-fields: true
                       nullable: true
                     taint:

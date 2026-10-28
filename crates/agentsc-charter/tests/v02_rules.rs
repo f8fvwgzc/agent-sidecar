@@ -235,7 +235,10 @@ fn the_schema_mirrors_the_tool_name_and_model_rules() {
     let defs = &schema["$defs"];
     let name = &defs["ToolSpec"]["properties"]["name"];
     assert_eq!(name["pattern"], TOOL_NAME_PATTERN);
-    assert_eq!(name["not"], serde_json::json!({"const": LOAD_SKILL_TOOL}));
+    assert_eq!(
+        name["not"],
+        serde_json::json!({"enum": [LOAD_SKILL_TOOL, ASK_CALLER_TOOL]})
+    );
     for node in [
         &defs["AgentSpec"]["properties"]["model"],
         &defs["HarnessSpec"]["properties"]["fallback_model"],
@@ -627,7 +630,7 @@ fn rule8_service_accounts_are_dns_labels() {
 
 #[test]
 fn schema_level_is_1_without_v02_fields_and_2_with_any() {
-    assert_eq!(CHARTER_SCHEMA_LEVEL, 5);
+    assert_eq!(CHARTER_SCHEMA_LEVEL, 6);
     assert_eq!(orders().schema_level(), 1);
     assert_eq!(Charter::from_yaml(INVENTORY).unwrap().schema_level(), 1);
     assert_eq!(v02().schema_level(), 2);

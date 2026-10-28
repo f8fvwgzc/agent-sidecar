@@ -15,6 +15,8 @@ Contents:
 - [Budgets](#budgets)
 - [Guardrails](#guardrails)
 - [Prompt injection: taint rules](#prompt-injection-taint-rules)
+- [Practices](#practices)
+- [Learning](#learning)
 - [Authz for agents](#authz-for-agents)
 - [Calling an agent from your app](#calling-an-agent-from-your-app)
 - [Testing with the mock model](#testing-with-the-mock-model)
@@ -424,6 +426,8 @@ Each entry in `agents:` has these fields.
 | `system` | no | `""` | none | The system prompt. |
 | `tools` | no | `[]` | tool names unique per agent | See [Tools](#tools). |
 | `budgets` | no | see [Budgets](#budgets) | every value > 0 | Limits for this agent. |
+| `practices` | no | every practice on | see [Practices](#practices) | How the agent works: it plans, asks you when a decision blocks it, and answers tersely. |
+| `learning` | no | off | see [Learning](#learning) | Lessons from finished runs, kept as notes for later runs. |
 
 The tool and service allow lists of an agent are not agent fields. They live in `guardrails.allowed_tools` and `guardrails.allowed_services`, keyed by the agent name.
 
@@ -920,6 +924,179 @@ agentsc logs orders --rule taint.would_deny
 
 Changing `taint`, `label` or `effect` needs the admin role, and loosening them shows up as `weakened` in the audit. [The design note](../design/taint-policy.md) covers the limits, for example: the whole run is the unit, so split "read and propose" from "write".
 
+## Practices
+
+Every agent gets a small set of working habits from the platform. The runtime puts a fixed text for each one in the system prompt, after your `system` and your inline skills. They are on by default. Your charter can turn each one off or tune it, but it can't change the words. To give other advice, write it in `system` or in a skill.
+
+| Practice | What the agent does |
+| --- | --- |
+| `plan` | Before its first tool call, it writes a short plan, with a check for each step. It checks every tool result against its step and repairs a miss before it goes on. An agent without tools gets no plan text. |
+| `clarify` | It looks facts up with its tools instead of asking you. When a decision only you can make blocks the task, it stops and asks, with a recommended answer for each question. |
+| `brevity`, `agent_brevity` | It answers tersely and keeps every technical fact. |
+| `auto_clarity` | It still writes plain, complete sentences for a security warning, a destructive or irreversible step, and steps whose order matters. |
+
+This is the block with its defaults. You don't need to write it to get them:
+
+```yaml
+agents:
+  - name: support
+    model: claude-opus-5-5
+    practices:                # optional; leave it out to get these defaults
+      plan: true
+      clarify: blocking       # never | blocking | always
+      max_questions: 5        # 1 to 10 questions per round
+      brevity: lite           # normal | lite | full | ultra, when your app is the caller
+      agent_brevity: full     # normal | lite | full | ultra, when an agent is the caller, locally or over the mesh
+      auto_clarity: true
+```
+
+A partial block keeps the defaults for the fields you leave out. `practices: {brevity: normal}` turns off only the output style for apps, and keeps the rest on.
+
+To turn a practice off, set `plan` or `auto_clarity` to `false`, `clarify` to `never`, or `brevity` or `agent_brevity` to `normal`.
+
+You can't name a tool `ask_caller`. The runtime uses that name, as it uses `load_skill` for skills. This holds at every schema level, so if a charter of yours has a tool named `ask_caller`, rename it before you upgrade the sidecar.
+
+### When the agent asks
+
+| `clarify` | When the agent asks |
+| --- | --- |
+| `blocking` (default) | Only when a decision blocks the task and no safe default exists. When a safe default exists, it uses it and says in its answer what it assumed. |
+| `always` | Before it acts on a request that leaves decisions open. It asks every decision it can ask now, and keeps a question that depends on another answer for the next round. |
+| `never` | Never. The agent gets no `ask_caller` tool. |
+
+An app that runs unattended and can't answer questions should set `clarify: never`, or send the recommended answers back. Answers you send in `context` or `input` are your word: the answering run is a new run and starts with only `taint.input`, not with what the run that asked had read ([taint rules](#prompt-injection-taint-rules)). The recommended answers are the model's output and may come from untrusted data. So for an agent with a `taint` block, an unattended app must not send them back on its own. Set `clarify: never` for that agent, or have a person answer.
+
+When the agent asks, the run ends at once. You get `status: ok` and a `questions` list, and `output` shows the same questions as text:
+
+```json
+{
+  "status": "ok",
+  "agent": "support",
+  "output": "I need these decisions from you before I go on:\n\n1. Refund to the card or as store credit?\n   Recommended: Store credit, because the card on the order has expired.",
+  "questions": [
+    {"question": "Refund to the card or as store credit?",
+     "recommended": "Store credit, because the card on the order has expired."}
+  ]
+}
+```
+
+The status stays `ok`, so an app or a peer that knows nothing about `questions` still shows them to its user. `questions` is only there when the agent asked. A `denied` or `error` response never has it. The last step from the runtime is a `tool_call` step named `ask_caller`, with the summary `1 question` or `<k> questions`. When PII was redacted from the questions, a `guardrail` step follows it. So to tell that the agent asked, check whether the response has `questions`, not what the last step is.
+
+To answer, call the agent again with the same `input`, and put the questions and your answers in `context.answers`:
+
+```bash
+curl -s localhost:3500/v1/agents/support/invoke \
+  -H 'content-type: application/json' \
+  -d '{
+    "input": "Refund order 1042.",
+    "context": {"answers": [
+      {"question": "Refund to the card or as store credit?", "answer": "Store credit."}
+    ]}
+  }'
+```
+
+The agent treats answered decisions as settled and doesn't ask them again. Answers you write into `input` count too. The runtime keeps no state between calls, so send every answer so far, not only the latest round. `context` passes the input guardrails like the rest of the request.
+
+The sidecar treats questions like the agent's output. With `clarify: never` it drops any questions. Otherwise it keeps at most `max_questions` and handles them in this order:
+
+1. `output_deny`, over each question and recommended answer as the agent wrote it, and over all of them rendered as text.
+2. `pii_redact` on each string, when it is on.
+3. The cut of each string to 1000 characters. It comes after the redaction, so it can't leave half an email address that the redaction no longer finds.
+4. `output_deny` again, over each string as you will get it, and over the `output` the sidecar writes from them in place of the runtime's text.
+
+A match in step 1 or step 4 denies the whole invocation (HTTP 403), and you get neither the output nor the questions. Because `output_deny` runs both before and after the redaction and the cut, neither can hide a match, and you get only text that was checked.
+
+The run's `agent_invocation` record holds that `output`, so the audit log shows exactly the questions you got. The record has rule `clarify.asked`, so you can find the runs that asked:
+
+```bash
+agentsc logs billing --rule clarify.asked
+```
+
+### Brevity: who reads the answer
+
+The level depends on who called the agent:
+
+| Caller | Field | Default |
+| --- | --- | --- |
+| your app, or anything else in the pod that calls the sidecar without a calling agent | `brevity` | `lite` |
+| an agent, for example an orchestrator, locally or over the mesh | `agent_brevity` | `full` |
+
+Every call over the mesh comes from an agent tool, so it always carries the calling agent and gets `agent_brevity`. An app of another service never calls your agent directly: it calls an agent of its own service, and that agent calls yours.
+
+| Level | Style |
+| --- | --- |
+| `lite` | No filler, pleasantries or hedging. Full sentences. |
+| `full` | No articles either. Sentence fragments are fine. |
+| `ultra` | As short as the meaning allows. Each fact once. |
+| `normal` | No output style. The answer is as the model writes it. |
+
+At every level the agent keeps negations, numbers, units, names, identifiers, code, commands, JSON, error messages and quoted text exactly as they are. Tool inputs are never shortened.
+
+Brevity changes the words of the answer. If your `output_deny` patterns expect full sentences, test them at the level you use.
+
+### What practices don't do
+
+They are instructions to the model, not enforcement. A model can still skip the plan or write a long answer. The sidecar enforces tools, budgets, guardrails and taint, as before. `ask_caller` grants nothing: it only ends the run.
+
+Each practice adds input tokens to every model call. The plan adds a few output tokens before the first tool call, and they count against `max_tokens_per_call`.
+
+A `practices` block makes the charter schema level 6. The defaults need no charter change, so when old and new sidecars run side by side, the same agent can behave differently from pod to pod until all of them are upgraded. Changing a practice needs the editor role. Setting `auto_clarity` from true to false shows up as `weakened` in the audit.
+
+Plan the upgrade around this. While an older sidecar (level 5 or below) of the service is connected, the control plane refuses any write with a `practices` block (HTTP 400, `version_skew`, naming the old pods). An older sidecar that reads its charter from a ConfigMap rejects the block as an unknown field. So you can write the opt-out only after the last old pod is gone, and until then the upgraded pods run the defaults: they plan, they may ask, and they answer tersely. During the rollout, an app that runs unattended should treat a response with `questions` as not final.
+
+[The design note](../design/agent-practices.md) has the texts word for word.
+
+## Learning
+
+Learning turns a finished run into a note for the agent's later runs. It is off by default. The runtime only proposes a lesson. The sidecar scrubs it, checks it against `input_deny`, and audits it. In `review` mode a person approves each note before it becomes memory. Notes reach the model as data in the first user turn, never as instructions.
+
+```yaml
+agents:
+  - name: support
+    model: claude-opus-5-5
+    learning:
+      enabled: true
+      mode: review                # review (default) | auto
+      max_notes: 20
+      max_note_chars: 500
+      require_evidence: true      # a lesson must cite the steps it rests on
+      contrast_runs: 5            # 0 to 20 earlier runs to compare with; 0 = none
+      scopes: [invariant, domain] # the kinds of lesson that are kept
+```
+
+[CONTRACT.md](../../CONTRACT.md) §3 lists every `learning` field.
+
+After a run that used a tool (not counting `load_skill` and `ask_caller`) or ended `denied` or `error`, the runtime makes one more model call: the reflection. It sees the run with numbered steps (`s1`, `s2`, …) and short digests of the agent's earlier runs. A digest holds only the status, the rule, the number of steps and the tools called, never an input, an output or a tool result. The reflection answers `NONE` or four lines:
+
+```text
+SCOPE: domain
+TARGET: tool:get_order
+EVIDENCE: s2, s3
+NOTE: get_order is refused for orders older than a year; answer from the refund policy instead.
+```
+
+- `SCOPE` says what kind of lesson it is. `invariant` is how to work: planning, tool order, checking results. `domain` is your agent's subject. `scopes` sets which kinds are kept.
+- `TARGET` names the part of the agent the lesson is about: `notes`, `system`, `skill:<name>` or `tool:<name>`. It is advice for the reviewer. Nothing edits your `system` or a skill on its own. If the lesson belongs there, change the charter.
+- `EVIDENCE` lists the steps the lesson rests on. A step id that is not in the run drops the lesson, because the evidence is made up. With `require_evidence: true` (the default), a lesson without evidence is dropped too.
+- `NOTE` is the one line that becomes memory, at most `max_note_chars`. A longer note is dropped, not cut.
+
+Only the note becomes memory. The reviewer sees it with a rationale like this one. It is one line, and it holds step ids, kinds and tool names, never payloads:
+
+```text
+Reflection on a run that ended ok and used get_order. Scope: domain. Target: tool:get_order. Evidence: s2 call get_order; s3 result get_order (error). Compared with 2 earlier runs.
+```
+
+`Evidence: none.` means the lesson cites no step. The last sentence is left out when the reflection saw no earlier runs, and reads `Compared with 1 earlier run.` for one.
+
+With the mock model the reflection follows fixed rules. A refused tool call, or else the first tool used, gives `SCOPE: domain`, `TARGET: tool:<name>` and that step as evidence. A run that ended `denied` or `error` gives `SCOPE: invariant` and `TARGET: notes`. [runtime/README.md](../../runtime/README.md) has the notes it writes.
+
+Things to know:
+
+- Each reflection is one more model call. It counts in the agent's budgets.
+- Memory counts against a limit per service: the sum of `max_notes × max_note_chars` over the agents with learning on is at most 262144 characters.
+- Digests of earlier runs live in the runtime's memory. They are per replica and reset on restart.
+- `require_evidence`, `contrast_runs` and `scopes` make the charter schema level 6. Setting `require_evidence` from true to false shows up as `weakened` in the audit.
+
 ## Authz for agents
 
 `authz` has two lists. `callers` says who may invoke which of your agents. `services` says which methods and paths agents may call.
@@ -1016,6 +1193,7 @@ The response body:
 | `output` | The final answer. Empty when `status` is not `ok`. |
 | `usage` | `input_tokens`, `output_tokens` and `cost_usd` of this agent's own model calls. |
 | `steps` | One entry per step: `kind`, `name`, `decision`, `latency_ms`, and `rule` and `summary` when set. |
+| `questions` | Only when the agent stopped to ask you for decisions: a list of `{question, recommended}`. `status` is still `ok`. See [Practices](#practices). |
 | `rule`, `reason` | Only when `status` is not `ok`. Which rule acted, and why. |
 
 Response headers: `traceparent` and `x-agentsc-request-id`.
@@ -1107,6 +1285,7 @@ Tips for deterministic tests:
 - Put words from your test questions into the tool name or description.
 - Name id parameters `id`, `sku` or `order_id`, and use ids like `INV-1001` in test questions.
 - For an orchestrator, the mock picks one tool with the same word rule. It can be an agent tool or another tool. For an agent tool with the default `parameters`, it sends the whole input as `input`.
+- The mock ignores the system prompt, so the [practices](#practices) don't change its answers. It never calls `ask_caller`, so it never returns `questions`.
 
 A test can call the agent and check the steps. This one fails when the service call is missing or denied:
 
@@ -1220,6 +1399,10 @@ Fix parse errors first, then run the command again.
 | `bad pattern ... only a trailing * is supported` | A `*` in the middle of a path. | Use a prefix with a trailing `*`. |
 | `bad pattern ... is not an HTTP method or *` | A wrong method in a pattern. | Use an uppercase method or `*`. |
 | `audit.sink: file requires audit.file` | `sink: file` without a path. | Add `audit.file`. |
+| `practices.max_questions must be 1..=10` | Too few or too many questions per round. | Use 1 to 10. |
+| `learning.contrast_runs must be 0..=20` | Too many earlier runs to compare with. | Use 0 to 20. `0` turns the comparison off. |
+| `learning.scopes must list invariant, domain or both, each once` | `scopes` is empty or names a scope twice. | List `invariant`, `domain` or both, once each, or remove the field. |
+| `the tool name ask_caller is reserved` | A tool is named `ask_caller`. The runtime uses that name for questions to the caller, as it uses `load_skill` for skills. | Rename the tool. |
 
 ## Limits to know
 

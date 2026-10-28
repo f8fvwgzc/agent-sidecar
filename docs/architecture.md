@@ -248,7 +248,7 @@ Step by step:
 7. **The inventory sidecar reads the caller identity from the client certificate**: `spiffe://agentsc/ns/agentsc-demo/svc/orders`. It runs the same pipeline with that identity and calling agent `ops-assistant`. The inventory charter allows exactly this pair.
 8. **The inventory runtime runs `stock-analyst`.** Its `get_stock` tool is a `service` tool on its own service. The sidecar checks it, makes the path canonical, runs `authz.services` with identity `local`, and calls `http://127.0.0.1:8000/stock/WIDGET-1`. It adds the headers `traceparent`, `x-agentsc-request-id`, `x-agentsc-caller: local` and `x-agentsc-agent: stock-analyst`.
 9. **Output checks on inventory.** The final answer goes through `output_deny`, then `pii_redact`. If the answer contains the warehouse email from the stock record, it becomes `[redacted:email]` before it is sent back to orders.
-10. **Back on orders**, the answer becomes a tool result. The model writes the final answer. The orders sidecar runs its own output checks and returns the JSON envelope with `status`, `output`, `usage`, `steps`, `request_id` and `trace_id`.
+10. **Back on orders**, the answer becomes a tool result. The model writes the final answer. The orders sidecar runs its own output checks and returns the JSON envelope with `status`, `output`, `usage`, `steps`, `request_id` and `trace_id`, and `questions` when the agent stopped to ask its caller for decisions.
 
 Both sidecars write their records under the same `request_id` and `trace_id`. `agentsc logs orders,inventory --trace <id>` shows them as one story.
 

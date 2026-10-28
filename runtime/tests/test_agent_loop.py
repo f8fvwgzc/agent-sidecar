@@ -29,7 +29,8 @@ def test_orchestrator_calls_remote_agent_and_reports_model_calls(ops_assistant, 
     assert ev["kind"] == "model_call" and ev["agent"] == "ops-assistant" and ev["callee"] == "mock"
     assert ev["request_id"] == "req-1" and ev["trace_id"] == ctx.trace_id and ev["parent_span_id"] == ctx.span_id
     assert ev["tokens"]["input"] > 0 and ev["cost_usd"] == 0.0
-    assert ev["input"]["tools"] == ["lookup_order", "stock_analyst", "inventory_admin_reset"]
+    # The charter's tools, then ask_caller (practices.clarify is on by default; agent-practices design).
+    assert ev["input"]["tools"] == ["lookup_order", "stock_analyst", "inventory_admin_reset", "ask_caller"]
     assert res.input_tokens == sum(e["tokens"]["input"] for e in sidecar.events)
 
 

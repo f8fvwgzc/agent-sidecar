@@ -304,13 +304,17 @@ fn print_record(out: &mut impl Write, entry: &LogLine, raw: bool) -> anyhow::Res
         }
         _ => caller,
     };
-    // The v0.1 kinds show an allow's rule only for PII redaction and taint audit mode; `config`,
-    // `learning` and any kind this CLI does not know show the decision and rule as written.
+    // The v0.1 kinds show an allow's rule only for PII redaction, taint audit mode and a run that
+    // asked its caller (`clarify.asked`); `config`, `learning` and any kind this CLI does not know
+    // show the decision and rule as written.
     let v01_kind = V01_KINDS.contains(&rec.kind.as_str());
     let decision = match (rec.decision.as_str(), &rec.rule) {
         ("deny", rule) => format!("DENY {}", rule.clone().unwrap_or_default()),
         ("allow", Some(r))
-            if r.starts_with("guardrail.pii") || r.starts_with("taint.") || !v01_kind =>
+            if r.starts_with("guardrail.pii")
+                || r.starts_with("taint.")
+                || r == "clarify.asked"
+                || !v01_kind =>
         {
             format!("allow {r}")
         }

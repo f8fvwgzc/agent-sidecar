@@ -4,7 +4,31 @@
 
 import { h, clear, toast, icon, ICONS } from './dom.js';
 import { Form, section, grid, button, shortValue, errorBox, nextId } from './forms.js';
-import { clone, diffPaths, applyPaths, overlappingPaths, stringChange, isModelName, DNS_LABEL, TOOL_NAME, utf8Length, roleAtLeast } from './util.js';
+import {
+  clone,
+  diffPaths,
+  applyPaths,
+  overlappingPaths,
+  stringChange,
+  isModelName,
+  DNS_LABEL,
+  TOOL_NAME,
+  RESERVED_TOOL_NAMES,
+  utf8Length,
+  roleAtLeast,
+  getIn,
+  setIn,
+  pathString,
+  PRACTICES_DEFAULTS,
+  LEARNING_DEFAULTS,
+  CLARIFY_LEVELS,
+  BREVITY_LEVELS,
+  LESSON_SCOPES,
+  MAX_QUESTIONS,
+  CONTRAST_RUNS,
+  scopesKept,
+  lessonScopes,
+} from './util.js';
 
 const TOOL_FIELDS = { agent: ['agent', 'service'], service: ['service', 'method', 'path'], http: ['method', 'url'] };
 const ALL_TOOL_FIELDS = ['service', 'method', 'path', 'agent', 'url'];
@@ -23,7 +47,7 @@ export function normalizeView(v) {
 export function viewPayload(draft, original) {
   const a = clone(draft.agent);
   const o = (original && original.agent) || {};
-  for (const k of ['budgets', 'harness', 'learning']) {
+  for (const k of ['budgets', 'harness', 'practices', 'learning']) {
     if (a[k] && typeof a[k] === 'object' && !Object.keys(a[k]).length && !(k in o)) delete a[k];
   }
   for (const k of ['skills', 'tools']) if (Array.isArray(a[k]) && !a[k].length && !(k in o)) delete a[k];
@@ -149,6 +173,7 @@ export class ConfigTab {
           form.number('Tool result max chars', d, ['agent', 'harness', 'tool_result_max_chars'], { min: 100, max: 200000, placeholder: '20000' }),
         ),
       ),
+      this.practicesSection(form),
       this.learningSection(form),
       this.callersSection(),
     );
@@ -246,7 +271,7 @@ export class ConfigTab {
       emptyUnset: false,
       validate: (v) => {
         if (!TOOL_NAME.test(v || '')) return 'letters, digits, _ and -, at most 64';
-        if (v === 'load_skill') return 'load_skill is reserved';
+        if (RESERVED_TOOL_NAMES.includes(v)) return `${v} is reserved`;
         if ((d.agent.tools || []).some((x, j) => j !== i && x.name === v)) return 'another tool has this name';
         return null;
       },
@@ -375,6 +400,30 @@ export class ConfigTab {
   }
 
   /**
+   * The working method and output style the runtime puts in front of the model (agent-practices
+   * design). Switches and levels only: the texts are fixed in the runtime. A field left at
+   * "default" stays out of the charter, and an untouched block is not written.
+   */
+  practicesSection(form) {
+    const d = this.draft;
+    const keys = (k) => ['agent', 'practices', k];
+    const P = PRACTICES_DEFAULTS;
+    const levels = (list, dflt) => [['', `default (${dflt})`], ...list.map((l) => [l, l])];
+    return section(
+      'Practices',
+      h('p', { class: 'field-hint', text: 'Every practice is on unless turned off here (clarify never, brevity normal, a box unchecked). The texts are fixed in the runtime; the charter holds only these switches and levels.' }),
+      form.checkbox('Plan: a short plan before the first tool call, each result checked against its step', d, keys('plan'), { defaultChecked: P.plan, hint: 'only for agents with tools' }),
+      grid(
+        form.select('Clarify', d, keys('clarify'), levels(CLARIFY_LEVELS, P.clarify), { emptyUnset: true, hint: 'asking ends the run; never for callers that cannot answer' }),
+        form.number('Max questions', d, keys('max_questions'), { ...MAX_QUESTIONS, placeholder: String(P.max_questions), hint: 'per round' }),
+        form.select('Brevity (app callers)', d, keys('brevity'), levels(BREVITY_LEVELS, P.brevity), { emptyUnset: true, hint: 'when your app calls' }),
+        form.select('Brevity (agent callers)', d, keys('agent_brevity'), levels(BREVITY_LEVELS, P.agent_brevity), { emptyUnset: true, hint: 'when another agent calls' }),
+      ),
+      form.checkbox('Auto-clarity: plain sentences for warnings, destructive and ordered steps', d, keys('auto_clarity'), { defaultChecked: P.auto_clarity }),
+    );
+  }
+
+  /**
    * Whether this draft turns learning off. Memory exists only for agents with learning (design
    * §3): the control plane drops the agent's notes in the same change that disables it.
    */
@@ -443,8 +492,42 @@ export class ConfigTab {
         form.number('Max note chars', d, ['agent', 'learning', 'max_note_chars'], { min: 50, max: 4000, placeholder: '500' }),
         form.number('Note TTL (days, auto)', d, ['agent', 'learning', 'note_ttl_days'], { min: 1, max: 365, placeholder: '7' }),
         form.number('Max proposals per hour', d, ['agent', 'learning', 'max_proposals_per_hour'], { min: 1, max: 100, placeholder: '10' }),
+        form.number('Contrast runs', d, ['agent', 'learning', 'contrast_runs'], { ...CONTRAST_RUNS, placeholder: String(LEARNING_DEFAULTS.contrast_runs), hint: 'earlier runs shown as digests; 0 = none' }),
       ),
       form.checkbox('Also reflect on runs a peer service started', d, ['agent', 'learning', 'from_peers']),
+      form.checkbox('Require evidence: a lesson must cite the steps of the run it rests on', d, ['agent', 'learning', 'require_evidence'], { defaultChecked: LEARNING_DEFAULTS.require_evidence }),
+      this.scopesField(form),
+    );
+  }
+
+  /** `learning.scopes` as one checkbox per scope; at least one stays checked (CONTRACT §3.2). */
+  scopesField(form) {
+    const d = this.draft;
+    const keys = ['agent', 'learning', 'scopes'];
+    const original = clone(getIn(d, keys));
+    const kept = scopesKept(original);
+    const text = { invariant: 'invariant: how to work', domain: 'domain: the agent’s subject' };
+    const labelId = nextId('scopes');
+    const err = h('span', { class: 'field-error', hidden: true, role: 'alert' });
+    const boxes = LESSON_SCOPES.map((s) => h('input', { type: 'checkbox', id: nextId('scope'), checked: kept.includes(s), disabled: form.disabled }));
+    const update = () => {
+      const r = lessonScopes(LESSON_SCOPES.filter((_, i) => boxes[i].checked), original);
+      form.setError(pathString(keys), r.error || null, err, null);
+      if (!r.error) setIn(d, keys, r.value);
+      this.updateFooter();
+    };
+    for (const b of boxes) b.addEventListener('change', update);
+    return h(
+      'div',
+      { class: 'field', role: 'group', 'aria-labelledby': labelId },
+      h('span', { class: 'field-label', id: labelId, text: 'Lesson scopes kept' }),
+      h(
+        'div',
+        { class: 'check-row' },
+        LESSON_SCOPES.map((s, i) => h('label', { class: 'check-label', for: boxes[i].id }, boxes[i], h('span', { text: text[s] }))),
+      ),
+      h('span', { class: 'field-hint', text: 'lessons of an unchecked scope are dropped' }),
+      err,
     );
   }
 

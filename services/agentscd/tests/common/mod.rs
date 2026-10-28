@@ -14,7 +14,9 @@ use std::time::{Duration, Instant};
 use agentsc_charter::{AuditSink, Charter};
 use agentsc_proto::runtime_server::{Runtime, RuntimeServer};
 use agentsc_proto::sidecar_tools_client::SidecarToolsClient;
-use agentsc_proto::{Empty, ExecuteRequest, ExecuteResponse, HealthResponse, ToolContext};
+use agentsc_proto::{
+    Empty, ExecuteRequest, ExecuteResponse, HealthResponse, Question, ToolContext,
+};
 use agentscd::{Config, Sidecar};
 use hyper_util::rt::TokioIo;
 use serde_json::Value;
@@ -47,12 +49,40 @@ pub fn ok(output: &str) -> ExecuteResponse {
     }
 }
 
+/// A run that ended with `ask_caller` (agent-practices design): status `ok`, the questions, and
+/// `output` rendering them as text, as the runtime does.
+pub fn asked(questions: &[(&str, &str)]) -> ExecuteResponse {
+    let mut output = String::from("I need these decisions from you before I go on:");
+    for (i, (q, r)) in questions.iter().enumerate() {
+        output.push_str(&format!("\n\n{}. {q}\n   Recommended: {r}", i + 1));
+    }
+    ExecuteResponse {
+        questions: questions
+            .iter()
+            .map(|(q, r)| Question {
+                question: q.to_string(),
+                recommended: r.to_string(),
+            })
+            .collect(),
+        ..ok(&output)
+    }
+}
+
 impl FakeRuntime {
     pub fn answering(output: &str) -> Self {
         let output = output.to_string();
         Self::with(move |_| {
             let output = output.clone();
             Box::pin(async move { ok(&output) })
+        })
+    }
+
+    /// Every Execute ends by asking the caller `questions` (`asked`).
+    pub fn asking(questions: &[(&str, &str)]) -> Self {
+        let resp = asked(questions);
+        Self::with(move |_| {
+            let resp = resp.clone();
+            Box::pin(async move { resp })
         })
     }
 

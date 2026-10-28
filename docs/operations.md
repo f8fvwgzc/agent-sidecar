@@ -187,6 +187,7 @@ Rule names come in families:
 | `model.refusal` | The model refused the request. |
 | `agent.unknown` | The agent is not in the charter. The record has `decision: allow` and `error` set. |
 | `audit.unavailable` | `--audit-fail-closed` refused new work while the audit sink was failing. See [Audit sink failures](#audit-sink-failures). |
+| `clarify.asked` | The agent stopped to ask its caller for decisions (`ask_caller`). The `agent_invocation` record has `decision: allow` and the questions, as text, in its `output`. The sidecar writes that `output` from the questions it kept after the output guardrails, so it is exactly what the caller got. `agentsc logs --rule clarify.asked` finds these records, and its table shows them as `allow clarify.asked`. |
 
 Some failures name a rule only in the HTTP response: `runtime.unavailable`, `model.error`, `budget.max_steps` and `budget.max_tokens_per_call`. Their `agent_invocation` record has `decision: allow`, `rule: null` and the reason in `error`.
 
@@ -357,6 +358,7 @@ Your pods need the label `agentsc.io/service: <svc>`, and the sidecar container 
 | `--trace T` | none | Only records whose `trace_id` starts with `T`. |
 | `--request R` | none | Only records whose `request_id` starts with `R`. |
 | `--kind K` | none | Only records of one kind, for example `service_call`. |
+| `--rule R` | none | Only records whose `rule` starts with `R`, for example `taint.would_deny` or `clarify.asked`. |
 | `--denied` | off | Only records with `decision: deny`. |
 | `-f`, `--follow` | off | Follow new records (`kubectl logs -f`). Records print as they arrive, not sorted. |
 | `--raw` | off | Print the JSON lines instead of the table. |
@@ -365,7 +367,7 @@ Your pods need the label `agentsc.io/service: <svc>`, and the sidecar container 
 
 Exit status: `agentsc logs` exits 1 if kubectl fails. It prints `kubectl logs failed (...); no audit records were read`. An empty table always means "no matching records". It never hides a kubectl failure.
 
-The table columns are: time (UTC, `HH:MM:SS.mmm`), service, agent, kind, direction, caller, `→` callee, decision, latency. Then, when present: `tokens=<in>/<out> $<cost>`, `error=<text>`, and always `trace=<first 8 characters>`. A SPIFFE caller is shortened to `svc/<name>`. The calling agent is shown in parentheses, except on an `agent_invocation` record whose caller is `local`. A denial shows `DENY <rule>`. A `pii_redact` record shows `allow guardrail.pii_redact`.
+The table columns are: time (UTC, `HH:MM:SS.mmm`), service, agent, kind, direction, caller, `→` callee, decision, latency. Then, when present: `tokens=<in>/<out> $<cost>`, `error=<text>`, and always `trace=<first 8 characters>`. A SPIFFE caller is shortened to `svc/<name>`. The calling agent is shown in parentheses, except on an `agent_invocation` record whose caller is `local`. A denial shows `DENY <rule>`. A `pii_redact` record shows `allow guardrail.pii_redact`. An allowed record shows its rule only when the rule is `guardrail.pii_redact`, a `taint.*` rule or `clarify.asked` (a run that asked its caller), or the record is of a newer kind such as `config` or `learning`.
 
 This is real output for the denied call of the local demo:
 
@@ -624,6 +626,18 @@ Things to know:
 - **Changing `service.name` or `service.namespace` changes the SPIFFE id.** The certificate must match it, or the sidecar does not start. Issue a new certificate, and update the `authz` rules in other charters that name the old id.
 
 See [Creating agents](guides/creating-agents.md) for what to put in a charter.
+
+## Upgrade notes
+
+### Agent practices (charter schema level 6)
+
+This build gives every agent the practices: a plan before its first tool call, questions to its caller when a decision blocks the task, and terse answers ([the design note](design/agent-practices.md)). They are on by default, so they need no charter change. Read these points before you roll it out:
+
+- **Rename a tool named `ask_caller` first.** This build rejects a tool with that name at every schema level, because the runtime offers its own `ask_caller` tool for questions to the caller. A charter with such a tool doesn't validate, so an upgraded `agentscd` won't load it. Rename the tool, and every `guardrails.allowed_tools` and skill `tools` entry that names it, before you upgrade.
+- **Upgraded pods run the defaults at once.** In a mixed rollout the same agent plans, asks and answers tersely on new pods, and doesn't on old ones.
+- **The opt-out waits for the last old pod.** Turning a practice off takes a `practices` block, which is schema level 6. While an older sidecar (level 5 or below) of the service is connected, the control plane refuses any write with that block (HTTP 400, `version_skew`, naming the old pods). An older sidecar that reads its charter from a ConfigMap rejects the block as an unknown field, so an old pod that restarts with it doesn't start (see [Changing a charter](#changing-a-charter)). So write the opt-out only after the last old pod is gone. Until then the upgraded pods run the defaults.
+- **Apps must expect questions.** A run that asked returns `200` with `status: ok` and a `questions` list. During the rollout, an app that runs unattended should treat a response with `questions` as not final. For an agent with a `taint` block, it must not send the recommended answers back on its own ([Creating agents](guides/creating-agents.md#when-the-agent-asks)).
+- **Find the runs that asked** with `agentsc logs <service> --rule clarify.asked`.
 
 ## Rotating certificates
 

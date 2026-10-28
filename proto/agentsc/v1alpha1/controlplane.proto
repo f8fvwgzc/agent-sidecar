@@ -33,7 +33,7 @@ message Hello {
   string charter_yaml = 7;          // local start-up charter, for pending adoption only
   uint32 app_port = 8;
   uint32 mesh_port = 9;
-  uint32 charter_schema_level = 10; // 2 for v0.2, 3 with taint policy
+  uint32 charter_schema_level = 10; // 2 for v0.2, 3 with taint policy, 4 with authz.taint, 5 with peers in another namespace, 6 with agent practices
   string memory_version = 11;
 }
 

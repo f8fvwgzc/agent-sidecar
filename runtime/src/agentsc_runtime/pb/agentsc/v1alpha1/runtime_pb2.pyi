@@ -30,20 +30,22 @@ class ExecuteRequest(_message.Message):
     def __init__(self, request_id: _Optional[str] = ..., trace_id: _Optional[str] = ..., span_id: _Optional[str] = ..., agent_spec_json: _Optional[str] = ..., input: _Optional[str] = ..., context_json: _Optional[str] = ..., caller: _Optional[str] = ..., caller_agent: _Optional[str] = ..., depth: _Optional[int] = ...) -> None: ...
 
 class ExecuteResponse(_message.Message):
-    __slots__ = ("status", "output", "usage", "steps", "rule", "reason")
+    __slots__ = ("status", "output", "usage", "steps", "rule", "reason", "questions")
     STATUS_FIELD_NUMBER: _ClassVar[int]
     OUTPUT_FIELD_NUMBER: _ClassVar[int]
     USAGE_FIELD_NUMBER: _ClassVar[int]
     STEPS_FIELD_NUMBER: _ClassVar[int]
     RULE_FIELD_NUMBER: _ClassVar[int]
     REASON_FIELD_NUMBER: _ClassVar[int]
+    QUESTIONS_FIELD_NUMBER: _ClassVar[int]
     status: str
     output: str
     usage: _common_pb2.Usage
     steps: _containers.RepeatedCompositeFieldContainer[_common_pb2.Step]
     rule: str
     reason: str
-    def __init__(self, status: _Optional[str] = ..., output: _Optional[str] = ..., usage: _Optional[_Union[_common_pb2.Usage, _Mapping]] = ..., steps: _Optional[_Iterable[_Union[_common_pb2.Step, _Mapping]]] = ..., rule: _Optional[str] = ..., reason: _Optional[str] = ...) -> None: ...
+    questions: _containers.RepeatedCompositeFieldContainer[_common_pb2.Question]
+    def __init__(self, status: _Optional[str] = ..., output: _Optional[str] = ..., usage: _Optional[_Union[_common_pb2.Usage, _Mapping]] = ..., steps: _Optional[_Iterable[_Union[_common_pb2.Step, _Mapping]]] = ..., rule: _Optional[str] = ..., reason: _Optional[str] = ..., questions: _Optional[_Iterable[_Union[_common_pb2.Question, _Mapping]]] = ...) -> None: ...
 
 class HealthResponse(_message.Message):
     __slots__ = ("ok", "model_provider", "version")

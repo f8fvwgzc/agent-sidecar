@@ -109,8 +109,14 @@ Top-level keys are exactly these; unknown keys anywhere are a validation
 error (`agentsc charter validate` exits 1 and names the path). JSON Schema:
 `schemas/charter.schema.json`, generated from the Rust types by
 `agentsc charter schema`; a test keeps the file in sync. Fields marked
-*v0.2* are optional additions (§3.3); a charter without them is a v0.1
-charter, unchanged.
+*v0.2*, *level 3*, *level 4* or *level 6* are optional additions (§3.3, §3.5); a
+charter without them is a v0.1 charter and serializes exactly as one. It
+does not behave exactly as one: the practices (level 6, §3.3) are on by
+default, so a sidecar of this build gives every agent a working method and
+an output style, and offers it `ask_caller` (§9), with no change to its
+charter. This build also rejects a tool named `ask_caller` at every level
+(§3.2 rule 12), so a charter with such a tool must rename it before the
+upgrade.
 
 ```yaml
 apiVersion: agentsc.io/v1alpha1
@@ -160,9 +166,19 @@ agents:
       note_ttl_days: 7               # 1..=365; auto notes only
       from_peers: false              # also reflect on invocations whose caller is a peer service
       max_proposals_per_hour: 10     # 1..=100
+      require_evidence: true         # level 6, optional; a lesson must cite steps of the run (§9)
+      contrast_runs: 5               # level 6, optional; 0..=20 earlier runs shown as digests; 0 = none
+      scopes: [invariant, domain]    # level 6, optional; the lesson scopes that are kept; non-empty, each once
     taint:                           # level 3, optional; absent = no taint rules (§5.2)
       mode: enforce                  # enforce | audit
       input: trusted                 # label of the invocation's own input: trusted | untrusted | sensitive
+    practices:                       # level 6, optional; absent = these defaults (on) (§3.3, §9)
+      plan: true                     # a short plan before the first tool call; each result checked against its step
+      clarify: blocking              # never | blocking | always: when to ask the caller with ask_caller
+      max_questions: 5               # 1..=10, questions per round
+      brevity: lite                  # normal | lite | full | ultra, when the service's own app is the caller
+      agent_brevity: full            # normal | lite | full | ultra, when an agent is the caller (every mesh call)
+      auto_clarity: true             # plain prose for warnings, destructive and ordered steps
 guardrails:
   max_input_bytes: 16384
   pii_redact: true             # redact emails and phone numbers in agent output (response + audit)
@@ -267,7 +283,7 @@ literal segments, and one segment of one or more characters for each
 v0.2 rules (each has a passing and a failing test in `crates/agentsc-charter/tests/v02_rules.rs`;
 the JSON Schema mirrors what it can express: patterns, ranges, lengths, `maxItems`, `uniqueItems`,
 `learning.mode: auto` ⇒ `enabled: true`, a tool `name` that matches `^[a-zA-Z0-9_-]{1,64}$` and is
-`not` `load_skill`, and a `model` / `fallback_model` that matches `^[^\s\x00-\x1f\x7f-\x9f]+$`
+`not` one of `load_skill` and `ask_caller` (rule 12), and a `model` / `fallback_model` that matches `^[^\s\x00-\x1f\x7f-\x9f]+$`
 with `maxLength` 128; the validator is the authority, e.g. it counts the 128 in bytes):
 
 1. Skill names are DNS-1123 labels and unique; `agents[].skills` entries name a top-level skill
@@ -302,7 +318,20 @@ with `maxLength` 128; the validator is the authority, e.g. it counts the 128 in 
    and get no memory from `runtime_spec` (§4.3).
 8. `service.service_accounts` entries are DNS-1123 labels.
 
-### 3.3 Skills, harness, learning, telemetry (v0.2)
+Level 6 rules (design: [docs/design/agent-practices.md](docs/design/agent-practices.md); each has
+a passing and a failing test in `crates/agentsc-charter/tests/practices_rules.rs`; the JSON
+Schema mirrors the ranges, the enums, `minItems`, `uniqueItems` and the reserved tool name, and
+the validator is the authority):
+
+9. `practices.max_questions` is 1..=10: `agents[i] (a): practices.max_questions must be 1..=10`.
+10. `learning.contrast_runs` is 0..=20: `agents[i] (a): learning.contrast_runs must be 0..=20`.
+11. `learning.scopes` is non-empty and lists each value once: `agents[i] (a): learning.scopes
+    must list invariant, domain or both, each once`.
+12. No tool may be named `ask_caller` (the runtime offers it for questions to the caller, §9),
+    as no tool may be named `load_skill` (rule 3): `… the tool name ask_caller is reserved for
+    questions to the caller`.
+
+### 3.3 Skills, harness, learning, telemetry (v0.2), practices (level 6)
 
 - **Skills** are named instructions in the top-level `skills`; an agent lists the ones it uses.
   The runtime receives them resolved (§4.3): a skill whose `instructions` are shorter than 2048
@@ -312,15 +341,36 @@ with `maxLength` 128; the validator is the authority, e.g. it counts the 128 in 
   last retryable failure, and the cut-off for tool results. Absent = the defaults above.
 - **Learning**: agents may propose lessons (`SidecarTools.ProposeLesson`, §4.3); in `review`
   mode an editor decides, in `auto` mode a lesson becomes a note at once and expires after
-  `note_ttl_days`. Absent = off.
+  `note_ttl_days`. Absent = off. The level-6 fields shape the reflection (§9) and matter only
+  when `enabled` is true: with `require_evidence` a lesson must cite at least one step of the
+  run, `contrast_runs` is how many digests of earlier runs the reflection sees, and `scopes`
+  are the lesson scopes that are kept (`invariant`: how to work; `domain`: the agent's subject).
+- **Practices** (level 6): a fixed working method and output style that the runtime puts in
+  front of the model (§9). Their texts are fixed in the runtime; the charter holds only
+  switches and levels, never text, so these settings can't carry instructions. `plan` asks for
+  a short plan before the first tool call and a check of each result. `clarify` offers the
+  `ask_caller` tool: `blocking` asks only when a decision only the caller can make blocks the
+  task and no safe default exists, `always` asks before acting on any open decision, and
+  `never` offers no `ask_caller`. `max_questions` caps the questions of one round. `brevity` is
+  the answer's style when the service's own app (or another local caller without a calling
+  agent) is the caller, `agent_brevity` when an agent is (`normal`, `lite`, `full`, `ultra`;
+  `normal` is no output style). Every call over the mesh comes from an agent tool, so it
+  carries a calling agent and gets `agent_brevity`. `auto_clarity` keeps plain prose for
+  warnings, destructive and ordered steps. Absent = on, with the defaults above; a partial
+  block fills the missing fields with them, so `practices: {brevity: normal}` keeps
+  `plan`, `clarify` and `auto_clarity` on. No value is `off`: YAML 1.1 readers (`kubectl`, Helm,
+  PyYAML) read a bare `off` as the boolean `false`.
 - **Telemetry**: OpenTelemetry export and what audit leaves the pod. `otlp_endpoint` is honoured
   only when the sidecar allows it (`--otlp-endpoint-allow`).
 - `service.service_accounts`: the pods allowed to obtain this service's certificate run as the
   service account `<service.name>` or one of these.
 
 Defaults are filled by `agentsc-charter` (`AgentSpec::harness_or_default`,
-`learning_or_default`, `Charter::telemetry_or_default`); empty v0.2 lists and absent v0.2
-blocks are left out when a charter is serialized, so a v0.1 charter serializes exactly as before.
+`learning_or_default`, `practices_or_default`, `LearningSpec::require_evidence_or_default`,
+`contrast_runs_or_default`, `scopes_or_default`, `Charter::telemetry_or_default`); empty v0.2
+lists, absent v0.2 blocks, an absent `practices` block and absent level-6 `learning` fields are
+left out when a charter is serialized, so a v0.1 charter serializes exactly as before and a
+level-2 `learning` block serializes as it did at level 2.
 
 ### 3.4 Custom resource form
 
@@ -370,13 +420,24 @@ an oversized plain charter before it is parsed.
 - `Charter::schema_level()` is 1 for a charter that uses only v0.1 fields, 2 when it uses any
   v0.2 field (`skills`, `telemetry`, `service.service_accounts`, `agents[].skills`, `harness`,
   `learning`; empty lists count as unused), 3 when it uses a taint field (`agents[].taint`,
-  `tools[].label`, `tools[].effect`), 4 when it uses `authz.taint`, and 5 when it names a peer
+  `tools[].label`, `tools[].effect`), 4 when it uses `authz.taint`, 5 when it names a peer
   in another namespace (`<service>.<namespace>` as a tool's `service` or a `mesh.peers` key: no
-  new field, but an older sidecar would take it for a service of its own namespace).
+  new field, but an older sidecar would take it for a service of its own namespace), and 6 when
+  it uses a practices or level-6 learning field (`agents[].practices`,
+  `agents[].learning.require_evidence`, `agents[].learning.contrast_runs`,
+  `agents[].learning.scopes`).
   `Charter::level_fields()` lists each such field with its level (a tool once, at the highest).
-  `CHARTER_SCHEMA_LEVEL` = 5 is the level this build understands (sent as `Hello.charter_schema_level`); the control
+  `CHARTER_SCHEMA_LEVEL` = 6 is the level this build understands (sent as `Hello.charter_schema_level`); the control
   plane refuses to push a field to a connected instance below its level, naming the field and
   the instances.
+- The practices need no charter field to be on (§3.3), so a level-6 sidecar gives every agent
+  the practices while an older sidecar (level 5 or below) running the same charter does not: in
+  a mixed fleet the same agent behaves differently pod to pod until every sidecar is upgraded.
+  The opt-out is a `practices` block. The control plane refuses it (400 `version_skew`) while an
+  older sidecar of the service is connected, and an older sidecar rejects it in a ConfigMap
+  charter as an unknown field, so it can be written only after the last old pod is gone; until
+  then the upgraded pods run the defaults. The sidecar and the runtime ship in one image, so
+  they always agree on `agent_spec_json` (§4.3).
 - **Restart-only fields**: a hot reload may not change `service.name`, `service.namespace`,
   `service.app_port`, `mesh.port`, `audit.sink`, `audit.file` or `telemetry.otlp_endpoint`
   (`agentsc_charter::diff::restart_required` lists the ones that differ). A sidecar refuses such
@@ -385,7 +446,8 @@ an oversized plain charter before it is parsed.
 - `agentsc_charter::diff::weakened` lists the changes that reduce protection (§6, `config`
   records) and `agentsc_charter::diff::required_role` the role a change needs (viewer < editor <
   admin, with one `"<field> requires admin"` reason per field that needs admin; any change to
-  `agents[].taint`, and setting or changing a tool's `label` or `effect`, needs admin). A service with
+  `agents[].taint`, and setting or changing a tool's `label` or `effect`, needs admin; the
+  level-6 fields need editor, and two of their changes are weakened, §6.1). A service with
   no stored charter has nothing to diff: `agentsc_charter::diff::first_charter_role` says that
   adopting a pending charter needs editor and a first `PUT` needs admin.
 
@@ -439,6 +501,62 @@ A tool call that is denied inside the run does **not** fail the invocation; it
 is returned to the model as an error tool result, appears in `steps[]` with
 `decision: deny`, and is audited.
 
+**Questions** (level 6, `practices.clarify`, §3.3). A run that stopped to ask
+the caller (`ask_caller`, §9) still ends with status `ok`; the response adds
+`questions`, present only when there are any:
+
+```json
+{
+  "status": "ok",
+  "output": "I need these decisions from you before I go on:\n\n1. Refund to the card or as store credit?\n   Recommended: Store credit, because the card on the order has expired.",
+  "questions": [
+    { "question": "Refund to the card or as store credit?",
+      "recommended": "Store credit, because the card on the order has expired." }
+  ],
+  …
+}
+```
+
+`output` holds the same questions as text, so an app or a peer that knows
+nothing about `questions` still shows them. The sidecar treats questions as
+model output, in this order:
+
+1. With `practices.clarify: never` it drops any questions the runtime sends.
+2. It keeps at most `practices.max_questions` of them.
+3. It runs `guardrails.output_deny` over each raw `question` and
+   `recommended`, as the runtime sent it, and over the raw strings rendered
+   in the format of §9. A match denies the whole invocation (403, output and
+   questions withheld).
+4. It redacts PII in each string when `pii_redact` is on, then cuts it to
+   1000 characters. Redacting first means a cut can't leave half an e-mail
+   address that the redaction no longer recognises.
+5. It renders `output` from these delivered strings, in the format of §9, in
+   place of the runtime's `output`, and runs `output_deny` again over each
+   delivered string and over that `output`. A match denies as in step 3.
+   The `agent_invocation` record (§6) holds `output`, so the audit log shows
+   exactly the questions the caller got.
+
+Steps 3 and 5 check the strings on both sides of the redaction and the
+cut, so no match is lost to them, and the caller gets only text that was
+checked. The runtime's own `output` is neither checked nor redacted: the
+caller never gets it, and step 3 checks the sidecar's rendering of the raw
+strings instead.
+
+A non-`ok` status never carries questions.
+
+The runtime keeps no state between invocations. The caller answers with a
+new invocation that carries the original `input` and puts the questions and
+its answers in `context`, for example
+`{"answers": [{"question": "…", "answer": "…"}]}`, or writes them into the
+`input`; the agent treats those decisions as settled and does not ask them
+again. `context` passes the input guardrails like any other (§5.1 step 3).
+Answers in `context` or `input` are vouched for by the caller: the answering
+run is a new run and starts with only `taint.input` (§5.2; from a peer, also
+the labels of its `x-agentsc-taint`), whatever the run that asked had read.
+For an agent with a `taint` block, an unattended app must not send the
+recommended answers back on its own, since they may come from untrusted
+data; it uses `clarify: never` for that agent, or has a person answer.
+
 Response headers always include `traceparent` and `x-agentsc-request-id`.
 
 Also: `GET /v1/agents` → `{"agents":[{"name","type","model","tools":[...]}]}`,
@@ -459,6 +577,10 @@ and `AppApi.ListAgents`. Denials map to `PERMISSION_DENIED` /
 `RESOURCE_EXHAUSTED`, unknown agent to `NOT_FOUND`, runtime errors and
 `audit.unavailable` to `UNAVAILABLE`; the JSON envelope above is the gRPC
 message `InvokeAgentResponse`.
+Questions are `repeated Question questions = 10` in it, with
+`message Question { string question = 1; string recommended = 2; }` in
+`common.proto`; the sidecar fills them for app and mesh callers, so a run
+that asked returns them to a peer's sidecar too.
 
 ### 4.2 Sidecar ↔ sidecar (mesh, gRPC over mTLS, port 50002)
 
@@ -502,10 +624,24 @@ restrictions, so a peer gains nothing by lying.
   `memory: [{id, text}]` (the agent's active notes, oldest first). Memory
   exists only for agents with `learning.enabled`: for any other agent
   `memory` is `[]`, whatever notes the sidecar holds, and `spec.py` drops
-  notes that arrive for an agent without learning. The
-  runtime's `spec.py` parses exactly this (unknown fields are errors);
+  notes that arrive for an agent without learning. Since level 6 it also
+  carries `practices`, always and with every field filled (an agent without
+  a `practices` block gets the defaults, §3.3), and `learning` carries the
+  three level-6 fields, filled:
+
+  ```json
+  "practices": { "plan": true, "clarify": "blocking", "max_questions": 5,
+                 "brevity": "lite", "agent_brevity": "full", "auto_clarity": true },
+  "learning": { …, "require_evidence": true, "contrast_runs": 5, "scopes": ["invariant", "domain"] }
+  ```
+
+  The runtime's `spec.py` parses exactly this (unknown fields are errors;
+  `Practices` and the three `Learning` fields have the same defaults);
   `schemas/runtime-agent-spec.example.json` is a generated example that the
   Rust and Python tests both check.
+  `ExecuteResponse.questions` (`repeated Question questions = 7`) holds the
+  questions of a run that ended with `ask_caller` (§9), with status `ok`; the
+  sidecar handles them as in §4.1 before any caller sees them.
 - `Health(Empty) → HealthResponse{ok, model_provider: "anthropic"|"mock"}`.
 
 `SidecarTools` (served by the sidecar on `sidecar.sock`, called by the runtime
@@ -547,14 +683,27 @@ declared path or URL template (§3.1) — else `guardrail.tool_spec`.
   The sidecar checks that learning is enabled for `ctx.agent`, that the run's
   caller was `local` unless `learning.from_peers`, the rate limit
   `max_proposals_per_hour`, and that `note` is at most `max_note_chars`. It
-  scrubs the note (every value remembered for `run_request_id` by
-  `audit.redact`, every withheld guardrail-denied input, then PII redaction),
-  runs `guardrails.input_deny` on it (a match → `learning.denied`), and writes a
-  `learning` record (§6). Managed, it sends a `LearningProposal` to the control
-  plane, the only writer of memory; unmanaged with `mode: auto` it adds the note
-  to its local memory; unmanaged with `mode: review` the proposal is only
-  audited. Rules: `learning.proposed`, `learning.applied`, `learning.denied`,
-  `learning.rate_limited`.
+  scrubs the note and the rationale (every value remembered for
+  `run_request_id` by `audit.redact`, every withheld guardrail-denied input,
+  then PII redaction), runs `guardrails.input_deny` on both (a match →
+  `learning.denied`), and writes a `learning` record (§6). Managed, it sends a
+  `LearningProposal` to the control plane, the only writer of memory;
+  unmanaged with `mode: auto` it adds the note to its local memory; unmanaged
+  with `mode: review` the proposal is only audited. Rules: `learning.proposed`,
+  `learning.applied`, `learning.denied`, `learning.rate_limited`. Only the
+  note becomes memory. The `rationale` (level 6) carries what else the
+  reflection found (§9), with no payloads, only step ids, kinds and tool
+  names, and a reviewer sees it next to the note. It is one line:
+
+  ```text
+  Reflection on a run that ended ok and used get_order. Scope: domain. Target: tool:get_order. Evidence: s2 call get_order; s3 result get_order (error). Compared with 2 earlier runs.
+  ```
+
+  A run that called no tool (it ended `denied` or `error`) reads `… and used
+  no tools.`, a tool the charter doesn't declare shows as `undeclared`, and
+  `Evidence: none.` stands for no cited step. The last sentence is left out
+  when the reflection saw no earlier runs, and reads `Compared with 1 earlier
+  run.` for one.
 
 The sidecar adds `traceparent` (a child span) and `x-agentsc-request-id` to
 every request it sends — local app, mesh, http tool — and, toward an app,
@@ -721,7 +870,10 @@ an OpenAI-compatible adapter (`POST /v1/chat/completions`) is the next.
    `authz.services` for the target with identity `local`), inbound rules on
    the callee side (`guardrail.path`, `authz.services` for self with the
    caller's SAN).
-5. Guardrails on output: `guardrail.output_deny.<name>` → deny;
+5. Guardrails on output, over `output` or, for a run that asked (§4.1), over
+   each raw string of `questions`, their rendering, each delivered (redacted,
+   cut) string and the `output` rendered from them:
+   `guardrail.output_deny.<name>` → deny on any match;
    `guardrail.pii_redact` → rewrite, decision stays `allow`.
 
 `authz.services` matching: a rule applies when its `identity` (if set) equals
@@ -869,7 +1021,7 @@ and was billed).
   "cost_usd": 0.0052 | null,
   "latency_ms": 1180,
   "decision": "allow | deny",
-  "rule": "authz.services.deny-admin | guardrail.input_deny.no-secrets | budget.max_calls_per_minute | taint.untrusted_write | null",
+  "rule": "authz.services.deny-admin | guardrail.input_deny.no-secrets | budget.max_calls_per_minute | taint.untrusted_write | clarify.asked | null",
   "reason": "human readable or null",
   "error": "string or null"
 }
@@ -883,9 +1035,10 @@ Redaction, in this order, over the full payloads:
    as `"[redacted:<rule>]"`, only its hash remains. That is the invocation's
    input (with its `context`) in the `guardrail` and `agent_invocation` records
    of a `guardrail.input_deny.*` denial, the final output in the `guardrail`
-   record of a `guardrail.output_deny.*` denial, and the input of the calling
-   agent's `tool_call` / `agent_call` records when the callee's input rule
-   denied it. The denied input is also scrubbed (`[redacted]`) from every later
+   record of a `guardrail.output_deny.*` denial (for a run that asked, the
+   question string or rendering that matched, §4.1), and the input of the
+   calling agent's `tool_call` / `agent_call` records when the callee's input
+   rule denied it. The denied input is also scrubbed (`[redacted]`) from every later
    record of the same request in that sidecar, like the values in step 2.
 2. `audit.redact` dotted paths are replaced with `"[redacted]"` inside
    `input`/`output` (arrays are walked). Values found at those paths (strings
@@ -906,6 +1059,14 @@ Redaction, in this order, over the full payloads:
 
 A mesh call refused for its certificate (`authz.identity.invalid`) is audited
 as kind `authz` with `caller: "unknown"`.
+
+The `agent_invocation` record of a run that asked the caller (`ask_caller`,
+§9) has decision `allow`, rule `clarify.asked` and the questions, as text, in
+its `output`. The sidecar renders that `output` from the questions it keeps,
+after the guardrails and redaction of §4.1, so it is exactly what the caller
+got. `ask_caller` writes
+no `tool_call` record of its own; it shows in `steps[]` and in the
+`model_call` record of the turn that called it.
 
 Which records a single demo call produces (orders pod unless noted):
 
@@ -954,7 +1115,9 @@ rule whose regex changed counts as removed). Taint (§5.2): a removed
 `agents.<a>.taint`, `agents.<a>.taint.mode` enforce → audit,
 `agents.<a>.taint.input` and `agents.<a>.tools.<t>.label` changed away from
 untrusted or sensitive (each guards a different rule), `agents.<a>.tools.<t>.effect`
-write → read.
+write → read. Level 6 (§3.3): `agents.<a>.practices.auto_clarity` true →
+false and `agents.<a>.learning.require_evidence` true → false; both compare
+effective values, so an absent block or field counts as true.
 
 **Unknown kinds.** A consumer that sees a `kind` it does not know keeps the
 record and shows the kind as written: `agentsc logs` and embassy never reject a
@@ -1119,13 +1282,93 @@ reads records from a file instead of kubectl.
 - `stop_reason: max_tokens`: with text and no tool call → `ok` with the
   truncated text (step summary says so); with a tool call or no text → `error`,
   rule `budget.max_tokens_per_call` (a cut-off tool call never runs).
+- System prompt (level 6, §3.3; the texts are fixed in the runtime and given
+  word for word in [docs/design/agent-practices.md](docs/design/agent-practices.md)):
+  the charter's `system`, then `# Skills` (inline skills), then
+  `# Working method`, then `# Output style`. A section with nothing in it is
+  left out, so an agent with `plan: false`, `clarify: never` and both brevity
+  levels at `normal` gets exactly the prompt it got at level 5.
+  `# Working method` holds the plan text when `plan` is true and the agent has
+  at least one charter tool (in `agent_spec_json`, so after
+  `guardrails.allowed_tools`), and the clarify text of its level (`blocking`
+  or `always`, naming `max_questions`) when `clarify` is not `never`,
+  separated by a blank line. `# Output style` is present when the level is not
+  `normal`; the level is `agent_brevity` when the Execute has a `caller_agent`
+  (another agent called, locally or over the mesh), else `brevity`. Its text
+  is the level's sentence, then the common rules (keep every technical fact;
+  never drop a negation, a number or a unit; keep names, identifiers, code,
+  commands, JSON, error messages and quoted text exactly; the style is for the
+  answer only, never for tool inputs), then, with `auto_clarity`, the clarity
+  rule (plain, complete sentences for a security warning, a destructive or
+  irreversible action, and steps whose order matters). The reflection call
+  never gets these sections: its prompt is the reflection prompt alone, and a
+  lesson stays plain prose.
+- `ask_caller` (level 6): offered when `clarify` is not `never`, after the
+  charter tools and after `load_skill` when that is offered, with input
+  `{"questions": [{"question", "recommended"}]}` (`minItems` 1, `maxItems`
+  `max_questions`, both strings required). A valid call ends the run at once
+  with status `ok`: the other `tool_use` blocks of that turn are not run;
+  `questions` (§4.3) is the list, whitespace trimmed; `output` is the
+  questions as text, `I need these decisions from you before I go on:`, then
+  per question `<k>. <question>` and `   Recommended: <recommended>`, each
+  block after a blank line; `steps[]` gets a `tool_call` step `ask_caller`,
+  decision `allow`, summary `1 question` or `<k> questions`. A call with no
+  questions, more than `max_questions`, or an empty `question` or
+  `recommended` gets the error tool result `ask_caller needs 1 to <n>
+  questions, each with a non-empty question and recommended answer.`, a
+  `tool_call` step with summary `error: invalid questions`, and the loop goes
+  on. Like `load_skill`, `ask_caller` is not in `tools_used`, so a run that
+  only asked is not reflected on; no `tool_call` record is reported for it
+  (§6). The runtime keeps no state between Executes: answers come back in
+  `context` or the `input` (§4.1).
+- Reflection (learning on, after the Execute returned; design §12). The
+  transcript numbers every entry after `input`, `s1` to `sN`, the outcome
+  included (`s4 outcome: ok`); each entry is one line, its whitespace
+  collapsed. A call that never got a result (cut off by `max_tokens`, or
+  another call in the turn that asked) reads `sN call <tool> (not run):
+  <args>`, and a tool name the charter doesn't declare (other than
+  `load_skill` and `ask_caller`) shows as `undeclared`. With `contrast_runs`
+  above 0 the runtime keeps, per agent and per process, a digest of each
+  finished run of an agent with learning on: its status, rule, number of
+  steps (its transcript entries, `s1` to `sN`, the outcome included), and the
+  declared tools it called, in order (only calls that got a result;
+  `load_skill` and `ask_caller` are left out, and a tool the charter doesn't
+  declare shows as `undeclared`). Digests hold no input, output, argument or
+  result, so nothing of one caller's run reaches the reflection on another's.
+  A reflection gets the newest `contrast_runs` digests from before its run,
+  newest first, in an `<earlier_runs>` block (`r1 ok; 4 steps; tools:
+  get_order` for a call, its result, the answer and the outcome), left out
+  when there are none; digests live in memory and reset when the runtime
+  restarts. With `require_evidence` the prompt says a lesson must rest on
+  steps named by id; without it, that the model cites them when it can.
+  The answer is `NONE` or exactly four lines, `SCOPE: invariant | domain`,
+  `TARGET: notes | system | skill:<name> | tool:<name>`, `EVIDENCE: s2, s3`
+  and `NOTE: <one line>`, and code checks it: a line that starts with three
+  backticks is ignored; `NONE`, an empty answer, one without a `NOTE:` line
+  or with a `NOTE` of `NONE` or `N/A`, or one that gives a field twice, gives
+  no lesson; the note is one line once whitespace is collapsed, and a note
+  over `max_note_chars` gives no lesson;
+  `SCOPE` must be one of `learning.scopes`; every `EVIDENCE` id must be an id
+  of this transcript (one unknown id gives no lesson), and with
+  `require_evidence` at least one is needed; a `TARGET` other than `notes`,
+  `system`, `skill:<a skill of the agent>` or `tool:<a tool of the agent>`
+  becomes `notes`. Only the note is proposed as memory; scope, target,
+  evidence and contrast go in the `rationale` (§4.3). `TARGET` is advice for
+  the reviewer: nothing edits `system` or a skill on its own.
 - Mock model: on a turn without tool results it picks the single tool whose
   name+description shares the most words with the input (ties → declaration
   order) and fills string parameters heuristically (`input`/`question`/`query`
   → the whole input; `sku`/`id`/`order_id` → the first `UPPER-1` token, else
   the first run of 3+ digits); on a turn with tool results it answers
   `Based on <tool>: <result>` (results truncated to 600 chars). No tools → it
-  echoes `Mock answer for: <input>`.
+  echoes `Mock answer for: <input>`. It never calls `ask_caller` (it is left
+  out of its tool choice, like `load_skill`); tests that need it script the
+  model. On the reflection prompt it answers in the four-line format by fixed
+  rules: a refused tool call, else the first tool used, gives `SCOPE: domain`,
+  `TARGET: tool:<name>` and that step as evidence; else a run that ended
+  `denied` or `error` gives `SCOPE: invariant`, `TARGET: notes` and the
+  outcome step as evidence; else `NONE`. When the prompt says only one scope
+  is kept, it uses that one.
 
 ## 10. Testing gates
 
@@ -1141,9 +1384,16 @@ reads records from a file instead of kubectl.
   reports no cost still cannot spend past the budget, concurrent calls cannot
   overshoot it, `max_tokens_per_call` and `max_steps` held, calls bound to runs,
   the key never the runtime's, answers streamed through unchanged and recorded).
+  The level-6 rules of §3.2 are in
+  `crates/agentsc-charter/tests/practices_rules.rs`; questions held to the
+  output guardrails, PII redaction and `max_questions`, and rule
+  `clarify.asked`, in `services/agentscd/tests/clarify.rs`.
 - `cd runtime && uv run pytest` — mock model routing, agent loop with a fake
   sidecar, the gateway client on a unix socket, event shape, model calls
-  reported after a cancel or a failure, deadlines.
+  reported after a cancel or a failure, deadlines; the practices sections of
+  the system prompt (`tests/test_practices.py`); `ask_caller` and its questions
+  (`tests/test_clarify.py`); the numbered transcript, the digests of earlier
+  runs and the checks on the four-line answer.
 - `make test-live` (CI: `.github/workflows/real-model.yml`, nightly and by hand,
   when the secret `ANTHROPIC_API_KEY` exists) — the real model path: agentscd,
   the runtime and the Anthropic API through the gateway; streaming, `tool_use`,
@@ -1170,3 +1420,9 @@ reads records from a file instead of kubectl.
   refusal is surfaced as `model.refusal`.
 - An `output_deny` match cannot retract the `model_call` record already
   written for the turn that produced the output.
+- The practices (§3.3) are instructions to the model, not enforcement. The
+  sidecar enforces tools, budgets, guardrails and taint; a model can still
+  ignore the plan or the brevity rules. `ask_caller` adds no permission: it
+  only ends the run.
+- Digests of earlier runs (§9) are per runtime process, so per replica, and
+  reset on restart.

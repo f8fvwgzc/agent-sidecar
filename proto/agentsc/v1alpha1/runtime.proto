@@ -28,6 +28,7 @@ message ExecuteResponse {
   repeated Step steps = 4;
   string rule = 5;
   string reason = 6;
+  repeated Question questions = 7;  // only when the agent asked (ask_caller); status stays ok
 }
 
 message HealthResponse {

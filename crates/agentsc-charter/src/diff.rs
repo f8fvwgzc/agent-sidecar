@@ -69,8 +69,11 @@ pub fn restart_required(old: &Charter, new: &Charter) -> Vec<String> {
 
 /// Changes that reduce protection (design §5), as paths: a removed `audit.redact` path
 /// (`audit.redact[<path>]`), `guardrails.pii_redact` true → false, `telemetry.export_payloads`
-/// false → true, `authz.default` deny → allow, and a removed `input_deny` / `output_deny` rule
-/// (`guardrails.input_deny[<name>]`; a rule whose regex changed counts as removed).
+/// false → true, `authz.default` deny → allow, a removed `input_deny` / `output_deny` rule
+/// (`guardrails.input_deny[<name>]`; a rule whose regex changed counts as removed), a loosened
+/// taint policy, and per agent `agents.<a>.practices.auto_clarity` and
+/// `agents.<a>.learning.require_evidence` true → false (agent-practices design; effective values,
+/// so an absent block counts as true).
 pub fn weakened(old: &Charter, new: &Charter) -> Vec<String> {
     let mut out = Vec::new();
     for p in &old.audit.redact {
@@ -148,6 +151,15 @@ pub fn weakened(old: &Charter, new: &Charter) -> Vec<String> {
                 out.push(format!("agents.{}.tools.{}.effect", o.name, ot.name));
             }
         }
+        // agent practices: plain prose for warnings dropped, lessons without evidence allowed
+        if o.practices_or_default().auto_clarity && !n.practices_or_default().auto_clarity {
+            out.push(format!("agents.{}.practices.auto_clarity", o.name));
+        }
+        if o.learning_or_default().require_evidence_or_default()
+            && !n.learning_or_default().require_evidence_or_default()
+        {
+            out.push(format!("agents.{}.learning.require_evidence", o.name));
+        }
     }
     out
 }
@@ -155,14 +167,15 @@ pub fn weakened(old: &Charter, new: &Charter) -> Vec<String> {
 /// The role a write from `old` (the stored charter) to `new` needs (design §8.3), and, when that
 /// is admin, one `"<field> requires admin"` reason per field that needs it. Any write needs at
 /// least editor. Editors may change agents' `system`, `model`, `skills`, `harness`, `budgets`,
-/// `learning` (except setting `mode: auto`) and tools of type `service` and `agent` within the
-/// namespace (a target `<service>.<namespace>` no tool had before needs admin); top-level
-/// `skills`; the `guardrails.allowed_tools` / `allowed_services` entries; the agent names in
-/// `authz.callers` rules whose identity is `local`; and create and delete agents (removing a
-/// deleted agent's name from any `authz.callers` rule, and dropping a rule left empty, is part of
-/// deleting it). Everything else needs admin: `service`, `mesh`, `audit`, `telemetry`, the
-/// `guardrails` rules, `authz.default`, `authz.services`, any non-local `authz.callers` rule added,
-/// changed or removed, an agent's `type`, `learning.mode: auto`, and a new `http` tool origin.
+/// `practices`, `learning` (except setting `mode: auto`) and tools of type `service` and `agent`
+/// within the namespace (a target `<service>.<namespace>` no tool had before needs admin);
+/// top-level `skills`; the `guardrails.allowed_tools` / `allowed_services` entries; the agent
+/// names in `authz.callers` rules whose identity is `local`; and create and delete agents
+/// (removing a deleted agent's name from any `authz.callers` rule, and dropping a rule left empty,
+/// is part of deleting it). Everything else needs admin: `service`, `mesh`, `audit`,
+/// `telemetry`, the `guardrails` rules, `authz.default`, `authz.services`, any non-local
+/// `authz.callers` rule added, changed or removed, an agent's `type`, `learning.mode: auto`, and
+/// a new `http` tool origin.
 ///
 /// A service without a stored charter has nothing to diff against, so callers decide its first
 /// charter with [`first_charter_role`] instead (design §8.3): adopting a pending charter

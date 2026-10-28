@@ -34,8 +34,10 @@ pub const MAX_TOKENS_PER_CALL_LIMIT: u32 = 128_000;
 /// 3 = taint policy (`agents[].taint`, `tools[].label`, `tools[].effect`), 4 = the taint rule
 /// for inbound service calls (`authz.taint`), 5 = peers in another namespace
 /// (`<service>.<namespace>` in `tools[].service` or as a `mesh.peers` key, which an older
-/// sidecar would take for a service of its own namespace).
-pub const CHARTER_SCHEMA_LEVEL: u32 = 5;
+/// sidecar would take for a service of its own namespace), 6 = agent practices
+/// (`agents[].practices`, `learning.require_evidence`, `learning.contrast_runs`,
+/// `learning.scopes`; agent-practices design).
+pub const CHARTER_SCHEMA_LEVEL: u32 = 6;
 /// A charter is at most this many bytes, measured the same way whatever form it arrived in
 /// ([`Charter::validate`]): its JSON serialization and its plain YAML ([`Charter::to_yaml`], the
 /// text `CharterUpdate.charter_yaml` and the file store carry) are each at most this size, so a
@@ -68,6 +70,9 @@ pub const MAX_MEMORY_BYTES: usize = MAX_MEMORY_CHARS;
 pub const INLINE_SKILL_MAX_BYTES: usize = 2048;
 /// The tool the runtime offers for skills that are not inline; no charter tool may use the name.
 pub const LOAD_SKILL_TOOL: &str = "load_skill";
+/// The tool the runtime offers when `practices.clarify` is not `never`: calling it ends the run with
+/// questions for the caller (agent-practices design). No charter tool may use the name.
+pub const ASK_CALLER_TOOL: &str = "ask_caller";
 /// A DNS-1123 label, as JSON Schema `pattern`.
 pub const DNS_LABEL_PATTERN: &str = "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$";
 /// `http(s)://host[:port]` with at most a `/` after it and no whitespace or control character
@@ -274,6 +279,17 @@ pub struct LearningSpec {
     #[serde(default = "d_max_proposals_per_hour")]
     #[schemars(range(min = 1, max = 100))]
     pub max_proposals_per_hour: u32,
+    /// A lesson must cite the steps of the run it rests on (agent-practices design). Absent = true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_evidence: Option<bool>,
+    /// Earlier runs the reflection sees as digests, 0..=20; 0 = none. Absent = 5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(max = 20))]
+    pub contrast_runs: Option<u32>,
+    /// The lesson scopes that are kept, each at most once. Absent = `[invariant, domain]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1), extend("uniqueItems" = true))]
+    pub scopes: Option<Vec<LessonScope>>,
 }
 fn d_max_notes() -> u32 {
     20
@@ -287,6 +303,13 @@ fn d_note_ttl_days() -> u32 {
 fn d_max_proposals_per_hour() -> u32 {
     10
 }
+fn d_contrast_runs() -> u32 {
+    5
+}
+fn d_scopes() -> Vec<LessonScope> {
+    vec![LessonScope::Invariant, LessonScope::Domain]
+}
+// The level-6 fields stay `None`, so a default block serializes as it did at level 2.
 impl Default for LearningSpec {
     fn default() -> Self {
         Self {
@@ -297,6 +320,143 @@ impl Default for LearningSpec {
             note_ttl_days: d_note_ttl_days(),
             from_peers: false,
             max_proposals_per_hour: d_max_proposals_per_hour(),
+            require_evidence: None,
+            contrast_runs: None,
+            scopes: None,
+        }
+    }
+}
+
+impl LearningSpec {
+    /// [`LearningSpec::require_evidence`] with its default (true).
+    pub fn require_evidence_or_default(&self) -> bool {
+        self.require_evidence.unwrap_or(true)
+    }
+
+    /// [`LearningSpec::contrast_runs`] with its default (5).
+    pub fn contrast_runs_or_default(&self) -> u32 {
+        self.contrast_runs.unwrap_or_else(d_contrast_runs)
+    }
+
+    /// [`LearningSpec::scopes`] with its default (`[invariant, domain]`).
+    pub fn scopes_or_default(&self) -> Vec<LessonScope> {
+        self.scopes.clone().unwrap_or_else(d_scopes)
+    }
+}
+
+/// What a lesson is about (agent-practices design, from Harness²).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum LessonScope {
+    /// How to work (planning, tool order, checking results, finishing); holds even if the
+    /// subject changes.
+    Invariant,
+    /// A procedure or constraint of the agent's subject.
+    Domain,
+}
+
+impl LessonScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LessonScope::Invariant => "invariant",
+            LessonScope::Domain => "domain",
+        }
+    }
+}
+
+/// How tersely the agent answers (`practices.brevity`, `practices.agent_brevity`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Brevity {
+    /// No output style: the answer is as the model writes it.
+    Normal,
+    /// Terse, in full sentences.
+    #[default]
+    Lite,
+    /// Terse, no articles; sentence fragments are fine.
+    Full,
+    /// As terse as the meaning allows; each fact stated once.
+    Ultra,
+}
+
+impl Brevity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Brevity::Normal => "normal",
+            Brevity::Lite => "lite",
+            Brevity::Full => "full",
+            Brevity::Ultra => "ultra",
+        }
+    }
+}
+
+/// When the agent asks its caller for decisions (`practices.clarify`, the `ask_caller` tool).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Clarify {
+    /// The agent never asks: no `ask_caller` tool and no clarify text.
+    Never,
+    /// Only when a decision only the caller can make blocks the task and no safe default exists.
+    #[default]
+    Blocking,
+    /// Before acting on a request that leaves decisions open.
+    Always,
+}
+
+impl Clarify {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Clarify::Never => "never",
+            Clarify::Blocking => "blocking",
+            Clarify::Always => "always",
+        }
+    }
+}
+
+/// `agents[].practices` (agent-practices design): the working practices the runtime puts in
+/// front of the model. Only switches and levels: the texts are fixed in the runtime, so these
+/// settings cannot carry instructions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PracticesSpec {
+    /// Write a short plan before the first tool call and check each tool result against it.
+    #[serde(default = "d_true")]
+    pub plan: bool,
+    /// When to ask the caller: `never`, `blocking` (a decision blocks the task) or `always`.
+    #[serde(default)]
+    pub clarify: Clarify,
+    /// Questions per round, 1..=10.
+    #[serde(default = "d_max_questions")]
+    #[schemars(range(min = 1, max = 10))]
+    pub max_questions: u32,
+    /// How tersely the agent answers when the service's own app (or another local caller without
+    /// a calling agent) is the caller.
+    #[serde(default)]
+    pub brevity: Brevity,
+    /// How tersely the agent answers when another agent is the caller.
+    #[serde(default = "d_agent_brevity")]
+    pub agent_brevity: Brevity,
+    /// Plain prose for security warnings, destructive or irreversible actions and ordered steps.
+    #[serde(default = "d_true")]
+    pub auto_clarity: bool,
+}
+fn d_max_questions() -> u32 {
+    5
+}
+fn d_agent_brevity() -> Brevity {
+    Brevity::Full
+}
+impl Default for PracticesSpec {
+    fn default() -> Self {
+        Self {
+            plan: true,
+            clarify: Clarify::Blocking,
+            max_questions: d_max_questions(),
+            brevity: Brevity::Lite,
+            agent_brevity: d_agent_brevity(),
+            auto_clarity: true,
         }
     }
 }
@@ -368,6 +528,10 @@ pub struct AgentSpec {
     /// Governed learning. Absent = off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub learning: Option<LearningSpec>,
+    /// Working practices: plan, clarify, brevity (agent-practices design). Absent = the
+    /// defaults, all on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub practices: Option<PracticesSpec>,
     /// Taint-aware policy (docs/design/taint-policy.md). Absent = off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub taint: Option<TaintSpec>,
@@ -448,6 +612,11 @@ impl AgentSpec {
     pub fn learning_enabled(&self) -> bool {
         self.learning.as_ref().is_some_and(|l| l.enabled)
     }
+
+    /// `practices` with the defaults filled.
+    pub fn practices_or_default(&self) -> PracticesSpec {
+        self.practices.clone().unwrap_or_default()
+    }
 }
 
 fn default_agent_type() -> AgentType {
@@ -466,8 +635,8 @@ pub enum ToolType {
 #[serde(deny_unknown_fields)]
 pub struct ToolSpec {
     /// The name the model sees, unique per agent: `^[a-zA-Z0-9_-]{1,64}$`, and never
-    /// `load_skill` (the runtime's tool for skills).
-    #[schemars(pattern(TOOL_NAME_PATTERN), extend("not" = {"const": "load_skill"}))]
+    /// `load_skill` or `ask_caller` (the runtime's own tools).
+    #[schemars(pattern(TOOL_NAME_PATTERN), extend("not" = {"enum": ["load_skill", "ask_caller"]}))]
     pub name: String,
     pub description: String,
     #[serde(rename = "type")]
@@ -778,9 +947,10 @@ impl Charter {
     /// (`skills`, `telemetry`, `service.service_accounts`, `agents[].skills`, `harness`,
     /// `learning`), 3 for the taint fields (`agents[].taint`, `tools[].label`, `tools[].effect`),
     /// 4 for `authz.taint`, 5 for a peer in another namespace (a tool whose `service` is
-    /// `<service>.<namespace>`, a `mesh.peers` key of that form). A tool is listed once, at the
-    /// highest level it needs. Empty lists count as unused: they are left out when the charter is
-    /// serialized.
+    /// `<service>.<namespace>`, a `mesh.peers` key of that form), 6 for the practice fields
+    /// (`agents[].practices`, `learning.require_evidence`, `learning.contrast_runs`,
+    /// `learning.scopes`; agent-practices design). A tool is listed once, at the highest level it
+    /// needs. Empty lists count as unused: they are left out when the charter is serialized.
     pub fn level_fields(&self) -> Vec<(String, u32)> {
         let mut out = Vec::new();
         if self.authz.taint.is_some() {
@@ -802,8 +972,20 @@ impl Charter {
             if a.harness.is_some() {
                 out.push((format!("agents.{}.harness", a.name), 2));
             }
-            if a.learning.is_some() {
+            if let Some(l) = &a.learning {
                 out.push((format!("agents.{}.learning", a.name), 2));
+                for (field, used) in [
+                    ("require_evidence", l.require_evidence.is_some()),
+                    ("contrast_runs", l.contrast_runs.is_some()),
+                    ("scopes", l.scopes.is_some()),
+                ] {
+                    if used {
+                        out.push((format!("agents.{}.learning.{field}", a.name), 6));
+                    }
+                }
+            }
+            if a.practices.is_some() {
+                out.push((format!("agents.{}.practices", a.name), 6));
             }
             if a.taint.is_some() {
                 out.push((format!("agents.{}.taint", a.name), 3));
@@ -867,8 +1049,9 @@ impl Charter {
     /// `ExecuteRequest.agent_spec_json` for `agent` (design §4 "What the runtime receives"): the
     /// agent's entry after `guardrails.allowed_tools` (exactly [`Charter::agent_for_runtime`]),
     /// with `skills` resolved to `[{name, description, instructions, inline}]` (`inline` when the
-    /// instructions are shorter than [`INLINE_SKILL_MAX_BYTES`]), `harness` and `learning` with
-    /// the defaults filled, and `memory` = `[{id, text}]` (the active notes, oldest first).
+    /// instructions are shorter than [`INLINE_SKILL_MAX_BYTES`]), `harness`, `learning` (with its
+    /// level-6 fields) and `practices` with the defaults filled (`practices` is always sent,
+    /// agent-practices design), and `memory` = `[{id, text}]` (the active notes, oldest first).
     /// Memory exists only for agents with learning enabled (design §3): for any other agent
     /// `memory` is `[]`, whatever notes are passed in. `Value::Null` for an agent the charter does
     /// not declare.
@@ -897,9 +1080,17 @@ impl Charter {
                 "harness".into(),
                 serde_json::to_value(a.harness_or_default()).unwrap_or(Value::Null),
             );
+            let mut learning = a.learning_or_default();
+            learning.require_evidence = Some(learning.require_evidence_or_default());
+            learning.contrast_runs = Some(learning.contrast_runs_or_default());
+            learning.scopes = Some(learning.scopes_or_default());
             map.insert(
                 "learning".into(),
-                serde_json::to_value(a.learning_or_default()).unwrap_or(Value::Null),
+                serde_json::to_value(learning).unwrap_or(Value::Null),
+            );
+            map.insert(
+                "practices".into(),
+                serde_json::to_value(a.practices_or_default()).unwrap_or(Value::Null),
             );
             // the taint policy is the sidecar's: the runtime never sees it
             map.remove("taint");
@@ -1026,6 +1217,7 @@ impl Charter {
                 ));
             }
             self.validate_agent_v02(agent, &at, &mut errs);
+            validate_agent_practices(agent, &at, &mut errs);
             if agent.budgets.max_tokens_per_call == 0
                 || agent.budgets.max_calls_per_minute == 0
                 || agent.budgets.max_steps == 0
@@ -1059,6 +1251,11 @@ impl Charter {
                 if tool.name == LOAD_SKILL_TOOL {
                     errs.push(format!(
                         "{tt}: the tool name {LOAD_SKILL_TOOL} is reserved for skills"
+                    ));
+                }
+                if tool.name == ASK_CALLER_TOOL {
+                    errs.push(format!(
+                        "{tt}: the tool name {ASK_CALLER_TOOL} is reserved for questions to the caller"
                     ));
                 }
                 if tool.description.trim().is_empty() {
@@ -1387,6 +1584,32 @@ impl Charter {
                     "{at}: learning.mode: auto requires learning.enabled: true"
                 ));
             }
+        }
+    }
+}
+
+/// An agent's `practices` and the level-6 `learning` fields (agent-practices design, CONTRACT
+/// §3.2). The ranges are the JSON Schema's; the validator is the authority.
+fn validate_agent_practices(agent: &AgentSpec, at: &str, errs: &mut Vec<String>) {
+    if let Some(p) = &agent.practices
+        && !(1..=10).contains(&p.max_questions)
+    {
+        errs.push(format!("{at}: practices.max_questions must be 1..=10"));
+    }
+    let Some(l) = &agent.learning else {
+        return;
+    };
+    if let Some(n) = l.contrast_runs
+        && n > 20
+    {
+        errs.push(format!("{at}: learning.contrast_runs must be 0..=20"));
+    }
+    if let Some(scopes) = &l.scopes {
+        let unique: BTreeSet<LessonScope> = scopes.iter().copied().collect();
+        if scopes.is_empty() || unique.len() != scopes.len() {
+            errs.push(format!(
+                "{at}: learning.scopes must list invariant, domain or both, each once"
+            ));
         }
     }
 }

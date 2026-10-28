@@ -13,7 +13,17 @@ import pytest
 from agentsc_runtime.agent import run_agent
 from agentsc_runtime.models import MockModel, ModelResponse
 from agentsc_runtime.pb.agentsc.v1alpha1 import common_pb2
-from agentsc_runtime.prompts import NOTES_HEADER, load_skill_tool, notes_block, system_prompt
+from agentsc_runtime.prompts import (
+    BREVITY_LITE,
+    BREVITY_RULES,
+    CLARIFY_BLOCKING_TEXT,
+    CLARITY_RULE,
+    NOTES_HEADER,
+    PLAN_TEXT,
+    load_skill_tool,
+    notes_block,
+    system_prompt,
+)
 from agentsc_runtime.sidecar import GrpcSidecar
 from agentsc_runtime.spec import AgentSpec, MemoryNote, Skill
 
@@ -70,10 +80,13 @@ def test_inline_skills_are_appended_to_the_system_prompt(support, sidecar, ctx):
     spy = Spy()
     asyncio.run(run_agent(support, "hello there", "", ctx, spy, sidecar))
     system = spy.seen[0]["system"]
+    # system, then # Skills, then the practices sections (the example's practices are the defaults).
     assert system == (
         "You help customers of the shop.\n\n# Skills\n\n## refund-policy\n"
         "How to decide whether a refund is allowed.\n\n"
-        "Look up the order with get_order first. Refund only within 30 days."
+        "Look up the order with get_order first. Refund only within 30 days.\n\n"
+        f"# Working method\n\n{PLAN_TEXT}\n\n{CLARIFY_BLOCKING_TEXT.format(n=5)}\n\n"
+        f"# Output style\n\n{BREVITY_LITE} {BREVITY_RULES} {CLARITY_RULE}"
     )
     assert "Escalate when" not in system, "a skill that is not inline is loaded on demand"
     assert sidecar.events[0]["input"]["system"] == system, "the record shows the prompt the model got"
@@ -87,15 +100,15 @@ def test_load_skill_is_offered_for_skills_that_are_not_inline(support, sidecar, 
     spy = Spy()
     asyncio.run(run_agent(support, "hello there", "", ctx, spy, sidecar))
     tools = spy.seen[0]["tools"]
-    assert [t["name"] for t in tools] == ["get_order", "refund", "triage", "partner", "load_skill"]
-    load = tools[-1]
+    assert [t["name"] for t in tools] == ["get_order", "refund", "triage", "partner", "load_skill", "ask_caller"]
+    load = tools[-2]
     assert load["input_schema"] == {
         "type": "object",
         "properties": {"name": {"type": "string", "enum": ["escalation"]}},
         "required": ["name"],
     }
     assert "- escalation: When to hand a case to a human." in load["description"]
-    assert sidecar.events[0]["input"]["tools"][-1] == "load_skill"
+    assert sidecar.events[0]["input"]["tools"][-2:] == ["load_skill", "ask_caller"], "ask_caller after load_skill"
 
     for skill in support.skills:
         skill.inline = True

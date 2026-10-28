@@ -21,7 +21,10 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from .prompts import NONE, NOTES_OPEN, REFLECTION_MARKER, TRANSCRIPT_CLOSE, TRANSCRIPT_OPEN
-from .spec import LOAD_SKILL_TOOL
+from .spec import ASK_CALLER_TOOL, LOAD_SKILL_TOOL
+
+# Tools the runtime offers itself: the mock loads skills on its own terms and never asks the caller.
+_RUNTIME_TOOLS = {LOAD_SKILL_TOOL, ASK_CALLER_TOOL}
 
 STOPWORDS = {
     "the",
@@ -124,7 +127,8 @@ def _estimate_tokens(text: str) -> int:
 
 class MockModel:
     """Deterministic, offline. Loads the best-matching skill that is not inline, picks the single
-    best-matching tool, then summarises; on the reflection prompt it writes a fixed-form note."""
+    best-matching tool (never `ask_caller`), then summarises; on the reflection prompt it answers in
+    the four-line lesson format with a fixed-form note."""
 
     provider = "mock"
 
@@ -190,22 +194,31 @@ class MockModel:
 
     @staticmethod
     def reflect(system: str, transcript: str) -> str:
-        """A note drawn from the reflection transcript by fixed rules: a refused tool call, else the
-        first tool used and the input it answered, else a run that ended denied or in error, else NONE."""
+        """A lesson drawn from the reflection transcript by fixed rules (CONTRACT.md §9): a refused tool
+        call, else the first tool used and the input it answered, gives scope `domain`, target
+        `tool:<name>` and that step as evidence; else a run that ended denied or in error gives scope
+        `invariant`, target `notes` and the outcome step; else NONE. When the prompt keeps one scope
+        only, that one is used. The note is held to the limit the prompt names."""
         limit = int(m.group(1)) if (m := re.search(r"at most (\d+) characters", system)) else 500
+        only = m.group(1) if (m := re.search(r"Only (invariant|domain) lessons are kept\.", system)) else None
         body = transcript.split(TRANSCRIPT_OPEN, 1)[-1].split(TRANSCRIPT_CLOSE, 1)[0]
         asked = next((line[len("input: ") :] for line in body.splitlines() if line.startswith("input: ")), "")
-        if denied := re.search(r"^result (\S+) \(error\): denied by (\S+?):", body, re.MULTILINE):
-            note = f"{denied.group(1)} is refused by {denied.group(2)}: answer without it or say it is not allowed."
+        if denied := re.search(r"^(s\d+) result (\S+) \(error\): denied by (\S+?):", body, re.MULTILINE):
+            step, scope, target = denied.group(1), "domain", f"tool:{denied.group(2)}"
+            note = f"{denied.group(2)} is refused by {denied.group(3)}: answer without it or say it is not allowed."
         elif used := next(
-            (m for m in re.finditer(r"^call (\S+): ", body, re.MULTILINE) if m.group(1) != LOAD_SKILL_TOOL), None
+            (m for m in re.finditer(r"^(s\d+) call (\S+): ", body, re.MULTILINE) if m.group(2) not in _RUNTIME_TOOLS),
+            None,
         ):
-            note = f"Use {used.group(1)} for requests like: {' '.join(asked.split())}"
-        elif ended := re.search(r"^outcome: (denied|error) \(([^)\s]+)\)", body, re.MULTILINE):
-            note = f"Runs like this one end {ended.group(1)} with rule {ended.group(2)}."
+            step, scope, target = used.group(1), "domain", f"tool:{used.group(2)}"
+            note = f"Use {used.group(2)} for requests like: {' '.join(asked.split())}"
+        elif ended := re.search(r"^(s\d+) outcome: (denied|error) \(([^)\s]+)\)", body, re.MULTILINE):
+            step, scope, target = ended.group(1), "invariant", "notes"
+            note = f"Runs like this one end {ended.group(2)} with rule {ended.group(3)}."
         else:
             return NONE
-        return note[: max(1, limit)].rstrip()
+        note = note[: max(1, limit)].rstrip()
+        return f"SCOPE: {only or scope}\nTARGET: {target}\nEVIDENCE: {step}\nNOTE: {note}"
 
     def complete(
         self,
@@ -262,7 +275,7 @@ class MockModel:
         if skill is not None and skill not in loaded:
             return self._use(LOAD_SKILL_TOOL, {"name": skill}, prompt_tokens)
 
-        plain = [t for t in tools if t["name"] != LOAD_SKILL_TOOL]
+        plain = [t for t in tools if t["name"] not in _RUNTIME_TOOLS]
         tool = self.pick_tool(user_input, plain) if plain else None
         if tool is None:
             text = f"Mock answer for: {user_input}"

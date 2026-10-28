@@ -1352,5 +1352,6 @@ fn envelope(
         steps: vec![],
         rule: rule.into(),
         reason: reason.into(),
+        questions: Vec::new(),
     }
 }

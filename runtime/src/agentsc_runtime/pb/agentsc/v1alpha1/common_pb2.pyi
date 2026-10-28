@@ -54,8 +54,16 @@ class InvokeAgentRequest(_message.Message):
     depth: int
     def __init__(self, agent: _Optional[str] = ..., input: _Optional[str] = ..., context_json: _Optional[str] = ..., request_id: _Optional[str] = ..., traceparent: _Optional[str] = ..., caller_agent: _Optional[str] = ..., depth: _Optional[int] = ...) -> None: ...
 
+class Question(_message.Message):
+    __slots__ = ("question", "recommended")
+    QUESTION_FIELD_NUMBER: _ClassVar[int]
+    RECOMMENDED_FIELD_NUMBER: _ClassVar[int]
+    question: str
+    recommended: str
+    def __init__(self, question: _Optional[str] = ..., recommended: _Optional[str] = ...) -> None: ...
+
 class InvokeAgentResponse(_message.Message):
-    __slots__ = ("status", "request_id", "trace_id", "agent", "output", "usage", "steps", "rule", "reason")
+    __slots__ = ("status", "request_id", "trace_id", "agent", "output", "usage", "steps", "rule", "reason", "questions")
     STATUS_FIELD_NUMBER: _ClassVar[int]
     REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
     TRACE_ID_FIELD_NUMBER: _ClassVar[int]
@@ -65,6 +73,7 @@ class InvokeAgentResponse(_message.Message):
     STEPS_FIELD_NUMBER: _ClassVar[int]
     RULE_FIELD_NUMBER: _ClassVar[int]
     REASON_FIELD_NUMBER: _ClassVar[int]
+    QUESTIONS_FIELD_NUMBER: _ClassVar[int]
     status: str
     request_id: str
     trace_id: str
@@ -74,7 +83,8 @@ class InvokeAgentResponse(_message.Message):
     steps: _containers.RepeatedCompositeFieldContainer[Step]
     rule: str
     reason: str
-    def __init__(self, status: _Optional[str] = ..., request_id: _Optional[str] = ..., trace_id: _Optional[str] = ..., agent: _Optional[str] = ..., output: _Optional[str] = ..., usage: _Optional[_Union[Usage, _Mapping]] = ..., steps: _Optional[_Iterable[_Union[Step, _Mapping]]] = ..., rule: _Optional[str] = ..., reason: _Optional[str] = ...) -> None: ...
+    questions: _containers.RepeatedCompositeFieldContainer[Question]
+    def __init__(self, status: _Optional[str] = ..., request_id: _Optional[str] = ..., trace_id: _Optional[str] = ..., agent: _Optional[str] = ..., output: _Optional[str] = ..., usage: _Optional[_Union[Usage, _Mapping]] = ..., steps: _Optional[_Iterable[_Union[Step, _Mapping]]] = ..., rule: _Optional[str] = ..., reason: _Optional[str] = ..., questions: _Optional[_Iterable[_Union[Question, _Mapping]]] = ...) -> None: ...
 
 class ServiceRequest(_message.Message):
     __slots__ = ("method", "path", "headers", "body", "request_id", "traceparent", "agent")

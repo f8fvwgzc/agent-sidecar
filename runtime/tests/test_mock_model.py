@@ -132,24 +132,51 @@ def test_answers_with_the_skill_named_when_no_tool_fits():
     assert m.complete("sys", msgs, tools, 256).text() == "Mock answer for: greet the visitors (with skill greeting)"
 
 
-def test_reflection_notes_are_deterministic():
-    system = reflection_system(80)
+BOTH = ["invariant", "domain"]
 
-    def note(*lines: str) -> str:
-        transcript = "\n".join(["<transcript>", "agent: a", "caller: local", *lines, "</transcript>"])
-        return MockModel().complete(system, [{"role": "user", "content": transcript}], [], 256).text()
 
-    denied = note(
+def reflection(system: str, *lines: str) -> str:
+    transcript = "\n".join(["<transcript>", "agent: a", "caller: local", *lines, "</transcript>"])
+    return MockModel().complete(system, [{"role": "user", "content": transcript}], [], 256).text()
+
+
+def test_reflection_lessons_are_deterministic():
+    system = reflection_system(80, BOTH, True)
+    denied = reflection(
+        system,
         "input: Reset it",
-        "call reset: {}",
-        "result reset (error): denied by authz.services.deny-admin: no",
-        "outcome: ok",
+        "s1 call reset: {}",
+        "s2 result reset (error): denied by authz.services.deny-admin: no",
+        "s3 outcome: ok",
     )
     full = "reset is refused by authz.services.deny-admin: answer without it or say it is not allowed."
-    assert len(full) > 80 and denied == full[:80], "held to the limit the prompt names"
-    used = note("input: How   many\tWIDGET-1?", "call load_skill: {}", "call stock: {}", "outcome: ok")
-    assert used == "Use stock for requests like: How many WIDGET-1?"
-    assert note("input: x", "outcome: error (budget.max_steps): too long") == (
-        "Runs like this one end error with rule budget.max_steps."
+    assert len(full) > 80, "held to the limit the prompt names"
+    assert denied == f"SCOPE: domain\nTARGET: tool:reset\nEVIDENCE: s2\nNOTE: {full[:80].rstrip()}"
+    used = reflection(
+        system,
+        "input: How   many\tWIDGET-1?",
+        "s1 call load_skill: {}",
+        "s2 result load_skill: (skill instructions)",
+        "s3 call ask_caller: {}",
+        "s4 call stock: {}",
+        "s5 outcome: ok",
     )
-    assert note("input: hi", "outcome: ok") == "NONE"
+    assert (
+        used == "SCOPE: domain\nTARGET: tool:stock\nEVIDENCE: s4\nNOTE: Use stock for requests like: How many WIDGET-1?"
+    )
+    ended = reflection(system, "input: x", "s1 outcome: error (budget.max_steps): too long")
+    assert ended == (
+        "SCOPE: invariant\nTARGET: notes\nEVIDENCE: s1\nNOTE: Runs like this one end error with rule budget.max_steps."
+    )
+    cut_off = reflection(system, "input: x", "s1 call stock (not run): {}", "s2 outcome: error (budget.max_tokens)")
+    assert cut_off.splitlines()[:3] == ["SCOPE: invariant", "TARGET: notes", "EVIDENCE: s2"], "a call not run is unused"
+    assert reflection(system, "input: hi", "s1 outcome: ok") == "NONE"
+
+
+def test_the_mock_reflection_keeps_to_the_one_scope_the_prompt_allows():
+    only_invariant = reflection_system(500, ["invariant"], True)
+    used = reflection(only_invariant, "input: stock?", "s1 call stock: {}", "s2 outcome: ok")
+    assert used.splitlines()[0] == "SCOPE: invariant"
+    only_domain = reflection_system(500, ["domain"], False)
+    ended = reflection(only_domain, "input: x", "s1 outcome: denied (model.refusal)")
+    assert ended.splitlines()[:3] == ["SCOPE: domain", "TARGET: notes", "EVIDENCE: s1"]

@@ -252,7 +252,7 @@ async fn issuance_hello_heartbeats_and_updates() {
         h.charter_schema_level,
         agentsc_charter::CHARTER_SCHEMA_LEVEL
     );
-    assert_eq!(h.charter_schema_level, 5);
+    assert_eq!(h.charter_schema_level, 6);
     assert_eq!(h.memory_version, "");
     assert_eq!(
         cp.shared.peers.lock().unwrap()[0],

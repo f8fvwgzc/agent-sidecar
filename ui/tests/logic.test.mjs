@@ -32,6 +32,17 @@ import {
   clone,
   setIn,
   getIn,
+  parseNumber,
+  checkboxValue,
+  lessonScopes,
+  scopesKept,
+  PRACTICES_DEFAULTS,
+  LEARNING_DEFAULTS,
+  CLARIFY_LEVELS,
+  BREVITY_LEVELS,
+  MAX_QUESTIONS,
+  CONTRAST_RUNS,
+  RESERVED_TOOL_NAMES,
 } from '../js/util.js';
 import { G, nodeBox, portPoint, bezier, edgePath, frameRect, emptyFrameRect, rectsOverlap } from '../js/geometry.js';
 import { autoLayout, resolvePositions, depths } from '../js/layout.js';
@@ -663,6 +674,78 @@ test('viewPayload drops empty sections the original lacked and fields of other t
   assert.deepEqual(p.callers, []);
   const withSkills = normalizeView({ agent: { name: 'a', model: 'm', skills: [] } });
   assert.deepEqual(viewPayload(withSkills, withSkills).agent.skills, [], 'an explicit empty list stays');
+});
+
+// ---- agent practices and the level-6 learning fields (docs/design/agent-practices.md) -------------------
+
+test('the form shows the charter defaults: every practice on, clarify blocking, lite for apps and full for agents', () => {
+  assert.deepEqual(PRACTICES_DEFAULTS, { plan: true, clarify: 'blocking', max_questions: 5, brevity: 'lite', agent_brevity: 'full', auto_clarity: true });
+  assert.deepEqual(LEARNING_DEFAULTS, { require_evidence: true, contrast_runs: 5, scopes: ['invariant', 'domain'] });
+  assert.deepEqual(CLARIFY_LEVELS, ['never', 'blocking', 'always']);
+  assert.deepEqual(BREVITY_LEVELS, ['normal', 'lite', 'full', 'ultra']);
+});
+
+test('max questions accepts 1 to 10 and an empty field, and refuses 0, 11 and fractions', () => {
+  assert.deepEqual(parseNumber('1', MAX_QUESTIONS), { value: 1 });
+  assert.deepEqual(parseNumber(' 10 ', MAX_QUESTIONS), { value: 10 });
+  assert.deepEqual(parseNumber('', MAX_QUESTIONS), { value: undefined }, 'empty leaves the field out: the default 5 applies');
+  assert.deepEqual(parseNumber('0', MAX_QUESTIONS), { error: 'at least 1' });
+  assert.deepEqual(parseNumber('11', MAX_QUESTIONS), { error: 'at most 10' });
+  assert.deepEqual(parseNumber('2.5', MAX_QUESTIONS), { error: 'a whole number' });
+  assert.deepEqual(parseNumber('five', MAX_QUESTIONS), { error: 'a number' });
+});
+
+test('contrast runs accepts 0 to 20 and refuses -1 and 21', () => {
+  assert.deepEqual(parseNumber('0', CONTRAST_RUNS), { value: 0 }, '0 = no earlier runs, not "unset"');
+  assert.deepEqual(parseNumber('20', CONTRAST_RUNS), { value: 20 });
+  assert.deepEqual(parseNumber('-1', CONTRAST_RUNS), { error: 'at least 0' });
+  assert.deepEqual(parseNumber('21', CONTRAST_RUNS), { error: 'at most 20' });
+});
+
+test('a checkbox that is on by default writes nothing while checked, false when unchecked, and keeps an explicit value', () => {
+  assert.equal(checkboxValue(true, false, true), undefined, 'absent and left on: still absent');
+  assert.equal(checkboxValue(false, false, true), false);
+  assert.equal(checkboxValue(true, true, true), true, 'an explicit true stays explicit');
+  assert.equal(checkboxValue(false, true, true), false);
+  // Boxes that are off by default behave as before.
+  assert.equal(checkboxValue(false, false), undefined);
+  assert.equal(checkboxValue(true, false), true);
+  assert.equal(checkboxValue(false, true), false, 'an explicit false stays explicit');
+});
+
+test('lesson scopes need at least one scope, and both checked on an absent field writes nothing', () => {
+  assert.deepEqual(scopesKept(undefined), ['invariant', 'domain'], 'absent keeps both');
+  assert.deepEqual(scopesKept(['domain']), ['domain']);
+  assert.deepEqual(lessonScopes([], undefined), { error: 'keep invariant, domain or both' });
+  assert.deepEqual(lessonScopes([], ['domain']), { error: 'keep invariant, domain or both' });
+  assert.deepEqual(lessonScopes(['invariant', 'domain'], undefined), { value: undefined });
+  assert.deepEqual(lessonScopes(['domain'], undefined), { value: ['domain'] });
+  assert.deepEqual(lessonScopes(['domain', 'invariant'], ['invariant']), { value: ['invariant', 'domain'] }, 'each scope once, in the default order');
+  assert.deepEqual(lessonScopes(['invariant', 'domain'], ['domain', 'invariant']), { value: ['domain', 'invariant'] }, 'a spelled-out list keeps its order');
+  assert.deepEqual(lessonScopes(['invariant', 'domain', 'domain', 'other'], undefined), { value: undefined });
+});
+
+test('viewPayload leaves out a practices block left at its defaults and keeps one the user changed', () => {
+  const original = normalizeView({ agent: { name: 'a', model: 'm' } });
+  const untouched = clone(original);
+  untouched.agent.practices = {};
+  untouched.agent.learning = {};
+  assert.deepEqual(viewPayload(untouched, original), viewPayload(original, original), 'no practices and no learning written');
+  const changed = clone(original);
+  changed.agent.practices = { clarify: 'never', agent_brevity: 'ultra' };
+  changed.agent.learning = { contrast_runs: 0, scopes: ['domain'] };
+  const p = viewPayload(changed, original);
+  assert.deepEqual(p.agent.practices, { clarify: 'never', agent_brevity: 'ultra' });
+  assert.deepEqual(p.agent.learning, { contrast_runs: 0, scopes: ['domain'] });
+  const spelled = normalizeView({ agent: { name: 'a', model: 'm', practices: {} } });
+  assert.deepEqual(viewPayload(spelled, spelled).agent.practices, {}, 'an explicit empty block stays');
+});
+
+test('load_skill and ask_caller are reserved tool names, and a suggested tool name never takes one', () => {
+  assert.deepEqual(RESERVED_TOOL_NAMES, ['load_skill', 'ask_caller']);
+  assert.equal(suggestToolName('ask-caller', []), 'ask_caller_2');
+  assert.equal(suggestToolName('load_skill', []), 'load_skill_2');
+  assert.equal(suggestToolName('helper', []), 'helper');
 });
 
 test('inspector targets and tabs per node kind', () => {

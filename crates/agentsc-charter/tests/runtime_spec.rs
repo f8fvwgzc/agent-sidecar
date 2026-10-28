@@ -6,7 +6,7 @@ use agentsc_charter::*;
 use common::*;
 use serde_json::{Value, json};
 
-const NEW_KEYS: [&str; 4] = ["skills", "harness", "learning", "memory"];
+const NEW_KEYS: [&str; 5] = ["skills", "harness", "learning", "practices", "memory"];
 
 fn without_new_keys(mut v: Value) -> Value {
     if let Value::Object(m) = &mut v {
@@ -34,7 +34,13 @@ fn it_is_a_superset_of_what_the_sidecar_sends_today() {
             assert_eq!(
                 spec["learning"],
                 json!({"enabled": false, "mode": "review", "max_notes": 20, "max_note_chars": 500,
-                       "note_ttl_days": 7, "from_peers": false, "max_proposals_per_hour": 10})
+                       "note_ttl_days": 7, "from_peers": false, "max_proposals_per_hour": 10,
+                       "require_evidence": true, "contrast_runs": 5, "scopes": ["invariant", "domain"]})
+            );
+            assert_eq!(
+                spec["practices"],
+                json!({"plan": true, "clarify": "blocking", "max_questions": 5,
+                       "brevity": "lite", "agent_brevity": "full", "auto_clarity": true})
             );
         }
     }
@@ -107,6 +113,13 @@ fn harness_learning_and_memory() {
                "fallback_model": "claude-haiku-5-5", "tool_result_max_chars": 20000})
     );
     assert_eq!(spec["learning"]["enabled"], true);
+    assert_eq!(spec["learning"]["require_evidence"], true);
+    assert_eq!(spec["learning"]["contrast_runs"], 5);
+    assert_eq!(spec["learning"]["scopes"], json!(["invariant", "domain"]));
+    assert_eq!(
+        spec["practices"],
+        serde_json::to_value(PracticesSpec::default()).unwrap()
+    );
     assert_eq!(
         spec["memory"],
         json!([
@@ -157,6 +170,46 @@ fn memory_is_passed_only_to_agents_with_learning_enabled() {
     for a in &o.agents {
         assert_eq!(o.runtime_spec(&a.name, &notes)["memory"], json!([]));
     }
+}
+
+#[test]
+fn practices_and_the_new_learning_fields_are_always_filled() {
+    // agent-practices design: `practices` is always sent with every field, and `learning` gets
+    // the three level-6 fields filled
+    let mut c = v02();
+    c.agents[0].practices = Some(PracticesSpec {
+        clarify: Clarify::Never,
+        brevity: Brevity::Ultra,
+        ..PracticesSpec::default()
+    });
+    let l = c.agents[0].learning.as_mut().unwrap();
+    l.contrast_runs = Some(0);
+    l.scopes = Some(vec![LessonScope::Domain]);
+    let spec = c.runtime_spec("support", &[]);
+    assert_eq!(
+        spec["practices"],
+        json!({"plan": true, "clarify": "never", "max_questions": 5,
+               "brevity": "ultra", "agent_brevity": "full", "auto_clarity": true})
+    );
+    assert_eq!(spec["learning"]["require_evidence"], true);
+    assert_eq!(spec["learning"]["contrast_runs"], 0);
+    assert_eq!(spec["learning"]["scopes"], json!(["domain"]));
+    // an agent with neither block gets every default
+    let spec = c.runtime_spec("triage", &[]);
+    assert_eq!(
+        spec["practices"],
+        json!({"plan": true, "clarify": "blocking", "max_questions": 5,
+               "brevity": "lite", "agent_brevity": "full", "auto_clarity": true})
+    );
+    assert_eq!(spec["learning"]["require_evidence"], true);
+    assert_eq!(spec["learning"]["contrast_runs"], 5);
+    assert_eq!(spec["learning"]["scopes"], json!(["invariant", "domain"]));
+    // the keys come in the same order whichever blocks the charter spells out
+    let keys = |v: &Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+    assert_eq!(
+        keys(&c.runtime_spec("support", &[])),
+        keys(&c.runtime_spec("triage", &[]))
+    );
 }
 
 #[test]

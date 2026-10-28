@@ -239,6 +239,17 @@
           ],
           "description": "Governed learning. Absent = off."
         },
+        "practices": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PracticesSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Working practices: plan, clarify, brevity (agent-practices design). Absent = the\ndefaults, all on."
+        },
         "taint": {
           "anyOf": [
             {
@@ -269,10 +280,13 @@
       "properties": {
         "name": {
           "type": "string",
-          "description": "The name the model sees, unique per agent: `^[a-zA-Z0-9_-]{1,64}$`, and never\n`load_skill` (the runtime's tool for skills).",
+          "description": "The name the model sees, unique per agent: `^[a-zA-Z0-9_-]{1,64}$`, and never\n`load_skill` or `ask_caller` (the runtime's own tools).",
           "pattern": "^[a-zA-Z0-9_-]{1,64}$",
           "not": {
-            "const": "load_skill"
+            "enum": [
+              "load_skill",
+              "ask_caller"
+            ]
           }
         },
         "description": {
@@ -498,6 +512,35 @@
           "description": "Lessons the agent may propose per hour, 1..=100.",
           "maximum": 100,
           "default": 10
+        },
+        "require_evidence": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "A lesson must cite the steps of the run it rests on (agent-practices design). Absent = true."
+        },
+        "contrast_runs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "description": "Earlier runs the reflection sees as digests, 0..=20; 0 = none. Absent = 5.",
+          "maximum": 20
+        },
+        "scopes": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/LessonScope"
+          },
+          "description": "The lesson scopes that are kept, each at most once. Absent = `[invariant, domain]`.",
+          "minItems": 1,
+          "uniqueItems": true
         }
       },
       "description": "`agents[].learning`: governed learning (design §4, §6.5).",
@@ -535,6 +578,106 @@
           "description": "A proposed lesson becomes a note at once and expires after `note_ttl_days`."
         }
       ]
+    },
+    "LessonScope": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "invariant",
+          "description": "How to work (planning, tool order, checking results, finishing); holds even if the\nsubject changes."
+        },
+        {
+          "type": "string",
+          "const": "domain",
+          "description": "A procedure or constraint of the agent's subject."
+        }
+      ],
+      "description": "What a lesson is about (agent-practices design, from Harness²)."
+    },
+    "PracticesSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "plan": {
+          "type": "boolean",
+          "description": "Write a short plan before the first tool call and check each tool result against it.",
+          "default": true
+        },
+        "clarify": {
+          "$ref": "#/$defs/Clarify",
+          "description": "When to ask the caller: `never`, `blocking` (a decision blocks the task) or `always`.",
+          "default": "blocking"
+        },
+        "max_questions": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 1,
+          "description": "Questions per round, 1..=10.",
+          "maximum": 10,
+          "default": 5
+        },
+        "brevity": {
+          "$ref": "#/$defs/Brevity",
+          "description": "How tersely the agent answers when the service's own app (or another local caller without\na calling agent) is the caller.",
+          "default": "lite"
+        },
+        "agent_brevity": {
+          "$ref": "#/$defs/Brevity",
+          "description": "How tersely the agent answers when another agent is the caller.",
+          "default": "full"
+        },
+        "auto_clarity": {
+          "type": "boolean",
+          "description": "Plain prose for security warnings, destructive or irreversible actions and ordered steps.",
+          "default": true
+        }
+      },
+      "description": "`agents[].practices` (agent-practices design): the working practices the runtime puts in\nfront of the model. Only switches and levels: the texts are fixed in the runtime, so these\nsettings cannot carry instructions."
+    },
+    "Clarify": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "never",
+          "description": "The agent never asks: no `ask_caller` tool and no clarify text."
+        },
+        {
+          "type": "string",
+          "const": "blocking",
+          "description": "Only when a decision only the caller can make blocks the task and no safe default exists."
+        },
+        {
+          "type": "string",
+          "const": "always",
+          "description": "Before acting on a request that leaves decisions open."
+        }
+      ],
+      "description": "When the agent asks its caller for decisions (`practices.clarify`, the `ask_caller` tool)."
+    },
+    "Brevity": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "normal",
+          "description": "No output style: the answer is as the model writes it."
+        },
+        {
+          "type": "string",
+          "const": "lite",
+          "description": "Terse, in full sentences."
+        },
+        {
+          "type": "string",
+          "const": "full",
+          "description": "Terse, no articles; sentence fragments are fine."
+        },
+        {
+          "type": "string",
+          "const": "ultra",
+          "description": "As terse as the meaning allows; each fact stated once."
+        }
+      ],
+      "description": "How tersely the agent answers (`practices.brevity`, `practices.agent_brevity`)."
     },
     "TaintSpec": {
       "type": "object",

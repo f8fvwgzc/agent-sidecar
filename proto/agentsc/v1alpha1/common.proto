@@ -30,6 +30,12 @@ message InvokeAgentRequest {
   uint32 depth = 7;          // agent-call nesting depth
 }
 
+// A decision the agent needs from its caller (practices.clarify, CONTRACT.md §9).
+message Question {
+  string question = 1;
+  string recommended = 2;
+}
+
 message InvokeAgentResponse {
   string status = 1;         // ok | denied | error
   string request_id = 2;
@@ -40,6 +46,7 @@ message InvokeAgentResponse {
   repeated Step steps = 7;
   string rule = 8;           // when status != ok
   string reason = 9;         // when status != ok
+  repeated Question questions = 10;  // only when the agent asked (ask_caller); status stays ok
 }
 
 // An HTTP exchange carried over gRPC (mesh and runtime tool calls).

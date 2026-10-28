@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1d\x61gentsc/v1alpha1/common.proto\x12\x10\x61gentsc.v1alpha1\"\x07\n\x05\x45mpty\"F\n\x05Usage\x12\x14\n\x0cinput_tokens\x18\x01 \x01(\r\x12\x15\n\routput_tokens\x18\x02 \x01(\r\x12\x10\n\x08\x63ost_usd\x18\x03 \x01(\x01\"g\n\x04Step\x12\x0c\n\x04kind\x18\x01 \x01(\t\x12\x0c\n\x04name\x18\x02 \x01(\t\x12\x10\n\x08\x64\x65\x63ision\x18\x03 \x01(\t\x12\x0c\n\x04rule\x18\x04 \x01(\t\x12\x12\n\nlatency_ms\x18\x05 \x01(\r\x12\x0f\n\x07summary\x18\x06 \x01(\t\"\x96\x01\n\x12InvokeAgentRequest\x12\r\n\x05\x61gent\x18\x01 \x01(\t\x12\r\n\x05input\x18\x02 \x01(\t\x12\x14\n\x0c\x63ontext_json\x18\x03 \x01(\t\x12\x12\n\nrequest_id\x18\x04 \x01(\t\x12\x13\n\x0btraceparent\x18\x05 \x01(\t\x12\x14\n\x0c\x63\x61ller_agent\x18\x06 \x01(\t\x12\r\n\x05\x64\x65pth\x18\x07 \x01(\r\"\xd7\x01\n\x13InvokeAgentResponse\x12\x0e\n\x06status\x18\x01 \x01(\t\x12\x12\n\nrequest_id\x18\x02 \x01(\t\x12\x10\n\x08trace_id\x18\x03 \x01(\t\x12\r\n\x05\x61gent\x18\x04 \x01(\t\x12\x0e\n\x06output\x18\x05 \x01(\t\x12&\n\x05usage\x18\x06 \x01(\x0b\x32\x17.agentsc.v1alpha1.Usage\x12%\n\x05steps\x18\x07 \x03(\x0b\x32\x16.agentsc.v1alpha1.Step\x12\x0c\n\x04rule\x18\x08 \x01(\t\x12\x0e\n\x06reason\x18\t \x01(\t\"\xe4\x01\n\x0eServiceRequest\x12\x0e\n\x06method\x18\x01 \x01(\t\x12\x0c\n\x04path\x18\x02 \x01(\t\x12>\n\x07headers\x18\x03 \x03(\x0b\x32-.agentsc.v1alpha1.ServiceRequest.HeadersEntry\x12\x0c\n\x04\x62ody\x18\x04 \x01(\x0c\x12\x12\n\nrequest_id\x18\x05 \x01(\t\x12\x13\n\x0btraceparent\x18\x06 \x01(\t\x12\r\n\x05\x61gent\x18\x07 \x01(\t\x1a.\n\x0cHeadersEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"\xa0\x01\n\x0fServiceResponse\x12\x0e\n\x06status\x18\x01 \x01(\r\x12?\n\x07headers\x18\x02 \x03(\x0b\x32..agentsc.v1alpha1.ServiceResponse.HeadersEntry\x12\x0c\n\x04\x62ody\x18\x03 \x01(\x0c\x1a.\n\x0cHeadersEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1d\x61gentsc/v1alpha1/common.proto\x12\x10\x61gentsc.v1alpha1\"\x07\n\x05\x45mpty\"F\n\x05Usage\x12\x14\n\x0cinput_tokens\x18\x01 \x01(\r\x12\x15\n\routput_tokens\x18\x02 \x01(\r\x12\x10\n\x08\x63ost_usd\x18\x03 \x01(\x01\"g\n\x04Step\x12\x0c\n\x04kind\x18\x01 \x01(\t\x12\x0c\n\x04name\x18\x02 \x01(\t\x12\x10\n\x08\x64\x65\x63ision\x18\x03 \x01(\t\x12\x0c\n\x04rule\x18\x04 \x01(\t\x12\x12\n\nlatency_ms\x18\x05 \x01(\r\x12\x0f\n\x07summary\x18\x06 \x01(\t\"\x96\x01\n\x12InvokeAgentRequest\x12\r\n\x05\x61gent\x18\x01 \x01(\t\x12\r\n\x05input\x18\x02 \x01(\t\x12\x14\n\x0c\x63ontext_json\x18\x03 \x01(\t\x12\x12\n\nrequest_id\x18\x04 \x01(\t\x12\x13\n\x0btraceparent\x18\x05 \x01(\t\x12\x14\n\x0c\x63\x61ller_agent\x18\x06 \x01(\t\x12\r\n\x05\x64\x65pth\x18\x07 \x01(\r\"1\n\x08Question\x12\x10\n\x08question\x18\x01 \x01(\t\x12\x13\n\x0brecommended\x18\x02 \x01(\t\"\x86\x02\n\x13InvokeAgentResponse\x12\x0e\n\x06status\x18\x01 \x01(\t\x12\x12\n\nrequest_id\x18\x02 \x01(\t\x12\x10\n\x08trace_id\x18\x03 \x01(\t\x12\r\n\x05\x61gent\x18\x04 \x01(\t\x12\x0e\n\x06output\x18\x05 \x01(\t\x12&\n\x05usage\x18\x06 \x01(\x0b\x32\x17.agentsc.v1alpha1.Usage\x12%\n\x05steps\x18\x07 \x03(\x0b\x32\x16.agentsc.v1alpha1.Step\x12\x0c\n\x04rule\x18\x08 \x01(\t\x12\x0e\n\x06reason\x18\t \x01(\t\x12-\n\tquestions\x18\n \x03(\x0b\x32\x1a.agentsc.v1alpha1.Question\"\xe4\x01\n\x0eServiceRequest\x12\x0e\n\x06method\x18\x01 \x01(\t\x12\x0c\n\x04path\x18\x02 \x01(\t\x12>\n\x07headers\x18\x03 \x03(\x0b\x32-.agentsc.v1alpha1.ServiceRequest.HeadersEntry\x12\x0c\n\x04\x62ody\x18\x04 \x01(\x0c\x12\x12\n\nrequest_id\x18\x05 \x01(\t\x12\x13\n\x0btraceparent\x18\x06 \x01(\t\x12\r\n\x05\x61gent\x18\x07 \x01(\t\x1a.\n\x0cHeadersEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"\xa0\x01\n\x0fServiceResponse\x12\x0e\n\x06status\x18\x01 \x01(\r\x12?\n\x07headers\x18\x02 \x03(\x0b\x32..agentsc.v1alpha1.ServiceResponse.HeadersEntry\x12\x0c\n\x04\x62ody\x18\x03 \x01(\x0c\x1a.\n\x0cHeadersEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -43,14 +43,16 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_STEP']._serialized_end=235
   _globals['_INVOKEAGENTREQUEST']._serialized_start=238
   _globals['_INVOKEAGENTREQUEST']._serialized_end=388
-  _globals['_INVOKEAGENTRESPONSE']._serialized_start=391
-  _globals['_INVOKEAGENTRESPONSE']._serialized_end=606
-  _globals['_SERVICEREQUEST']._serialized_start=609
-  _globals['_SERVICEREQUEST']._serialized_end=837
-  _globals['_SERVICEREQUEST_HEADERSENTRY']._serialized_start=791
-  _globals['_SERVICEREQUEST_HEADERSENTRY']._serialized_end=837
-  _globals['_SERVICERESPONSE']._serialized_start=840
-  _globals['_SERVICERESPONSE']._serialized_end=1000
-  _globals['_SERVICERESPONSE_HEADERSENTRY']._serialized_start=791
-  _globals['_SERVICERESPONSE_HEADERSENTRY']._serialized_end=837
+  _globals['_QUESTION']._serialized_start=390
+  _globals['_QUESTION']._serialized_end=439
+  _globals['_INVOKEAGENTRESPONSE']._serialized_start=442
+  _globals['_INVOKEAGENTRESPONSE']._serialized_end=704
+  _globals['_SERVICEREQUEST']._serialized_start=707
+  _globals['_SERVICEREQUEST']._serialized_end=935
+  _globals['_SERVICEREQUEST_HEADERSENTRY']._serialized_start=889
+  _globals['_SERVICEREQUEST_HEADERSENTRY']._serialized_end=935
+  _globals['_SERVICERESPONSE']._serialized_start=938
+  _globals['_SERVICERESPONSE']._serialized_end=1098
+  _globals['_SERVICERESPONSE_HEADERSENTRY']._serialized_start=889
+  _globals['_SERVICERESPONSE_HEADERSENTRY']._serialized_end=935
 # @@protoc_insertion_point(module_scope)

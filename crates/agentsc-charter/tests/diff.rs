@@ -240,6 +240,91 @@ fn strengthening_changes_are_not_weakening() {
     assert_eq!(weakened(&o, &exporting), ["telemetry.export_payloads"]);
 }
 
+#[test]
+fn dropping_auto_clarity_or_required_evidence_is_weakening() {
+    // agent-practices design: effective values, so an absent block counts as true
+    let (old, new) = changed(|c| {
+        c.agents[0].practices = Some(PracticesSpec {
+            auto_clarity: false,
+            ..PracticesSpec::default()
+        })
+    });
+    assert_eq!(
+        weakened(&old, &new),
+        ["agents.support.practices.auto_clarity"]
+    );
+    let (old, new) =
+        changed(|c| c.agents[0].learning.as_mut().unwrap().require_evidence = Some(false));
+    assert_eq!(
+        weakened(&old, &new),
+        ["agents.support.learning.require_evidence"]
+    );
+    // triage has no learning block at all: absent counts as true too
+    let (old, new) = changed(|c| {
+        c.agents[1].learning = Some(LearningSpec {
+            require_evidence: Some(false),
+            ..LearningSpec::default()
+        })
+    });
+    assert_eq!(
+        weakened(&old, &new),
+        ["agents.triage.learning.require_evidence"]
+    );
+    // several at once, in a fixed order: per agent, taint and tools first, then the practices
+    let (old, new) = changed(|c| {
+        for a in &mut c.agents {
+            a.practices = Some(PracticesSpec {
+                auto_clarity: false,
+                ..PracticesSpec::default()
+            });
+        }
+        c.agents[0].learning.as_mut().unwrap().require_evidence = Some(false);
+        c.guardrails.pii_redact = false;
+    });
+    assert_eq!(
+        weakened(&old, &new),
+        [
+            "guardrails.pii_redact",
+            "agents.support.practices.auto_clarity",
+            "agents.support.learning.require_evidence",
+            "agents.triage.practices.auto_clarity",
+        ]
+    );
+    // spelling out the defaults, turning them back on, or tuning the other fields is not
+    let (old, new) = changed(|c| {
+        c.agents[0].practices = Some(PracticesSpec::default());
+        let l = c.agents[0].learning.as_mut().unwrap();
+        l.require_evidence = Some(true);
+        l.contrast_runs = Some(0);
+        l.scopes = Some(vec![LessonScope::Domain]);
+        c.agents[1].practices = Some(PracticesSpec {
+            plan: false,
+            clarify: Clarify::Never,
+            max_questions: 1,
+            brevity: Brevity::Normal,
+            agent_brevity: Brevity::Normal,
+            auto_clarity: true,
+        });
+    });
+    assert!(
+        weakened(&old, &new).is_empty(),
+        "{:?}",
+        weakened(&old, &new)
+    );
+    assert!(weakened(&new, &old).is_empty());
+    let mut off = v02();
+    off.agents[0].practices = Some(PracticesSpec {
+        auto_clarity: false,
+        ..PracticesSpec::default()
+    });
+    off.agents[0].learning.as_mut().unwrap().require_evidence = Some(false);
+    assert!(weakened(&off, &v02()).is_empty(), "turning them on again");
+    // a deleted agent is not a weakening of its practices
+    let mut gone = off.clone();
+    gone.agents.retain(|a| a.name != "support");
+    assert!(weakened(&v02(), &gone).is_empty());
+}
+
 // --- required_role: what an editor may do ----------------------------------------------------------
 
 #[test]
@@ -266,6 +351,21 @@ fn editors_may_change_agents_skills_and_local_callers() {
     });
     editor("learning off, from auto", |c| {
         c.agents[0].learning.as_mut().unwrap().enabled = false;
+    });
+    editor("practices and the level-6 learning fields", |c| {
+        c.agents[0].practices = Some(PracticesSpec {
+            plan: false,
+            clarify: Clarify::Always,
+            max_questions: 10,
+            brevity: Brevity::Normal,
+            agent_brevity: Brevity::Ultra,
+            auto_clarity: false,
+        });
+        let l = c.agents[0].learning.as_mut().unwrap();
+        l.require_evidence = Some(false);
+        l.contrast_runs = Some(20);
+        l.scopes = Some(vec![LessonScope::Invariant]);
+        c.agents[1].practices = Some(PracticesSpec::default());
     });
     editor("service and agent tools", |c| {
         c.agents[0].tools.push(ToolSpec {

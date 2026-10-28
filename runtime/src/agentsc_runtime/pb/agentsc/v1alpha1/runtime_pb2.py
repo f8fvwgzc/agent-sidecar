@@ -25,7 +25,7 @@ _sym_db = _symbol_database.Default()
 from agentsc_runtime.pb.agentsc.v1alpha1 import common_pb2 as agentsc_dot_v1alpha1_dot_common__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1e\x61gentsc/v1alpha1/runtime.proto\x12\x10\x61gentsc.v1alpha1\x1a\x1d\x61gentsc/v1alpha1/common.proto\"\xba\x01\n\x0e\x45xecuteRequest\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x10\n\x08trace_id\x18\x02 \x01(\t\x12\x0f\n\x07span_id\x18\x03 \x01(\t\x12\x17\n\x0f\x61gent_spec_json\x18\x04 \x01(\t\x12\r\n\x05input\x18\x05 \x01(\t\x12\x14\n\x0c\x63ontext_json\x18\x06 \x01(\t\x12\x0e\n\x06\x63\x61ller\x18\x07 \x01(\t\x12\x14\n\x0c\x63\x61ller_agent\x18\x08 \x01(\t\x12\r\n\x05\x64\x65pth\x18\t \x01(\r\"\x9e\x01\n\x0f\x45xecuteResponse\x12\x0e\n\x06status\x18\x01 \x01(\t\x12\x0e\n\x06output\x18\x02 \x01(\t\x12&\n\x05usage\x18\x03 \x01(\x0b\x32\x17.agentsc.v1alpha1.Usage\x12%\n\x05steps\x18\x04 \x03(\x0b\x32\x16.agentsc.v1alpha1.Step\x12\x0c\n\x04rule\x18\x05 \x01(\t\x12\x0e\n\x06reason\x18\x06 \x01(\t\"E\n\x0eHealthResponse\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\x16\n\x0emodel_provider\x18\x02 \x01(\t\x12\x0f\n\x07version\x18\x03 \x01(\t\"p\n\x0bToolContext\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x10\n\x08trace_id\x18\x02 \x01(\t\x12\x0f\n\x07span_id\x18\x03 \x01(\t\x12\r\n\x05\x61gent\x18\x04 \x01(\t\x12\x0c\n\x04tool\x18\x05 \x01(\t\x12\r\n\x05\x64\x65pth\x18\x06 \x01(\r\"\xf1\x01\n\x12ToolServiceRequest\x12*\n\x03\x63tx\x18\x01 \x01(\x0b\x32\x1d.agentsc.v1alpha1.ToolContext\x12\x0f\n\x07service\x18\x02 \x01(\t\x12\x0e\n\x06method\x18\x03 \x01(\t\x12\x0c\n\x04path\x18\x04 \x01(\t\x12\x42\n\x07headers\x18\x05 \x03(\x0b\x32\x31.agentsc.v1alpha1.ToolServiceRequest.HeadersEntry\x12\x0c\n\x04\x62ody\x18\x06 \x01(\x0c\x1a.\n\x0cHeadersEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"{\n\x10ToolAgentRequest\x12*\n\x03\x63tx\x18\x01 \x01(\x0b\x32\x1d.agentsc.v1alpha1.ToolContext\x12\x16\n\x0etarget_service\x18\x02 \x01(\t\x12\x14\n\x0ctarget_agent\x18\x03 \x01(\t\x12\r\n\x05input\x18\x04 \x01(\t\"\xd9\x01\n\x0fToolHttpRequest\x12*\n\x03\x63tx\x18\x01 \x01(\x0b\x32\x1d.agentsc.v1alpha1.ToolContext\x12\x0e\n\x06method\x18\x02 \x01(\t\x12\x0b\n\x03url\x18\x03 \x01(\t\x12?\n\x07headers\x18\x04 \x03(\x0b\x32..agentsc.v1alpha1.ToolHttpRequest.HeadersEntry\x12\x0c\n\x04\x62ody\x18\x05 \x01(\x0c\x1a.\n\x0cHeadersEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"\x1a\n\nAuditEvent\x12\x0c\n\x04json\x18\x01 \x01(\t\"t\n\rLessonRequest\x12*\n\x03\x63tx\x18\x01 \x01(\x0b\x32\x1d.agentsc.v1alpha1.ToolContext\x12\x0c\n\x04note\x18\x02 \x01(\t\x12\x11\n\trationale\x18\x03 \x01(\t\x12\x16\n\x0erun_request_id\x18\x04 \x01(\t\"@\n\x0eLessonResponse\x12\x10\n\x08\x64\x65\x63ision\x18\x01 \x01(\t\x12\x0c\n\x04rule\x18\x02 \x01(\t\x12\x0e\n\x06reason\x18\x03 \x01(\t2\x9e\x01\n\x07Runtime\x12N\n\x07\x45xecute\x12 .agentsc.v1alpha1.ExecuteRequest\x1a!.agentsc.v1alpha1.ExecuteResponse\x12\x43\n\x06Health\x12\x17.agentsc.v1alpha1.Empty\x1a .agentsc.v1alpha1.HealthResponse2\xb0\x03\n\x0cSidecarTools\x12X\n\rInvokeService\x12$.agentsc.v1alpha1.ToolServiceRequest\x1a!.agentsc.v1alpha1.ServiceResponse\x12X\n\x0bInvokeAgent\x12\".agentsc.v1alpha1.ToolAgentRequest\x1a%.agentsc.v1alpha1.InvokeAgentResponse\x12R\n\nInvokeHttp\x12!.agentsc.v1alpha1.ToolHttpRequest\x1a!.agentsc.v1alpha1.ServiceResponse\x12\x44\n\x0bReportEvent\x12\x1c.agentsc.v1alpha1.AuditEvent\x1a\x17.agentsc.v1alpha1.Empty\x12R\n\rProposeLesson\x12\x1f.agentsc.v1alpha1.LessonRequest\x1a .agentsc.v1alpha1.LessonResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1e\x61gentsc/v1alpha1/runtime.proto\x12\x10\x61gentsc.v1alpha1\x1a\x1d\x61gentsc/v1alpha1/common.proto\"\xba\x01\n\x0e\x45xecuteRequest\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x10\n\x08trace_id\x18\x02 \x01(\t\x12\x0f\n\x07span_id\x18\x03 \x01(\t\x12\x17\n\x0f\x61gent_spec_json\x18\x04 \x01(\t\x12\r\n\x05input\x18\x05 \x01(\t\x12\x14\n\x0c\x63ontext_json\x18\x06 \x01(\t\x12\x0e\n\x06\x63\x61ller\x18\x07 \x01(\t\x12\x14\n\x0c\x63\x61ller_agent\x18\x08 \x01(\t\x12\r\n\x05\x64\x65pth\x18\t \x01(\r\"\xcd\x01\n\x0f\x45xecuteResponse\x12\x0e\n\x06status\x18\x01 \x01(\t\x12\x0e\n\x06output\x18\x02 \x01(\t\x12&\n\x05usage\x18\x03 \x01(\x0b\x32\x17.agentsc.v1alpha1.Usage\x12%\n\x05steps\x18\x04 \x03(\x0b\x32\x16.agentsc.v1alpha1.Step\x12\x0c\n\x04rule\x18\x05 \x01(\t\x12\x0e\n\x06reason\x18\x06 \x01(\t\x12-\n\tquestions\x18\x07 \x03(\x0b\x32\x1a.agentsc.v1alpha1.Question\"E\n\x0eHealthResponse\x12\n\n\x02ok\x18\x01 \x01(\x08\x12\x16\n\x0emodel_provider\x18\x02 \x01(\t\x12\x0f\n\x07version\x18\x03 \x01(\t\"p\n\x0bToolContext\x12\x12\n\nrequest_id\x18\x01 \x01(\t\x12\x10\n\x08trace_id\x18\x02 \x01(\t\x12\x0f\n\x07span_id\x18\x03 \x01(\t\x12\r\n\x05\x61gent\x18\x04 \x01(\t\x12\x0c\n\x04tool\x18\x05 \x01(\t\x12\r\n\x05\x64\x65pth\x18\x06 \x01(\r\"\xf1\x01\n\x12ToolServiceRequest\x12*\n\x03\x63tx\x18\x01 \x01(\x0b\x32\x1d.agentsc.v1alpha1.ToolContext\x12\x0f\n\x07service\x18\x02 \x01(\t\x12\x0e\n\x06method\x18\x03 \x01(\t\x12\x0c\n\x04path\x18\x04 \x01(\t\x12\x42\n\x07headers\x18\x05 \x03(\x0b\x32\x31.agentsc.v1alpha1.ToolServiceRequest.HeadersEntry\x12\x0c\n\x04\x62ody\x18\x06 \x01(\x0c\x1a.\n\x0cHeadersEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"{\n\x10ToolAgentRequest\x12*\n\x03\x63tx\x18\x01 \x01(\x0b\x32\x1d.agentsc.v1alpha1.ToolContext\x12\x16\n\x0etarget_service\x18\x02 \x01(\t\x12\x14\n\x0ctarget_agent\x18\x03 \x01(\t\x12\r\n\x05input\x18\x04 \x01(\t\"\xd9\x01\n\x0fToolHttpRequest\x12*\n\x03\x63tx\x18\x01 \x01(\x0b\x32\x1d.agentsc.v1alpha1.ToolContext\x12\x0e\n\x06method\x18\x02 \x01(\t\x12\x0b\n\x03url\x18\x03 \x01(\t\x12?\n\x07headers\x18\x04 \x03(\x0b\x32..agentsc.v1alpha1.ToolHttpRequest.HeadersEntry\x12\x0c\n\x04\x62ody\x18\x05 \x01(\x0c\x1a.\n\x0cHeadersEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"\x1a\n\nAuditEvent\x12\x0c\n\x04json\x18\x01 \x01(\t\"t\n\rLessonRequest\x12*\n\x03\x63tx\x18\x01 \x01(\x0b\x32\x1d.agentsc.v1alpha1.ToolContext\x12\x0c\n\x04note\x18\x02 \x01(\t\x12\x11\n\trationale\x18\x03 \x01(\t\x12\x16\n\x0erun_request_id\x18\x04 \x01(\t\"@\n\x0eLessonResponse\x12\x10\n\x08\x64\x65\x63ision\x18\x01 \x01(\t\x12\x0c\n\x04rule\x18\x02 \x01(\t\x12\x0e\n\x06reason\x18\x03 \x01(\t2\x9e\x01\n\x07Runtime\x12N\n\x07\x45xecute\x12 .agentsc.v1alpha1.ExecuteRequest\x1a!.agentsc.v1alpha1.ExecuteResponse\x12\x43\n\x06Health\x12\x17.agentsc.v1alpha1.Empty\x1a .agentsc.v1alpha1.HealthResponse2\xb0\x03\n\x0cSidecarTools\x12X\n\rInvokeService\x12$.agentsc.v1alpha1.ToolServiceRequest\x1a!.agentsc.v1alpha1.ServiceResponse\x12X\n\x0bInvokeAgent\x12\".agentsc.v1alpha1.ToolAgentRequest\x1a%.agentsc.v1alpha1.InvokeAgentResponse\x12R\n\nInvokeHttp\x12!.agentsc.v1alpha1.ToolHttpRequest\x1a!.agentsc.v1alpha1.ServiceResponse\x12\x44\n\x0bReportEvent\x12\x1c.agentsc.v1alpha1.AuditEvent\x1a\x17.agentsc.v1alpha1.Empty\x12R\n\rProposeLesson\x12\x1f.agentsc.v1alpha1.LessonRequest\x1a .agentsc.v1alpha1.LessonResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -39,29 +39,29 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_EXECUTEREQUEST']._serialized_start=84
   _globals['_EXECUTEREQUEST']._serialized_end=270
   _globals['_EXECUTERESPONSE']._serialized_start=273
-  _globals['_EXECUTERESPONSE']._serialized_end=431
-  _globals['_HEALTHRESPONSE']._serialized_start=433
-  _globals['_HEALTHRESPONSE']._serialized_end=502
-  _globals['_TOOLCONTEXT']._serialized_start=504
-  _globals['_TOOLCONTEXT']._serialized_end=616
-  _globals['_TOOLSERVICEREQUEST']._serialized_start=619
-  _globals['_TOOLSERVICEREQUEST']._serialized_end=860
-  _globals['_TOOLSERVICEREQUEST_HEADERSENTRY']._serialized_start=814
-  _globals['_TOOLSERVICEREQUEST_HEADERSENTRY']._serialized_end=860
-  _globals['_TOOLAGENTREQUEST']._serialized_start=862
-  _globals['_TOOLAGENTREQUEST']._serialized_end=985
-  _globals['_TOOLHTTPREQUEST']._serialized_start=988
-  _globals['_TOOLHTTPREQUEST']._serialized_end=1205
-  _globals['_TOOLHTTPREQUEST_HEADERSENTRY']._serialized_start=814
-  _globals['_TOOLHTTPREQUEST_HEADERSENTRY']._serialized_end=860
-  _globals['_AUDITEVENT']._serialized_start=1207
-  _globals['_AUDITEVENT']._serialized_end=1233
-  _globals['_LESSONREQUEST']._serialized_start=1235
-  _globals['_LESSONREQUEST']._serialized_end=1351
-  _globals['_LESSONRESPONSE']._serialized_start=1353
-  _globals['_LESSONRESPONSE']._serialized_end=1417
-  _globals['_RUNTIME']._serialized_start=1420
-  _globals['_RUNTIME']._serialized_end=1578
-  _globals['_SIDECARTOOLS']._serialized_start=1581
-  _globals['_SIDECARTOOLS']._serialized_end=2013
+  _globals['_EXECUTERESPONSE']._serialized_end=478
+  _globals['_HEALTHRESPONSE']._serialized_start=480
+  _globals['_HEALTHRESPONSE']._serialized_end=549
+  _globals['_TOOLCONTEXT']._serialized_start=551
+  _globals['_TOOLCONTEXT']._serialized_end=663
+  _globals['_TOOLSERVICEREQUEST']._serialized_start=666
+  _globals['_TOOLSERVICEREQUEST']._serialized_end=907
+  _globals['_TOOLSERVICEREQUEST_HEADERSENTRY']._serialized_start=861
+  _globals['_TOOLSERVICEREQUEST_HEADERSENTRY']._serialized_end=907
+  _globals['_TOOLAGENTREQUEST']._serialized_start=909
+  _globals['_TOOLAGENTREQUEST']._serialized_end=1032
+  _globals['_TOOLHTTPREQUEST']._serialized_start=1035
+  _globals['_TOOLHTTPREQUEST']._serialized_end=1252
+  _globals['_TOOLHTTPREQUEST_HEADERSENTRY']._serialized_start=861
+  _globals['_TOOLHTTPREQUEST_HEADERSENTRY']._serialized_end=907
+  _globals['_AUDITEVENT']._serialized_start=1254
+  _globals['_AUDITEVENT']._serialized_end=1280
+  _globals['_LESSONREQUEST']._serialized_start=1282
+  _globals['_LESSONREQUEST']._serialized_end=1398
+  _globals['_LESSONRESPONSE']._serialized_start=1400
+  _globals['_LESSONRESPONSE']._serialized_end=1464
+  _globals['_RUNTIME']._serialized_start=1467
+  _globals['_RUNTIME']._serialized_end=1625
+  _globals['_SIDECARTOOLS']._serialized_start=1628
+  _globals['_SIDECARTOOLS']._serialized_end=2060
 # @@protoc_insertion_point(module_scope)

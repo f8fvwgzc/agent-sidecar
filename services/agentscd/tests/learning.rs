@@ -26,6 +26,9 @@ fn learning(mode: LearningMode, per_hour: u32, from_peers: bool) -> LearningSpec
         note_ttl_days: 7,
         from_peers,
         max_proposals_per_hour: per_hour,
+        require_evidence: None,
+        contrast_runs: None,
+        scopes: None,
     }
 }
 
