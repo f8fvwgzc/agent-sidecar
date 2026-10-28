@@ -653,7 +653,7 @@ A small team wants to move fast and stay safe. These are **recommendations**, no
 
 6. **Read the audit log with the tools you have.** `kubectl logs -c agentscd` gives the raw JSONL, mixed with the sidecar's own log lines. `agentsc logs <services> -n shop --denied` shows what was blocked. You do not need a log stack on day one.
 7. **Keep each charter in its service's repo.** Put it next to the code, for example `deploy/charter.yaml`. Create the ConfigMap from that one file. A change to the agent and a change to the code land in the same pull request.
-8. **Validate charters in CI.** The repo ships no CI config, so this is a step you add. Build the CLI once from a clone of agent-sidecar. This needs a Rust toolchain with `cargo`:
+8. **Validate charters in CI.** agent-sidecar ships no CI config for your charters (its own workflows only check its repository), so this is a step you add. Build the CLI once from a clone of agent-sidecar. This needs a Rust toolchain with `cargo`:
 
    ```bash
    git clone https://github.com/f8fvwgzc/agent-sidecar.git && cd agent-sidecar

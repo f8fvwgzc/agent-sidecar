@@ -871,8 +871,10 @@ an OpenAI-compatible adapter (`POST /v1/chat/completions`) is the next.
   in the trust domain; a certificate without one is rejected
   (`authz.identity.invalid`, reason `client certificate has no
   spiffe://<trust domain>/ns/<ns>/svc/<svc> URI SAN`).
-- Mesh client: verifies the server against `ca.crt` with server name
-  `<service>.<ns>.svc.cluster.local` and presents its own leaf.
+- Mesh client: verifies the server against the mesh CA roots and by identity:
+  the server's only URI SAN must be the SPIFFE ID of the service the charter
+  names, `spiffe://<trust domain>/ns/<namespace>/svc/<service>`. The name sent
+  for SNI decides nothing. It presents its own leaf.
 - In the kustomize manifests (§7) the certificate is **per service** (every
   replica of a Deployment shares the Secret), issued by the bootstrap Job. A
   managed sidecar (every pod the Helm chart's webhook injects, §7) makes its

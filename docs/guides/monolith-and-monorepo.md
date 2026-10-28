@@ -548,7 +548,7 @@ To run several services of the monorepo on one machine, copy the pattern of `scr
 
 ### Validate every charter in one CI step
 
-This is a recommendation. agent-sidecar does not ship this script, and the repo has no CI config. It is one shell loop over the CLI, so it works in any CI system.
+This is a recommendation. agent-sidecar does not ship this script or a CI config for your charters. It is one shell loop over the CLI, so it works in any CI system.
 
 `scripts/validate-charters.sh`:
 
