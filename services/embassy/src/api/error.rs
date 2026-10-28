@@ -53,6 +53,12 @@ impl Fail {
         Self::new(ErrorCode::Internal, [e.to_string()])
     }
 
+    /// One more detail (a 409 that names what is in the way).
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.body.details.push(detail.into());
+        self
+    }
+
     pub fn with_header(mut self, name: HeaderName, value: HeaderValue) -> Self {
         self.headers.push((name, value));
         self

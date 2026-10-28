@@ -396,6 +396,9 @@ async fn on_store_event(hub: &Arc<Hub>, ev: StoreEvent) {
         StoreEvent::AdoptionPending { .. } => {
             hub.graph.bump();
         }
+        StoreEvent::AgentsChanged { key } => {
+            crate::controlplane::push_agents(hub, &key).await;
+        }
         StoreEvent::CpAudit(rec) => {
             let scope = cp_scope(&rec);
             hub.publish(SseEvent::CpAudit(*rec), scope);

@@ -460,6 +460,15 @@ impl<'a> Call<'a> {
         Ok(())
     }
 
+    /// A quarantined agent's run calls nothing more (CONTRACT.md §5.3): its runs in flight are
+    /// refused at their next tool call.
+    fn quarantine_gate(&self, input: &Value) -> Result<(), Status> {
+        match self.svc.state.quarantine_verdict(&self.c.agent) {
+            Some(v) => Err(self.deny(input, v)),
+            None => Ok(()),
+        }
+    }
+
     /// The call returned data to the run: the run now carries the tool's label.
     fn taint_mark(&self, tool: &ToolSpec) {
         self.svc
@@ -640,6 +649,7 @@ impl SidecarTools for ToolsService {
             Err(v) => return Err(call.deny(&input, v)),
         };
         call.taint_gate(spec, tool, &input)?;
+        call.quarantine_gate(&input)?;
         let method = req.method.to_ascii_uppercase();
         let mismatch = |path: &str| {
             Verdict::deny(
@@ -857,6 +867,7 @@ impl SidecarTools for ToolsService {
             Err(v) => return Err(call.deny(&input, v)),
         };
         call.taint_gate(spec, tool, &input)?;
+        call.quarantine_gate(&input)?;
         let remote = !self.is_self(Some(&req.target_service));
         let declared = tool.tool_type == ToolType::Agent
             && tool.agent.as_deref() == Some(req.target_agent.as_str())
@@ -1088,6 +1099,7 @@ impl SidecarTools for ToolsService {
             Err(v) => return Err(call.deny(&input, v)),
         };
         call.taint_gate(spec, tool, &input)?;
+        call.quarantine_gate(&input)?;
         let method = req.method.to_ascii_uppercase();
         let mismatch = |url: &str| {
             Verdict::deny(

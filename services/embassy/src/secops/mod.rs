@@ -63,6 +63,36 @@ pub struct AgentEntry {
     pub updated_at: String,
     /// Other names of the agent (`agent://<workspace>/<name>` from nexc-engine), sorted.
     pub aliases: Vec<String>,
+    /// Set while the agent is quarantined: its sidecars refuse everything it does.
+    pub quarantine: Option<QuarantineState>,
+}
+
+/// An agent's quarantine (CONTRACT.md §5.3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuarantineState {
+    /// RFC 3339, UTC.
+    pub at: String,
+    pub reason: String,
+    /// Who quarantined it (an operator's name, or `embassy:risk`).
+    pub by: String,
+}
+
+/// The longest quarantine reason, in characters.
+pub const MAX_QUARANTINE_REASON: usize = 2000;
+
+/// A quarantine reason: not blank, at most [`MAX_QUARANTINE_REASON`] characters.
+pub fn check_reason(reason: &str) -> Result<(), StoreError> {
+    if reason.trim().is_empty() {
+        return Err(StoreError::Invalid(vec![
+            "a quarantine needs a reason".into(),
+        ]));
+    }
+    if reason.chars().count() > MAX_QUARANTINE_REASON {
+        return Err(StoreError::Invalid(vec![format!(
+            "the reason is longer than {MAX_QUARANTINE_REASON} characters"
+        )]));
+    }
+    Ok(())
 }
 
 /// What [`SecOpsStore::sync_agents`] did to one agent.
@@ -235,6 +265,21 @@ pub trait SecOpsStore: Send + Sync {
     /// Take the alias from agent `id`. [`StoreError::NotFound`] when it does not have it.
     async fn delete_alias(&self, id: &str, alias: &str) -> Result<AgentEntry, StoreError>;
 
+    /// Quarantine agent `id` for `reason` (not blank, at most [`MAX_QUARANTINE_REASON`]
+    /// characters) at `at`. [`StoreError::Conflict`] (the time of the quarantine in force) when
+    /// it is quarantined already. Emits [`crate::store::StoreEvent::AgentsChanged`].
+    async fn quarantine_agent(
+        &self,
+        id: &str,
+        reason: &str,
+        actor: &Actor,
+        at: &str,
+    ) -> Result<AgentEntry, StoreError>;
+
+    /// Release agent `id`. [`StoreError::Conflict`] (`"not quarantined"`) when it is not
+    /// quarantined. Emits [`crate::store::StoreEvent::AgentsChanged`].
+    async fn release_agent(&self, id: &str) -> Result<AgentEntry, StoreError>;
+
     /// Append `records` to their chains, in order within each chain (chains in sorted order, so
     /// two replicas appending to the same chains never wait on each other in a cycle), all taken
     /// in at `ingested_at`. Each chain's head is locked while its entries are appended, so
@@ -300,6 +345,7 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
             aliases: Vec::new(),
+            quarantine: None,
         }
     }
 

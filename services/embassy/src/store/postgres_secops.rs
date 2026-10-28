@@ -12,13 +12,15 @@ use tokio_postgres::Row;
 use super::{PgStore, checked_key, now_ts};
 use crate::secops::{
     AgentChange, AgentEntry, AgentFilter, AgentStatus, ChainFilter, ChainHead, ChainService,
-    LedgerRecord, MAX_ALIASES, RegistryChange, SecOpsStore, SyncPlan, by_chain, check_alias,
+    LedgerRecord, MAX_ALIASES, QuarantineState, RegistryChange, SecOpsStore, SyncPlan, by_chain,
+    check_alias, check_reason,
 };
+use crate::store::StoreEvent;
 use crate::store::{Actor, ServiceKey, StoreError};
 use agentsc_common::principal::AgentId;
 
-const AGENT_SELECT: &str =
-    "SELECT id, namespace, service, name, status, created_at, updated_at FROM agents";
+const AGENT_SELECT: &str = "SELECT id, namespace, service, name, status, created_at, updated_at, \
+     quarantined_at, quarantine_reason, quarantined_by FROM agents";
 
 fn entry_of(r: &Row) -> AgentEntry {
     let id: String = r.get(0);
@@ -33,6 +35,10 @@ fn entry_of(r: &Row) -> AgentEntry {
         created_at: r.get(5),
         updated_at: r.get(6),
         aliases: Vec::new(),
+        quarantine: match (r.get::<_, Option<String>>(7), r.get(8), r.get(9)) {
+            (Some(at), Some(reason), Some(by)) => Some(QuarantineState { at, reason, by }),
+            _ => None,
+        },
     }
 }
 
@@ -281,6 +287,65 @@ impl SecOpsStore for PgStore {
         tx.commit().await?;
         Ok(out)
     }
+    async fn quarantine_agent(
+        &self,
+        id: &str,
+        reason: &str,
+        actor: &Actor,
+        at: &str,
+    ) -> Result<AgentEntry, StoreError> {
+        check_reason(reason)?;
+        let mut client = self.client().await?;
+        let tx = client.transaction().await?;
+        tx.query_opt("SELECT id FROM agents WHERE id = $1 FOR UPDATE", &[&id])
+            .await?
+            .ok_or(StoreError::NotFound)?;
+        if let Some(q) = agent_by_id(&tx, id).await?.quarantine {
+            return Err(StoreError::Conflict { current: q.at });
+        }
+        tx.execute(
+            "UPDATE agents SET quarantined_at = $2, quarantine_reason = $3, quarantined_by = $4 \
+             WHERE id = $1",
+            &[&id, &at, &reason, &actor.name],
+        )
+        .await?;
+        let out = agent_by_id(&tx, id).await?;
+        let event = StoreEvent::AgentsChanged {
+            key: ServiceKey::new(&out.namespace, &out.service),
+        };
+        self.notify(&tx, &event).await?;
+        tx.commit().await?;
+        self.emit(event);
+        Ok(out)
+    }
+
+    async fn release_agent(&self, id: &str) -> Result<AgentEntry, StoreError> {
+        let mut client = self.client().await?;
+        let tx = client.transaction().await?;
+        tx.query_opt("SELECT id FROM agents WHERE id = $1 FOR UPDATE", &[&id])
+            .await?
+            .ok_or(StoreError::NotFound)?;
+        if agent_by_id(&tx, id).await?.quarantine.is_none() {
+            return Err(StoreError::Conflict {
+                current: "not quarantined".into(),
+            });
+        }
+        tx.execute(
+            "UPDATE agents SET quarantined_at = NULL, quarantine_reason = NULL, quarantined_by = NULL \
+             WHERE id = $1",
+            &[&id],
+        )
+        .await?;
+        let out = agent_by_id(&tx, id).await?;
+        let event = StoreEvent::AgentsChanged {
+            key: ServiceKey::new(&out.namespace, &out.service),
+        };
+        self.notify(&tx, &event).await?;
+        tx.commit().await?;
+        self.emit(event);
+        Ok(out)
+    }
+
     async fn ledger_append(
         &self,
         ingested_at: &str,

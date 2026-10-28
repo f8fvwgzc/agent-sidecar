@@ -9,13 +9,15 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use super::{SqliteStore, checked_key, now_ts};
 use crate::secops::{
     AgentChange, AgentEntry, AgentFilter, AgentStatus, ChainFilter, ChainHead, ChainService,
-    LedgerRecord, MAX_ALIASES, RegistryChange, SecOpsStore, SyncPlan, by_chain, check_alias,
+    LedgerRecord, MAX_ALIASES, QuarantineState, RegistryChange, SecOpsStore, SyncPlan, by_chain,
+    check_alias, check_reason,
 };
+use crate::store::StoreEvent;
 use crate::store::{Actor, ServiceKey, StoreError};
 use agentsc_common::principal::AgentId;
 
-const AGENT_SELECT: &str =
-    "SELECT id, namespace, service, name, status, created_at, updated_at FROM agents";
+const AGENT_SELECT: &str = "SELECT id, namespace, service, name, status, created_at, updated_at, \
+     quarantined_at, quarantine_reason, quarantined_by FROM agents";
 
 fn entry_of(r: &rusqlite::Row<'_>) -> rusqlite::Result<AgentEntry> {
     let id: String = r.get(0)?;
@@ -30,6 +32,10 @@ fn entry_of(r: &rusqlite::Row<'_>) -> rusqlite::Result<AgentEntry> {
         created_at: r.get(5)?,
         updated_at: r.get(6)?,
         aliases: Vec::new(),
+        quarantine: match (r.get::<_, Option<String>>(7)?, r.get(8)?, r.get(9)?) {
+            (Some(at), Some(reason), Some(by)) => Some(QuarantineState { at, reason, by }),
+            _ => None,
+        },
     })
 }
 
@@ -265,6 +271,69 @@ impl SecOpsStore for SqliteStore {
         })
         .await
     }
+    async fn quarantine_agent(
+        &self,
+        id: &str,
+        reason: &str,
+        actor: &Actor,
+        at: &str,
+    ) -> Result<AgentEntry, StoreError> {
+        check_reason(reason)?;
+        let (id, reason, by, at) = (
+            id.to_string(),
+            reason.to_string(),
+            actor.name.clone(),
+            at.to_string(),
+        );
+        let out = self
+            .run(move |conn| {
+                let tx = conn.transaction()?;
+                let agent = agent_by_id(&tx, &id)?;
+                if let Some(q) = agent.quarantine {
+                    return Err(StoreError::Conflict { current: q.at });
+                }
+                tx.execute(
+                    "UPDATE agents SET quarantined_at = ?2, quarantine_reason = ?3, quarantined_by = ?4 \
+                     WHERE id = ?1",
+                    params![id, at, reason, by],
+                )?;
+                let out = agent_by_id(&tx, &id)?;
+                tx.commit()?;
+                Ok(out)
+            })
+            .await?;
+        self.emit(StoreEvent::AgentsChanged {
+            key: ServiceKey::new(&out.namespace, &out.service),
+        });
+        Ok(out)
+    }
+
+    async fn release_agent(&self, id: &str) -> Result<AgentEntry, StoreError> {
+        let id = id.to_string();
+        let out = self
+            .run(move |conn| {
+                let tx = conn.transaction()?;
+                if agent_by_id(&tx, &id)?.quarantine.is_none() {
+                    return Err(StoreError::Conflict {
+                        current: "not quarantined".into(),
+                    });
+                }
+                tx.execute(
+                    "UPDATE agents SET quarantined_at = NULL, quarantine_reason = NULL, \
+                     quarantined_by = NULL WHERE id = ?1",
+                    params![id],
+                )?;
+                let out = agent_by_id(&tx, &id)?;
+                tx.commit()?;
+                Ok(out)
+            })
+            .await?;
+        self.emit(StoreEvent::AgentsChanged {
+            key: ServiceKey::new(&out.namespace, &out.service),
+        });
+        Ok(out)
+    }
+
     async fn ledger_append(
         &self,
         ingested_at: &str,

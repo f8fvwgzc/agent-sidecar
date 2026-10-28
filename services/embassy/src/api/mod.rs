@@ -246,6 +246,8 @@ pub fn api_routes() -> Router<Arc<Hub>> {
             "/agents/{id}/aliases",
             post(agents::put_alias).delete(agents::delete_alias),
         )
+        .route("/agents/{id}/quarantine", post(agents::quarantine))
+        .route("/agents/{id}/release", post(agents::release))
         .route("/principals", get(agents::resolve_principal))
         .route("/ledger/runs", get(ledger::list_runs))
         .route("/ledger/runs/{chain}", get(ledger::get_run))

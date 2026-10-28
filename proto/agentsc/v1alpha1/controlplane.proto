@@ -89,7 +89,16 @@ message ControlMessage {
     CharterUpdate charter = 1;
     MemoryUpdate memory = 2;
     AgentIds agent_ids = 3;
+    Quarantine quarantine = 4;
   }
+}
+
+// The service's quarantined agents (CONTRACT.md §5.3): agent name → the reason. A full
+// replacement (empty: none), sent with `AgentIds` after the first charter or memory push of a
+// stream and whenever a quarantine of the service's agents changes. Not acknowledged. The sidecar
+// refuses every invocation and every tool call of a quarantined agent (rule `quarantine.active`).
+message Quarantine {
+  map<string, string> agents = 1;
 }
 
 // The registry ids of the service's agents (CONTRACT.md §5.3): agent name → `agt_<uuidv7>`. A

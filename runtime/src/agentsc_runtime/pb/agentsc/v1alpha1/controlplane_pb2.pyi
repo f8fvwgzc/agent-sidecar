@@ -127,14 +127,29 @@ class LearningProposal(_message.Message):
     def __init__(self, dedup_key: _Optional[str] = ..., agent: _Optional[str] = ..., note: _Optional[str] = ..., rationale: _Optional[str] = ..., request_id: _Optional[str] = ..., trace_id: _Optional[str] = ..., auto: _Optional[bool] = ...) -> None: ...
 
 class ControlMessage(_message.Message):
-    __slots__ = ("charter", "memory", "agent_ids")
+    __slots__ = ("charter", "memory", "agent_ids", "quarantine")
     CHARTER_FIELD_NUMBER: _ClassVar[int]
     MEMORY_FIELD_NUMBER: _ClassVar[int]
     AGENT_IDS_FIELD_NUMBER: _ClassVar[int]
+    QUARANTINE_FIELD_NUMBER: _ClassVar[int]
     charter: CharterUpdate
     memory: MemoryUpdate
     agent_ids: AgentIds
-    def __init__(self, charter: _Optional[_Union[CharterUpdate, _Mapping]] = ..., memory: _Optional[_Union[MemoryUpdate, _Mapping]] = ..., agent_ids: _Optional[_Union[AgentIds, _Mapping]] = ...) -> None: ...
+    quarantine: Quarantine
+    def __init__(self, charter: _Optional[_Union[CharterUpdate, _Mapping]] = ..., memory: _Optional[_Union[MemoryUpdate, _Mapping]] = ..., agent_ids: _Optional[_Union[AgentIds, _Mapping]] = ..., quarantine: _Optional[_Union[Quarantine, _Mapping]] = ...) -> None: ...
+
+class Quarantine(_message.Message):
+    __slots__ = ("agents",)
+    class AgentsEntry(_message.Message):
+        __slots__ = ("key", "value")
+        KEY_FIELD_NUMBER: _ClassVar[int]
+        VALUE_FIELD_NUMBER: _ClassVar[int]
+        key: str
+        value: str
+        def __init__(self, key: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
+    AGENTS_FIELD_NUMBER: _ClassVar[int]
+    agents: _containers.ScalarMap[str, str]
+    def __init__(self, agents: _Optional[_Mapping[str, str]] = ...) -> None: ...
 
 class AgentIds(_message.Message):
     __slots__ = ("ids",)

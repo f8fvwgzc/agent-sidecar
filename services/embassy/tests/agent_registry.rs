@@ -158,6 +158,54 @@ async fn registry_rules(store: Arc<dyn SecOpsStore>) {
         Err(StoreError::Invalid(_))
     ));
 
+    // quarantine: once, with a reason; kept across syncs; released once
+    let at = "2026-10-29T10:00:00.000Z";
+    assert!(matches!(
+        store.quarantine_agent(&ops.id, "  ", &admin(), at).await,
+        Err(StoreError::Invalid(_))
+    ));
+    let q = store
+        .quarantine_agent(&ops.id, "risky", &admin(), at)
+        .await
+        .unwrap();
+    let state = q.quarantine.clone().unwrap();
+    assert_eq!(
+        (state.at.as_str(), state.reason.as_str(), state.by.as_str()),
+        (at, "risky", "alice")
+    );
+    assert_eq!(
+        store.quarantine_agent(&ops.id, "again", &admin(), at).await,
+        Err(StoreError::Conflict { current: at.into() })
+    );
+    store
+        .sync_agents(&key, &names(&["ops", "triage"]))
+        .await
+        .unwrap();
+    assert!(store.get_agent(&ops.id).await.unwrap().quarantine.is_some());
+    assert!(
+        store
+            .release_agent(&ops.id)
+            .await
+            .unwrap()
+            .quarantine
+            .is_none()
+    );
+    assert!(matches!(
+        store.release_agent(&ops.id).await,
+        Err(StoreError::Conflict { .. })
+    ));
+    assert_eq!(
+        store
+            .quarantine_agent(
+                "agt_0193a1b2-c3d4-7b33-9c44-5d6e7f809102",
+                "x",
+                &admin(),
+                at
+            )
+            .await,
+        Err(StoreError::NotFound)
+    );
+
     // a deleted service's agents retire
     let all_gone = store.sync_agents(&key, &BTreeSet::new()).await.unwrap();
     assert_eq!(all_gone.len(), 2);
@@ -510,5 +558,89 @@ async fn a_sidecar_gets_its_agents_ids_and_its_records_carry_them() {
         names(&["billing", "ops", "triage"])
     );
     assert_eq!(again["ops"], ops_id);
+    env.stop().await;
+}
+
+#[tokio::test]
+async fn a_quarantine_reaches_the_sidecars_and_a_release_lifts_it() {
+    let env = Env::start().await;
+    env.create("orders", &orders_yaml()).await;
+    common::eventually("registered", || async {
+        agents_of(&env.get("/agents?service=orders", "alice").await.body).len() == 2
+    })
+    .await;
+    let mut sc = env
+        .sidecar(NS, "orders", hello(NS, "orders", "orders-1"))
+        .await
+        .unwrap();
+    // after hello: the ids, then the (empty) quarantine list
+    let ids = sc.next_agent_ids().await;
+    let ops = ids["ops"].clone();
+    assert!(sc.next_quarantine().await.is_empty(), "none after hello");
+
+    let path = format!("/agents/{ops}/quarantine");
+    let body = json!({"reason": "risk 7.5 over 6"});
+    assert_eq!(
+        env.call("POST", &path, "bob", Some(body.clone()), None)
+            .await
+            .status,
+        403
+    );
+    assert_eq!(
+        env.call("POST", &path, "dave", Some(body.clone()), None)
+            .await
+            .status,
+        403
+    );
+    let blank = env
+        .call("POST", &path, "alice", Some(json!({"reason": " "})), None)
+        .await;
+    assert_eq!(blank.status, 400, "{}", blank.text);
+    let r = env
+        .call("POST", &path, "alice", Some(body.clone()), None)
+        .await;
+    assert_eq!(r.status, 200, "{}", r.text);
+    assert_eq!(r.body["quarantine"]["reason"], "risk 7.5 over 6");
+    assert_eq!(r.body["quarantine"]["by"], "alice");
+    let pushed = sc.next_quarantine().await;
+    assert_eq!(
+        pushed.get("ops").map(String::as_str),
+        Some("risk 7.5 over 6")
+    );
+    assert_eq!(pushed.len(), 1);
+    let again = env.call("POST", &path, "alice", Some(body), None).await;
+    assert_eq!(again.status, 409, "{}", again.text);
+    assert_eq!(
+        env.get(&format!("/agents/{ops}"), "carol").await.body["quarantine"]["reason"],
+        "risk 7.5 over 6"
+    );
+
+    // a sidecar that connects later gets it after hello
+    let mut late = env
+        .sidecar(NS, "orders", hello(NS, "orders", "orders-2"))
+        .await
+        .unwrap();
+    assert_eq!(late.next_quarantine().await.len(), 1);
+
+    let release = format!("/agents/{ops}/release");
+    let r = env.call("POST", &release, "alice", None, None).await;
+    assert_eq!(r.status, 200, "{}", r.text);
+    assert!(r.body["quarantine"].is_null());
+    assert!(sc.next_quarantine().await.is_empty());
+    assert_eq!(
+        env.call("POST", &release, "alice", None, None).await.status,
+        409
+    );
+
+    let audit = env.hub.store.cp_audit(100).await.unwrap();
+    assert!(audit.iter().any(|r| {
+        r.action == CpAction::AgentQuarantined
+            && r.result == embassy::api::types::CpResult::Ok
+            && r.reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("risk 7.5 over 6")
+    }));
+    assert!(audit.iter().any(|r| r.action == CpAction::AgentReleased));
     env.stop().await;
 }
