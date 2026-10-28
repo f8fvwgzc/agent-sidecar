@@ -752,7 +752,8 @@ test('inspector targets and tabs per node kind', () => {
   const g = sampleGraph();
   const t = targetFor(nodeOf(g, agentId('front', 'lead')));
   assert.deepEqual(t, { kind: 'agent', id: agentId('front', 'lead'), ns: NS, svc: 'front', agent: 'lead' });
-  assert.deepEqual(tabsFor(t, true), ['config', 'traffic', 'learning', 'yaml', 'instances']);
+  assert.deepEqual(tabsFor(t, true), ['config', 'traffic', 'learning', 'approvals', 'yaml', 'instances']);
+  assert.deepEqual(tabsFor({ kind: 'service' }, true), ['overview', 'traffic', 'learning', 'approvals', 'yaml', 'instances']);
   assert.deepEqual(targetFor(nodeOf(g, svcId('back'))), { kind: 'service', id: svcId('back'), ns: NS, svc: 'back' });
   assert.deepEqual(tabsFor({ kind: 'service' }, false), ['overview', 'instances']);
   assert.deepEqual(tabsFor(targetFor(nodeOf(g, appId('back'))), true), ['overview', 'traffic', 'yaml', 'instances']);
@@ -817,4 +818,25 @@ test('the response cache is bounded; the least recently used copy goes first; no
   assert.equal(c.get('/a'), null);
   c.clear();
   assert.equal(c.size, 0);
+});
+
+// ---- approvals (CONTRACT.md §5.4) -----------------------------------------------------------------
+
+test('approvals list the pending ones first and count down to their expiry', async () => {
+  const { sortApprovals, secondsLeft } = await import('../js/tab-approvals.js');
+  const list = [
+    { id: 'a', status: 'approved' },
+    { id: 'b', status: 'pending' },
+    { id: 'c', status: 'expired' },
+    { id: 'd', status: 'pending' },
+  ];
+  assert.deepEqual(sortApprovals(list).map((a) => a.id), ['b', 'd', 'a', 'c']);
+  const now = Date.parse('2026-10-29T10:00:00.000Z');
+  assert.equal(secondsLeft({ expires_at: '2026-10-29T10:10:00.000Z' }, now), 600);
+  assert.equal(secondsLeft({ expires_at: '2026-10-29T09:59:50.000Z' }, now), -10);
+});
+
+test('the console knows the approval event the server sends', async () => {
+  const { SSE_TYPES } = await import('../js/api.js');
+  assert.ok(SSE_TYPES.includes('approval'));
 });

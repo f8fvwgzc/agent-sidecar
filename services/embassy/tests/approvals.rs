@@ -335,3 +335,32 @@ async fn a_request_is_decided_through_the_api_and_the_sidecar_learns() {
     );
     env.stop().await;
 }
+
+#[tokio::test]
+async fn approvals_are_live_events_for_the_namespace() {
+    let env = Env::start().await;
+    env.create("orders", &orders_yaml()).await;
+    let open = |who: &'static str| {
+        let env = &env;
+        async move {
+            let resp = env.req("GET", "/api/v1/events", Some(who)).send().await.unwrap();
+            assert_eq!(resp.status(), 200);
+            common::SseReader::new(resp)
+        }
+    };
+    let mut carol = open("carol").await;
+    let mut dave = open("dave").await;
+    let sc = env.sidecar(NS, "orders", hello(NS, "orders", "orders-1")).await.unwrap();
+    sc.send(request("live-1", 600)).await;
+    let f = carol.until("approval").await;
+    assert_eq!((f.data["id"].as_str(), f.data["status"].as_str()), (Some("live-1"), Some("pending")));
+    let r = env.call("POST", "/approvals/live-1/approve", "bob", None, None).await;
+    assert_eq!(r.status, 200, "{}", r.text);
+    let f = carol.until("approval").await;
+    assert_eq!((f.data["id"].as_str(), f.data["status"].as_str(), f.data["decided_by"].as_str()), (Some("live-1"), Some("approved"), Some("bob")));
+    // another namespace's viewer gets none of them
+    while let Some(f) = dave.next_within(std::time::Duration::from_millis(300)).await {
+        assert_ne!(f.event, "approval", "{f:?}");
+    }
+    env.stop().await;
+}

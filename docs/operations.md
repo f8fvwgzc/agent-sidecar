@@ -990,7 +990,7 @@ Its sidecars refuse every invocation (`403`, rule `quarantine.active`) and every
 
 ### Approving tool calls
 
-A tool with `approval` in its charter waits for a person on every call (CONTRACT.md §5.4). Pending ones are listed and decided through the API, by an editor of the namespace:
+A tool with `approval` in its charter waits for a person on every call (CONTRACT.md §5.4). An editor of the namespace decides in the console (inspector → **Approvals** on the service or the agent, live through the SSE event `approval`), or through the API:
 
 ```bash
 curl -s -H "Authorization: Bearer $TOKEN" "https://embassy/api/v1/approvals?status=pending"

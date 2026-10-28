@@ -371,6 +371,7 @@ code,
 .pill-error,
 .pill-warn,
 .pill-pending,
+.pill-denied,
 .pill-as-errors,
 .pill-st-degraded {
   background: rgba(255, 181, 71, 0.12);
@@ -388,6 +389,7 @@ code,
 
 .pill-st-disconnected,
 .pill-as-idle,
+.pill-expired,
 .pill-muted {
   background: rgba(255, 255, 255, 0.05);
   color: var(--muted);
@@ -2842,4 +2844,27 @@ pre.json {
   overflow: auto;
   padding: 16px;
   background: var(--bg);
+}
+
+/* Approvals tab (tab-approvals.js): a quarantined agent, an approval running out of time */
+.callout {
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+}
+
+.callout-danger {
+  background: rgba(255, 99, 99, 0.1);
+  border-color: rgba(255, 99, 99, 0.35);
+  color: #ffb3b3;
+}
+
+.approvals-tab .danger {
+  color: #ff8a8a;
+}
+
+.approvals-tab .card-actions .input {
+  flex: 1;
+  min-width: 10rem;
 }

@@ -69,7 +69,7 @@ export function isUnreachable(e) {
   return e.status === 0 || e.status === 404 || e.status === 405 || e.status >= 500 || e.code === 'not_the_api';
 }
 
-export const SSE_TYPES = ['audit', 'graph', 'registry', 'config', 'ack', 'proposal', 'cp_audit', 'lagged', 'reset'];
+export const SSE_TYPES = ['audit', 'graph', 'registry', 'config', 'ack', 'proposal', 'cp_audit', 'lagged', 'reset', 'approval'];
 
 export class ApiError extends Error {
   constructor(status, body, fallback) {
@@ -294,6 +294,17 @@ export class Api {
   }
   decide(id, action, memoryVersion) {
     return this.call('POST', `/proposals/${seg(id)}/${action === 'approve' ? 'approve' : 'reject'}`, { ifMatch: memoryVersion });
+  }
+
+  // approvals of tool calls and the agent registry (CONTRACT.md §5.3, §5.4)
+  approvals(q) {
+    return this.call('GET', '/approvals', { q });
+  }
+  decideApproval(id, action, reason) {
+    return this.call('POST', `/approvals/${seg(id)}/${action === 'approve' ? 'approve' : 'deny'}`, { body: { reason: reason || '' } });
+  }
+  registryAgents(q) {
+    return this.call('GET', '/agents', { q });
   }
 
   // events
