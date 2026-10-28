@@ -3,7 +3,8 @@
 //!
 //! **Schema.** Numbered migrations ([`MIGRATIONS`]; 1 is `postgres_schema_v1.sql`: the SQLite
 //! tables in PostgreSQL types with the same invariants as triggers, plus `pending_adoptions`; 2
-//! is the agent registry of [`crate::secops`], implemented in `postgres_secops.rs`).
+//! is the agent registry and 3 the evidence ledger of [`crate::secops`], implemented in
+//! `postgres_secops.rs`).
 //! [`PgStore::open`] applies the missing ones, each in its own transaction, under an advisory lock
 //! (per schema), so replicas that start together apply each once. The applied ones are in
 //! `agentsc_schema_migrations`. A database a newer embassy migrated is refused.
@@ -54,6 +55,7 @@ use crate::names::is_dns_label;
 pub const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("postgres_schema_v1.sql")),
     (2, include_str!("postgres_schema_v2.sql")),
+    (3, include_str!("postgres_schema_v3.sql")),
 ];
 /// The channel of the store's notifications.
 pub const CHANNEL: &str = "agentsc_store";

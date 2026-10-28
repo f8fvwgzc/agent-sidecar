@@ -623,6 +623,7 @@ pub async fn ingest_batch(hub: &Hub, key: &ServiceKey, batch: AuditBatch) {
     let ids = crate::secops::registry::active_ids(hub, key)
         .await
         .unwrap_or_default();
+    let mut kept = Vec::new();
     for json in batch.records_json {
         if json.len() > MAX_RECORD_BYTES {
             tracing::debug!(service = %key, bytes = json.len(), "dropping an audit record over 64 KiB");
@@ -644,8 +645,10 @@ pub async fn ingest_batch(hub: &Hub, key: &ServiceKey, batch: AuditBatch) {
             tracing::debug!(service = %key, agent, "dropping a record of an agent the stored charter does not have");
             continue;
         }
+        kept.push(rec.clone());
         hub.ingest_record(rec);
     }
+    crate::secops::ledger::append(hub, &kept).await;
 }
 
 /// A span start: the traces and a `span_start` event.

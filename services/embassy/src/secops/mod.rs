@@ -1,5 +1,6 @@
 //! The control plane's AgentSecOps data (docs/design/agentsecops-merge.md §4, §6): the agent
-//! registry ([`registry`], docs/design/agent-registry.md).
+//! registry ([`registry`], docs/design/agent-registry.md) and the evidence ledger ([`ledger`],
+//! docs/design/evidence-ledger.md).
 //!
 //! It lives in the SQL stores only, each in its own migrations: the SQLite store (one process,
 //! development) and the PostgreSQL store (many replicas). `--store file:<dir>` keeps it in a
@@ -13,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::store::{Actor, ServiceKey, StoreError};
 
+pub mod ledger;
 pub mod registry;
 
 /// Whether an agent is declared by its service's stored charter now.
@@ -124,6 +126,51 @@ impl SyncPlan {
     }
 }
 
+/// One audit record for the ledger ([`SecOpsStore::ledger_append`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LedgerRecord {
+    /// [`agentsc_ledger::chain_of`] the record.
+    pub chain: String,
+    pub namespace: String,
+    pub service: String,
+    pub agent_id: Option<String>,
+    pub kind: String,
+    /// The record as embassy took it in (service, namespace and `agent_id` filled).
+    pub record: serde_json::Value,
+}
+
+/// A service a chain has records of.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ChainService {
+    pub namespace: String,
+    pub service: String,
+}
+
+/// Where a chain is (CONTRACT.md §6.3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChainHead {
+    pub chain: String,
+    /// How many entries it has.
+    pub entries: u64,
+    /// The last entry's hash (64 zeros while it has none).
+    pub head: String,
+    /// How many entries its newest seal covers (0: none).
+    pub sealed: u64,
+    /// When its last entry was taken in.
+    pub updated_at: String,
+    /// The services it has records of, sorted.
+    pub services: Vec<ChainService>,
+}
+
+/// Which chains [`SecOpsStore::ledger_chains`] returns: those with records of the namespace (and
+/// service), newest first, at most `limit`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChainFilter {
+    pub namespace: Option<String>,
+    pub service: Option<String>,
+    pub limit: usize,
+}
+
 /// The longest alias, in bytes.
 pub const MAX_ALIAS_BYTES: usize = 256;
 /// The most aliases one agent has.
@@ -187,6 +234,55 @@ pub trait SecOpsStore: Send + Sync {
 
     /// Take the alias from agent `id`. [`StoreError::NotFound`] when it does not have it.
     async fn delete_alias(&self, id: &str, alias: &str) -> Result<AgentEntry, StoreError>;
+
+    /// Append `records` to their chains, in order within each chain (chains in sorted order, so
+    /// two replicas appending to the same chains never wait on each other in a cycle), all taken
+    /// in at `ingested_at`. Each chain's head is locked while its entries are appended, so
+    /// replicas appending to one chain serialize. Returns how many entries were appended.
+    async fn ledger_append(
+        &self,
+        ingested_at: &str,
+        records: &[LedgerRecord],
+    ) -> Result<u64, StoreError>;
+
+    /// One chain's head. [`StoreError::NotFound`] when it has no entry.
+    async fn ledger_head(&self, chain: &str) -> Result<ChainHead, StoreError>;
+
+    /// Chains matching `filter`, the most recently appended first.
+    async fn ledger_chains(&self, filter: &ChainFilter) -> Result<Vec<ChainHead>, StoreError>;
+
+    /// A chain's entries, in order (empty when it has none).
+    async fn ledger_entries(&self, chain: &str) -> Result<Vec<agentsc_ledger::Entry>, StoreError>;
+
+    /// A chain's seals, the fewest entries first.
+    async fn ledger_seals(&self, chain: &str) -> Result<Vec<agentsc_ledger::Seal>, StoreError>;
+
+    /// Chains with entries no seal covers whose last entry was taken in at or before
+    /// `quiet_before`, oldest first, at most `limit`.
+    async fn ledger_unsealed(
+        &self,
+        quiet_before: &str,
+        limit: usize,
+    ) -> Result<Vec<ChainHead>, StoreError>;
+
+    /// Keep `seal`, which covers the first `entries` entries of `chain`. `false` when a seal of
+    /// that many entries is kept already (another replica sealed first).
+    async fn ledger_put_seal(
+        &self,
+        chain: &str,
+        entries: u64,
+        sealed_at: &str,
+        seal: &agentsc_ledger::Seal,
+    ) -> Result<bool, StoreError>;
+}
+
+/// `records` by chain (sorted), each chain's records in their order.
+pub fn by_chain(records: &[LedgerRecord]) -> std::collections::BTreeMap<String, Vec<LedgerRecord>> {
+    let mut out: std::collections::BTreeMap<String, Vec<LedgerRecord>> = Default::default();
+    for r in records {
+        out.entry(r.chain.clone()).or_default().push(r.clone());
+    }
+    out
 }
 
 #[cfg(test)]

@@ -33,6 +33,7 @@ pub mod error;
 mod handlers;
 pub mod ids;
 mod learning;
+pub mod ledger;
 mod links;
 mod live;
 pub mod types;
@@ -246,6 +247,10 @@ pub fn api_routes() -> Router<Arc<Hub>> {
             post(agents::put_alias).delete(agents::delete_alias),
         )
         .route("/principals", get(agents::resolve_principal))
+        .route("/ledger/runs", get(ledger::list_runs))
+        .route("/ledger/runs/{chain}", get(ledger::get_run))
+        .route("/ledger/runs/{chain}/bundle", get(ledger::bundle))
+        .route("/ledger/keys", get(ledger::keys))
         .route("/proposals", get(learning::list_proposals))
         .route("/proposals/{id}/approve", post(learning::approve))
         .route("/proposals/{id}/reject", post(learning::reject))
@@ -269,6 +274,7 @@ pub fn router(hub: Arc<Hub>, api: bool, ui: Option<crate::ui_assets::UiFiles>) -
         .route("/healthz", get(handlers::healthz))
         .route("/readyz", get(handlers::readyz));
     if api {
+        app = app.route("/.well-known/jwks.json", get(ledger::well_known_jwks));
         // every client's requests are rate limited (ratelimit.rs), probes excepted
         app = app.nest(
             "/api/v1",

@@ -629,6 +629,12 @@ See [Creating agents](guides/creating-agents.md) for what to put in a charter.
 
 ## Upgrade notes
 
+### Evidence ledger
+
+- **The SQL stores migrate on start** to SQLite schema version 3 and PostgreSQL migration 3 (the `ledger_*` tables).
+- **Create a signing key** (`embassy ledger-key create`) and pass `--ledger-key-file` to every replica, or the ledger runs without seals.
+- **Storage grows** with every audit record the sidecars send. Plan for it, since there is no retention yet (#31).
+
 ### Agent registry
 
 - **The SQL stores migrate on start**: SQLite to schema version 2, PostgreSQL to migration 2 (the `agents` and `agent_aliases` tables). An older embassy refuses a migrated database, so roll back by restoring a backup, not by starting the old version on it.
@@ -954,5 +960,27 @@ The registry (and, in later releases, the evidence ledger, approvals and risk) l
 
 ```bash
 sqlite3 -readonly /var/lib/agentsc/embassy.db "SELECT id, namespace, service, name, status FROM agents ORDER BY namespace, service, name"
+```
+
+### The evidence ledger
+
+embassy chains every audit record a sidecar sends into its run's chain, seals the chains, and exports a run as a bundle anyone can verify offline ([CONTRACT.md §6.3](../CONTRACT.md#63-the-evidence-ledger), [the design note](design/evidence-ledger.md)). It lives in the AgentSecOps store (above), so a Kubernetes store needs `--secops-store` for it too.
+
+- **Create the signing key once** and keep it in a Secret: `embassy ledger-key create --out ledger.key` writes a 32-byte Ed25519 seed (mode 0600) and prints its `kid` and public key. Start every replica with `--ledger-key-file /path/to/ledger.key` (env `AGENTSC_LEDGER_KEY_FILE`). Without it, embassy logs `EVIDENCE LEDGER SEALS ARE OFF`: the chains are kept, but bundles carry no seal and `agentsc verify` fails their `seals` check.
+- **Rotate** by creating a new key, then starting embassy with the new `--ledger-key-file` and the old public key as `--ledger-retired-key <public key>` (`embassy ledger-key show old.key` prints it). Old seals keep verifying because the retired key stays in the JWKS. Never publish a retired key's seed.
+- **Verify a run offline:**
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" "https://embassy/api/v1/ledger/runs/$REQUEST_ID/bundle" -o run.evidence.json
+curl -s https://embassy/.well-known/jwks.json -o jwks.json
+agentsc verify run.evidence.json --keys jwks.json
+```
+
+  It prints one `ok` / `FAIL` line per check and exits 0 (verifies), 1 (a check fails) or 2 (unreadable). A run whose records carry payloads (`telemetry.control_plane_payloads`) needs a token with payload access.
+- **Sealing** happens once a chain has had no new entry for `--ledger-seal-after` seconds (10), and before every export.
+- **Backups.** The ledger is append-only in the database (triggers refuse updates, deletes and truncation), so a restore is the only way to roll it back, and a restored copy keeps verifying. It grows with the audit volume; there is no retention yet (#31).
+
+```bash
+psql "$AGENTSC_POSTGRES_URL" -c "SELECT chain, entries, sealed, updated_at FROM ledger_heads ORDER BY updated_at DESC LIMIT 20"
 ```
 

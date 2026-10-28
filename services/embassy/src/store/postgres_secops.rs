@@ -1,6 +1,8 @@
-//! [`SecOpsStore`] on the PostgreSQL store (migration 2, `postgres_schema_v2.sql`): the agent
-//! registry. A sync takes a transaction-scoped advisory lock on its service first, so two
-//! replicas syncing the same charter change serialize and the second finds nothing to do.
+//! [`SecOpsStore`] on the PostgreSQL store: the agent registry (migration 2,
+//! `postgres_schema_v2.sql`) and the evidence ledger (migration 3, `postgres_schema_v3.sql`). A
+//! sync takes a transaction-scoped advisory lock on its service first, so two replicas syncing the
+//! same charter change serialize and the second finds nothing to do; an append locks each chain's
+//! head row, in chain order, so replicas appending to one chain serialize too.
 use std::collections::BTreeSet;
 
 use async_trait::async_trait;
@@ -9,8 +11,8 @@ use tokio_postgres::Row;
 
 use super::{PgStore, checked_key, now_ts};
 use crate::secops::{
-    AgentChange, AgentEntry, AgentFilter, AgentStatus, MAX_ALIASES, RegistryChange, SecOpsStore,
-    SyncPlan, check_alias,
+    AgentChange, AgentEntry, AgentFilter, AgentStatus, ChainFilter, ChainHead, ChainService,
+    LedgerRecord, MAX_ALIASES, RegistryChange, SecOpsStore, SyncPlan, by_chain, check_alias,
 };
 use crate::store::{Actor, ServiceKey, StoreError};
 use agentsc_common::principal::AgentId;
@@ -65,6 +67,52 @@ async fn entries<C: GenericClient + Sync>(
     let mut out = Vec::with_capacity(rows.len());
     for r in &rows {
         out.push(with_aliases(c, entry_of(r)).await?);
+    }
+    Ok(out)
+}
+
+fn unsigned(v: i64) -> u64 {
+    u64::try_from(v).unwrap_or(0)
+}
+
+fn signed(v: u64) -> Result<i64, StoreError> {
+    i64::try_from(v).map_err(|_| StoreError::Io(format!("{v} does not fit the database")))
+}
+
+const HEAD_SELECT: &str = "SELECT chain, entries, head, sealed, updated_at FROM ledger_heads";
+
+fn head_of(r: &Row) -> ChainHead {
+    ChainHead {
+        chain: r.get(0),
+        entries: unsigned(r.get(1)),
+        head: r.get(2),
+        sealed: unsigned(r.get(3)),
+        updated_at: r.get(4),
+        services: Vec::new(),
+    }
+}
+
+async fn heads<C: GenericClient + Sync>(
+    c: &C,
+    rows: Vec<Row>,
+) -> Result<Vec<ChainHead>, StoreError> {
+    let mut out = Vec::with_capacity(rows.len());
+    for r in &rows {
+        let mut h = head_of(r);
+        h.services = c
+            .query(
+                "SELECT namespace, service FROM ledger_chain_services WHERE chain = $1 \
+                 ORDER BY namespace, service",
+                &[&h.chain],
+            )
+            .await?
+            .iter()
+            .map(|r| ChainService {
+                namespace: r.get(0),
+                service: r.get(1),
+            })
+            .collect();
+        out.push(h);
     }
     Ok(out)
 }
@@ -232,5 +280,176 @@ impl SecOpsStore for PgStore {
         let out = agent_by_id(&tx, id).await?;
         tx.commit().await?;
         Ok(out)
+    }
+    async fn ledger_append(
+        &self,
+        ingested_at: &str,
+        records: &[LedgerRecord],
+    ) -> Result<u64, StoreError> {
+        if records.is_empty() {
+            return Ok(0);
+        }
+        let mut client = self.client().await?;
+        let tx = client.transaction().await?;
+        let mut appended = 0u64;
+        for (chain, recs) in by_chain(records) {
+            tx.execute(
+                "INSERT INTO ledger_heads (chain, updated_at) VALUES ($1, $2) \
+                 ON CONFLICT (chain) DO NOTHING",
+                &[&chain, &ingested_at],
+            )
+            .await?;
+            let row = tx
+                .query_one(
+                    "SELECT entries, head FROM ledger_heads WHERE chain = $1 FOR UPDATE",
+                    &[&chain],
+                )
+                .await?;
+
+            let mut head: String = row.get(1);
+            for (seq, r) in (unsigned(row.get(0))..).zip(recs) {
+                let hash = agentsc_ledger::entry_hash(&head, &chain, seq, ingested_at, &r.record)
+                    .ok_or_else(|| StoreError::Io(format!("chain {chain}: a bad head")))?;
+                tx.execute(
+                    "INSERT INTO ledger_entries (chain, seq, ingested_at, record, prev_hash, hash, \
+                     namespace, service, agent_id, kind) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                    &[
+                        &chain,
+                        &signed(seq)?,
+                        &ingested_at,
+                        &agentsc_ledger::canonical_json(&r.record),
+                        &head,
+                        &hash,
+                        &r.namespace,
+                        &r.service,
+                        &r.agent_id,
+                        &r.kind,
+                    ],
+                )
+                .await?;
+                tx.execute(
+                    "INSERT INTO ledger_chain_services (chain, namespace, service) \
+                     VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+                    &[&chain, &r.namespace, &r.service],
+                )
+                .await?;
+                head = hash;
+                appended += 1;
+            }
+        }
+        tx.commit().await?;
+        Ok(appended)
+    }
+
+    async fn ledger_head(&self, chain: &str) -> Result<ChainHead, StoreError> {
+        let client = self.client().await?;
+        let row = client
+            .query_opt(
+                &format!("{HEAD_SELECT} WHERE chain = $1 AND entries > 0"),
+                &[&chain],
+            )
+            .await?
+            .ok_or(StoreError::NotFound)?;
+        Ok(heads(&client, vec![row]).await?.remove(0))
+    }
+
+    async fn ledger_chains(&self, filter: &ChainFilter) -> Result<Vec<ChainHead>, StoreError> {
+        let client = self.client().await?;
+        let limit = i64::try_from(filter.limit).unwrap_or(i64::MAX);
+        let rows = client
+            .query(
+                "SELECT chain, entries, head, sealed, updated_at FROM ledger_heads h \
+                 WHERE entries > 0 AND ($1::text IS NULL OR EXISTS (SELECT 1 FROM ledger_chain_services s \
+                 WHERE s.chain = h.chain AND s.namespace = $1 AND ($2::text IS NULL OR s.service = $2))) \
+                 ORDER BY updated_at DESC, chain LIMIT $3",
+                &[&filter.namespace, &filter.service, &limit],
+            )
+            .await?;
+        heads(&client, rows).await
+    }
+
+    async fn ledger_entries(&self, chain: &str) -> Result<Vec<agentsc_ledger::Entry>, StoreError> {
+        let client = self.client().await?;
+        client
+            .query(
+                "SELECT seq, ingested_at, record, prev_hash, hash FROM ledger_entries \
+                 WHERE chain = $1 ORDER BY seq",
+                &[&chain],
+            )
+            .await?
+            .iter()
+            .map(|r| {
+                let record: String = r.get(2);
+                Ok(agentsc_ledger::Entry {
+                    seq: unsigned(r.get(0)),
+                    ingested_at: r.get(1),
+                    record: serde_json::from_str(&record)
+                        .map_err(|e| StoreError::Io(format!("ledger record: {e}")))?,
+                    prev_hash: r.get(3),
+                    hash: r.get(4),
+                })
+            })
+            .collect()
+    }
+
+    async fn ledger_seals(&self, chain: &str) -> Result<Vec<agentsc_ledger::Seal>, StoreError> {
+        let client = self.client().await?;
+        Ok(client
+            .query(
+                "SELECT statement, signature, kid FROM ledger_seals WHERE chain = $1 ORDER BY entries",
+                &[&chain],
+            )
+            .await?
+            .iter()
+            .map(|r| agentsc_ledger::Seal {
+                statement: r.get(0),
+                signature: r.get(1),
+                kid: r.get(2),
+            })
+            .collect())
+    }
+
+    async fn ledger_unsealed(
+        &self,
+        quiet_before: &str,
+        limit: usize,
+    ) -> Result<Vec<ChainHead>, StoreError> {
+        let client = self.client().await?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = client
+            .query(
+                &format!(
+                    "{HEAD_SELECT} WHERE sealed < entries AND updated_at <= $1 ORDER BY updated_at LIMIT $2"
+                ),
+                &[&quiet_before, &limit],
+            )
+            .await?;
+        heads(&client, rows).await
+    }
+
+    async fn ledger_put_seal(
+        &self,
+        chain: &str,
+        entries: u64,
+        sealed_at: &str,
+        seal: &agentsc_ledger::Seal,
+    ) -> Result<bool, StoreError> {
+        let client = self.client().await?;
+        let n = client
+            .execute(
+                "INSERT INTO ledger_seals (chain, entries, statement, signature, kid, sealed_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (chain, entries) DO NOTHING",
+                &[
+                    &chain,
+                    &signed(entries)?,
+                    &seal.statement,
+                    &seal.signature,
+                    &seal.kid,
+                    &sealed_at,
+                ],
+            )
+            .await?;
+        Ok(n == 1)
     }
 }

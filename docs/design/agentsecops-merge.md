@@ -50,7 +50,7 @@ They are nexc-engine's (PRODUCT-MIGRATION.md §2), seen from the receiving side:
 | Model gateway: keys, run binding, budgets, one price table | `agentscd` gateway (CONTRACT.md §4.4) | shipped |
 | Standalone model gateway, LLM connection contract v1 | `agentsc-gateway`, docs/LLM-CONNECTION.md | open PR (#18) |
 | Guardrails | charter `guardrails` (`input_deny`, `output_deny`, `pii_redact`) | shipped, regex-based |
-| Audit | `agentscd` audit records (CONTRACT.md §6: payload hashes, redaction, durable sink, fail-closed), control-plane audit in every store | shipped; no hash chain |
+| Audit | `agentscd` audit records (CONTRACT.md §6: payload hashes, redaction, durable sink, fail-closed), control-plane audit in every store | shipped; hash-chained and sealed by the evidence ledger since (CONTRACT.md §6.3) |
 | Traces | OpenTelemetry export of audit records (`agentsc-otel`), embassy's trace views | shipped |
 | Learning, memory | proposals, approvals of lessons, memory per agent | shipped |
 | Control plane | embassy: REST API, SSE, console, Connect streams to sidecars, admission webhooks, the sidecar integrity policy | shipped |
@@ -58,7 +58,7 @@ They are nexc-engine's (PRODUCT-MIGRATION.md §2), seen from the receiving side:
 
 What attache did not have when this was written: agents as principals of their own (an agent was
 a name inside a service's charter; now the agent registry, docs/design/agent-registry.md), human approvals of tool calls, risk scores and quarantine, DLP beyond regexes,
-injection screening, a hash-chained and signed evidence ledger, MCP and A2A, alert routing, and a
+injection screening, a hash-chained and signed evidence ledger (now docs/design/evidence-ledger.md), MCP and A2A, alert routing, and a
 store for many embassy replicas.
 
 ## 3. Inventory: nexc-engine's AgentSecOps modules

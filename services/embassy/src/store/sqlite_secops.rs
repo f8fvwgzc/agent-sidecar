@@ -1,5 +1,6 @@
-//! [`SecOpsStore`] on the SQLite store (migration 2, `schema_v2.sql`): the agent registry. Every
-//! call is one transaction under the store's one lock, so syncs of one service serialize.
+//! [`SecOpsStore`] on the SQLite store: the agent registry (migration 2, `schema_v2.sql`) and the
+//! evidence ledger (migration 3, `schema_v3.sql`). Every call is one transaction under the
+//! store's one lock, so syncs of one service and appends to one chain serialize.
 use std::collections::BTreeSet;
 
 use async_trait::async_trait;
@@ -7,8 +8,8 @@ use rusqlite::{OptionalExtension, Transaction, params};
 
 use super::{SqliteStore, checked_key, now_ts};
 use crate::secops::{
-    AgentChange, AgentEntry, AgentFilter, AgentStatus, MAX_ALIASES, RegistryChange, SecOpsStore,
-    SyncPlan, check_alias,
+    AgentChange, AgentEntry, AgentFilter, AgentStatus, ChainFilter, ChainHead, ChainService,
+    LedgerRecord, MAX_ALIASES, RegistryChange, SecOpsStore, SyncPlan, by_chain, check_alias,
 };
 use crate::store::{Actor, ServiceKey, StoreError};
 use agentsc_common::principal::AgentId;
@@ -61,6 +62,47 @@ fn agents_of(tx: &Transaction<'_>, key: &ServiceKey) -> Result<Vec<AgentEntry>, 
         .query_map(params![key.namespace, key.service], entry_of)?
         .collect::<Result<Vec<_>, _>>()?;
     rows.into_iter().map(|e| with_aliases(tx, e)).collect()
+}
+
+fn unsigned(v: i64) -> u64 {
+    u64::try_from(v).unwrap_or(0)
+}
+
+fn signed(v: u64) -> Result<i64, StoreError> {
+    i64::try_from(v).map_err(|_| StoreError::Io(format!("{v} does not fit the database")))
+}
+
+const HEAD_SELECT: &str = "SELECT chain, entries, head, sealed, updated_at FROM ledger_heads";
+
+fn head_of(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChainHead> {
+    Ok(ChainHead {
+        chain: r.get(0)?,
+        entries: unsigned(r.get(1)?),
+        head: r.get(2)?,
+        sealed: unsigned(r.get(3)?),
+        updated_at: r.get(4)?,
+        services: Vec::new(),
+    })
+}
+
+fn with_services(tx: &Transaction<'_>, mut h: ChainHead) -> Result<ChainHead, StoreError> {
+    let mut stmt = tx.prepare_cached(
+        "SELECT namespace, service FROM ledger_chain_services WHERE chain = ?1 \
+         ORDER BY namespace, service",
+    )?;
+    h.services = stmt
+        .query_map(params![h.chain], |r| {
+            Ok(ChainService {
+                namespace: r.get(0)?,
+                service: r.get(1)?,
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(h)
+}
+
+fn heads(tx: &Transaction<'_>, rows: Vec<ChainHead>) -> Result<Vec<ChainHead>, StoreError> {
+    rows.into_iter().map(|h| with_services(tx, h)).collect()
 }
 
 #[async_trait]
@@ -220,6 +262,203 @@ impl SecOpsStore for SqliteStore {
             let out = agent_by_id(&tx, &id)?;
             tx.commit()?;
             Ok(out)
+        })
+        .await
+    }
+    async fn ledger_append(
+        &self,
+        ingested_at: &str,
+        records: &[LedgerRecord],
+    ) -> Result<u64, StoreError> {
+        if records.is_empty() {
+            return Ok(0);
+        }
+        let (at, groups) = (ingested_at.to_string(), by_chain(records));
+        self.run(move |conn| {
+            let tx = conn.transaction()?;
+            let mut appended = 0u64;
+            for (chain, recs) in groups {
+                tx.execute(
+                    "INSERT INTO ledger_heads (chain, updated_at) VALUES (?1, ?2) \
+                     ON CONFLICT (chain) DO NOTHING",
+                    params![chain, at],
+                )?;
+                let (entries, mut head): (i64, String) = tx.query_row(
+                    "SELECT entries, head FROM ledger_heads WHERE chain = ?1",
+                    params![chain],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+
+                for (seq, r) in (unsigned(entries)..).zip(recs) {
+                    let hash = agentsc_ledger::entry_hash(&head, &chain, seq, &at, &r.record)
+                        .ok_or_else(|| StoreError::Io(format!("chain {chain}: a bad head")))?;
+                    tx.execute(
+                        "INSERT INTO ledger_entries (chain, seq, ingested_at, record, prev_hash, \
+                         hash, namespace, service, agent_id, kind) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                        params![
+                            chain,
+                            signed(seq)?,
+                            at,
+                            agentsc_ledger::canonical_json(&r.record),
+                            head,
+                            hash,
+                            r.namespace,
+                            r.service,
+                            r.agent_id,
+                            r.kind
+                        ],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO ledger_chain_services (chain, namespace, service) \
+                         VALUES (?1, ?2, ?3) ON CONFLICT DO NOTHING",
+                        params![chain, r.namespace, r.service],
+                    )?;
+                    head = hash;
+                    appended += 1;
+                }
+            }
+            tx.commit()?;
+            Ok(appended)
+        })
+        .await
+    }
+
+    async fn ledger_head(&self, chain: &str) -> Result<ChainHead, StoreError> {
+        let chain = chain.to_string();
+        self.run(move |conn| {
+            let tx = conn.transaction()?;
+            let h = tx
+                .query_row(
+                    &format!("{HEAD_SELECT} WHERE chain = ?1 AND entries > 0"),
+                    params![chain],
+                    head_of,
+                )
+                .optional()?
+                .ok_or(StoreError::NotFound)?;
+            with_services(&tx, h)
+        })
+        .await
+    }
+
+    async fn ledger_chains(&self, filter: &ChainFilter) -> Result<Vec<ChainHead>, StoreError> {
+        let filter = filter.clone();
+        self.run(move |conn| {
+            let tx = conn.transaction()?;
+            let mut stmt = tx.prepare_cached(
+                "SELECT chain, entries, head, sealed, updated_at FROM ledger_heads h \
+                 WHERE entries > 0 AND (?1 IS NULL OR EXISTS (SELECT 1 FROM ledger_chain_services s \
+                 WHERE s.chain = h.chain AND s.namespace = ?1 AND (?2 IS NULL OR s.service = ?2))) \
+                 ORDER BY updated_at DESC, chain LIMIT ?3",
+            )?;
+            let rows = stmt
+                .query_map(
+                    params![filter.namespace, filter.service, filter.limit as i64],
+                    head_of,
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(stmt);
+            heads(&tx, rows)
+        })
+        .await
+    }
+
+    async fn ledger_entries(&self, chain: &str) -> Result<Vec<agentsc_ledger::Entry>, StoreError> {
+        let chain = chain.to_string();
+        self.run(move |conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT seq, ingested_at, record, prev_hash, hash FROM ledger_entries \
+                 WHERE chain = ?1 ORDER BY seq",
+            )?;
+            let rows = stmt
+                .query_map(params![chain], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows.into_iter()
+                .map(|(seq, ingested_at, record, prev_hash, hash)| {
+                    Ok(agentsc_ledger::Entry {
+                        seq: unsigned(seq),
+                        ingested_at,
+                        record: serde_json::from_str(&record)
+                            .map_err(|e| StoreError::Io(format!("ledger record: {e}")))?,
+                        prev_hash,
+                        hash,
+                    })
+                })
+                .collect()
+        })
+        .await
+    }
+
+    async fn ledger_seals(&self, chain: &str) -> Result<Vec<agentsc_ledger::Seal>, StoreError> {
+        let chain = chain.to_string();
+        self.run(move |conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT statement, signature, kid FROM ledger_seals WHERE chain = ?1 ORDER BY entries",
+            )?;
+            let rows = stmt
+                .query_map(params![chain], |r| {
+                    Ok(agentsc_ledger::Seal {
+                        statement: r.get(0)?,
+                        signature: r.get(1)?,
+                        kid: r.get(2)?,
+                    })
+                })?
+                .collect::<Result<_, _>>()?;
+            Ok(rows)
+        })
+        .await
+    }
+
+    async fn ledger_unsealed(
+        &self,
+        quiet_before: &str,
+        limit: usize,
+    ) -> Result<Vec<ChainHead>, StoreError> {
+        let quiet_before = quiet_before.to_string();
+        self.run(move |conn| {
+            let tx = conn.transaction()?;
+            let mut stmt = tx.prepare_cached(&format!(
+                "{HEAD_SELECT} WHERE sealed < entries AND updated_at <= ?1 ORDER BY updated_at LIMIT ?2"
+            ))?;
+            let rows = stmt
+                .query_map(params![quiet_before, limit as i64], head_of)?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(stmt);
+            heads(&tx, rows)
+        })
+        .await
+    }
+
+    async fn ledger_put_seal(
+        &self,
+        chain: &str,
+        entries: u64,
+        sealed_at: &str,
+        seal: &agentsc_ledger::Seal,
+    ) -> Result<bool, StoreError> {
+        let (chain, sealed_at, seal) = (chain.to_string(), sealed_at.to_string(), seal.clone());
+        self.run(move |conn| {
+            let n = conn.execute(
+                "INSERT INTO ledger_seals (chain, entries, statement, signature, kid, sealed_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT (chain, entries) DO NOTHING",
+                params![
+                    chain,
+                    signed(entries)?,
+                    seal.statement,
+                    seal.signature,
+                    seal.kid,
+                    sealed_at
+                ],
+            )?;
+            Ok(n == 1)
         })
         .await
     }
