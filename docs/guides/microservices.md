@@ -731,7 +731,7 @@ Other checks worth writing yourself:
 
 **No NetworkPolicy is shipped.** [Operations, production checklist item 1](../operations.md#production-checklist-recommendations) has an example that lets only pods with an `agentsc.io/service` label reach a service, and only on the mesh port. For billing, change `inventory` to `billing` and the namespace to `shop`. Your CNI plugin must enforce NetworkPolicy. Not every CNI does.
 
-If you also restrict egress, remember two things. The agent runtime calls the model API directly from the pod. And the pods need DNS to find their peers.
+If you also restrict egress, remember two things. The sidecar's model gateway calls the model API from the pod. And the pods need DNS to find their peers.
 
 ### Budgets per team
 
@@ -764,17 +764,17 @@ There is no team-level budget field. Budgets are set per agent, in each charter,
 
 These gaps are real in the current code. Plan around them.
 
-- **Sidecar injection is manual.** There is no mutating webhook. The `agentscd` container, the charter mount and the TLS mount are written into each Deployment.
-- **Certificates are per service, with no rotation.** A bootstrap Job issues them. Every replica of a Deployment shares one certificate. A leaf certificate is valid for 365 days. To renew, re-run the Job and restart the pods.
-- **One CA per namespace.** The embassy bootstrap looks up the CA Secret in its own namespace. Each namespace gets its own CA. The caller also checks the peer certificate for `<service>.<caller namespace>.svc.cluster.local`. So cross-namespace mesh calls are not supported out of the box, and copying the CA Secret is not enough.
+- **Sidecar injection is manual in the kustomize manifests.** The `agentscd` container, the charter mount and the TLS mount are written into each Deployment. With the Helm chart, embassy's mutating webhook injects the sidecars into pods labelled `agentsc.io/inject: "true"`.
+- **In the kustomize manifests, certificates are per service, with no rotation.** A bootstrap Job issues them. Every replica of a Deployment shares one certificate. A leaf certificate is valid for 365 days. To renew, re-run the Job and restart the pods. Pods the Helm chart injects get their own certificate from embassy instead (24 hours by default), renewed without a restart.
+- **One CA per namespace in the kustomize manifests.** The embassy bootstrap looks up the CA Secret in its own namespace, so each namespace gets its own CA, and copying the CA Secret is not enough for calls across namespaces. With the Helm chart one embassy CA serves every namespace, and a charter names a peer in another namespace as `<service>.<namespace>` (charter schema level 5).
 - **Budgets are in memory, per sidecar replica.** They are not shared between replicas. They reset when the pod restarts. With N replicas, the real limit is up to N times the charter value.
-- **Charter changes need a restart.** The sidecar loads the charter once at start. A ConfigMap change does nothing until you restart the pod. The same is true for certificates and the API key Secret.
-- **The runtime shares the sidecar container.** The Python agent runtime is a child process of `agentscd`, in the same container, with the same resource limits. If it crashes, the sidecar restarts it with backoff and the pod is not ready until it answers again.
-- **The runtime calls the model API directly.** Model calls are audited, not proxied. The pod needs network access to the model provider, and the API key is in the sidecar container's environment.
+- **Some charter fields need a restart.** The sidecar applies a changed charter file without a restart, and embassy pushes changes to managed sidecars, but the restart-only fields (`service.name`, `service.namespace`, the ports, `audit.sink`, `audit.file`, `telemetry.otlp_endpoint`) need one. So do a new `--tls-dir` certificate and the API key Secret.
+- **The runtime shares the sidecar container in the kustomize manifests.** The Python agent runtime is a child process of `agentscd`, in the same container, with the same resource limits. If it crashes, the sidecar restarts it with backoff and the pod is not ready until it answers again. The Helm chart runs it as its own container, `agentsc-runtime`.
+- **Model calls go through the sidecar's model gateway.** The gateway holds the API key, binds each call to a run and enforces the budgets; the runtime never holds the key. The pod needs network access to the model provider.
 - **`pii_redact` does not cover prompts.** It rewrites emails and phone numbers in the agent's final output and in the audit records. It does not change what the runtime sends to the model provider. It does not change raw service responses returned to a remote agent-to-service caller.
 - **Plain app-to-app traffic is not covered.** Only agent calls go through the sidecar. Normal HTTP calls between apps skip it.
 - **Cross-charter edges are not validated.** The CLI checks one charter at a time.
 - **Mesh call limits.** A mesh call fails if it cannot connect within 5 seconds or does not finish within 120 seconds. Agent calls can nest at most 4 deep.
-- **Not shipped:** NetworkPolicy, published images, a Helm chart, a UI and CI config.
+- **Not shipped:** a NetworkPolicy for your pods (the Helm chart's covers embassy only).
 
 See [creating agents](creating-agents.md) for charter details, [monolith and monorepo](monolith-and-monorepo.md) for many agents in one service, and [operations](../operations.md#known-limitations) for the full list of limitations and the production checklist.

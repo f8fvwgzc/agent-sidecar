@@ -873,10 +873,13 @@ an OpenAI-compatible adapter (`POST /v1/chat/completions`) is the next.
   spiffe://<trust domain>/ns/<ns>/svc/<svc> URI SAN`).
 - Mesh client: verifies the server against `ca.crt` with server name
   `<service>.<ns>.svc.cluster.local` and presents its own leaf.
-- MVP simplification (documented, not hidden): the certificate is **per
-  service** (every replica of a Deployment shares the Secret), issued by a
-  bootstrap Job. Per-pod issuance through an init container CSR to a running
-  `embassy` is the next step, as is the mutating webhook (§7).
+- In the kustomize manifests (§7) the certificate is **per service** (every
+  replica of a Deployment shares the Secret), issued by the bootstrap Job. A
+  managed sidecar (every pod the Helm chart's webhook injects, §7) makes its
+  own ECDSA P-256 key instead and gets a per-pod leaf from a running
+  `embassy` (`CertificateAuthority.IssueCertificate`, with its Kubernetes or
+  join token), valid for `issuance.workload_cert_ttl` (24 hours by default)
+  and renewed from two thirds of its lifetime without a restart.
 
 ### 5.1 Authz evaluation order (callee side, inbound)
 
@@ -1439,8 +1442,10 @@ reads records from a file instead of kubectl.
 
 ## 11. Known gaps (MVP)
 
-- Per-pod certificates and rotation; webhook injection; `embassy` as a
-  long-running CA server.
+- The kustomize manifests of §7 write the sidecar into each Deployment and
+  use per-service certificates from the bootstrap Job, with no rotation and
+  one CA per namespace. Webhook injection and per-pod certificates that
+  `embassy` renews (§5, §7) come with the Helm chart.
 - Budgets are in-memory per sidecar replica (not shared across replicas).
 - The `mock` model runs in the runtime: its calls cost nothing, and its step
   limit is the runtime's own (`max_steps`); provider calls are held by the

@@ -472,9 +472,9 @@ Example: the denial from the demo, as the inventory sidecar wrote it. The sideca
 
 ### What is not enforced yet
 
-- **The runtime shares the sidecar's container.** It is a child process with the same user, file system and network. It can read the mounted TLS key in `/etc/agentsc/tls`. It calls the model API directly. Nothing stops it from opening other network connections, including to the local app. The tool checks stop a model that asks for the wrong tool. They do not sandbox the runtime process.
-- **No NetworkPolicy is shipped.** An app that listens on all interfaces can be reached by other pods without the sidecar. The demo `orders` app listens on `:8080` and its Service exposes that port, because it is the demo entry point. Only an app bound to `127.0.0.1`, like `inventory`, is reachable only through its sidecar. The `x-agentsc-caller` and `x-agentsc-agent` headers the sidecar sends to the app can be trusted only when the app listens on loopback only.
-- **Certificates are shared and long-lived.** One key per service for all replicas, valid 365 days, with no rotation and no revocation.
+- **The runtime shares the sidecar's container** in the kustomize demo (the Helm chart gives it its own container). It is a child process with the same user, file system and network. It can read the mounted TLS key in `/etc/agentsc/tls`. Its model calls go through the sidecar's model gateway, but nothing stops it from opening other network connections, including to the local app. The tool checks stop a model that asks for the wrong tool. They do not sandbox the runtime process.
+- **No NetworkPolicy is shipped for your pods** (the Helm chart's covers embassy only). An app that listens on all interfaces can be reached by other pods without the sidecar. The demo `orders` app listens on `:8080` and its Service exposes that port, because it is the demo entry point. Only an app bound to `127.0.0.1`, like `inventory`, is reachable only through its sidecar. The `x-agentsc-caller` and `x-agentsc-agent` headers the sidecar sends to the app can be trusted only when the app listens on loopback only.
+- **Certificates are shared and long-lived in the kustomize demo.** One key per service for all replicas, valid 365 days, with no rotation and no revocation. Pods the Helm chart injects get their own key and a certificate from embassy, valid 24 hours by default and renewed in place, still with no revocation.
 
 ## Kubernetes topology
 
@@ -519,7 +519,7 @@ flowchart TB
 
 The `agentscd` image holds the sidecar binary, the Python runtime, the `agentsc` CLI and the `agentsc-ready` script. It runs as user 10001 and exposes 3500, 50001 and 50002.
 
-**Sidecar injection is manual.** The `agentscd` container, the charter mount and the TLS mount are written into each Deployment by hand. The pod annotation `agentsc.io/inject: "false"` is only a marker. No mutating webhook reads it. To add a new service you also add it to the Job's `--services` list and run the Job again.
+**Sidecar injection is manual in these manifests.** The `agentscd` container, the charter mount and the TLS mount are written into each Deployment by hand. The pod annotation `agentsc.io/inject: "false"` is only a marker. The Helm chart's mutating webhook (embassy) injects the sidecars into pods with the label `agentsc.io/inject: "true"` instead. To add a new service you also add it to the Job's `--services` list and run the Job again.
 
 ## Code map
 
@@ -556,17 +556,14 @@ The `agentscd` image holds the sidecar binary, the Python runtime, the `agentsc`
 
 These gaps are real in the current code. Plan around them.
 
-- **Sidecar injection is manual.** There is no mutating webhook. You write the `agentscd` container into each Deployment.
-- **Certificates are per service.** A bootstrap Job issues them. There is no rotation, no revocation, and no per-pod certificate. `embassy` is not a running CA server.
-- **One CA per namespace.** `embassy bootstrap` looks up the CA Secret in its own namespace. Each namespace gets its own CA. The mesh client also verifies every peer as `<peer>.<own namespace>.svc.cluster.local`, and dials that address unless `mesh.peers` overrides it. Cross-namespace mesh calls do not work out of the box.
+- **Sidecar injection is manual in the kustomize demo.** You write the `agentscd` container into each Deployment in `deploy/`. With the Helm chart, embassy's mutating webhook injects `agentscd` and `agentsc-runtime` into pods labelled `agentsc.io/inject: "true"`.
+- **In the kustomize demo, certificates are per service.** A bootstrap Job issues them, with no rotation and no revocation. Pods the Helm chart injects get a per-pod certificate from embassy's `IssueCertificate` (24 hours by default), renewed without a restart; there is no revocation either.
+- **One CA per namespace in the kustomize demo.** `embassy bootstrap` looks up the CA Secret in its own namespace, so each namespace gets its own CA. With the Helm chart one embassy CA serves every namespace, and a charter names a peer in another namespace as `<service>.<namespace>` (charter schema level 5).
 - **Budgets are in memory.** They are per sidecar replica and reset on restart.
-- **The runtime calls the model API directly.** Model calls are audited through `ReportEvent`, not proxied by the sidecar.
-- **The runtime runs in the sidecar's container** as a child process, with the same user, files and network.
-- **`pii_redact` does not cover prompts.** It covers the agent's final output and the audit records, not what is sent to the model provider.
-- **The charter is loaded once at startup.** A ConfigMap change needs a pod restart. The same is true for new certificates.
-- **No NetworkPolicy is shipped.**
-- **No UI.** The charter JSON Schema is the interface a UI could be built on.
-- **No CI configuration** is in the repository.
+- **The runtime runs in the sidecar's container in the kustomize demo** as a child process, with the same user, files and network (but not the key). The Helm chart runs it as its own container.
+- **`pii_redact` does not cover prompts.** It covers the agent's final output and the audit records, not what the model gateway passes on to the provider.
+- **Some configuration is read at startup.** The charter is reloaded without a restart (from its file, or pushed by embassy), except its restart-only fields. The `--tls-dir` certificate and the provider key need a pod restart; only certificates embassy issues are renewed in place.
+- **No NetworkPolicy is shipped for your pods.** The Helm chart's NetworkPolicy covers embassy only.
 - **No refusal fallback.** A model refusal is returned as `model.refusal`.
 
 See also [Operations: known limitations](operations.md#known-limitations) and [CONTRACT.md section 11](../CONTRACT.md#11-known-gaps-mvp).

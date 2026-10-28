@@ -842,22 +842,20 @@ See [Microservices](guides/microservices.md) for rollout plans for a whole syste
 
 These are true for the current code. "Not built yet" means there is no code for it. [CONTRACT.md section 11](../CONTRACT.md#11-known-gaps-mvp) has the short list.
 
-1. **Sidecar injection is manual.** There is no mutating webhook. The `agentscd` container, the charter mount and the TLS mount are written into each Deployment. The `agentsc.io/inject` annotation in the demo Deployments has no effect.
-2. **Certificates are per service, not per pod.** All replicas share one Secret. A one-shot bootstrap Job issues them. There is no rotation. Per-pod certificates and `embassy` as a running CA server are not built yet.
-3. **One CA per namespace.** The bootstrap Job looks up the CA Secret `agentsc-ca` in its own namespace (the one in `--namespace`, where it also writes the certificates). So each namespace gets its own CA. Mesh calls across namespaces are not supported out of the box.
+1. **Sidecar injection is manual in the kustomize demo.** The `agentscd` container, the charter mount and the TLS mount are written into each Deployment in `deploy/`, and the `agentsc.io/inject` annotation there has no effect. With the Helm chart, embassy's mutating webhook injects the sidecars into pods labelled `agentsc.io/inject: "true"` (CONTRACT.md §7).
+2. **In the kustomize demo, certificates are per service, not per pod.** All replicas share one Secret. A one-shot bootstrap Job issues them, and there is no rotation. Pods the Helm chart injects get their own certificate from embassy instead, valid for `issuance.workload_cert_ttl` (24 hours by default) and renewed without a restart (CONTRACT.md §5).
+3. **One CA per namespace in the kustomize demo.** The bootstrap Job looks up the CA Secret `agentsc-ca` in its own namespace (the one in `--namespace`, where it also writes the certificates). So each namespace gets its own CA, and mesh calls across namespaces need the Helm chart, where one embassy CA serves every namespace.
 4. **Budgets are in memory per replica.** They are not shared between replicas, and they reset on restart.
 5. **Model calls go through the sidecar's gateway** (CONTRACT.md §4.4). The sidecar holds `ANTHROPIC_API_KEY`, binds each call to a run, enforces `max_tokens_per_call`, `max_steps` and the daily cost budget itself, and counts the usage the provider reports. The runtime's own figures are never used. The `mock` model runs inside the runtime and costs nothing.
 6. **The runtime runs in the sidecar's container** in these explicit-sidecar manifests. It is a child process of `agentscd`, started without the provider key (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `AGENTSC_APP_TOKEN` are removed from its environment). It still shares the container's user, filesystem, resource limits and network, so a compromised runtime process could read the sidecar's memory or `/proc/<pid>/environ`. The Helm chart's injector instead runs it as its own native sidecar, `agentsc-runtime`, which shares only the socket directory and the pod's network with `agentscd` and has no key; its model calls reach the provider through the gateway's socket in that directory.
 7. **`pii_redact` has a narrow scope.** It applies to the agent's final output and to audit records. It does not apply to prompts and tool results sent to the model provider. With a real model, data such as the demo's warehouse email reaches the provider. It finds only emails and phone numbers.
-8. **Configuration is read once.** The charter, the TLS files and `ANTHROPIC_API_KEY` are read at startup. A ConfigMap or Secret change needs a pod restart.
+8. **Some configuration is read once.** The sidecar polls its charter file and applies a change without a restart, and embassy pushes charter changes to managed sidecars, but the restart-only fields (CONTRACT.md §3.5) still need a restart. The `--tls-dir` files and `ANTHROPIC_API_KEY` are read at startup: a Secret change needs a pod restart. Only the certificates embassy issues are renewed in place.
 9. **Refusal fallbacks are not enabled.** A model refusal is returned as `model.refusal`.
-10. **No NetworkPolicy is shipped.**
-11. **No UI.** The charter schema (`schemas/charter.schema.json`) is the API.
-12. **No CI config in the repo.**
-13. **Audit output is basic.** There are two sinks (stdout and file). There is no shipping and no file rotation. A failing sink keeps at most 4 MiB of records in memory ([Audit sink failures](#audit-sink-failures)).
-14. **No metrics and no trace export.** There is no metrics endpoint. Trace ids are propagated, but spans are not exported to a tracing backend. They exist only in the audit records.
-15. **The manifests are a demo.** The namespace `agentsc-demo` and the services `orders,inventory` are hard-coded in the Job and the kustomization. The images are `:dev` tags built inside minikube. No images are published.
-16. **The readiness probe uses a fixed address.** `agentsc-ready` always calls `127.0.0.1:3500`.
+10. **No NetworkPolicy is shipped for your pods.** The Helm chart's NetworkPolicy covers embassy only ([Production checklist](#production-checklist-recommendations)).
+11. **Audit output is basic.** There are two sinks (stdout and file). There is no shipping and no file rotation. A failing sink keeps at most 4 MiB of records in memory ([Audit sink failures](#audit-sink-failures)).
+12. **No metrics and no trace export.** There is no metrics endpoint. Trace ids are propagated, but spans are not exported to a tracing backend. They exist only in the audit records.
+13. **The manifests are a demo.** The namespace `agentsc-demo` and the services `orders,inventory` are hard-coded in the Job and the kustomization. The images are `:dev` tags built inside minikube. No images are published.
+14. **The readiness probe uses a fixed address.** `agentsc-ready` always calls `127.0.0.1:3500`.
 
 Fixed limits and timeouts in the code:
 

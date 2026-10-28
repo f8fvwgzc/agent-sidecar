@@ -28,9 +28,9 @@ agent-sidecar brings AgentSecOps to LLM agents: identity, policy, budgets, guard
 flowchart LR
   subgraph podA["pod: orders"]
     A["app (any language)"] -->|"HTTP or gRPC on localhost"| S["sidecar (agentscd)"]
-    S ---|"gRPC on a unix socket"| R["runtime (agentsc-runtime)"]
+    S ---|"gRPC and the model gateway, on unix sockets"| R["runtime (agentsc-runtime)"]
   end
-  R -->|"model API"| C["Claude"]
+  S -->|"model API (the sidecar holds the key)"| C["Claude"]
   subgraph podB["pod: inventory"]
     P["peer sidecar"] --> B["peer app"]
   end
@@ -116,13 +116,12 @@ Check a charter with `cargo run -p agentsc-cli -- charter validate <file>`.
 
 This is a `v1alpha1` MVP. It is **not production-ready**. The most important limits:
 
-- Sidecar injection is manual. There is no mutating webhook; you write the `agentscd` container into each Deployment.
-- Certificates are per service, issued by a bootstrap Job, with no rotation. The Job keeps its CA Secret in its own namespace, so each namespace gets its own CA. Cross-namespace mesh calls do not work out of the box.
+- The two Kubernetes paths differ. With the Helm chart, embassy's mutating webhook injects the sidecars into pods labelled `agentsc.io/inject: "true"`, and each pod gets its own certificate from embassy (24 hours by default, renewed without a restart). The kustomize demo in `deploy/` writes the `agentscd` container into each Deployment by hand and uses per-service certificates from a bootstrap Job, with no rotation and one CA per namespace.
 - Budgets live in memory in each sidecar replica. They are not shared across replicas, and they reset when the sidecar restarts.
-- The runtime runs as a child process in the same container as the sidecar.
-- The runtime calls the model API directly. These calls are audited, not proxied. `pii_redact` only rewrites the agent's final output and the audit records. It does not change prompts sent to the model.
-- The charter is loaded once at startup. A ConfigMap change needs a pod restart.
-- There is no NetworkPolicy and no UI yet.
+- The runtime's model calls go through the sidecar's model gateway, which holds the provider key and enforces the budgets. `pii_redact` only rewrites the agent's final output and the audit records. It does not change prompts sent to the model.
+- In the kustomize demo the runtime is a child process in the sidecar's container. The Helm chart runs it as its own container, without the key.
+- Charter changes apply without a restart (the sidecar reloads its file; embassy pushes to managed sidecars), except the restart-only fields such as `service.name` and the ports.
+- No NetworkPolicy is shipped for your pods. The chart's NetworkPolicy covers embassy only.
 
 More detail is in [docs/operations.md](docs/operations.md) and [CONTRACT.md §11](CONTRACT.md#11-known-gaps-mvp).
 

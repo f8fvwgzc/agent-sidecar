@@ -275,7 +275,7 @@ sequenceDiagram
 
 ### Run it on Kubernetes
 
-Use the same pattern as `deploy/inventory/`: one Deployment with two containers, `app` and `agentscd`. Sidecar injection is manual. There is no mutating webhook yet, so you write the `agentscd` container into the Deployment yourself.
+Use the same pattern as `deploy/inventory/`: one Deployment with two containers, `app` and `agentscd`. Without the Helm chart, sidecar injection is manual, so you write the `agentscd` container into the Deployment yourself. With the chart, label the pod `agentsc.io/inject: "true"` and embassy's mutating webhook injects the sidecars.
 
 You need four things in namespace `shop`:
 
@@ -459,13 +459,13 @@ The [operations guide](../operations.md) explains the audit fields and the CLI f
 
 ### Limits that matter for a monolith
 
-- **One runtime for all agents.** The runtime is a child process inside the `agentscd` container. All agents of the pod share it and that container's CPU and memory. Size the container for all of them.
+- **One runtime for all agents.** The runtime is one process: a child of `agentscd` inside its container, or the `agentsc-runtime` container that the Helm chart injects. All agents of the pod share it and its container's CPU and memory. Size that container for all of them.
 - **Guardrails are per charter.** `max_input_bytes`, `pii_redact`, `input_deny` and `output_deny` apply to every agent in the charter. Only `allowed_tools`, `allowed_services` and `budgets` are per agent.
 - **What `pii_redact` covers.** It redacts each agent's final output, including a specialist's answer to the orchestrator, and every audit record. It does not redact prompts sent to the model provider. Tool results, such as an order with a customer email, go to the model unchanged.
 - **Budgets are in memory, per replica.** With `replicas: 3`, each replica counts its own `max_calls_per_minute` and `max_cost_usd_per_day`. A restart resets them.
-- **The runtime calls the model API directly.** Model calls are audited, not proxied.
-- **The charter is loaded once.** A change needs a pod restart.
-- **No NetworkPolicy is shipped.** Write your own if you need one. Allow egress to the model API.
+- **Model calls go through the sidecar's model gateway.** It holds the key and enforces each agent's budgets.
+- **A few charter fields need a restart.** Other charter changes apply without one (the sidecar reloads its file; embassy pushes to managed sidecars), but the restart-only fields of CONTRACT.md §3.5 need a pod restart.
+- **No NetworkPolicy is shipped for your pods.** Write your own if you need one. Allow egress to the model API.
 
 ### When to split into several services
 

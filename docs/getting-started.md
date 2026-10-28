@@ -268,7 +268,7 @@ flowchart LR
 5. Restarts both Deployments and waits up to 300 seconds for each rollout.
 6. Prints the pods, Services and Secrets.
 
-Each pod has two containers: `app` and `agentscd`. The `agentscd` container is written into each Deployment in `deploy/`. There is no automatic injection yet. The `inventory` app listens on `127.0.0.1` inside its pod, and the `inventory` Service exposes only the mesh port `50002`. So other pods can reach the inventory app only through its sidecar. No NetworkPolicy is shipped. Any pod in the cluster can reach the orders app on port 8080 and the mesh port 50002 of both sidecars. The mesh port accepts only mTLS clients with a certificate from the namespace's CA.
+Each pod has two containers: `app` and `agentscd`. The `agentscd` container is written into each Deployment in `deploy/`. The Helm path (`make demo-helm`) injects it instead, through embassy's mutating webhook. The `inventory` app listens on `127.0.0.1` inside its pod, and the `inventory` Service exposes only the mesh port `50002`. So other pods can reach the inventory app only through its sidecar. No NetworkPolicy is shipped. Any pod in the cluster can reach the orders app on port 8080 and the mesh port 50002 of both sidecars. The mesh port accepts only mTLS clients with a certificate from the namespace's CA.
 
 ### Ask your own question
 

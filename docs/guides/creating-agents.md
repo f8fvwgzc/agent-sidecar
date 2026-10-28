@@ -408,7 +408,7 @@ The same charter runs in a pod. There, the pieces come from Kubernetes objects:
   kubectl -n shop create configmap billing-charter \
     --from-file=charter.yaml=.local/billing/billing.charter.yaml
   ```
-- **The sidecar container** is written into your Deployment by hand. There is no injection webhook yet. Copy the `agentscd` container, its volumes and its probes from [deploy/inventory/deployment.yaml](../../deploy/inventory/deployment.yaml).
+- **The sidecar container** is injected by embassy's mutating webhook when you install the Helm chart and label the pod `agentsc.io/inject: "true"`. Without the chart, write it into your Deployment by hand: copy the `agentscd` container, its volumes and its probes from [deploy/inventory/deployment.yaml](../../deploy/inventory/deployment.yaml).
 - **The certificate** is the Secret `agentsc-cert-<service>`. The `embassy bootstrap` Job creates it. The Job's `--namespace` flag sets both the namespace of the Secrets and the namespace in the SPIFFE id. The Job keeps one CA per namespace, in the Secret `agentsc-ca`. The demo Job in [deploy/embassy/job.yaml](../../deploy/embassy/job.yaml) runs `bootstrap --namespace agentsc-demo --services orders,inventory`, so adding `billing` there gives a certificate for `agentsc-demo`, not `shop`. For `billing` in `shop`, run a copy of the Job in `shop`, with `--namespace shop --services billing`, and its ServiceAccount, Role and RoleBinding from [deploy/embassy/rbac.yaml](../../deploy/embassy/rbac.yaml). The certificates do not rotate.
 - **A charter change** needs a pod restart: update the ConfigMap, then run `kubectl -n shop rollout restart deployment/billing`.
 
@@ -1414,12 +1414,9 @@ Fix parse errors first, then run the command again.
 
 These are true for the current code. [Operations](../operations.md#known-limitations) has the full list.
 
-- **The charter is loaded once.** A change needs a sidecar restart. In Kubernetes, update the ConfigMap and restart the pod.
-- **No UI.** You write charters by hand. The JSON Schema helps your editor.
+- **A few charter fields need a restart.** The sidecar applies a changed charter file without a restart, and embassy pushes changes to managed sidecars, but `service.name`, `service.namespace`, `service.app_port`, `mesh.port`, `audit.sink`, `audit.file` and `telemetry.otlp_endpoint` are restart-only (CONTRACT.md §3.5).
 - **Budgets are in memory.** They are per sidecar replica and reset on restart.
-- **The runtime calls the model API directly.** Model calls are audited through the sidecar, but they are not proxied. The runtime runs as a child process in the same container as the sidecar.
-- **`pii_redact` does not protect prompts.** It cleans the final output and the audit records, not what the model provider receives.
-- **Cross-namespace calls are not supported out of the box.** Peer addresses and TLS names use the charter's own namespace, and the bootstrap Job creates one CA per namespace.
-- **Sidecar injection is manual.** You write the `agentscd` container into each Deployment.
-- **Certificates are per service.** The bootstrap Job issues them, and they do not rotate.
-- **No NetworkPolicy is shipped.** The `x-agentsc-*` headers your app receives are only as trustworthy as your app port is private.
+- **`pii_redact` does not protect prompts.** It cleans the final output and the audit records, not what the model provider receives. Model calls go through the sidecar's model gateway, which holds the key and enforces the budgets, but passes the prompt on as it is.
+- **The kustomize demo is explicit.** In `deploy/` you write the `agentscd` container into each Deployment, the runtime runs as a child process in the sidecar's container, and a bootstrap Job issues per-service certificates that do not rotate, with one CA per namespace. The Helm chart injects the sidecars, gives the runtime its own container and each pod its own certificate from embassy, renewed in place.
+- **Peers in another namespace need charter schema level 5.** Name them `<service>.<namespace>` in `tools[].service` or `mesh.peers`; a plain `<service>` is in the charter's own namespace.
+- **No NetworkPolicy is shipped for your pods.** The `x-agentsc-*` headers your app receives are only as trustworthy as your app port is private.
