@@ -1261,6 +1261,63 @@ paths:
         "503":
           $ref: "#/components/responses/SecopsUnavailable"
 
+  /agents/{id}/risk:
+    parameters:
+      - $ref: "#/components/parameters/AgentId"
+    get:
+      tags: [registry]
+      operationId: getAgentRisk
+      summary: The agent's newest run score (CONTRACT.md §5.5) and how many runs its baseline learned.
+      x-required-role: viewer
+      responses:
+        "200":
+          description: The risk.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [agent_id, baseline_runs, scored_from, quarantine_score, latest]
+                properties:
+                  agent_id:
+                    type: string
+                  baseline_runs:
+                    type: integer
+                  scored_from:
+                    type: integer
+                    description: Runs a baseline needs before a run is scored (3).
+                  quarantine_score:
+                    oneOf:
+                      - type: number
+                      - type: "null"
+                  latest:
+                    oneOf:
+                      - type: "null"
+                      - type: object
+                        required: [agent_id, chain, score, reasons, novelty, scored_at]
+                        properties:
+                          agent_id:
+                            type: string
+                          chain:
+                            type: string
+                          score:
+                            type: number
+                          reasons:
+                            type: array
+                            items:
+                              type: string
+                          novelty:
+                            type: number
+                          scored_at:
+                            type: string
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+        "503":
+          $ref: "#/components/responses/SecopsUnavailable"
+
   /principals:
     get:
       tags: [registry]

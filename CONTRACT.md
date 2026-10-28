@@ -1089,6 +1089,31 @@ tools:
   <request_id>[: why]`). An approval holds the hash of the arguments, never the arguments.
 - **Changing it** needs admin, and removing an `approval` is a weakened change (§6.1).
 
+### 5.5 Risk scores
+
+embassy scores each agent's part of each run against the agent's own baseline (design:
+[docs/design/risk.md](docs/design/risk.md); a port of nexc-engine's `domain/risk.rs`).
+
+- **When.** Once per run: when its ledger chain (§6.3) has had no new entry for
+  `--ledger-seal-after`, one replica claims it and scores every agent with records in it (by
+  `agent_id`). Records that arrive later are not scored again.
+- **Features:** model turns, tokens per turn, tool calls per turn, distinct tools, distinct hosts
+  (`http_call`), agent calls, denials (any record with `decision: deny`), egress calls.
+- **Baseline:** Welford mean and variance per feature over every run learned, the hosts and tools
+  ever seen (at most 64 new ones per run), the MinHash signatures of the last 20 tool sequences.
+- **Score:** 0 before 3 runs. A feature with z ≥ 2 adds min(z, 3); new hosts add min(n, 3); new
+  tools add 1; a tool sequence unlike any earlier one (novelty above 0.8) adds 1; at most 10,
+  two decimals. Each part comes with a reason in words (`5.0x its usual egress calls`, `2 hosts
+  it never called: …`). There is no decay.
+- **Quarantine.** With `risk.quarantine_score` in the ControlPlaneConfig (absent = never by score),
+  a run that scores at or above it, against a baseline of at least 3 runs, quarantines the agent
+  (§5.3) with actor `embassy:risk` and reason `automatic: risk score <s> over <t> in run <run>
+  (<reasons>)`; that run is not learned. A release is manual.
+- **Storage** (SQL migration 6): the baselines (updated only when no other replica changed them
+  since they were read), and every score, never changed or removed.
+- **API:** `GET /agents/{id}/risk`: `{agent_id, baseline_runs, scored_from, quarantine_score,
+  latest: {chain, score, reasons, novelty, scored_at} | null}`.
+
 ## 6. Audit record
 
 One JSON object per line, written by `agentscd` only (sink `stdout`, readable

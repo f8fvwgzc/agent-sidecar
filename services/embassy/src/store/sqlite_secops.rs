@@ -10,7 +10,8 @@ use super::{SqliteStore, checked_key, now_ts};
 use crate::secops::{
     AgentChange, AgentEntry, AgentFilter, AgentStatus, Approval, ApprovalFilter, ApprovalPut,
     ApprovalStatus, ChainFilter, ChainHead, ChainService, LedgerRecord, MAX_ALIASES, PENDING_MAX,
-    QuarantineState, RegistryChange, SecOpsStore, SyncPlan, by_chain, check_alias, check_reason,
+    QuarantineState, RegistryChange, RiskRow, SecOpsStore, SyncPlan, by_chain, check_alias,
+    check_reason,
 };
 use crate::store::StoreEvent;
 use crate::store::{Actor, ServiceKey, StoreError};
@@ -365,6 +366,120 @@ impl SecOpsStore for SqliteStore {
             key: ServiceKey::new(&out.namespace, &out.service),
         });
         Ok(out)
+    }
+
+    async fn risk_unscored(
+        &self,
+        quiet_before: &str,
+        limit: usize,
+    ) -> Result<Vec<String>, StoreError> {
+        let q = quiet_before.to_string();
+        self.run(move |conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT chain FROM ledger_heads WHERE risk_scored = 0 AND entries > 0 AND updated_at <= ?1 \
+                 ORDER BY updated_at LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![q, limit as i64], |r| r.get(0))?.collect::<Result<_, _>>()?;
+            Ok(rows)
+        })
+        .await
+    }
+
+    async fn risk_claim(&self, chain: &str) -> Result<bool, StoreError> {
+        let chain = chain.to_string();
+        self.run(move |conn| {
+            Ok(conn.execute(
+                "UPDATE ledger_heads SET risk_scored = 1 WHERE chain = ?1 AND risk_scored = 0",
+                params![chain],
+            )? == 1)
+        })
+        .await
+    }
+
+    async fn get_baseline(&self, agent_id: &str) -> Result<Option<(u64, String)>, StoreError> {
+        let id = agent_id.to_string();
+        self.run(move |conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT runs, state FROM agent_baselines WHERE agent_id = ?1",
+                    params![id],
+                    |r| Ok((unsigned(r.get(0)?), r.get(1)?)),
+                )
+                .optional()?)
+        })
+        .await
+    }
+
+    async fn put_baseline(
+        &self,
+        agent_id: &str,
+        expected: Option<u64>,
+        runs: u64,
+        state: &str,
+        at: &str,
+    ) -> Result<bool, StoreError> {
+        let (id, state, at) = (agent_id.to_string(), state.to_string(), at.to_string());
+        self.run(move |conn| {
+            let n = match expected {
+                None => conn.execute(
+                    "INSERT INTO agent_baselines (agent_id, runs, state, updated_at) VALUES (?1, ?2, ?3, ?4) \
+                     ON CONFLICT (agent_id) DO NOTHING",
+                    params![id, signed(runs)?, state, at],
+                )?,
+                Some(e) => conn.execute(
+                    "UPDATE agent_baselines SET runs = ?2, state = ?3, updated_at = ?4 \
+                     WHERE agent_id = ?1 AND runs = ?5",
+                    params![id, signed(runs)?, state, at, signed(e)?],
+                )?,
+            };
+            Ok(n == 1)
+        })
+        .await
+    }
+
+    async fn put_risk(&self, row: &RiskRow) -> Result<(), StoreError> {
+        let r = row.clone();
+        self.run(move |conn| {
+            conn.execute(
+                "INSERT INTO agent_risk (agent_id, chain, score, reasons, novelty, scored_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT (agent_id, chain) DO NOTHING",
+                params![
+                    r.agent_id,
+                    r.chain,
+                    r.score,
+                    serde_json::to_string(&r.reasons).unwrap_or_default(),
+                    r.novelty,
+                    r.scored_at
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn latest_risk(&self, agent_id: &str) -> Result<Option<RiskRow>, StoreError> {
+        let id = agent_id.to_string();
+        self.run(move |conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT agent_id, chain, score, reasons, novelty, scored_at FROM agent_risk \
+                     WHERE agent_id = ?1 ORDER BY scored_at DESC, chain DESC LIMIT 1",
+                    params![id],
+                    |r| {
+                        let reasons: String = r.get(3)?;
+                        Ok(RiskRow {
+                            agent_id: r.get(0)?,
+                            chain: r.get(1)?,
+                            score: r.get(2)?,
+                            reasons: serde_json::from_str(&reasons).unwrap_or_default(),
+                            novelty: r.get(4)?,
+                            scored_at: r.get(5)?,
+                        })
+                    },
+                )
+                .optional()?)
+        })
+        .await
     }
 
     async fn put_approval(&self, a: &Approval) -> Result<ApprovalPut, StoreError> {

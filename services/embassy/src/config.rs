@@ -82,6 +82,18 @@ pub struct ControlPlaneConfig {
     pub policy: Option<PolicyConfig>,
     #[serde(default)]
     pub events: EventsConfig,
+    /// Risk scoring of agents (crate::secops::risk, CONTRACT.md §5.5).
+    #[serde(default)]
+    pub risk: RiskConfig,
+}
+
+/// `risk`: what the risk score does (crate::secops::risk).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RiskConfig {
+    /// A run score at or above this quarantines the agent; absent = never by score.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quarantine_score: Option<f64>,
 }
 
 impl Default for ControlPlaneConfig {
@@ -97,6 +109,7 @@ impl Default for ControlPlaneConfig {
             sidecar_images: SidecarImagesConfig::default(),
             policy: None,
             events: EventsConfig::default(),
+            risk: RiskConfig::default(),
         }
     }
 }
@@ -366,6 +379,13 @@ impl ControlPlaneConfig {
     /// may not appear in a join token.
     pub fn validate(&self, cp_namespace: &str) -> Result<(), Vec<String>> {
         let mut errs = Vec::new();
+        if let Some(q) = self.risk.quarantine_score
+            && !(q.is_finite() && q >= 0.0)
+        {
+            errs.push(format!(
+                "risk.quarantine_score must be a number >= 0, not {q}"
+            ));
+        }
         if self.api_version != API_VERSION {
             errs.push(format!(
                 "apiVersion must be {API_VERSION}, not {:?}",

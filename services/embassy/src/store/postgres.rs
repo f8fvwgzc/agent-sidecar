@@ -3,7 +3,7 @@
 //!
 //! **Schema.** Numbered migrations ([`MIGRATIONS`]; 1 is `postgres_schema_v1.sql`: the SQLite
 //! tables in PostgreSQL types with the same invariants as triggers, plus `pending_adoptions`; 2
-//! is the agent registry, 3 the evidence ledger, 4 quarantines and 5 approvals of [`crate::secops`], implemented in
+//! is the agent registry, 3 the evidence ledger, 4 quarantines, 5 approvals and 6 risk of [`crate::secops`], implemented in
 //! `postgres_secops.rs`).
 //! [`PgStore::open`] applies the missing ones, each in its own transaction, under an advisory lock
 //! (per schema), so replicas that start together apply each once. The applied ones are in
@@ -58,6 +58,7 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
     (3, include_str!("postgres_schema_v3.sql")),
     (4, include_str!("postgres_schema_v4.sql")),
     (5, include_str!("postgres_schema_v5.sql")),
+    (6, include_str!("postgres_schema_v6.sql")),
 ];
 /// The channel of the store's notifications.
 pub const CHANNEL: &str = "agentsc_store";

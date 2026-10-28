@@ -338,3 +338,30 @@ pub async fn release(
     .await;
     Ok(Json(a).into_response())
 }
+
+/// `GET /agents/{id}/risk`: the agent's newest run score and how many runs its baseline learned.
+pub async fn risk(
+    State(hub): State<Arc<Hub>>,
+    Authed(ident): Authed,
+    Path(id): Path<String>,
+) -> Result<Response, Fail> {
+    let agent = visible_agent(&hub, &ident, &id).await?;
+    let store = secops(&hub)?;
+    let runs = store
+        .get_baseline(&id)
+        .await
+        .map_err(|e| Fail::store(e, ""))?
+        .map_or(0, |(n, _)| n);
+    let latest = store
+        .latest_risk(&id)
+        .await
+        .map_err(|e| Fail::store(e, ""))?;
+    Ok(Json(serde_json::json!({
+        "agent_id": agent.id,
+        "baseline_runs": runs,
+        "scored_from": crate::secops::risk::MIN_RUNS,
+        "quarantine_score": hub.config.load().risk.quarantine_score,
+        "latest": latest,
+    }))
+    .into_response())
+}

@@ -249,6 +249,7 @@ pub fn api_routes() -> Router<Arc<Hub>> {
         )
         .route("/agents/{id}/quarantine", post(agents::quarantine))
         .route("/agents/{id}/release", post(agents::release))
+        .route("/agents/{id}/risk", get(agents::risk))
         .route("/principals", get(agents::resolve_principal))
         .route("/approvals", get(approvals::list))
         .route("/approvals/{id}", get(approvals::get))
