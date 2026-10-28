@@ -36,11 +36,13 @@ version = "0.2.0"
 dependencies = [
  "agentsc-charter",
  "agentsc-common",
+ "agentsc-ledger",
  "anyhow",
  "clap",
  "serde",
  "serde_json",
  "serde_yaml_ng",
+ "tempfile",
 ]
 
 [[package]]
@@ -59,6 +61,19 @@ dependencies = [
  "tokio",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "agentsc-ledger"
+version = "0.2.0"
+dependencies = [
+ "base64 0.23.1",
+ "hex",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
 ]
 
 [[package]]

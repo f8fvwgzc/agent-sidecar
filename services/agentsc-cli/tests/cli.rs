@@ -290,3 +290,93 @@ fn logs_read_records_of_any_version() {
     // --raw prints the line as it was read, unknown fields and all
     assert_eq!(run(&["--raw"]).trim_end(), newer);
 }
+
+/// A sealed bundle of two entries, the key, and the JWKS, written to `dir`.
+fn evidence(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf, String) {
+    use agentsc_ledger::*;
+    let key = SigningKey::from_seed(&[9u8; 32]);
+    let mut entries: Vec<Entry> = Vec::new();
+    for kind in ["model_call", "agent_invocation"] {
+        let rec = serde_json::json!({"kind": kind, "request_id": "r1", "decision": "allow"});
+        let e = Entry::next(entries.last(), "r1", "2026-10-29T10:00:00.000Z", rec);
+        entries.push(e);
+    }
+    let s = seal(&key, "r1", 2, &entries[1].hash, "2026-10-29T10:00:01.000Z");
+    let bundle = Bundle {
+        format: BUNDLE_FORMAT.into(),
+        exported_at: "2026-10-29T10:00:02.000Z".into(),
+        chain: "r1".into(),
+        entries,
+        seals: vec![s],
+    };
+    let b = dir.join("run-r1.evidence.json");
+    std::fs::write(&b, serde_json::to_string_pretty(&bundle).unwrap()).unwrap();
+    let k = dir.join("jwks.json");
+    let jwks = Jwks {
+        keys: vec![key.jwk(KeyStatus::Current)],
+    };
+    std::fs::write(&k, serde_json::to_string(&jwks).unwrap()).unwrap();
+    (b, k, key.jwk(KeyStatus::Current).x)
+}
+
+#[test]
+fn verify_says_what_holds_and_exits_0_1_or_2() {
+    let dir = tempfile::tempdir().unwrap();
+    let (bundle, jwks, public) = evidence(dir.path());
+    let run = |args: &[&str]| {
+        let out = agentsc().args(args).output().unwrap();
+        (
+            out.status.code().unwrap(),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+    };
+    let b = bundle.to_str().unwrap();
+    let (code, out, _) = run(&["verify", b, "--keys", jwks.to_str().unwrap()]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.starts_with("chain r1\n  ok   format"), "{out}");
+    assert!(out.ends_with("the bundle verifies\n"), "{out}");
+    let (code, out, _) = run(&["verify", b, "--key", &public, "--json"]);
+    assert_eq!(code, 0, "{out}");
+    let report: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(report["ok"], true);
+    assert_eq!(report["checks"].as_array().unwrap().len(), 3);
+
+    // a tampered bundle: exit 1, the failing check named
+    let text = std::fs::read_to_string(&bundle).unwrap();
+    let tampered = dir.path().join("tampered.json");
+    std::fs::write(&tampered, text.replace("\"allow\"", "\"deny\"")).unwrap();
+    let (code, out, _) = run(&["verify", tampered.to_str().unwrap(), "--key", &public]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("  FAIL chain"), "{out}");
+    assert!(out.ends_with("the bundle does NOT verify\n"), "{out}");
+    // the wrong key: exit 1, seals
+    let other = agentsc_ledger::SigningKey::from_seed(&[1u8; 32])
+        .jwk(agentsc_ledger::KeyStatus::Current)
+        .x;
+    let (code, out, _) = run(&["verify", b, "--key", &other]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("  FAIL seals"), "{out}");
+    // unreadable input: exit 2
+    let (code, _, err) = run(&["verify", "/nonexistent.json", "--key", &public]);
+    assert_eq!(code, 2, "{err}");
+    let (code, _, err) = run(&["verify", jwks.to_str().unwrap(), "--key", &public]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("not an evidence bundle"), "{err}");
+    let (code, _, err) = run(&["verify", b, "--key", "abcd"]);
+    assert_eq!(code, 2, "{err}");
+    // stdin
+    let mut child = agentsc()
+        .args(["verify", "-", "--key", &public])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(text.as_bytes())
+        .unwrap();
+    assert_eq!(child.wait_with_output().unwrap().status.code(), Some(0));
+}

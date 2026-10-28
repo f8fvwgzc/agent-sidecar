@@ -1229,6 +1229,44 @@ record is redacted with one consistent snapshot), and the writer, its sink,
 the values it remembered for open requests and its subscribers are unaffected.
 `AuditWriter::redaction()` returns the settings in force.
 
+### 6.3 The evidence ledger
+
+Audit records become evidence when embassy chains and seals them (design:
+[docs/design/evidence-ledger.md](docs/design/evidence-ledger.md); the format is the crate
+`agentsc-ledger`, so embassy and `agentsc verify` share one definition).
+
+- **Chains.** A chain is one run: the records of one `request_id`, across every service and hop,
+  in the order embassy took them in. Records without a `request_id` (`config`) chain per service
+  as `service:<namespace>/<service>`. Entry `seq` (from 0) holds `ingested_at` (when embassy took
+  it in), the `record`, `prev_hash` and `hash`:
+
+  ```
+  hash = hex(SHA-256("agentsc-ledger-entry-v1" 0x00 ‖ prev_hash (32 bytes) ‖ canonical({chain, ingested_at, record, seq})))
+  ```
+
+  The first entry's `prev_hash` is 64 zeros. `canonical(v)` is compact JSON with every object's
+  keys sorted bytewise (strings and numbers as `serde_json` writes them), so a re-indented or
+  reordered copy hashes the same.
+- **Seals.** A seal signs `{chain, entries, head, kid, sealed_at, type: "agentsc.ledger_seal.v1"}`
+  (the canonical text, kept exactly as signed) with Ed25519: it says entries `0..entries` of the
+  chain end in `head`. `kid` is the RFC 7638 thumbprint of the public key
+  (`base64url(SHA-256({"crv":"Ed25519","kty":"OKP","x":"<base64url key>"}))`). Public keys are a
+  JWKS: `{kty: "OKP", crv: "Ed25519", x, kid, alg: "EdDSA", use: "sig", status: "current" |
+  "retired"}`; a retired key's seals still verify.
+- **Bundles.** One chain's evidence: `{format: "agentsc-evidence-bundle/v1", exported_at,
+  chain, entries: [{seq, ingested_at, record, prev_hash, hash}], seals: [{statement, signature
+  (hex), kid}]}`.
+- **`agentsc verify <bundle> (--keys <jwks.json> | --key <public key>) [--json]`** runs every
+  check whatever the others find: `format`; `chain` (entries `0..n` in order, each following the
+  one before and hashing to its hash, at least one); `seals` (each seal parses, names its key,
+  the key is published under its thumbprint, the signature holds over the exact statement, it is
+  about this chain, its head is the hash of its last entry; and one seal covers every entry). It
+  prints `chain <id>`, one `ok`/`FAIL` line per check and the verdict, or with `--json`
+  `{ok, chain, checks: [{name, ok, detail}]}`; exit 0 when the bundle verifies, 1 when a check
+  fails, 2 when the bundle or the keys cannot be read. An edited record fails `chain`; a record
+  taken off the end or added after the last seal fails `seals`; a removed or reordered one fails
+  both; an edited statement or a wrong key fails `seals`.
+
 ## 7. Kubernetes packaging
 
 `deploy/` is a kustomize tree, applied with `kubectl apply -k deploy/`:
@@ -1292,6 +1330,7 @@ agentsc charter schema                 # JSON Schema to stdout (== schemas/chart
 agentsc charter schema --crd           # the CustomResourceDefinition charters.agentsc.io, YAML (== deploy/crds/charters.agentsc.io.yaml)
 agentsc charter to-cr <file>           # the charter as a `Charter` custom resource, YAML; exit 1 if the charter is invalid
 agentsc logs <svc>[,<svc>…] [-n NS] [--context C] [--agent A] [--trace T] [--request R] [--kind <any kind>] [--rule PREFIX] [--denied] [-f] [--raw] [--file F|-] [--tail N]
+agentsc verify <bundle|-> (--keys <jwks.json> | --key <public key>) [--json]   # an evidence bundle, offline (§6.3); exit 0 verifies, 1 a check fails, 2 unreadable
 agentsc version
 ```
 

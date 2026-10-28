@@ -1,0 +1,23 @@
+[package]
+name = "agentsc-ledger"
+description = "The evidence ledger's format: hash-chained audit records, Ed25519 seals, JWKS, bundles and their offline verification (CONTRACT.md §6.3)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+base64.workspace = true
+thiserror.workspace = true
+# Ed25519 signing and verification (the workspace's rustls provider is ring too).
+ring = "0.17"
+
+[dev-dependencies]
+hex.workspace = true
+base64.workspace = true
