@@ -253,7 +253,7 @@ def stack(sample_env: dict[str, str], tmp_path_factory: pytest.TempPathFactory) 
 def split_flags(command: list[str]) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
     for a in command:
-        m = re.fullmatch(r"--([a-z][a-z-]*)(?:=(.*))?", a)
+        m = re.fullmatch(r"--([a-z][a-z0-9-]*)(?:=(.*))?", a)
         assert m, f"argument {a!r} is not --flag[=value]"
         out.setdefault(m.group(1), []).append(m.group(2) or "")
     return out
@@ -311,7 +311,7 @@ def test_embassy_runs_every_component_with_the_file_store(stack: dict) -> None:
     binary = os.environ.get("EMBASSY_BIN")
     if binary and Path(binary).exists():
         help_text = subprocess.run([binary, "serve", "--help"], capture_output=True, text=True, check=True).stdout
-        assert set(flags) <= set(re.findall(r"--([a-z][a-z-]+)", help_text))
+        assert set(flags) <= set(re.findall(r"--([a-z][a-z0-9-]+)", help_text))
 
 
 # Stands in for embassy in the entrypoint test: `ca-init --out <dir>` writes a CA there, anything
