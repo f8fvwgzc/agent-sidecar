@@ -297,6 +297,8 @@ pub async fn quarantine(
     )
     .await;
     let a = result?;
+    // a quarantined agent's calls that wait for a person are not approved any more
+    crate::secops::approvals::expire_agent(&hub, &a.namespace, &a.service, &a.name).await;
     crate::controlplane::push_agents(
         &hub,
         &crate::store::ServiceKey::new(&a.namespace, &a.service),

@@ -36,8 +36,8 @@ pub const MAX_TOKENS_PER_CALL_LIMIT: u32 = 128_000;
 /// (`<service>.<namespace>` in `tools[].service` or as a `mesh.peers` key, which an older
 /// sidecar would take for a service of its own namespace), 6 = agent practices
 /// (`agents[].practices`, `learning.require_evidence`, `learning.contrast_runs`,
-/// `learning.scopes`; agent-practices design).
-pub const CHARTER_SCHEMA_LEVEL: u32 = 6;
+/// `learning.scopes`; agent-practices design), 7 = approvals (`tools[].approval`).
+pub const CHARTER_SCHEMA_LEVEL: u32 = 7;
 /// A charter is at most this many bytes, measured the same way whatever form it arrived in
 /// ([`Charter::validate`]): its JSON serialization and its plain YAML ([`Charter::to_yaml`], the
 /// text `CharterUpdate.charter_yaml` and the file store carry) are each at most this size, so a
@@ -665,6 +665,29 @@ pub struct ToolSpec {
     /// everything else writes; `agent` tools read (the callee's sidecar enforces its own policy).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effect: Option<ToolEffect>,
+    /// A person must approve each call before it runs (schema level 7, CONTRACT.md §5.4). Absent
+    /// = no approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<ApprovalSpec>,
+}
+
+/// The default and the largest `tools[].approval.timeout_s` (nexc-engine's).
+pub const APPROVAL_TIMEOUT_DEFAULT_S: u32 = 600;
+pub const APPROVAL_TIMEOUT_MAX_S: u32 = 86_400;
+
+/// `tools[].approval`: each call waits for a person's decision (CONTRACT.md §5.4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovalSpec {
+    /// Seconds a call waits for a decision before it is refused (`approval.expired`), 1 to
+    /// 86400; the run's own deadline may end the wait sooner.
+    #[serde(default = "d_approval_timeout")]
+    #[schemars(range(min = 1, max = 86_400))]
+    pub timeout_s: u32,
+}
+
+fn d_approval_timeout() -> u32 {
+    APPROVAL_TIMEOUT_DEFAULT_S
 }
 
 impl ToolSpec {
@@ -967,8 +990,9 @@ impl Charter {
     /// 4 for `authz.taint`, 5 for a peer in another namespace (a tool whose `service` is
     /// `<service>.<namespace>`, a `mesh.peers` key of that form), 6 for the practice fields
     /// (`agents[].practices`, `learning.require_evidence`, `learning.contrast_runs`,
-    /// `learning.scopes`; agent-practices design). A tool is listed once, at the highest level it
-    /// needs. Empty lists count as unused: they are left out when the charter is serialized.
+    /// `learning.scopes`; agent-practices design), 7 for a tool with an `approval`. A tool is
+    /// listed once, at the highest level it needs. Empty lists count as unused: they are left out
+    /// when the charter is serialized.
     pub fn level_fields(&self) -> Vec<(String, u32)> {
         let mut out = Vec::new();
         if self.authz.taint.is_some() {
@@ -1009,7 +1033,9 @@ impl Charter {
                 out.push((format!("agents.{}.taint", a.name), 3));
             }
             for t in &a.tools {
-                let level = if t.service.as_deref().is_some_and(is_qualified_peer) {
+                let level = if t.approval.is_some() {
+                    7
+                } else if t.service.as_deref().is_some_and(is_qualified_peer) {
                     5
                 } else if t.label.is_some() || t.effect.is_some() {
                     3
@@ -1282,6 +1308,13 @@ impl Charter {
                 }
                 if tool.description.trim().is_empty() {
                     errs.push(format!("{tt}: description is required"));
+                }
+                if let Some(a) = &tool.approval
+                    && !(1..=APPROVAL_TIMEOUT_MAX_S).contains(&a.timeout_s)
+                {
+                    errs.push(format!(
+                        "{tt}: approval.timeout_s must be 1..={APPROVAL_TIMEOUT_MAX_S}"
+                    ));
                 }
                 if let Some(p) = &tool.parameters
                     && !p.is_object()
@@ -2119,6 +2152,7 @@ mod tests {
             url: None,
             label: None,
             effect: None,
+            approval: None,
         };
         c.agents[0].tools.push(stock("inventory.warehouse"));
         c.mesh
@@ -2424,6 +2458,7 @@ mod tests {
             url: Some("https://api.example.com/v1//items/{id}".into()),
             label: None,
             effect: None,
+            approval: None,
         });
         let err = c.validate().unwrap_err().to_string();
         assert!(err.contains("empty segment"), "{err}");

@@ -433,9 +433,9 @@ an oversized plain charter before it is parsed.
   new field, but an older sidecar would take it for a service of its own namespace), and 6 when
   it uses a practices or level-6 learning field (`agents[].practices`,
   `agents[].learning.require_evidence`, `agents[].learning.contrast_runs`,
-  `agents[].learning.scopes`).
+  `agents[].learning.scopes`), and 7 when a tool has an `approval` (§5.4).
   `Charter::level_fields()` lists each such field with its level (a tool once, at the highest).
-  `CHARTER_SCHEMA_LEVEL` = 6 is the level this build understands (sent as `Hello.charter_schema_level`); the control
+  `CHARTER_SCHEMA_LEVEL` = 7 is the level this build understands (sent as `Hello.charter_schema_level`); the control
   plane refuses to push a field to a connected instance below its level, naming the field and
   the instances.
 - The practices need no charter field to be on (§3.3), so a level-6 sidecar gives every agent
@@ -1052,6 +1052,42 @@ Design: [docs/design/agent-registry.md](docs/design/agent-registry.md).
 - **Not yet:** creating and disabling the principal in Tutela (`tutela.admin.v1`, Tutela
   phase B, #24) and delegated agent tokens (RFC 8693 token exchange at `tutelad`, #25); both
   wait for `tutelad`.
+
+### 5.4 Approvals of tool calls
+
+A tool with `approval` (schema level 7) waits, for each call, until a person decides
+(design: [docs/design/approvals.md](docs/design/approvals.md)):
+
+```yaml
+tools:
+  - name: refund
+    ...
+    approval:                # level 7, optional; absent = no approval
+      timeout_s: 600         # 1..=86400, default 600: how long a call waits for a decision
+```
+
+- **The sidecar** checks the call as any other (§5.1, taint, quarantine), then sends
+  `SidecarMessage.approval_request` (`ApprovalRequest`: an id, the agent, the tool, the run, the
+  SHA-256 of the arguments, `timeout_s`) and holds the call until `ControlMessage.approval_decision`
+  for that id, `timeout_s`, or the run's own deadline, whichever comes first. Approved: an `authz`
+  record (`decision: allow`, rule `approval.granted`, reason `<tool> approved by <who>[: why]`),
+  then the call. Denied: refused (`PERMISSION_DENIED`, rule `approval.denied`, reason `<tool> was
+  denied by <who>: <why>`, a `tool_call` deny record); the model sees the error and the run goes
+  on. No decision in time: refused, rule `approval.expired`. A sidecar without a control plane
+  refuses every call of such a tool (`approval.unavailable`). A quarantine that arrives while a
+  call waits refuses it too. Requests are sent again after every reconnect until decided.
+- **embassy** keeps an approval per request (SQL migration 5; decided once, never removed): the
+  request is the same one when it comes again, and a decided one is answered at once. It expires
+  `timeout_s` after embassy took it in (embassy's clock); an approval given after that counts as
+  expired. An agent has at most 16 pending; past that the request is denied. Quarantining an
+  agent expires its pending approvals. Decisions and expiries reach the sidecars on every replica.
+- **API** (`/api/v1`): `GET /approvals?status=&namespace=&service=&limit=` (newest first; 50, at
+  most 500), `GET /approvals/{id}`: a viewer of the namespace (else `404`). `POST
+  /approvals/{id}/approve` `{"reason"?}` and `POST /approvals/{id}/deny` `{"reason"}` (a deny needs
+  one; at most 2000 characters): an editor of the namespace; `409 not_pending` when it is decided
+  or expired already. Audited as `approval_approve` / `approval_deny` (reason `<tool> in run
+  <request_id>[: why]`). An approval holds the hash of the arguments, never the arguments.
+- **Changing it** needs admin, and removing an `approval` is a weakened change (§6.1).
 
 ## 6. Audit record
 

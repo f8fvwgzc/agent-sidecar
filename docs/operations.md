@@ -629,6 +629,11 @@ See [Creating agents](guides/creating-agents.md) for what to put in a charter.
 
 ## Upgrade notes
 
+### Approvals
+
+- **The SQL stores migrate on start** to SQLite schema version 5 and PostgreSQL migration 5 (`approvals`).
+- **`tools[].approval` is charter schema level 7.** Upgrade every sidecar of a service before you add one: the control plane refuses the charter while an older sidecar is connected.
+
 ### Quarantine
 
 - **The SQL stores migrate on start** to SQLite schema version 4 and PostgreSQL migration 4 (three columns on `agents`).
@@ -977,6 +982,18 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "X-Agentsc-CSRF: 1" -H "Con
 ```
 
 Its sidecars refuse every invocation (`403`, rule `quarantine.active`) and every further tool call of its runs in flight, within the time a push takes. Other agents of the service go on. Find the agent's id with `GET /api/v1/agents?service=<svc>`. Lift it with `POST /api/v1/agents/$AGENT_ID/release`; nothing else does. Both are in the control-plane audit (`agent_quarantined`, `agent_released`). `agentsc logs <svc> --rule quarantine.active` shows what was refused.
+
+### Approving tool calls
+
+A tool with `approval` in its charter waits for a person on every call (CONTRACT.md §5.4). Pending ones are listed and decided through the API, by an editor of the namespace:
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" "https://embassy/api/v1/approvals?status=pending"
+curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "X-Agentsc-CSRF: 1" -H "Content-Type: application/json" \
+  -d '{"reason":"refund checked with the customer"}' https://embassy/api/v1/approvals/$ID/approve
+```
+
+`/deny` needs a reason. A call nobody decides within its `timeout_s` (600 s by default) is refused (`approval.expired`). It also ends early if the run's own deadline comes first. A sidecar with no control plane refuses every call of such a tool (`approval.unavailable`). `agentsc logs <svc> --rule approval.` shows what was granted, denied or expired.
 
 ### The evidence ledger
 

@@ -252,7 +252,7 @@ async fn issuance_hello_heartbeats_and_updates() {
         h.charter_schema_level,
         agentsc_charter::CHARTER_SCHEMA_LEVEL
     );
-    assert_eq!(h.charter_schema_level, 6);
+    assert_eq!(h.charter_schema_level, 7);
     assert_eq!(h.memory_version, "");
     assert_eq!(
         cp.shared.peers.lock().unwrap()[0],
@@ -1512,4 +1512,119 @@ async fn a_configured_trust_domain_end_to_end() {
     cfg.trust_domain = "Prod Example".into();
     let err = agentscd::start(cfg).await.err().expect("refused");
     assert!(format!("{err:#}").contains("--trust-domain"), "{err:#}");
+}
+
+fn lookup_call(request_id: &str) -> ToolServiceRequest {
+    ToolServiceRequest {
+        ctx: ctx(
+            "ops-assistant",
+            "lookup_order",
+            request_id,
+            "00f067aa0ba902b7",
+        ),
+        service: "orders".into(),
+        method: "GET".into(),
+        path: "/orders/1001".into(),
+        headers: Default::default(),
+        body: vec![],
+    }
+}
+
+fn decision(id: &str, decision: &str, by: &str, reason: &str) -> ControlMessage {
+    ControlMessage {
+        msg: Some(control_message::Msg::ApprovalDecision(
+            agentsc_proto::ApprovalDecision {
+                id: id.into(),
+                decision: decision.into(),
+                decided_by: by.into(),
+                reason: reason.into(),
+            },
+        )),
+    }
+}
+
+fn rule_of(st: &tonic::Status) -> String {
+    st.metadata()
+        .get("x-agentsc-rule")
+        .map(|v| v.to_str().unwrap().to_string())
+        .unwrap_or_default()
+}
+
+/// CONTRACT.md §5.4: a tool with `approval` waits for the control plane's decision.
+#[tokio::test]
+async fn a_tool_with_an_approval_waits_for_the_decision() {
+    let ca = agentsc_pki::ca_init().unwrap();
+    let cp = FakeCp::start(ca.clone()).await;
+    let state_dir = tempfile::tempdir().unwrap();
+    let audit_dir = tempfile::tempdir().unwrap();
+    let audit = audit_dir.path().join("audit.jsonl");
+    let m = start_managed(
+        cp.addr,
+        &ca,
+        state_dir.path(),
+        None,
+        |_| FakeRuntime::answering("done"),
+        |_| {},
+    )
+    .await;
+    eventually("hello", || !cp.hellos().is_empty()).await;
+    let mut c = charter(&audit);
+    let i = c.agents[0]
+        .tools
+        .iter()
+        .position(|t| t.name == "lookup_order")
+        .unwrap();
+    c.agents[0].tools[i].approval = Some(agentsc_charter::ApprovalSpec { timeout_s: 1 });
+    cp.push(charter_update("e1", "1", &c)).await;
+    assert!(ack(&cp, "charter", "1").await.applied);
+    let mut tools = tools(&m.sock).await;
+
+    // approved: the call goes on, after an authz record
+    let _a = in_flight(&m.sidecar, "held-a", "ops-assistant");
+    let mut t = tools.clone();
+    let call = tokio::spawn(async move { t.invoke_service(lookup_call("held-a")).await });
+    eventually("the request", || cp.approval_requests().len() == 1).await;
+    let req = cp.approval_requests()[0].clone();
+    assert_eq!(
+        (req.agent.as_str(), req.tool.as_str(), req.timeout_s),
+        ("ops-assistant", "lookup_order", 1)
+    );
+    assert_eq!(req.request_id, "held-a");
+    assert_eq!(req.args_sha256.len(), 64);
+    cp.push(decision(&req.id, "approved", "bob", "")).await;
+    let out = call.await.unwrap();
+    if let Err(st) = &out {
+        assert!(!rule_of(st).starts_with("approval."), "{st:?}");
+    }
+    wait_audit(&audit, 1, |r| {
+        r["rule"] == "approval.granted" && r["request_id"] == "held-a"
+    })
+    .await;
+
+    // denied: refused with who and why
+    let _b = in_flight(&m.sidecar, "held-b", "ops-assistant");
+    let mut t = tools.clone();
+    let call = tokio::spawn(async move { t.invoke_service(lookup_call("held-b")).await });
+    eventually("the second request", || cp.approval_requests().len() == 2).await;
+    let id = cp.approval_requests()[1].id.clone();
+    cp.push(decision(&id, "denied", "bob", "not for this customer"))
+        .await;
+    let err = call.await.unwrap().unwrap_err();
+    assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    assert_eq!(rule_of(&err), "approval.denied");
+    assert!(
+        err.message()
+            .contains("was denied by bob: not for this customer"),
+        "{err:?}"
+    );
+
+    // nobody decides: expired after timeout_s
+    let _c = in_flight(&m.sidecar, "held-c", "ops-assistant");
+    let err = tools
+        .invoke_service(lookup_call("held-c"))
+        .await
+        .unwrap_err();
+    assert_eq!(rule_of(&err), "approval.expired", "{err:?}");
+    assert_eq!(m.state().approvals.waiting(), 0);
+    m.sidecar.abort();
 }

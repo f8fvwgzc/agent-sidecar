@@ -104,6 +104,8 @@ pub struct AppState {
     /// Quarantined agents of this service, name → reason (`ControlMessage.quarantine`, CONTRACT.md
     /// §5.3): their invocations and tool calls are refused.
     pub(crate) quarantined: Mutex<HashMap<String, String>>,
+    /// Tool calls waiting for a person's approval (approvals.rs).
+    pub approvals: crate::approvals::Approvals,
 }
 
 /// The rule of a refusal because the agent is quarantined (CONTRACT.md §5.3).
@@ -308,6 +310,7 @@ impl AppState {
             apply_lock: Mutex::new(()),
             pending_memory: Mutex::new(pending_memory),
             quarantined: Mutex::new(HashMap::new()),
+            approvals: crate::approvals::Approvals::default(),
             file_yaml: Mutex::new(file_text),
             tls: Arc::new(ArcSwapOption::from(tls.map(Arc::new))),
             cert_not_after,

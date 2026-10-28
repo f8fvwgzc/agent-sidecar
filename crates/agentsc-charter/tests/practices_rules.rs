@@ -430,7 +430,7 @@ fn each_new_field_is_level_6() {
             c.agents[0].learning.as_mut().unwrap().scopes = Some(vec![LessonScope::Domain])
         }),
     ];
-    assert_eq!(CHARTER_SCHEMA_LEVEL, 6);
+    assert_eq!(CHARTER_SCHEMA_LEVEL, 7);
     for (field, edit) in edits {
         let mut c = v02();
         edit(&mut c);

@@ -630,7 +630,7 @@ fn rule8_service_accounts_are_dns_labels() {
 
 #[test]
 fn schema_level_is_1_without_v02_fields_and_2_with_any() {
-    assert_eq!(CHARTER_SCHEMA_LEVEL, 6);
+    assert_eq!(CHARTER_SCHEMA_LEVEL, 7);
     assert_eq!(orders().schema_level(), 1);
     assert_eq!(Charter::from_yaml(INVENTORY).unwrap().schema_level(), 1);
     assert_eq!(v02().schema_level(), 2);

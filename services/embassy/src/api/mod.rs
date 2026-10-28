@@ -27,6 +27,7 @@ use crate::names::is_dns_label;
 use crate::store::ServiceKey;
 
 pub mod agents;
+pub mod approvals;
 pub mod cache;
 pub mod edit;
 pub mod error;
@@ -249,6 +250,10 @@ pub fn api_routes() -> Router<Arc<Hub>> {
         .route("/agents/{id}/quarantine", post(agents::quarantine))
         .route("/agents/{id}/release", post(agents::release))
         .route("/principals", get(agents::resolve_principal))
+        .route("/approvals", get(approvals::list))
+        .route("/approvals/{id}", get(approvals::get))
+        .route("/approvals/{id}/approve", post(approvals::approve))
+        .route("/approvals/{id}/deny", post(approvals::deny))
         .route("/ledger/runs", get(ledger::list_runs))
         .route("/ledger/runs/{chain}", get(ledger::get_run))
         .route("/ledger/runs/{chain}/bundle", get(ledger::bundle))

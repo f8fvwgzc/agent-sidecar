@@ -3,7 +3,7 @@
 //!
 //! **Schema.** Numbered migrations ([`MIGRATIONS`]; 1 is `postgres_schema_v1.sql`: the SQLite
 //! tables in PostgreSQL types with the same invariants as triggers, plus `pending_adoptions`; 2
-//! is the agent registry, 3 the evidence ledger and 4 quarantines of [`crate::secops`], implemented in
+//! is the agent registry, 3 the evidence ledger, 4 quarantines and 5 approvals of [`crate::secops`], implemented in
 //! `postgres_secops.rs`).
 //! [`PgStore::open`] applies the missing ones, each in its own transaction, under an advisory lock
 //! (per schema), so replicas that start together apply each once. The applied ones are in
@@ -57,6 +57,7 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
     (2, include_str!("postgres_schema_v2.sql")),
     (3, include_str!("postgres_schema_v3.sql")),
     (4, include_str!("postgres_schema_v4.sql")),
+    (5, include_str!("postgres_schema_v5.sql")),
 ];
 /// The channel of the store's notifications.
 pub const CHANNEL: &str = "agentsc_store";
@@ -688,6 +689,10 @@ enum WireEvent {
     AgentsChanged {
         key: ServiceKey,
     },
+    ApprovalDecided {
+        key: ServiceKey,
+        id: String,
+    },
     /// The event did not fit a notification: re-read everything.
     Resync,
 }
@@ -713,6 +718,7 @@ impl WireEvent {
             StoreEvent::ProposalChanged { key, id } => Self::ProposalChanged { key, id },
             StoreEvent::AdoptionPending { key, sha256 } => Self::AdoptionPending { key, sha256 },
             StoreEvent::AgentsChanged { key } => Self::AgentsChanged { key },
+            StoreEvent::ApprovalDecided { key, id } => Self::ApprovalDecided { key, id },
             // this store writes no record of its own
             StoreEvent::CpAudit(_) => return None,
         })
@@ -738,6 +744,7 @@ impl WireEvent {
             Self::ProposalChanged { key, id } => StoreEvent::ProposalChanged { key, id },
             Self::AdoptionPending { key, sha256 } => StoreEvent::AdoptionPending { key, sha256 },
             Self::AgentsChanged { key } => StoreEvent::AgentsChanged { key },
+            Self::ApprovalDecided { key, id } => StoreEvent::ApprovalDecided { key, id },
             Self::Resync => return None,
         })
     }

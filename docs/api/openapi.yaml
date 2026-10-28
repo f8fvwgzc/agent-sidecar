@@ -129,6 +129,7 @@ tags:
   - name: proposals
   - name: registry
   - name: ledger
+  - name: approvals
   - name: events
   - name: traces
   - name: health
@@ -1113,6 +1114,153 @@ paths:
         "503":
           $ref: "#/components/responses/SecopsUnavailable"
 
+  /approvals:
+    get:
+      tags: [approvals]
+      operationId: listApprovals
+      summary: Approvals of tool calls (CONTRACT.md §5.4), newest first, in the caller's namespaces.
+      x-required-role: viewer
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, approved, denied, expired]
+        - name: namespace
+          in: query
+          schema:
+            $ref: "#/components/schemas/DnsLabel"
+        - name: service
+          in: query
+          schema:
+            $ref: "#/components/schemas/DnsLabel"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 50
+      responses:
+        "200":
+          description: The approvals.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Approval"
+        "400":
+          $ref: "#/components/responses/Invalid"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+        "503":
+          $ref: "#/components/responses/SecopsUnavailable"
+
+  /approvals/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ApprovalId"
+    get:
+      tags: [approvals]
+      operationId: getApproval
+      summary: One approval. 404 outside the caller's namespaces.
+      x-required-role: viewer
+      responses:
+        "200":
+          description: The approval.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Approval"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+        "503":
+          $ref: "#/components/responses/SecopsUnavailable"
+
+  /approvals/{id}/approve:
+    parameters:
+      - $ref: "#/components/parameters/ApprovalId"
+    post:
+      tags: [approvals]
+      operationId: approveApproval
+      summary: Approve the call; the waiting sidecar runs it. The body is optional.
+      description: 409 `not_pending` when it is decided or expired already (an approval after its time counts as expired). Audited as `approval_approve`.
+      x-required-role: editor
+      parameters:
+        - $ref: "#/components/parameters/Csrf"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApprovalDecisionBody"
+      responses:
+        "200":
+          description: The approval, approved.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Approval"
+        "400":
+          $ref: "#/components/responses/Invalid"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+        "503":
+          $ref: "#/components/responses/SecopsUnavailable"
+
+  /approvals/{id}/deny:
+    parameters:
+      - $ref: "#/components/parameters/ApprovalId"
+    post:
+      tags: [approvals]
+      operationId: denyApproval
+      summary: Refuse the call; the model sees the reason. A reason is required.
+      description: 409 `not_pending` when it is decided or expired already. Audited as `approval_deny`.
+      x-required-role: editor
+      parameters:
+        - $ref: "#/components/parameters/Csrf"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApprovalDecisionBody"
+      responses:
+        "200":
+          description: The approval, denied.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Approval"
+        "400":
+          $ref: "#/components/responses/Invalid"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+        "503":
+          $ref: "#/components/responses/SecopsUnavailable"
+
   /principals:
     get:
       tags: [registry]
@@ -1722,6 +1870,14 @@ components:
       description: Session cookie from `POST /login` (HMAC-SHA256 signed `{token_name, exp}`, 12 h).
 
   parameters:
+    ApprovalId:
+      name: id
+      in: path
+      required: true
+      description: The approval's id (the sidecar's request id).
+      schema:
+        type: string
+        maxLength: 64
     Chain:
       name: chain
       in: path
@@ -2963,6 +3119,58 @@ components:
     ProposalStatus:
       type: string
       enum: [pending, approved, rejected]
+    Approval:
+      type: object
+      description: One tool call that waits (or waited) for a person (CONTRACT.md §5.4).
+      required: [id, namespace, service, agent, agent_id, tool, request_id, trace_id, args_sha256, status, requested_at, expires_at, decided_at, decided_by, reason]
+      properties:
+        id:
+          type: string
+        namespace:
+          $ref: "#/components/schemas/DnsLabel"
+        service:
+          $ref: "#/components/schemas/DnsLabel"
+        agent:
+          type: string
+        agent_id:
+          oneOf:
+            - type: string
+            - type: "null"
+        tool:
+          type: string
+        request_id:
+          type: string
+        trace_id:
+          type: string
+        args_sha256:
+          type: string
+          description: SHA-256 of the call's arguments (never the arguments).
+        status:
+          type: string
+          enum: [pending, approved, denied, expired]
+        requested_at:
+          type: string
+        expires_at:
+          type: string
+        decided_at:
+          oneOf:
+            - type: string
+            - type: "null"
+        decided_by:
+          oneOf:
+            - type: string
+            - type: "null"
+        reason:
+          oneOf:
+            - type: string
+            - type: "null"
+    ApprovalDecisionBody:
+      type: object
+      additionalProperties: false
+      properties:
+        reason:
+          type: string
+          maxLength: 2000
     ChainHead:
       type: object
       required: [chain, entries, head, sealed, updated_at, services]
@@ -3362,6 +3570,8 @@ components:
             - ledger_export
             - agent_quarantined
             - agent_released
+            - approval_approve
+            - approval_deny
         namespace:
           oneOf:
             - type: string

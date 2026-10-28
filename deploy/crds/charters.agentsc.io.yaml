@@ -216,6 +216,21 @@ spec:
                             - read
                             - write
                             nullable: true
+                          approval:
+                            type: object
+                            description: |-
+                              A person must approve each call before it runs (schema level 7, CONTRACT.md §5.4). Absent
+                              = no approval.
+                            properties:
+                              timeout_s:
+                                type: integer
+                                description: |-
+                                  Seconds a call waits for a decision before it is refused (`approval.expired`), 1 to
+                                  86400; the run's own deadline may end the wait sooner.
+                                minimum: 1
+                                maximum: 86400
+                            x-kubernetes-preserve-unknown-fields: true
+                            nullable: true
                         required:
                         - name
                         - description

@@ -315,6 +315,16 @@ impl FakeCp {
             .collect()
     }
 
+    pub fn approval_requests(&self) -> Vec<agentsc_proto::ApprovalRequest> {
+        self.received()
+            .into_iter()
+            .filter_map(|(_, m)| match m.msg {
+                Some(sidecar_message::Msg::ApprovalRequest(r)) => Some(r),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub fn proposals(&self) -> Vec<agentsc_proto::LearningProposal> {
         self.received()
             .into_iter()

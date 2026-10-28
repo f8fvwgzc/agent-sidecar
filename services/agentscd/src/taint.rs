@@ -224,6 +224,7 @@ mod tests {
             url: (ty == ToolType::Http).then(|| "https://api.example.com/x".into()),
             label: None,
             effect: None,
+            approval: None,
         }
     }
 
