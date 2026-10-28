@@ -234,6 +234,11 @@ pub struct ServeArgs {
     /// `--store postgres`: connections per replica.
     #[arg(long, env = "AGENTSC_POSTGRES_POOL_SIZE", default_value_t = crate::store::postgres::DEFAULT_POOL_SIZE)]
     pub postgres_pool_size: usize,
+    /// Where the AgentSecOps data (the agent registry, crate::secops) lives: `sqlite:<path>` or
+    /// `postgres` (with the `--postgres-*` flags). Default: the store itself for `sqlite:` and
+    /// `postgres`, `<dir>/.secops.sqlite3` for `file:<dir>`, and none for `kubernetes`.
+    #[arg(long, env = "AGENTSC_SECOPS_STORE")]
+    pub secops_store: Option<StoreSpec>,
     /// ControlPlaneConfig file (reloaded on change).
     #[arg(long)]
     pub config: Option<PathBuf>,
@@ -344,6 +349,11 @@ impl ServeArgs {
         }
         if let Err(e) = agentsc_common::identity::check_trust_domain(&self.trust_domain) {
             errs.push(format!("--trust-domain: {e}"));
+        }
+        if let Some(spec) = &self.secops_store
+            && !matches!(spec, StoreSpec::Sqlite(_) | StoreSpec::Postgres)
+        {
+            errs.push("--secops-store is sqlite:<path> or postgres".into());
         }
         if let Err(e) = agentsc_common::identity::check_cluster_domain(&self.cluster_domain) {
             errs.push(format!("--cluster-domain: {e}"));
@@ -634,51 +644,85 @@ fn file_store_validator(
     )
 }
 
+/// The stores of `args`: the `Store`, and the AgentSecOps store (crate::secops) when there is one.
+type Stores = (
+    Option<Arc<dyn Store>>,
+    Option<Arc<dyn crate::secops::SecOpsStore>>,
+);
+
+/// `--store postgres` (or `--secops-store postgres`): connect and migrate.
+async fn open_postgres(
+    args: &ServeArgs,
+    flag: &str,
+) -> anyhow::Result<Arc<crate::store::postgres::PgStore>> {
+    let url = match &args.postgres_url_file {
+        Some(path) => std::fs::read_to_string(path)
+            .with_context(|| format!("--postgres-url-file {}", path.display()))?
+            .trim()
+            .to_string(),
+        None => std::env::var("AGENTSC_POSTGRES_URL").unwrap_or_default(),
+    };
+    if url.is_empty() {
+        anyhow::bail!(
+            "{flag} postgres needs the connection string: --postgres-url-file or env AGENTSC_POSTGRES_URL"
+        );
+    }
+    crate::store::postgres::PgStore::open(crate::store::postgres::PgOptions {
+        url,
+        ca_file: args.postgres_ca_file.clone(),
+        pool_size: args.postgres_pool_size,
+        application_name: "agentsc-embassy".into(),
+        allow_plaintext: args.postgres_allow_plaintext,
+    })
+    .await
+    .with_context(|| format!("{flag} postgres"))
+}
+
 async fn open_store(
     args: &ServeArgs,
     config: &Arc<ArcSwap<ControlPlaneConfig>>,
     hub: &HubCell,
-) -> anyhow::Result<Option<Arc<dyn Store>>> {
-    Ok(match &args.store {
-        None => None,
+) -> anyhow::Result<Stores> {
+    let (store, secops): Stores = match &args.store {
+        None => (None, None),
         Some(StoreSpec::File(dir)) => {
             let fs = crate::store::file::FileStore::open(dir.clone())
                 .await
                 .with_context(|| format!("--store file:{}", dir.display()))?;
             fs.set_validator(file_store_validator(config.clone(), hub.clone()));
-            Some(fs)
+            let secops: Option<Arc<dyn crate::secops::SecOpsStore>> = if args.secops_store.is_none()
+            {
+                let path = dir.join(".secops.sqlite3");
+                Some(
+                    crate::store::sqlite::SqliteStore::open(path.clone())
+                        .with_context(|| format!("the SecOps store {}", path.display()))?,
+                )
+            } else {
+                None
+            };
+            (Some(fs), secops)
         }
         Some(StoreSpec::Sqlite(path)) => {
             let db = crate::store::sqlite::SqliteStore::open(path.clone())
                 .with_context(|| format!("--store sqlite:{}", path.display()))?;
-            Some(db)
+            (Some(db.clone()), Some(db))
         }
         Some(StoreSpec::Postgres) => {
-            let url = match &args.postgres_url_file {
-                Some(path) => std::fs::read_to_string(path)
-                    .with_context(|| format!("--postgres-url-file {}", path.display()))?
-                    .trim()
-                    .to_string(),
-                None => std::env::var("AGENTSC_POSTGRES_URL").unwrap_or_default(),
-            };
-            if url.is_empty() {
-                anyhow::bail!(
-                    "--store postgres needs the connection string: --postgres-url-file or env AGENTSC_POSTGRES_URL"
-                );
-            }
-            let db = crate::store::postgres::PgStore::open(crate::store::postgres::PgOptions {
-                url,
-                ca_file: args.postgres_ca_file.clone(),
-                pool_size: args.postgres_pool_size,
-                application_name: "agentsc-embassy".into(),
-                allow_plaintext: args.postgres_allow_plaintext,
-            })
-            .await
-            .context("--store postgres")?;
-            Some(db)
+            let db = open_postgres(args, "--store").await?;
+            (Some(db.clone()), Some(db))
         }
-        Some(StoreSpec::Kubernetes) => Some(crate::k8s::open_store(args).await?),
-    })
+        Some(StoreSpec::Kubernetes) => (Some(crate::k8s::open_store(args).await?), None),
+    };
+    let secops: Option<Arc<dyn crate::secops::SecOpsStore>> = match &args.secops_store {
+        None => secops,
+        Some(StoreSpec::Sqlite(path)) => Some(
+            crate::store::sqlite::SqliteStore::open(path.clone())
+                .with_context(|| format!("--secops-store sqlite:{}", path.display()))?,
+        ),
+        Some(StoreSpec::Postgres) => Some(open_postgres(args, "--secops-store").await?),
+        Some(_) => anyhow::bail!("--secops-store is sqlite:<path> or postgres"),
+    };
+    Ok((store, secops))
 }
 
 /// Where `--dev` writes its admin token.
@@ -759,7 +803,7 @@ pub async fn start(
     }
     let config = Arc::new(ArcSwap::from_pointee(config));
     let hub_cell: HubCell = Arc::default();
-    let store = open_store(&args, &config, &hub_cell).await?;
+    let (store, secops) = open_store(&args, &config, &hub_cell).await?;
     let ca = if args.has(Ca) {
         let material = match (&args.ca_dir, &args.ca_secret) {
             (Some(dir), _) => crate::ca::CaMaterial::load_dir(dir)?,
@@ -835,6 +879,9 @@ pub async fn start(
         );
         if store.is_some() {
             h.ready.set("store", true);
+        }
+        if let Some(s) = secops.clone() {
+            let _ = h.secops.set(s);
         }
         for c in [Ca, Webhook] {
             if args.has(c) {

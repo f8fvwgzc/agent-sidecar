@@ -34,6 +34,7 @@ pub fn base(kind: Kind, direction: Direction) -> AuditRecord {
         service: "orders".into(),
         namespace: "shop".into(),
         agent: Some("ops-assistant".into()),
+        agent_id: None,
         caller: "local".into(),
         caller_agent: None,
         callee: "ops-assistant".into(),

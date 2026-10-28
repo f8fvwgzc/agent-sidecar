@@ -359,6 +359,50 @@ async fn issuance_hello_heartbeats_and_updates() {
         m.runtime.last_spec("ops-assistant")["memory"],
         json!([{"id": "n1", "text": "Look up the order first."}])
     );
+
+    // 9b. AgentIds: the registry's ids go on the agent's records from now on; a value that is
+    //     not an agent id is dropped, and nothing is acknowledged
+    let id = "agt_0193a1b2-c3d4-7b33-9c44-5d6e7f809102";
+    let acks_before = cp.acks().len();
+    cp.push(ControlMessage {
+        msg: Some(agentsc_proto::control_message::Msg::AgentIds(
+            agentsc_proto::AgentIds {
+                ids: [
+                    ("ops-assistant".to_string(), id.to_string()),
+                    ("stock-analyst".to_string(), "not-an-id".to_string()),
+                ]
+                .into(),
+            },
+        )),
+    })
+    .await;
+    eventually("the ids installed", || {
+        m.state().audit.writer().agent_ids().get("ops-assistant") == Some(&id.to_string())
+    })
+    .await;
+    assert!(
+        !m.state()
+            .audit
+            .writer()
+            .agent_ids()
+            .contains_key("stock-analyst")
+    );
+    let (status, v) = m.invoke("ops-assistant", "hi again").await;
+    assert_eq!(status, 200);
+    let request_id = v["request_id"].as_str().unwrap().to_string();
+    eventually("the invocation record with its agent_id", || {
+        std::fs::read_to_string(&audit)
+            .unwrap_or_default()
+            .lines()
+            .any(|l| {
+                let r: Value = serde_json::from_str(l).unwrap_or_default();
+                r["request_id"] == request_id
+                    && r["kind"] == "agent_invocation"
+                    && r["agent_id"] == id
+            })
+    })
+    .await;
+    assert_eq!(cp.acks().len(), acks_before, "AgentIds is not acknowledged");
     let before = cp.acks().len();
     cp.push(memory_update("0", &[])).await;
     eventually("the stale memory ack", || cp.acks().len() > before).await;

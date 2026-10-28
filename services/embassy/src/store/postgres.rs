@@ -2,7 +2,8 @@
 //! in PostgreSQL, for one or many embassy replicas.
 //!
 //! **Schema.** Numbered migrations ([`MIGRATIONS`]; 1 is `postgres_schema_v1.sql`: the SQLite
-//! tables in PostgreSQL types with the same invariants as triggers, plus `pending_adoptions`).
+//! tables in PostgreSQL types with the same invariants as triggers, plus `pending_adoptions`; 2
+//! is the agent registry of [`crate::secops`], implemented in `postgres_secops.rs`).
 //! [`PgStore::open`] applies the missing ones, each in its own transaction, under an advisory lock
 //! (per schema), so replicas that start together apply each once. The applied ones are in
 //! `agentsc_schema_migrations`. A database a newer embassy migrated is refused.
@@ -50,7 +51,10 @@ use crate::config::Role;
 use crate::names::is_dns_label;
 
 /// The migrations, in order: `(version, SQL)`.
-pub const MIGRATIONS: &[(i64, &str)] = &[(1, include_str!("postgres_schema_v1.sql"))];
+pub const MIGRATIONS: &[(i64, &str)] = &[
+    (1, include_str!("postgres_schema_v1.sql")),
+    (2, include_str!("postgres_schema_v2.sql")),
+];
 /// The channel of the store's notifications.
 pub const CHANNEL: &str = "agentsc_store";
 /// Store events a slow subscriber may fall behind before it loses some.
@@ -747,6 +751,9 @@ fn resync_actor() -> Actor {
         role: None,
     }
 }
+
+#[path = "postgres_secops.rs"]
+mod secops;
 
 /// The `postgres` store; see the module docs.
 pub struct PgStore {

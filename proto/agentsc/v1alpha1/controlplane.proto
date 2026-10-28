@@ -88,7 +88,16 @@ message ControlMessage {
   oneof msg {
     CharterUpdate charter = 1;
     MemoryUpdate memory = 2;
+    AgentIds agent_ids = 3;
   }
+}
+
+// The registry ids of the service's agents (CONTRACT.md §5.3): agent name → `agt_<uuidv7>`. A
+// full replacement, sent after the first charter or memory push of a stream and whenever an agent
+// of the service is registered, retired or registered again. Not acknowledged. The sidecar stamps
+// each id on its agent's audit records (`agent_id`).
+message AgentIds {
+  map<string, string> ids = 1;
 }
 
 message CharterUpdate {

@@ -83,6 +83,8 @@ impl Readiness {
 /// See the module docs.
 pub struct Hub {
     pub store: Arc<dyn Store>,
+    /// The AgentSecOps data (crate::secops), set once at start; unset without a SQL store.
+    pub secops: std::sync::OnceLock<Arc<dyn crate::secops::SecOpsStore>>,
     pub config: Arc<ArcSwap<ControlPlaneConfig>>,
     pub cp_audit: Arc<CpAudit>,
     pub auth: Auth,
@@ -246,6 +248,7 @@ impl Hub {
     ) -> Arc<Self> {
         Arc::new(Self {
             store,
+            secops: std::sync::OnceLock::new(),
             config,
             cp_audit,
             auth,
@@ -259,6 +262,11 @@ impl Hub {
             ready: Readiness::default(),
             shutdown,
         })
+    }
+
+    /// The AgentSecOps store, when this embassy keeps one (crate::secops).
+    pub fn secops(&self) -> Option<&Arc<dyn crate::secops::SecOpsStore>> {
+        self.secops.get()
     }
 
     /// Publish a live event.
@@ -337,7 +345,7 @@ async fn on_store_event(hub: &Arc<Hub>, ev: StoreEvent) {
                     namespace: key.namespace.clone(),
                     service: key.service.clone(),
                     version,
-                    actor: actor.name,
+                    actor: actor.name.clone(),
                     source,
                 }),
                 Scope::Service {
@@ -348,10 +356,12 @@ async fn on_store_event(hub: &Arc<Hub>, ev: StoreEvent) {
             hub.refresh_declared().await;
             hub.graph.bump();
             crate::controlplane::push_charter(hub, &key).await;
+            crate::secops::registry::sync_service(hub, &key, &actor).await;
         }
-        StoreEvent::ServiceDeleted { .. } => {
+        StoreEvent::ServiceDeleted { key, actor } => {
             hub.refresh_declared().await;
             hub.graph.bump();
+            crate::secops::registry::sync_service(hub, &key, &actor).await;
         }
         StoreEvent::MemoryChanged { key, .. } => {
             hub.graph.bump();
@@ -385,6 +395,8 @@ async fn store_pump(
     shutdown: CancellationToken,
 ) {
     hub.refresh_declared().await;
+    // what changed while this embassy was down; events from now on are in `rx` already
+    crate::secops::registry::reconcile_all(&hub).await;
     loop {
         let ev = tokio::select! {
             r = rx.recv() => r,
@@ -396,6 +408,7 @@ async fn store_pump(
                 tracing::warn!(missed = n, "store events lagged; resyncing");
                 hub.refresh_declared().await;
                 hub.graph.bump();
+                crate::secops::registry::reconcile_all(&hub).await;
                 crate::controlplane::push_all(&hub).await;
             }
             Err(broadcast::error::RecvError::Closed) => return,

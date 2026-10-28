@@ -104,6 +104,11 @@ pub struct AuditRecord {
     pub service: String,
     pub namespace: String,
     pub agent: Option<String>,
+    /// The registry id of `agent` (`agt_<uuidv7>`, CONTRACT.md §5.3), when the control plane sent
+    /// the sidecar its agents' ids. Left out of the JSON when absent, so an unmanaged sidecar's
+    /// records are as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
     pub caller: String,
     pub caller_agent: Option<String>,
     pub callee: String,
@@ -154,6 +159,8 @@ pub struct AuditRecordView {
     pub namespace: String,
     #[serde(default)]
     pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
     pub caller: String,
     #[serde(default)]
     pub caller_agent: Option<String>,
@@ -227,6 +234,7 @@ impl From<&AuditRecord> for AuditRecordView {
             service: r.service.clone(),
             namespace: r.namespace.clone(),
             agent: r.agent.clone(),
+            agent_id: r.agent_id.clone(),
             caller: r.caller.clone(),
             caller_agent: r.caller_agent.clone(),
             callee: r.callee.clone(),
@@ -297,6 +305,7 @@ impl AuditRecord {
             service: String::new(),
             namespace: String::new(),
             agent: agent.map(str::to_string),
+            agent_id: None,
             caller: caller.to_string(),
             caller_agent: caller_agent.map(str::to_string),
             callee: callee.to_string(),
@@ -589,6 +598,9 @@ pub struct AuditWriter {
     /// one snapshot, so a record is never redacted half with the old settings and half with the
     /// new ones.
     redaction: RwLock<Arc<Redaction>>,
+    /// agent name → registry id (`agt_<uuidv7>`), from the control plane
+    /// ([`AuditWriter::set_agent_ids`]); stamped on every record of a known agent.
+    agent_ids: RwLock<Arc<std::collections::HashMap<String, String>>>,
     /// request_id → values found at `audit.redact` paths, scrubbed from every later record of that
     /// request (the same value reappears as text inside model prompts and tool results).
     secrets: Mutex<std::collections::HashMap<String, (std::time::Instant, Vec<String>)>>,
@@ -631,6 +643,7 @@ impl AuditWriter {
                 paths: redact,
                 pii_redact: false,
             })),
+            agent_ids: RwLock::new(Arc::new(std::collections::HashMap::new())),
             secrets: Mutex::new(std::collections::HashMap::new()),
             sink: Mutex::new(Sink {
                 out: sink,
@@ -730,6 +743,23 @@ impl AuditWriter {
             .unwrap_or_else(PoisonError::into_inner) = new;
     }
 
+    /// Replace the agents' registry ids (agent name → `agt_<uuidv7>`, CONTRACT.md §5.3): every
+    /// record written after this call whose `agent` is one of them carries its `agent_id`.
+    pub fn set_agent_ids(&self, ids: std::collections::HashMap<String, String>) {
+        *self
+            .agent_ids
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Arc::new(ids);
+    }
+
+    /// The agents' registry ids in force.
+    pub fn agent_ids(&self) -> Arc<std::collections::HashMap<String, String>> {
+        self.agent_ids
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     /// The `audit.redact` paths and the `guardrails.pii_redact` switch in force.
     pub fn redaction(&self) -> (Vec<String>, bool) {
         let r = self.snapshot();
@@ -803,6 +833,11 @@ impl AuditWriter {
         let redaction = self.snapshot();
         record.service = self.service.clone();
         record.namespace = self.namespace.clone();
+        if record.agent_id.is_none()
+            && let Some(agent) = &record.agent
+        {
+            record.agent_id = self.agent_ids().get(agent).cloned();
+        }
         record.ensure_hashes();
         self.remember_with(&redaction.paths, &record.request_id, "input", &record.input);
         self.remember_with(
@@ -1054,6 +1089,45 @@ mod tests {
             lines[2]["input"], "cust-SECRET-99",
             "other requests are untouched"
         );
+    }
+
+    #[test]
+    fn a_known_agent_gets_its_registry_id_and_other_records_stay_as_they_were() {
+        let buf = Buf::default();
+        let w = AuditWriter::with_sink("s", "n", vec![], Box::new(buf.clone()));
+        let t = TraceContext::new_root();
+        let rec = |agent: Option<&str>| {
+            AuditRecord::new(
+                Kind::AgentInvocation,
+                Direction::Inbound,
+                "r",
+                &t,
+                agent,
+                "local",
+                None,
+                "x",
+                Value::Null,
+                Value::Null,
+            )
+        };
+        w.write(rec(Some("ops")));
+        w.set_agent_ids([("ops".to_string(), "agt_1".to_string())].into());
+        w.write(rec(Some("ops")));
+        w.write(rec(Some("other")));
+        w.write(rec(None));
+        let lines = buf.lines();
+        assert!(
+            lines[0].get("agent_id").is_none(),
+            "absent, not null, before any ids"
+        );
+        assert_eq!(lines[1]["agent_id"], "agt_1");
+        assert!(lines[2].get("agent_id").is_none() && lines[3].get("agent_id").is_none());
+        // the field reads back, and a view keeps it
+        let back: AuditRecord = serde_json::from_value(lines[1].clone()).unwrap();
+        assert_eq!(back.agent_id.as_deref(), Some("agt_1"));
+        let view = AuditRecordView::from_json(&lines[1].to_string()).unwrap();
+        assert_eq!(view.agent_id.as_deref(), Some("agt_1"));
+        assert!(view.extra.is_empty());
     }
 
     #[test]

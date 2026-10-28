@@ -15,6 +15,7 @@
 //! | [`graph`] | B3a | the node graph, its stats and the record → edge mapping (§10.1) |
 //! | [`hub`] | B3a | the state `controlplane`, `api` and `ui` share, and its tasks |
 //! | [`registry`] | B3a | the connected sidecar instances |
+//! | [`secops`] | AgentSecOps | the agent registry ([`secops::registry`]) in the SQL stores |
 //! | [`serve`] | B3a | `embassy serve` flags (§8.1) and the wiring of the components |
 //! | [`store`] | B3a | the `Store` trait (§8.4) and the file store |
 //! | [`traces`] | B3a | runs for the agent timeline (§10.1.1) |
@@ -42,6 +43,7 @@ pub mod k8s;
 pub mod names;
 pub mod ratelimit;
 pub mod registry;
+pub mod secops;
 pub mod serve;
 pub mod servingcert;
 pub mod sidecar_images;

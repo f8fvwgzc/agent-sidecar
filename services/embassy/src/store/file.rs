@@ -10,6 +10,7 @@
 //! | `.memory/<ns>/<svc>.json` | the memory document (`MemoryDoc`) |
 //! | `.proposals/<ns>/<svc>.json` | the proposals, each with the sidecar's `dedup_key` |
 //! | `.audit.jsonl` | the control-plane audit log, one JSON line per action |
+//! | `.secops.sqlite3` | the AgentSecOps data (agent registry), a SQLite database `embassy serve` opens beside this store ([`crate::secops`]) |
 //!
 //! Every file is written atomically (a temporary file in the same directory, flushed, then
 //! renamed). After a service is deleted its `.meta` file stays with `epoch: null` and the last

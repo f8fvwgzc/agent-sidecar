@@ -458,7 +458,11 @@ async fn replicas_starting_together_migrate_once_and_a_newer_schema_is_refused()
         .unwrap();
     assert_eq!(
         rows.iter().map(|r| r.get::<_, i64>(0)).collect::<Vec<_>>(),
-        [1]
+        embassy::store::postgres::MIGRATIONS
+            .iter()
+            .map(|(v, _)| *v)
+            .collect::<Vec<_>>(),
+        "each migration once"
     );
     db.raw
         .execute(

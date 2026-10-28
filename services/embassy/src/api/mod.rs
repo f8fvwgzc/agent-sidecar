@@ -26,6 +26,7 @@ use crate::hub::Hub;
 use crate::names::is_dns_label;
 use crate::store::ServiceKey;
 
+pub mod agents;
 pub mod cache;
 pub mod edit;
 pub mod error;
@@ -238,6 +239,13 @@ pub fn api_routes() -> Router<Arc<Hub>> {
             "/services/{ns}/{svc}/memory",
             get(learning::get_memory).put(learning::put_memory),
         )
+        .route("/agents", get(agents::list_agents))
+        .route("/agents/{id}", get(agents::get_agent))
+        .route(
+            "/agents/{id}/aliases",
+            post(agents::put_alias).delete(agents::delete_alias),
+        )
+        .route("/principals", get(agents::resolve_principal))
         .route("/proposals", get(learning::list_proposals))
         .route("/proposals/{id}/approve", post(learning::approve))
         .route("/proposals/{id}/reject", post(learning::reject))

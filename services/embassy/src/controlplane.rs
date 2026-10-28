@@ -27,8 +27,9 @@ use std::time::Duration;
 use agentsc_common::identity::SpiffeId;
 use agentsc_proto::control_plane_server::{ControlPlane, ControlPlaneServer};
 use agentsc_proto::{
-    AuditBatch, CharterUpdate, ConfigAck, ControlMessage, Heartbeat, Hello, LearningProposal,
-    MemoryUpdate, NoteList, SidecarMessage, SpanStart, control_message, sidecar_message,
+    AgentIds, AuditBatch, CharterUpdate, ConfigAck, ControlMessage, Heartbeat, Hello,
+    LearningProposal, MemoryUpdate, NoteList, SidecarMessage, SpanStart, control_message,
+    sidecar_message,
 };
 use chrono::Utc;
 use futures::StreamExt;
@@ -365,13 +366,39 @@ pub async fn push_memory(hub: &Hub, key: &ServiceKey) {
     }
 }
 
-/// Push charter and memory to every instance (after missed store events).
+/// The `AgentIds` of `key`'s active agents (CONTRACT.md §5.3); `None` without a SecOps store or
+/// when the registry cannot be read now.
+pub async fn agent_ids_message(hub: &Hub, key: &ServiceKey) -> Option<ControlMessage> {
+    hub.secops()?;
+    let ids = crate::secops::registry::active_ids(hub, key).await.ok()?;
+    Some(ControlMessage {
+        msg: Some(control_message::Msg::AgentIds(AgentIds {
+            ids: ids.into_iter().collect(),
+        })),
+    })
+}
+
+/// Push the agents' registry ids to every instance of `key`.
+pub async fn push_agent_ids(hub: &Hub, key: &ServiceKey) {
+    let outboxes = hub.registry.outboxes(key);
+    if outboxes.is_empty() {
+        return;
+    }
+    if let Some(msg) = agent_ids_message(hub, key).await {
+        for o in &outboxes {
+            send(o, msg.clone());
+        }
+    }
+}
+
+/// Push charter, memory and agent ids to every instance (after missed store events).
 pub async fn push_all(hub: &Hub) {
     let keys: std::collections::BTreeSet<ServiceKey> =
         hub.registry.all().into_iter().map(|(k, _)| k).collect();
     for key in keys {
         push_charter(hub, &key).await;
         push_memory(hub, &key).await;
+        push_agent_ids(hub, &key).await;
     }
 }
 
@@ -412,6 +439,9 @@ async fn on_hello(
             }
             if let Ok(doc) = hub.store.get_memory(key).await {
                 send(tx, memory_message(&doc));
+            }
+            if let Some(msg) = agent_ids_message(hub, key).await {
+                send(tx, msg);
             }
         }
         Err(StoreError::NotFound) => {
@@ -589,6 +619,10 @@ pub async fn ingest_batch(hub: &Hub, key: &ServiceKey, batch: AuditBatch) {
             .unwrap_or_default(),
         Err(_) => HashSet::new(),
     };
+    // a record of an older sidecar, or one sent before its AgentIds arrived, gets the id here
+    let ids = crate::secops::registry::active_ids(hub, key)
+        .await
+        .unwrap_or_default();
     for json in batch.records_json {
         if json.len() > MAX_RECORD_BYTES {
             tracing::debug!(service = %key, bytes = json.len(), "dropping an audit record over 64 KiB");
@@ -600,6 +634,9 @@ pub async fn ingest_batch(hub: &Hub, key: &ServiceKey, batch: AuditBatch) {
         };
         rec.service = key.service.clone();
         rec.namespace = key.namespace.clone();
+        if rec.agent_id.is_none() {
+            rec.agent_id = rec.agent.as_ref().and_then(|a| ids.get(a)).cloned();
+        }
         if let Some(agent) = &rec.agent
             && rec.direction != "inbound"
             && !agents.contains(agent)
