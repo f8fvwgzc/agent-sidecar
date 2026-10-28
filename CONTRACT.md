@@ -240,7 +240,15 @@ audit:
   effect: read                 # read | write (default: read for agent tools and GET/HEAD/OPTIONS, else write)
 ```
 
-`agent` tools take `{ "input": string }`; their `parameters` default to that.
+`agent` tools take `{ "input": string, "context"?: object }`: the question,
+and a JSON object the callee gets as its `context` (§4.1), which is how a
+calling agent answers the callee's questions (§9). Their `parameters`
+default to that schema, which the sidecar fills in `agent_spec_json` (§4.3).
+With its own `parameters`, an `agent` tool sends a string `input` argument as
+the input and a `context` object argument as the context; without a string
+`input`, all its arguments as one JSON string and no context. A `context` that
+is not a JSON object is refused before anything is sent (`is_error` tool
+result `denied by guardrail.tool_spec: …`).
 Only `type: orchestrator` agents may declare `agent` tools. An `agent` tool
 whose `service` is this charter's own service is a local agent tool.
 
@@ -549,13 +557,21 @@ new invocation that carries the original `input` and puts the questions and
 its answers in `context`, for example
 `{"answers": [{"question": "…", "answer": "…"}]}`, or writes them into the
 `input`; the agent treats those decisions as settled and does not ask them
-again. `context` passes the input guardrails like any other (§5.1 step 3).
-Answers in `context` or `input` are vouched for by the caller: the answering
-run is a new run and starts with only `taint.input` (§5.2; from a peer, also
-the labels of its `x-agentsc-taint`), whatever the run that asked had read.
-For an agent with a `taint` block, an unattended app must not send the
-recommended answers back on its own, since they may come from untrusted
-data; it uses `clarify: never` for that agent, or has a person answer.
+again. An app sets the request's `context`; a calling agent sets the
+`context` argument of its agent tool (§3.1), which the sidecar passes on as
+the callee's `context`, locally or over the mesh (§4.3). `context` passes the
+input guardrails like any other (§5.1 step 3), whoever sent it.
+Answers in `context` or `input` are vouched for by the caller. From an app,
+the answering run is a new run and starts with only `taint.input` (§5.2),
+whatever the run that asked had read. From an agent, local or over the mesh,
+it is part of the calling run (the same `request_id`, §5.2), so it also starts
+with every label the calling run has read; when that run got the questions,
+those include what the asking run read, since a callee's labels come back
+with its response. Answers an agent forwards from a tainted run never arrive
+as trusted. For an agent with a `taint` block, an unattended app must not
+send the recommended answers back on its own, since they may come from
+untrusted data; it uses `clarify: never` for that agent, or has a person
+answer.
 
 Response headers always include `traceparent` and `x-agentsc-request-id`.
 
@@ -635,6 +651,9 @@ restrictions, so a peer gains nothing by lying.
   "learning": { …, "require_evidence": true, "contrast_runs": 5, "scopes": ["invariant", "domain"] }
   ```
 
+  An `agent` tool without `parameters` gets the default of §3.1 filled in, so
+  the model is offered the `context` the sidecar forwards; `spec.py` falls
+  back to the same schema.
   The runtime's `spec.py` parses exactly this (unknown fields are errors;
   `Practices` and the three `Learning` fields have the same defaults);
   `schemas/runtime-agent-spec.example.json` is a generated example that the
@@ -665,6 +684,14 @@ declared path or URL template (§3.1) — else `guardrail.tool_spec`.
 - `InvokeAgent(ToolAgentRequest) → InvokeAgentResponse` — tool check; a local
   agent re-enters the invocation pipeline with `caller = local`,
   `caller_agent` set; a remote one goes over the mesh.
+  `ToolAgentRequest {ToolContext ctx = 1; string target_service = 2; string target_agent = 3; string input = 4; string context_json = 5;}`:
+  `context_json` is `""` or a JSON object, else `guardrail.tool_spec`. The
+  sidecar passes it on as the callee's `context` (`InvokeAgentRequest.context_json`,
+  locally or over the mesh), where it meets the callee's input guardrails and
+  taint as an app's `context` does (§5.1, §5.2). The calling agent's
+  `tool_call` and `agent_call` records then have `input = {input, context}`,
+  like the callee's `agent_invocation` record. The mesh has always carried
+  `context_json`, so a peer of an older build gets the context too.
 - `InvokeHttp(ToolHttpRequest) → ServiceResponse` — tool check (origin must
   equal the declared URL's), canonicalisation of the URL's path and query
   (§5.1, `guardrail.path`), the template check against the declared URL's
@@ -1037,9 +1064,11 @@ Redaction, in this order, over the full payloads:
    of a `guardrail.input_deny.*` denial, the final output in the `guardrail`
    record of a `guardrail.output_deny.*` denial (for a run that asked, the
    question string or rendering that matched, §4.1), and the input of the
-   calling agent's `tool_call` / `agent_call` records when the callee's input
-   rule denied it. The denied input is also scrubbed (`[redacted]`) from every later
-   record of the same request in that sidecar, like the values in step 2.
+   calling agent's `tool_call` / `agent_call` records (with its `context`) when
+   the callee's input rule denied it. The denied input is also scrubbed
+   (`[redacted]`) from every later record of the same request in that sidecar,
+   like the values in step 2; a denied agent tool `context` also value by
+   value, since the calling agent's next prompt quotes it as JSON.
 2. `audit.redact` dotted paths are replaced with `"[redacted]"` inside
    `input`/`output` (arrays are walked). Values found at those paths (strings
    and numbers of 4+ characters) are also remembered per `request_id` for 15
@@ -1320,7 +1349,9 @@ reads records from a file instead of kubectl.
   on. Like `load_skill`, `ask_caller` is not in `tools_used`, so a run that
   only asked is not reflected on; no `tool_call` record is reported for it
   (§6). The runtime keeps no state between Executes: answers come back in
-  `context` or the `input` (§4.1).
+  `context` or the `input` (§4.1); a calling agent sends them in its agent
+  tool's `context` argument (§3.1), which the runtime sends as
+  `ToolAgentRequest.context_json` (§4.3).
 - Reflection (learning on, after the Execute returned; design §12). The
   transcript numbers every entry after `input`, `s1` to `sN`, the outcome
   included (`s4 outcome: ok`); each entry is one line, its whitespace

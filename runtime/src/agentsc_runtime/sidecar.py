@@ -110,10 +110,14 @@ class GrpcSidecar:
         return resp.status, resp.body
 
     async def invoke_agent(
-        self, ctx: CallContext, tool: str, target_service: str, target_agent: str, input: str
+        self, ctx: CallContext, tool: str, target_service: str, target_agent: str, input: str, context_json: str = ""
     ) -> str:
         req = runtime_pb2.ToolAgentRequest(
-            ctx=_ctx(ctx, tool), target_service=target_service, target_agent=target_agent, input=input
+            ctx=_ctx(ctx, tool),
+            target_service=target_service,
+            target_agent=target_agent,
+            input=input,
+            context_json=context_json,
         )
         resp = await self._call(self._stub.InvokeAgent(req, timeout=timeout_for(ctx, AGENT_TIMEOUT)))
         if resp.status == "denied":  # older sidecars answered with an envelope

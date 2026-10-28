@@ -816,6 +816,7 @@ async fn span_starts_audit_batches_and_learning_proposals() {
                                 target_service: String::new(),
                                 target_agent: "order-triage".into(),
                                 input: "classify: late delivery".into(),
+                                context_json: String::new(),
                             })
                             .await
                             .unwrap()

@@ -109,7 +109,10 @@ It is not reported with `ReportEvent`: the questions reach the audit log in the 
 `output_deny` over the raw questions, their rendering, the redacted and cut questions and the
 `output` it renders from them (CONTRACT.md §4.1), so the caller and the audit log get the same
 checked text; with `clarify: never` it drops any questions. The runtime keeps no state between
-Executes; the caller's answers arrive in `context` or in the input.
+Executes; the caller's answers arrive in `context` or in the input. An agent tool takes an
+optional `context` object next to `input` (`spec.AGENT_TOOL_PARAMETERS`, the schema the
+sidecar fills too), and `tools.agent_request` sends it as `ToolAgentRequest.context_json`, so a
+calling agent answers a callee's questions as an app does.
 
 ## Learning
 

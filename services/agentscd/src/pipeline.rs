@@ -242,15 +242,21 @@ pub fn metered_usage(meter: &Meter, reported: Usage) -> Usage {
     }
 }
 
+/// The audited `input` of an invocation or an agent call: the input text, or, with a context,
+/// `{input, context}` (the context as JSON when it parses).
+pub fn input_value(input: &str, context_json: &str) -> Value {
+    if context_json.trim().is_empty() {
+        Value::String(input.to_string())
+    } else {
+        json!({ "input": input, "context": serde_json::from_str::<Value>(context_json).unwrap_or(Value::String(context_json.to_string())) })
+    }
+}
+
 /// Run the full pipeline for one invocation. Always writes exactly one `agent_invocation` record,
 /// also when the caller drops this future while the runtime runs (`error: "cancelled: …"`).
 pub async fn invoke(state: &Arc<AppState>, inv: Invocation) -> InvokeAgentResponse {
     let started = Instant::now();
-    let input_value = if inv.context_json.trim().is_empty() {
-        Value::String(inv.input.clone())
-    } else {
-        json!({ "input": inv.input, "context": serde_json::from_str::<Value>(&inv.context_json).unwrap_or(Value::String(inv.context_json.clone())) })
-    };
+    let input_value = input_value(&inv.input, &inv.context_json);
     let record = |output: Value| {
         AuditRecord::new(
             Kind::AgentInvocation,

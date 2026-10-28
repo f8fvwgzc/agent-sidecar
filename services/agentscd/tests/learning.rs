@@ -101,6 +101,7 @@ async fn review_mode_audits_a_scrubbed_lesson_and_keeps_memory_unchanged() {
                 target_service: String::new(),
                 target_agent: "order-triage".into(),
                 input: withheld.into(),
+                context_json: String::new(),
             })
             .await
             .unwrap_err()

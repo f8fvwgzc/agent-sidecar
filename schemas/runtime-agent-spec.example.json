@@ -24,7 +24,23 @@
       "name": "triage",
       "description": "Ask the triage agent.",
       "type": "agent",
-      "agent": "triage"
+      "agent": "triage",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "input": {
+            "type": "string",
+            "description": "What to ask the agent."
+          },
+          "context": {
+            "type": "object",
+            "description": "Optional JSON the agent gets as its context. To answer questions it asked, call it again with the same input and every answer so far here: {\"answers\": [{\"question\": \"…\", \"answer\": \"…\"}]}."
+          }
+        },
+        "required": [
+          "input"
+        ]
+      }
     },
     {
       "name": "partner",

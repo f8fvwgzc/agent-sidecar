@@ -69,6 +69,7 @@ message ToolAgentRequest {
   string target_service = 2;   // "" = local
   string target_agent = 3;
   string input = 4;
+  string context_json = 5;     // "" or a JSON object: the callee's `context`
 }
 
 message ToolHttpRequest {

@@ -175,6 +175,27 @@ def test_tool_calls_fit_inside_the_execute_deadline(ops_assistant, sidecar, ctx)
     assert res.status == "ok" and deadlines == [ctx.deadline]
 
 
+def test_the_agent_tool_request_carries_the_context():
+    """ToolAgentRequest.context_json (CONTRACT.md §4.3): "" or the JSON object for the callee's context."""
+    seen = []
+
+    class Stub:
+        def InvokeAgent(self, req, timeout):
+            seen.append(req)
+
+            async def ok():
+                return common_pb2.InvokeAgentResponse(status="ok", output="fine")
+
+            return ok()
+
+    sc = GrpcSidecar.__new__(GrpcSidecar)
+    sc._stub = Stub()
+    call = CallContext("r", "t", "s", "ops-assistant", 0)
+    asyncio.run(sc.invoke_agent(call, "stock_analyst", "inventory", "stock-analyst", "hi", '{"answers":[]}'))
+    asyncio.run(sc.invoke_agent(call, "stock_analyst", "inventory", "stock-analyst", "hi"))
+    assert [(r.input, r.context_json) for r in seen] == [("hi", '{"answers":[]}'), ("hi", "")]
+
+
 def test_model_calls_fit_inside_the_execute_deadline(ops_assistant, sidecar, ctx):
     """A model call gets what is left of the deadline, and none starts once it is (nearly) up."""
     timeouts = []

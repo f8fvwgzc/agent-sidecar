@@ -97,16 +97,18 @@ class ToolServiceRequest(_message.Message):
     def __init__(self, ctx: _Optional[_Union[ToolContext, _Mapping]] = ..., service: _Optional[str] = ..., method: _Optional[str] = ..., path: _Optional[str] = ..., headers: _Optional[_Mapping[str, str]] = ..., body: _Optional[bytes] = ...) -> None: ...
 
 class ToolAgentRequest(_message.Message):
-    __slots__ = ("ctx", "target_service", "target_agent", "input")
+    __slots__ = ("ctx", "target_service", "target_agent", "input", "context_json")
     CTX_FIELD_NUMBER: _ClassVar[int]
     TARGET_SERVICE_FIELD_NUMBER: _ClassVar[int]
     TARGET_AGENT_FIELD_NUMBER: _ClassVar[int]
     INPUT_FIELD_NUMBER: _ClassVar[int]
+    CONTEXT_JSON_FIELD_NUMBER: _ClassVar[int]
     ctx: ToolContext
     target_service: str
     target_agent: str
     input: str
-    def __init__(self, ctx: _Optional[_Union[ToolContext, _Mapping]] = ..., target_service: _Optional[str] = ..., target_agent: _Optional[str] = ..., input: _Optional[str] = ...) -> None: ...
+    context_json: str
+    def __init__(self, ctx: _Optional[_Union[ToolContext, _Mapping]] = ..., target_service: _Optional[str] = ..., target_agent: _Optional[str] = ..., input: _Optional[str] = ..., context_json: _Optional[str] = ...) -> None: ...
 
 class ToolHttpRequest(_message.Message):
     __slots__ = ("ctx", "method", "url", "headers", "body")

@@ -19,10 +19,16 @@ fn without_new_keys(mut v: Value) -> Value {
 
 #[test]
 fn it_is_a_superset_of_what_the_sidecar_sends_today() {
-    // services/agentscd sends serde_json::to_string(&charter.agent_for_runtime(agent))
+    // services/agentscd sends serde_json::to_string(&charter.agent_for_runtime(agent)), with the
+    // default parameters filled for agent tools
     for c in [orders(), Charter::from_yaml(INVENTORY).unwrap()] {
         for a in &c.agents {
-            let today = serde_json::to_value(c.agent_for_runtime(a)).unwrap();
+            let mut today = serde_json::to_value(c.agent_for_runtime(a)).unwrap();
+            for t in today["tools"].as_array_mut().unwrap() {
+                if t["type"] == "agent" {
+                    t["parameters"] = agent_tool_parameters();
+                }
+            }
             let spec = c.runtime_spec(&a.name, &[]);
             assert_eq!(without_new_keys(spec.clone()), today, "{}", a.name);
             assert_eq!(spec["skills"], json!([]));
@@ -60,6 +66,43 @@ fn tools_stay_filtered_by_allowed_tools() {
         .map(|t| t["name"].as_str().unwrap())
         .collect();
     assert_eq!(names, ["get_order", "triage"]);
+}
+
+#[test]
+fn agent_tools_get_input_and_an_optional_context() {
+    // CONTRACT.md §3.1: an agent tool without parameters takes `input` and, optionally, a
+    // `context` object the callee gets as its context
+    let mut c = v02();
+    let spec = c.runtime_spec("support", &[]);
+    let tool = |spec: &Value, name: &str| {
+        spec["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == name)
+            .unwrap()
+            .clone()
+    };
+    let params = tool(&spec, "triage")["parameters"].clone();
+    assert_eq!(params, agent_tool_parameters());
+    assert_eq!(params["required"], json!(["input"]));
+    assert_eq!(params["properties"]["input"]["type"], "string");
+    assert_eq!(params["properties"]["context"]["type"], "object");
+    // service and http tools keep what they declare
+    assert!(tool(&spec, "refund").get("parameters").is_none());
+    assert!(tool(&spec, "partner").get("parameters").is_none());
+    // an agent tool's own parameters are kept as they are
+    let own = json!({"type": "object", "properties": {"order": {"type": "string"}}});
+    c.agents[0]
+        .tools
+        .iter_mut()
+        .find(|t| t.name == "triage")
+        .unwrap()
+        .parameters = Some(own.clone());
+    assert_eq!(
+        tool(&c.runtime_spec("support", &[]), "triage")["parameters"],
+        own
+    );
 }
 
 #[test]

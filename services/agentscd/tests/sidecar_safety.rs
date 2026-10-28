@@ -432,6 +432,7 @@ async fn content_guardrail_denials_log_the_hash_not_the_payload() {
             target_service: String::new(),
             target_agent: "order-triage".into(),
             input: nested.into(),
+            context_json: String::new(),
         })
         .await
         .expect_err("callee's guardrail denies");
@@ -514,6 +515,88 @@ async fn content_guardrail_denials_log_the_hash_not_the_payload() {
     assert_eq!(
         recs[4]["input"]["messages"][0]["content"][0]["input"]["input"],
         "[redacted]"
+    );
+    rig.sidecar.abort();
+}
+
+#[tokio::test]
+async fn a_context_the_callee_refused_is_withheld_like_the_input() {
+    // an agent tool's `context` (answers to the callee's questions) meets the callee's
+    // input_deny like an app's: the calling agent's records and its next prompt, which quotes
+    // the context as a JSON value, keep only the hash
+    let rig = rig(Some("done")).await;
+    const IN_RULE: &str = "guardrail.input_deny.no-secrets";
+    let v: Value = reqwest::Client::new()
+        .post(rig.invoke_url())
+        .json(&json!({"input": "plan the export"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let run = v["request_id"].as_str().unwrap().to_string();
+    let mut tools = rig.tools().await;
+    let _in_flight = rig.in_flight(&run);
+    let input = "triage the export";
+    let context =
+        json!({"answers": [{"question": "Which login?", "answer": "password = sk-CTX-321"}]});
+    let err = tools
+        .invoke_agent(ToolAgentRequest {
+            ctx: ctx("order_triage", &run),
+            target_service: String::new(),
+            target_agent: "order-triage".into(),
+            input: input.into(),
+            context_json: context.to_string(),
+        })
+        .await
+        .expect_err("callee's guardrail denies the context");
+    assert_eq!(err.code(), tonic::Code::PermissionDenied, "{err:?}");
+    let prompt = json!({"messages": [{"role": "assistant", "content": [
+        {"type": "tool_use", "name": "order_triage", "input": {"input": input, "context": context}}]}]});
+    let model_call = AuditRecord::new(
+        Kind::ModelCall,
+        Direction::Outbound,
+        &run,
+        &TraceContext::new_root(),
+        Some("ops-assistant"),
+        "local",
+        None,
+        "mock",
+        prompt,
+        Value::Null,
+    );
+    tools
+        .report_event(AuditEvent {
+            json: model_call.to_json_line(),
+        })
+        .await
+        .unwrap();
+
+    let raw = rig.raw_audit();
+    assert!(!raw.contains("sk-CTX-321"), "the secret in the log:\n{raw}");
+    let sent = json!({"input": input, "context": context});
+    let calls = rig.records(|v| {
+        v["request_id"] == run.as_str()
+            && v["agent"] == "ops-assistant"
+            && (v["kind"] == "tool_call" || v["kind"] == "agent_call")
+    });
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    for r in &calls {
+        assert_eq!(r["input"], format!("[redacted:{IN_RULE}]"), "{r}");
+        assert_eq!(
+            r["input_sha256"],
+            sha256_hex(&payload_bytes(&sent)).as_str(),
+            "the hash proves what was sent, context included"
+        );
+    }
+    let quoted = rig.records(|v| v["request_id"] == run.as_str() && v["kind"] == "model_call");
+    let quoted = &quoted[0]["input"]["messages"][0]["content"][0]["input"];
+    // every value of the refused payload, as for a refused input
+    assert_eq!(quoted["input"], "[redacted]");
+    assert_eq!(
+        quoted["context"],
+        json!({"answers": [{"question": "[redacted]", "answer": "[redacted]"}]})
     );
     rig.sidecar.abort();
 }

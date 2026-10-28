@@ -10,7 +10,16 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from agentsc_runtime.spec import ASK_CALLER_TOOL, LOAD_SKILL_TOOL, AgentSpec, Harness, Learning, Practices
+from agentsc_runtime.spec import (
+    AGENT_TOOL_PARAMETERS,
+    ASK_CALLER_TOOL,
+    LOAD_SKILL_TOOL,
+    AgentSpec,
+    Harness,
+    Learning,
+    Practices,
+    ToolSpec,
+)
 
 # Written by the Rust side (`Charter::runtime_spec`, kept in sync by a cargo test): the same file
 # is what the sidecar sends, so the two sides cannot drift apart unnoticed.
@@ -38,6 +47,21 @@ V01 = {
 
 def example() -> dict[str, Any]:
     return json.loads(EXAMPLE.read_text())
+
+
+def test_agent_tools_default_to_the_parameters_the_sidecar_fills():
+    """The sidecar fills the `parameters` of an agent tool that declares none (Rust `agent_tool_parameters`):
+    `input` and an optional `context` object (CONTRACT.md §3.1). A spec without them means the same."""
+    triage = next(t for t in example()["tools"] if t["type"] == "agent")
+    assert triage["parameters"] == AGENT_TOOL_PARAMETERS
+    assert AGENT_TOOL_PARAMETERS["required"] == ["input"]
+    assert AGENT_TOOL_PARAMETERS["properties"]["context"]["type"] == "object"
+    bare = ToolSpec.model_validate({k: v for k, v in triage.items() if k != "parameters"})
+    assert bare.input_schema() == triage["parameters"]
+    bare.input_schema()["required"].append("context")
+    assert bare.input_schema()["required"] == ["input"], "each call gets its own copy"
+    own = {"type": "object", "properties": {"order": {"type": "string"}}}
+    assert ToolSpec.model_validate({**triage, "parameters": own}).input_schema() == own
 
 
 def test_the_sidecars_v02_spec_parses():

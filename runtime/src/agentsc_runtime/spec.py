@@ -10,6 +10,7 @@ forbids unknown fields, so a sidecar/runtime mismatch fails loudly instead of be
 
 from __future__ import annotations
 
+import copy
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -21,6 +22,23 @@ class Budgets(BaseModel):
     max_calls_per_minute: int = 60
     max_cost_usd_per_day: float = 10.0
     max_steps: int = 8
+
+
+# The `parameters` of an agent tool that declares none (CONTRACT.md §3.1): the question as `input`,
+# and an optional `context` object the callee gets as its context, which is how a calling agent
+# answers the callee's questions. The sidecar fills the same schema (Rust `agent_tool_parameters`).
+AGENT_TOOL_PARAMETERS: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "input": {"type": "string", "description": "What to ask the agent."},
+        "context": {
+            "type": "object",
+            "description": "Optional JSON the agent gets as its context. To answer questions it asked, call it again"
+            ' with the same input and every answer so far here: {"answers": [{"question": "…", "answer": "…"}]}.',
+        },
+    },
+    "required": ["input"],
+}
 
 
 class ToolSpec(BaseModel):
@@ -39,11 +57,7 @@ class ToolSpec(BaseModel):
         if self.parameters:
             return self.parameters
         if self.type == "agent":
-            return {
-                "type": "object",
-                "properties": {"input": {"type": "string", "description": "What to ask the agent."}},
-                "required": ["input"],
-            }
+            return copy.deepcopy(AGENT_TOOL_PARAMETERS)
         return {"type": "object", "properties": {}}
 
     def anthropic_tool(self) -> dict[str, Any]:

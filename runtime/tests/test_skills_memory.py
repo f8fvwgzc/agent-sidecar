@@ -211,7 +211,10 @@ def test_the_mock_does_not_read_the_notes_as_the_question(ops_assistant, sidecar
     ops_assistant.memory = [MemoryNote(id="n1", text="Reset the inventory admin counters first.")]
     res = asyncio.run(run_agent(ops_assistant, "How many WIDGET-1 in stock?", "", ctx, MockModel(), sidecar))
     assert res.status == "ok"
-    assert sidecar.calls[0] == ("agent", ("stock_analyst", "inventory", "stock-analyst", "How many WIDGET-1 in stock?"))
+    assert sidecar.calls[0] == (
+        "agent",
+        ("stock_analyst", "inventory", "stock-analyst", "How many WIDGET-1 in stock?", ""),
+    ), "the mock sends no context"
 
 
 # --- tool span ids and cut-off ------------------------------------------------------------------

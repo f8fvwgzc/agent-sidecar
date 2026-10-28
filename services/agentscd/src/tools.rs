@@ -846,7 +846,8 @@ impl SidecarTools for ToolsService {
             deadline,
             withhold: None,
         };
-        let input = Value::String(req.input.clone());
+        // the callee's `context` goes with the input, in our records as in the callee's
+        let input = pipeline::input_value(&req.input, &req.context_json);
 
         if let Err(v) = call.bind() {
             return Err(call.deny(&input, v));
@@ -871,6 +872,12 @@ impl SidecarTools for ToolsService {
                         req.target_service, req.target_agent, tool.name, tool.service, tool.agent
                     ),
                 ),
+            ));
+        }
+        if !req.context_json.trim().is_empty() && !input["context"].is_object() {
+            return Err(call.deny(
+                &input,
+                Verdict::deny(RULE_TOOL_SPEC, "the context must be a JSON object"),
             ));
         }
         let v = if remote {
@@ -908,7 +915,7 @@ impl SidecarTools for ToolsService {
                     let msg = InvokeAgentRequest {
                         agent: req.target_agent.clone(),
                         input: req.input.clone(),
-                        context_json: String::new(),
+                        context_json: req.context_json.clone(),
                         request_id: call.c.request_id.clone(),
                         traceparent: child.traceparent(),
                         caller_agent: call.c.agent.clone(),
@@ -963,7 +970,7 @@ impl SidecarTools for ToolsService {
                 Invocation {
                     agent: req.target_agent.clone(),
                     input: req.input.clone(),
-                    context_json: String::new(),
+                    context_json: req.context_json.clone(),
                     request_id: call.c.request_id.clone(),
                     trace: child.child(),
                     caller: authz::LOCAL.into(),
@@ -1004,12 +1011,15 @@ impl SidecarTools for ToolsService {
             }
             "denied" => {
                 let dv = Verdict::deny(resp.rule.clone(), resp.reason.clone());
-                // The callee's content rule matched this input (CONTRACT.md §6): keep it out of our
-                // records too, and out of the calling agent's next prompt, which quotes it.
+                // The callee's content rule matched this input or context (CONTRACT.md §6): keep
+                // them out of our records too, and out of the calling agent's next prompt, which
+                // quotes them, the context as a JSON value.
                 if dv.rule.starts_with(INPUT_DENY) {
-                    self.state
-                        .audit
-                        .withhold(&call.c.request_id, [req.input.clone()]);
+                    self.state.audit.withhold(
+                        &call.c.request_id,
+                        [req.input.clone(), req.context_json.clone()],
+                    );
+                    self.state.audit.withhold_value(&call.c.request_id, &input);
                     call.withhold = Some(dv.rule.clone());
                 }
                 call.tool(&input, Value::Null, &dv, None);

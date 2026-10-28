@@ -259,15 +259,45 @@ Tests that need it script the model.
 **Answering.** The runtime keeps no state between Executes. The caller answers with a new
 invocation that carries the original input and puts the questions and its answers in
 `context` (for example `{"answers": [{"question": "…", "answer": "…"}]}`), or writes them
-into the input. The clarify text tells the model to treat those decisions as settled. The
-answers are the caller's word: the answering run is a new run and starts with only
-`taint.input` (CONTRACT §5.2), whatever the run that asked had read.
+into the input. The clarify text tells the model to treat those decisions as settled.
+
+- An app sets the request's `context`.
+- A calling agent sets the `context` argument of its agent tool. An agent tool without its own
+  `parameters` takes `{"input": string, "context"?: object}` (CONTRACT §3.1). The sidecar fills
+  that schema in `agent_spec_json`, and the runtime's `ToolSpec.input_schema` falls back to the
+  same one. The runtime sends the object as `ToolAgentRequest.context_json`, and the sidecar
+  passes it on as the callee's `context`, locally or over the mesh. The property's description
+  tells the model how to answer: the same input, and every answer so far.
+
+Either way the context meets the callee's input guardrails (`max_input_bytes` over input and
+context together, `input_deny` over either; CONTRACT §5.1). The runtime writes an agent's
+context compact and with its characters as they are, as the sidecar writes an app's, so the
+same patterns match.
+
+The answers are the caller's word, and they carry the caller's taint:
+
+- From an app, the answering run is a new run and starts with only `taint.input`
+  (CONTRACT §5.2), whatever the run that asked had read.
+- From an agent, the answering run is part of the calling run, since it has the same
+  `request_id`. So it also starts with every label that run has read. Locally the two runs share
+  one taint record; over the mesh the labels go in `x-agentsc-taint`. When the calling run is
+  the one that got the questions, these labels include what the asking run read, because a
+  callee's labels come back with its response. An orchestrator that read untrusted text, or
+  passes on recommended answers drawn from it, can't make the callee write.
+
+When the callee's `input_deny` matches the context, the calling agent's `tool_call` and
+`agent_call` records keep only the hash, as for a matched input. The context's values are also
+scrubbed from the request's later records, such as the next `model_call`, which quotes the
+context as JSON.
 
 ## Wire
 
 `common.proto` gets `message Question { string question = 1; string recommended = 2; }` and
 `repeated Question questions = 10;` in `InvokeAgentResponse`. `runtime.proto` gets
-`repeated Question questions = 7;` in `ExecuteResponse`. The status set stays
+`repeated Question questions = 7;` in `ExecuteResponse`, and `string context_json = 5;` in
+`ToolAgentRequest`, the callee's context from an agent tool (see Answering). The sidecar
+refuses a `context_json` that is not `""` or a JSON object (`guardrail.tool_spec`). The mesh
+has always carried `InvokeAgentRequest.context_json`, so peers need nothing new. The status set stays
 `ok | denied | error`. A run that asked returns status `ok`, so an app or a peer that knows
 nothing about questions still shows the questions in `output`.
 
@@ -459,11 +489,12 @@ an absent block counts as true.
   may stop matching. Test your patterns at the level you use.
 - An app that runs unattended and can't answer questions should set `clarify: never`, or
   pass on the recommended answers in `context`. Answers in `context` (or the input) are
-  vouched for by the caller, and the answering run starts with only `taint.input`
+  vouched for by the caller, and an app's answering run starts with only `taint.input`
   (CONTRACT §5.2): the taint the asking run had read doesn't carry over. For an agent with a
   `taint` block, an unattended app must not send the recommended answers back on its own,
   since they may come from untrusted data. Use `clarify: never` for that agent, or have a
-  person answer.
+  person answer. An agent caller needs no such care: its answers carry its run's labels
+  (see Answering).
 - Digests of earlier runs are per process and per replica, and reset on restart.
 - `TARGET` is advice. Nothing edits `system` or a skill on its own; a person does, through the
   normal charter write.

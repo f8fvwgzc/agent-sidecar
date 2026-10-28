@@ -238,7 +238,7 @@ This snippet is partial: it shows only the `audit` block of a charter.
 audit:
   sink: stdout
   redact:
-    - input.context.customer_email     # agent_invocation input, when the app sends a context
+    - input.context.customer_email     # agent_invocation input with a context; also a calling agent's tool_call and agent_call input
     - output.body.warehouse_contact    # service_call output: {"status": 200, "body": {...}}
 ```
 
@@ -637,6 +637,7 @@ This build gives every agent the practices: a plan before its first tool call, q
 - **Upgraded pods run the defaults at once.** In a mixed rollout the same agent plans, asks and answers tersely on new pods, and doesn't on old ones.
 - **The opt-out waits for the last old pod.** Turning a practice off takes a `practices` block, which is schema level 6. While an older sidecar (level 5 or below) of the service is connected, the control plane refuses any write with that block (HTTP 400, `version_skew`, naming the old pods). An older sidecar that reads its charter from a ConfigMap rejects the block as an unknown field, so an old pod that restarts with it doesn't start (see [Changing a charter](#changing-a-charter)). So write the opt-out only after the last old pod is gone. Until then the upgraded pods run the defaults.
 - **Apps must expect questions.** A run that asked returns `200` with `status: ok` and a `questions` list. During the rollout, an app that runs unattended should treat a response with `questions` as not final. For an agent with a `taint` block, it must not send the recommended answers back on its own ([Creating agents](guides/creating-agents.md#when-the-agent-asks)).
+- **Agents answer agents in `context`.** An orchestrator answers a callee's questions with the optional `context` argument of its agent tool. The callee gets it as its `context`, locally or over the mesh, and checks it with its input guardrails. The calling agent's `tool_call` and `agent_call` records then have `input` `{"input": ..., "context": {...}}`, so an `audit.redact` path such as `input.context.customer_email` applies to them too. The answering run carries the calling run's taint labels, so these answers never arrive as trusted.
 - **Find the runs that asked** with `agentsc logs <service> --rule clarify.asked`.
 
 ## Rotating certificates

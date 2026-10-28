@@ -17,7 +17,7 @@ from agentsc_runtime.models import MockModel, ModelResponse
 from agentsc_runtime.pb.agentsc.v1alpha1 import common_pb2, runtime_pb2
 from agentsc_runtime.prompts import ask_caller_tool
 from agentsc_runtime.server import RuntimeServicer
-from agentsc_runtime.spec import Practices
+from agentsc_runtime.spec import AGENT_TOOL_PARAMETERS, Practices
 
 RENDERED = (
     "I need these decisions from you before I go on:\n"
@@ -308,3 +308,32 @@ def test_the_execute_handler_returns_the_questions(ops_assistant, sidecar):
 def test_a_run_that_did_not_ask_returns_no_questions(ops_assistant, sidecar):
     resp = handle(ops_assistant, MockModel(), sidecar)
     assert resp.status == "ok" and len(resp.questions) == 0
+
+
+# --- answering a callee's questions -------------------------------------------------------------
+
+
+def test_an_orchestrator_answers_a_callees_questions_in_context(ops_assistant, sidecar, ctx):
+    """An agent tool takes an optional `context`, which goes to the callee as its context (CONTRACT.md §4.3),
+    so a calling agent answers a callee's questions as an app does."""
+    answers = {"answers": [{"question": "Reorder now or wait?", "answer": "Reorder now."}]}
+    model = Scripted(
+        turn(block("stock_analyst", {"input": "Should we reorder WIDGET-1?", "context": answers}, "t1")),
+        done("Reordering WIDGET-1."),
+    )
+    res = execute(ops_assistant, model, sidecar, ctx)
+    assert res.status == "ok"
+    assert sidecar.calls == [
+        (
+            "agent",
+            (
+                "stock_analyst",
+                "inventory",
+                "stock-analyst",
+                "Should we reorder WIDGET-1?",
+                '{"answers":[{"question":"Reorder now or wait?","answer":"Reorder now."}]}',
+            ),
+        )
+    ]
+    tool = next(t for t in model.seen[0]["tools"] if t["name"] == "stock_analyst")
+    assert tool["input_schema"] == AGENT_TOOL_PARAMETERS, "the model is offered `context`"

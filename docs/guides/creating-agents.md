@@ -461,7 +461,7 @@ Common rules:
 
 - `name` matches `^[a-zA-Z0-9_-]{1,64}$` and is unique within the agent.
 - `description` must not be empty. The model reads it to choose the tool.
-- `parameters` is a JSON Schema object for the tool input. Without it, a `service` or `http` tool gets `{"type": "object", "properties": {}}`, and an `agent` tool gets one required string `input`.
+- `parameters` is a JSON Schema object for the tool input. Without it, a `service` or `http` tool gets `{"type": "object", "properties": {}}`, and an `agent` tool gets a required string `input` and an optional `context` object ([Agent tools](#agent-tools)).
 - `method` is one of `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS`, in uppercase.
 
 This charter has one example of each type. The sections below refer to it.
@@ -614,8 +614,10 @@ An `agent` tool runs another agent. Only an agent with `type: orchestrator` may 
 - `agent` names the target agent.
 - Without `service` (or with this service's own name), the target is a local agent. It must be declared in this charter. An agent may not name itself.
 - With another `service`, the target is an agent in that service. Validation cannot check that the remote agent exists.
-- By default the input is `{"input": "<question>"}`. If the arguments have no string `input`, the runtime sends all arguments as one JSON string.
-- The target agent does not receive the caller's `context`.
+- By default the tool takes `{"input": "<question>", "context": {...}}`, and `context` is optional. The target agent gets `input` as its input and `context` as its context, as if an app had sent them. This is how an orchestrator answers the target's questions ([When the agent asks](#when-the-agent-asks)).
+- With your own `parameters`, a string `input` argument is the input and a `context` object argument is the context. If the arguments have no string `input`, the runtime sends all arguments as one JSON string, with no context.
+- A `context` that is not a JSON object is refused before anything is sent. The model gets `denied by guardrail.tool_spec: …` and can call again.
+- The target agent never gets the orchestrator's own `context`, only what the model puts in the tool's `context`.
 - The result is the target agent's final output, after the target's own output guardrails.
 
 ### How arguments become a request
@@ -741,7 +743,7 @@ When `billing-assistant` uses `ask_payment_checker`, these checks run:
 | billing sidecar | `payments` is in the agent's allowed services (`guardrail.allowed_services`). By default it is, because a tool names it. |
 | billing sidecar | It opens mTLS to the payments sidecar with the billing certificate. It sends the claim "calling agent = `billing-assistant`". |
 | payments sidecar | `authz.callers`: the certificate identity `spiffe://agentsc/ns/shop/svc/billing` may run `payment-checker`, and `billing-assistant` is in `caller_agents`. |
-| payments sidecar | Depth, the budgets of `payment-checker`, and the input guardrails of the payments charter. Then the agent runs. |
+| payments sidecar | Depth, the budgets of `payment-checker`, and the input guardrails of the payments charter, over the input and the `context`. Then the agent runs. |
 | payments sidecar | Each tool call of `payment-checker` is checked by the payments charter, with `identity: local`. |
 | payments sidecar | Output guardrails and `pii_redact` of the payments charter. Then the output goes back to billing. |
 
@@ -996,6 +998,10 @@ curl -s localhost:3500/v1/agents/support/invoke \
 ```
 
 The agent treats answered decisions as settled and doesn't ask them again. Answers you write into `input` count too. The runtime keeps no state between calls, so send every answer so far, not only the latest round. `context` passes the input guardrails like the rest of the request.
+
+An orchestrator answers the same way. When the agent behind one of its `agent` tools asks, the orchestrator's model gets the questions as the tool result. It calls the tool again with the same `input` and the answers in the tool's `context` argument. The sidecar passes them on as the target's `context`, locally or over the mesh, and the target's input guardrails check them. The orchestrator can also ask its own caller first, with `ask_caller`.
+
+The orchestrator's answers are not trusted more than its run. The target's run is part of the orchestrator's run (the same request id), so it starts with every [taint label](#prompt-injection-taint-rules) the orchestrator's run has read. That includes what the target read when it asked, because a target's labels come back with its answer. So an orchestrator that read untrusted text can't make a target with a `taint` block write by answering its questions.
 
 The sidecar treats questions like the agent's output. With `clarify: never` it drops any questions. Otherwise it keeps at most `max_questions` and handles them in this order:
 
@@ -1284,7 +1290,7 @@ Tips for deterministic tests:
 
 - Put words from your test questions into the tool name or description.
 - Name id parameters `id`, `sku` or `order_id`, and use ids like `INV-1001` in test questions.
-- For an orchestrator, the mock picks one tool with the same word rule. It can be an agent tool or another tool. For an agent tool with the default `parameters`, it sends the whole input as `input`.
+- For an orchestrator, the mock picks one tool with the same word rule. It can be an agent tool or another tool. For an agent tool with the default `parameters`, it sends the whole input as `input`, and no `context`.
 - The mock ignores the system prompt, so the [practices](#practices) don't change its answers. It never calls `ask_caller`, so it never returns `questions`.
 
 A test can call the agent and check the steps. This one fails when the service call is missing or denied:

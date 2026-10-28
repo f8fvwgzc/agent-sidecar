@@ -698,6 +698,24 @@ impl ToolSpec {
     }
 }
 
+/// The `parameters` of an `agent` tool that declares none (CONTRACT.md §3.1): the question as
+/// `input`, and an optional `context` object the callee gets as its context, which is how a
+/// calling agent answers the callee's questions (agent-practices design, Answering). The runtime's
+/// `ToolSpec.input_schema` falls back to the same schema.
+pub fn agent_tool_parameters() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "input": { "type": "string", "description": "What to ask the agent." },
+            "context": {
+                "type": "object",
+                "description": "Optional JSON the agent gets as its context. To answer questions it asked, call it again with the same input and every answer so far here: {\"answers\": [{\"question\": \"…\", \"answer\": \"…\"}]}."
+            }
+        },
+        "required": ["input"]
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Budgets {
@@ -1047,7 +1065,8 @@ impl Charter {
     }
 
     /// `ExecuteRequest.agent_spec_json` for `agent` (design §4 "What the runtime receives"): the
-    /// agent's entry after `guardrails.allowed_tools` (exactly [`Charter::agent_for_runtime`]),
+    /// agent's entry after `guardrails.allowed_tools` (exactly [`Charter::agent_for_runtime`],
+    /// with [`agent_tool_parameters`] for an `agent` tool that declares no `parameters`),
     /// with `skills` resolved to `[{name, description, instructions, inline}]` (`inline` when the
     /// instructions are shorter than [`INLINE_SKILL_MAX_BYTES`]), `harness`, `learning` (with its
     /// level-6 fields) and `practices` with the defaults filled (`practices` is always sent,
@@ -1099,6 +1118,9 @@ impl Charter {
                     if let Value::Object(t) = t {
                         t.remove("label");
                         t.remove("effect");
+                        if t.get("type") == Some(&json!("agent")) && !t.contains_key("parameters") {
+                            t.insert("parameters".into(), agent_tool_parameters());
+                        }
                     }
                 }
             }

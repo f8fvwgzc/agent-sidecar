@@ -37,10 +37,10 @@ class FakeSidecar:
         return 404, b"not found"
 
     async def invoke_agent(
-        self, ctx: CallContext, tool: str, target_service: str, target_agent: str, input: str
+        self, ctx: CallContext, tool: str, target_service: str, target_agent: str, input: str, context_json: str = ""
     ) -> str:
         self.contexts.append(ctx)
-        self.calls.append(("agent", (tool, target_service, target_agent, input)))
+        self.calls.append(("agent", (tool, target_service, target_agent, input, context_json)))
         return f"{target_agent} says: WIDGET-1 has 42 on hand, reorder point 50, reorder now."
 
     async def invoke_http(self, ctx: CallContext, tool: str, method: str, url: str, headers, body):

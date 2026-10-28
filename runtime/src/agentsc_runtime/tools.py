@@ -51,7 +51,7 @@ class SidecarClient(Protocol):
     ) -> tuple[int, bytes]: ...
 
     async def invoke_agent(
-        self, ctx: CallContext, tool: str, target_service: str, target_agent: str, input: str
+        self, ctx: CallContext, tool: str, target_service: str, target_agent: str, input: str, context_json: str = ""
     ) -> str: ...
 
     async def invoke_http(
@@ -163,6 +163,25 @@ def _split_template(template: str) -> tuple[str, str, str]:
     return origin, template[: q.start()], template[q.start() :]
 
 
+def agent_request(args: dict[str, Any]) -> tuple[str, str]:
+    """The `input` and `context_json` of an agent tool call (CONTRACT.md §3.1, §4.3).
+
+    A string `input` is the question, and a `context` object goes to the callee as its context,
+    written like the sidecar writes an app's (compact, characters as they are), so the callee's
+    input guardrails see the same text. Any other `context` raises ToolDenied. Without a string
+    `input`, all the arguments are the input, as one JSON string, and there is no context.
+    """
+    question = args.get("input")
+    if not isinstance(question, str):
+        return json.dumps(args), ""
+    context = args.get("context")
+    if context is None or context == {}:
+        return question, ""
+    if not isinstance(context, dict):
+        raise ToolDenied(RULE_TOOL_SPEC, f"the context must be a JSON object, got {type(context).__name__}")
+    return question, json.dumps(context, ensure_ascii=False, separators=(",", ":"))
+
+
 def with_query(path: str, args: dict[str, Any]) -> str:
     """Append `args` as query parameters, after any query the template already has."""
     from urllib.parse import urlencode
@@ -195,8 +214,10 @@ async def run_tool(tool: ToolSpec, args: dict[str, Any], ctx: CallContext, sidec
         if tool.type == "agent":
             target_service = tool.service or ""
             callee = f"{target_service}/{tool.agent}" if target_service else str(tool.agent)
-            question = args.get("input") if isinstance(args.get("input"), str) else json.dumps(args)
-            output = await sidecar.invoke_agent(ctx, tool.name, target_service, tool.agent or "", question or "")
+            question, context_json = agent_request(args)
+            output = await sidecar.invoke_agent(
+                ctx, tool.name, target_service, tool.agent or "", question, context_json
+            )
             return ToolOutcome(output, False, "allow", "", kind, callee, _ms(started))
         method = (tool.method or "GET").upper()
         url, rest = fill_path(tool.url or "", args)

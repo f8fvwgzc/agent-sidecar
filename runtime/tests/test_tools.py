@@ -3,7 +3,7 @@ import asyncio
 import pytest
 
 from agentsc_runtime.spec import ToolSpec
-from agentsc_runtime.tools import ToolDenied, fill_path, run_tool, with_query
+from agentsc_runtime.tools import ToolDenied, agent_request, fill_path, run_tool, with_query
 
 
 def test_fill_path():
@@ -70,3 +70,29 @@ def test_fill_path_encodes_values_so_they_cannot_add_segments():
     assert fill_path("/q/{term}", {"term": "a b?c#d"}) == ("/q/a%20b%3Fc%23d", {})
     # a literal `;` would be a path parameter, which the sidecar refuses (CONTRACT.md §5.1)
     assert fill_path("/stock/{sku}", {"sku": "W;x=1"}) == ("/stock/W%3Bx%3D1", {})
+
+
+def test_agent_tool_arguments_become_input_and_context():
+    assert agent_request({"input": "q"}) == ("q", "")
+    assert agent_request({"input": "q", "context": None}) == ("q", "")
+    assert agent_request({"input": "q", "context": {}}) == ("q", "")
+    # compact, characters as they are: the text the sidecar writes for an app's context
+    answers = {"answers": [{"question": "Größe M oder L?", "answer": "M"}]}
+    assert agent_request({"input": "q", "context": answers}) == (
+        "q",
+        '{"answers":[{"question":"Größe M oder L?","answer":"M"}]}',
+    )
+    # without a string input every argument is the input, and there is no context
+    assert agent_request({"order": "1001", "context": {"a": 1}}) == ('{"order": "1001", "context": {"a": 1}}', "")
+    for bad in ["Yes.", ["M"], 3, True]:
+        with pytest.raises(ToolDenied) as e:
+            agent_request({"input": "q", "context": bad})
+        assert e.value.rule == "guardrail.tool_spec"
+
+
+def test_a_context_that_is_not_an_object_never_reaches_the_sidecar(sidecar, ctx):
+    tool = ToolSpec(name="triage", description="Ask the triage agent.", type="agent", agent="triage")
+    out = asyncio.run(run_tool(tool, {"input": "q", "context": "Yes, store credit."}, ctx, sidecar))
+    assert out.is_error and out.decision == "deny" and out.rule == "guardrail.tool_spec"
+    assert "context must be a JSON object, got str" in out.content
+    assert sidecar.calls == []

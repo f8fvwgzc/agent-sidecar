@@ -454,6 +454,7 @@ async fn a_local_agent_tool_returns_the_callees_questions_to_the_runtime() {
             target_service: String::new(),
             target_agent: "order-triage".into(),
             input: "triage order 1001".into(),
+            context_json: String::new(),
         })
         .await
         .expect("the nested run asked, status ok")
@@ -464,6 +465,141 @@ async fn a_local_agent_tool_returns_the_callees_questions_to_the_runtime() {
     assert_eq!(inv.len(), 1);
     assert_eq!(inv[0]["agent"], "order-triage");
     assert_eq!(inv[0]["rule"], RULE_CLARIFY_ASKED);
+    rig.sidecar.abort();
+}
+
+/// The calling agent's answers to NOTIFY, as its agent tool sends them.
+const ANSWERS: &str =
+    r#"{"answers": [{"question": "Tell the customer now?", "answer": "Yes, before the refund."}]}"#;
+
+/// The rule a denial names in `x-agentsc-rule`.
+fn rule_of(st: &tonic::Status) -> &str {
+    st.metadata()
+        .get("x-agentsc-rule")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+}
+
+fn triage(request_id: &str, context_json: &str) -> ToolAgentRequest {
+    ToolAgentRequest {
+        ctx: ctx("ops-assistant", "order_triage", request_id, SPAN),
+        target_service: String::new(),
+        target_agent: "order-triage".into(),
+        input: "triage order 1001".into(),
+        context_json: context_json.into(),
+    }
+}
+
+#[tokio::test]
+async fn a_local_agent_tool_answers_the_callees_questions_in_context() {
+    // the callee asks until it gets answers in its context
+    let rt = FakeRuntime::with(|req| {
+        Box::pin(async move {
+            if req.context_json.is_empty() {
+                asked(&[NOTIFY])
+            } else {
+                ok("P2, the customer is told first.")
+            }
+        })
+    });
+    let rig = rig(rt, |_| {}, |_| {}).await;
+    let mut tools = tools(&rig.sock).await;
+    let _runs = (
+        in_flight(&rig.sidecar, "local-answered", "ops-assistant"),
+        in_flight(&rig.sidecar, "local-unanswered", "ops-assistant"),
+    );
+    let resp = tools
+        .invoke_agent(triage("local-answered", ANSWERS))
+        .await
+        .expect("answered")
+        .into_inner();
+    assert_eq!(resp.status, "ok");
+    assert!(resp.questions.is_empty(), "{resp:?}");
+    assert_eq!(resp.output, "P2, the customer is told first.");
+    let seen = rig.runtime.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].input, "triage order 1001");
+    assert_eq!(
+        seen[0].context_json, ANSWERS,
+        "the callee gets the context as sent"
+    );
+    assert_eq!(seen[0].caller_agent, "ops-assistant");
+
+    // both sides audit the input with its context, as for an app's invocation
+    let audited = json!({
+        "input": "triage order 1001",
+        "context": serde_json::from_str::<Value>(ANSWERS).unwrap(),
+    });
+    let inv = invocation_records(&rig, "local-answered").await;
+    assert_eq!(inv.len(), 1);
+    assert_eq!(inv[0]["agent"], "order-triage");
+    assert_eq!(inv[0]["input"], audited);
+    let calls = wait_audit(&rig.audit, 2, |v| {
+        v["request_id"] == "local-answered"
+            && (v["kind"] == "tool_call" || v["kind"] == "agent_call")
+    })
+    .await;
+    assert_eq!(calls.len(), 2);
+    for r in &calls {
+        assert_eq!(r["agent"], "ops-assistant", "{r}");
+        assert_eq!(r["input"], audited, "{r}");
+    }
+
+    // without a context the record keeps the plain input, and the callee asks
+    let resp = tools
+        .invoke_agent(triage("local-unanswered", ""))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(resp.questions, vec![q(NOTIFY.0, NOTIFY.1)]);
+    let inv = invocation_records(&rig, "local-unanswered").await;
+    assert_eq!(inv[0]["input"], "triage order 1001");
+    rig.sidecar.abort();
+}
+
+#[tokio::test]
+async fn a_forwarded_context_passes_the_callees_input_guardrails() {
+    // CONTRACT.md §5.1 step 3: input_deny and max_input_bytes see the context, as an app's
+    let rig = rig(FakeRuntime::answering("P3"), |_| {}, |_| {}).await;
+    let mut tools = tools(&rig.sock).await;
+    let _runs = (
+        in_flight(&rig.sidecar, "ctx-secret", "ops-assistant"),
+        in_flight(&rig.sidecar, "ctx-big", "ops-assistant"),
+        in_flight(&rig.sidecar, "ctx-bad", "ops-assistant"),
+    );
+
+    let secret =
+        r#"{"answers": [{"question": "Which login?", "answer": "password = sk-CTX-321"}]}"#;
+    let err = tools
+        .invoke_agent(triage("ctx-secret", secret))
+        .await
+        .expect_err("the callee's input_deny matches the context");
+    assert_eq!(err.code(), tonic::Code::PermissionDenied, "{err:?}");
+    assert_eq!(rule_of(&err), "guardrail.input_deny.no-secrets", "{err:?}");
+
+    // input and context are 8192 bytes at most together (the orders charter's max_input_bytes)
+    let big = json!({ "note": "x".repeat(8192 - "triage order 1001".len()) }).to_string();
+    let err = tools
+        .invoke_agent(triage("ctx-big", &big))
+        .await
+        .expect_err("input and context are over the limit");
+    assert_eq!(err.code(), tonic::Code::PermissionDenied, "{err:?}");
+    assert_eq!(rule_of(&err), "guardrail.max_input_bytes", "{err:?}");
+
+    // a context that is not a JSON object is the runtime's mistake: refused before any call
+    for bad in ["[1, 2]", "\"Yes.\"", "{not json"] {
+        let err = tools
+            .invoke_agent(triage("ctx-bad", bad))
+            .await
+            .expect_err("not an object");
+        assert_eq!(err.code(), tonic::Code::PermissionDenied, "{bad}: {err:?}");
+        assert_eq!(rule_of(&err), "guardrail.tool_spec", "{bad}: {err:?}");
+    }
+    assert!(
+        rig.runtime.seen().is_empty(),
+        "no callee ran: {:?}",
+        rig.runtime.seen()
+    );
     rig.sidecar.abort();
 }
 
@@ -485,18 +621,25 @@ async fn a_mesh_call_carries_questions_back_to_the_calling_agent() {
         agentscd::start(cfg)
     };
 
-    // inventory: stock-analyst's (fake) run asks, with an email the callee's pii_redact catches
+    // inventory: stock-analyst's (fake) run asks, with an email the callee's pii_redact catches,
+    // until its context holds the answer
     let mut inv = Charter::from_yaml(INVENTORY).unwrap();
     inv.audit.sink = agentsc_charter::AuditSink::File;
     let inv_audit = root.join("inventory-audit.jsonl");
     inv.audit.file = Some(inv_audit.to_string_lossy().into_owned());
-    serve_runtime(
-        &root.join("sock-inventory"),
-        FakeRuntime::asking(&[(
-            "Reorder now or wait for ops-lead@example.com?",
-            "Reorder now.",
-        )]),
-    );
+    let inv_rt = FakeRuntime::with(|req| {
+        Box::pin(async move {
+            if req.context_json.is_empty() {
+                asked(&[(
+                    "Reorder now or wait for ops-lead@example.com?",
+                    "Reorder now.",
+                )])
+            } else {
+                ok("Reordered 50 of WIDGET-1.")
+            }
+        })
+    });
+    serve_runtime(&root.join("sock-inventory"), inv_rt.clone());
     let inventory = start("inventory", &inv, tls_dir("inventory"))
         .await
         .expect("inventory starts");
@@ -518,6 +661,7 @@ async fn a_mesh_call_carries_questions_back_to_the_calling_agent() {
             target_service: "inventory".into(),
             target_agent: "stock-analyst".into(),
             input: "should we reorder WIDGET-1?".into(),
+            context_json: String::new(),
         })
         .await
         .expect("the remote run asked, status ok")
@@ -539,6 +683,37 @@ async fn a_mesh_call_carries_questions_back_to_the_calling_agent() {
     assert_eq!(recs.len(), 1);
     assert_eq!(recs[0]["caller_agent"], "ops-assistant");
     assert_eq!(recs[0]["rule"], RULE_CLARIFY_ASKED);
+
+    // the calling agent answers in context, which reaches the remote run as its context
+    let answers = r#"{"answers": [{"question": "Reorder now or wait for [redacted:email]?", "answer": "Reorder now."}]}"#;
+    let resp = tools
+        .invoke_agent(ToolAgentRequest {
+            ctx: ctx("ops-assistant", "stock_analyst", "mesh-asked", SPAN),
+            target_service: "inventory".into(),
+            target_agent: "stock-analyst".into(),
+            input: "should we reorder WIDGET-1?".into(),
+            context_json: answers.into(),
+        })
+        .await
+        .expect("answered")
+        .into_inner();
+    assert_eq!(resp.status, "ok");
+    assert!(resp.questions.is_empty(), "{resp:?}");
+    assert_eq!(resp.output, "Reordered 50 of WIDGET-1.");
+    let seen = inv_rt.seen();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[1].context_json, answers);
+    assert_eq!(seen[1].caller_agent, "ops-assistant");
+    let recs = wait_audit(&inv_audit, 2, |v| {
+        v["request_id"] == "mesh-asked" && v["kind"] == "agent_invocation"
+    })
+    .await;
+    assert_eq!(recs.len(), 2);
+    assert_eq!(
+        recs[1]["input"]["context"],
+        serde_json::from_str::<Value>(answers).unwrap()
+    );
+    assert!(recs[1]["rule"].is_null(), "{}", recs[1]);
     orders.abort();
     inventory.abort();
 }

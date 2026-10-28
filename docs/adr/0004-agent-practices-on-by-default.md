@@ -38,8 +38,9 @@ is CONTRACT §3, §3.2, §3.3, §3.5, §4.1, §4.3 and §9.
   `ask_caller`. A valid call ends the run with status `ok`, an `output` that holds the questions
   as text, and an additive `questions` list (`{question, recommended}`) in the HTTP response,
   `InvokeAgentResponse` and `ExecuteResponse`. A non-`ok` status never carries questions. The
-  caller answers in its next invocation: an app in `context`, an agent caller, which has only
-  `input`, in `input`. The sidecar treats the questions as
+  caller answers in its next invocation, in `context` or the input: an app in the request's
+  `context`, an agent caller in the optional `context` argument of its agent tool, which the
+  sidecar passes on as the callee's `context`. The sidecar treats the questions as
   model output: dropped under `clarify: never`, capped at `max_questions`, run through
   `output_deny` as the runtime sent them, PII redaction, the cut, and `output_deny` again as
   delivered, and audited with rule `clarify.asked`. It renders `output` from the questions it
@@ -82,10 +83,12 @@ is CONTRACT §3, §3.2, §3.3, §3.5, §4.1, §4.3 and §9.
 - Old apps and peers keep working: a run that asked is `ok`, and its `output` already shows the
   questions. An app that runs unattended and can't answer sets `clarify: never`, or passes the
   recommended answers back in `context`. Answers in `context` (or the input) are vouched for by
-  the caller, and the answering run starts with only `taint.input` (CONTRACT §5.2). So for an
-  agent with a `taint` block an unattended app must not send the recommended answers back on
+  the caller, and an app's answering run starts with only `taint.input` (CONTRACT §5.2). So for
+  an agent with a `taint` block an unattended app must not send the recommended answers back on
   its own, since they may come from untrusted data: it uses `clarify: never` for that agent,
-  or a person answers.
+  or a person answers. An agent caller's answering run is part of the calling run, so it starts
+  with every label that run has read, the asking run's included: an orchestrator can't pass
+  recommended answers back as trusted.
 - Each practice costs input tokens on every model call, and the plan costs a few output tokens
   before the first tool call, which count against `max_tokens_per_call`.
 - Brevity rewrites the answer, so an `output_deny` pattern that expects full sentences may stop

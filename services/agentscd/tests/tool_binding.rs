@@ -54,6 +54,7 @@ async fn tool_calls_of_no_run_in_flight_are_refused() {
                 target_service: String::new(),
                 target_agent: "order-triage".into(),
                 input: "triage".into(),
+                context_json: String::new(),
             })
             .await
             .unwrap_err(),
@@ -121,6 +122,7 @@ async fn the_runs_depth_wins_over_the_runtimes() {
             target_service: String::new(),
             target_agent: "order-triage".into(),
             input: "triage".into(),
+            context_json: String::new(),
         })
         .await
         .unwrap_err();

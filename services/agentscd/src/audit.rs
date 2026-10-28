@@ -458,6 +458,14 @@ impl Audit {
         self.writer.withhold(request_id, values);
     }
 
+    /// [`Audit::withhold`] for every string (and long number) in `payload`: a denied JSON payload
+    /// comes back in later records as a JSON value, not as its text.
+    pub fn withhold_value(&self, request_id: &str, payload: &Value) {
+        let mut found = Vec::new();
+        collect_leaves(payload, &mut found);
+        self.withhold(request_id, found);
+    }
+
     /// See [`AuditWriter::on_cancel`].
     pub fn on_cancel(&self, records: Vec<AuditRecord>, started: Instant) -> OnCancel<'_> {
         for r in &records {
