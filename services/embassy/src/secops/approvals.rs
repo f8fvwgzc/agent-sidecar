@@ -42,6 +42,17 @@ pub fn decision_message(a: &Approval) -> ControlMessage {
     }
 }
 
+/// The `approval` SSE event (namespace-scoped) of an approval that was asked for or changed.
+pub fn publish(hub: &Hub, a: &Approval) {
+    hub.publish(
+        crate::api::types::SseEvent::Approval(a.clone()),
+        crate::events::Scope::Service {
+            namespace: a.namespace.clone(),
+            service: a.service.clone(),
+        },
+    );
+}
+
 fn push(hub: &Hub, key: &ServiceKey, msg: &ControlMessage) {
     for o in hub.registry.outboxes(key) {
         crate::controlplane::send(&o, msg.clone());
@@ -57,6 +68,7 @@ pub async fn push_decision_of(hub: &Hub, key: &ServiceKey, id: &str) {
         && a.status != ApprovalStatus::Pending
     {
         push(hub, key, &decision_message(&a));
+        publish(hub, &a);
     }
 }
 
@@ -107,7 +119,7 @@ pub async fn on_request(hub: &Hub, key: &ServiceKey, req: ApprovalRequest) {
         reason: None,
     };
     match store.put_approval(&a).await {
-        Ok(ApprovalPut::Stored(_)) => {}
+        Ok(ApprovalPut::Stored(a)) => publish(hub, &a),
         Ok(ApprovalPut::Existing(e)) if e.status != ApprovalStatus::Pending => {
             push(hub, key, &decision_message(&e));
         }
@@ -148,6 +160,7 @@ pub async fn expire_agent(hub: &Hub, namespace: &str, service: &str, agent: &str
             let key = ServiceKey::new(namespace, service);
             for a in &gone {
                 push(hub, &key, &decision_message(a));
+                publish(hub, a);
             }
         }
         Err(e) => {
@@ -178,6 +191,7 @@ pub async fn expirer(hub: Arc<Hub>, shutdown: CancellationToken) {
                         &ServiceKey::new(&a.namespace, &a.service),
                         &decision_message(a),
                     );
+                    publish(&hub, a);
                 }
             }
             Err(e) => tracing::warn!(error = %e, "expiring approvals failed"),

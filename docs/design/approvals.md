@@ -24,8 +24,11 @@ AgentSecOps merge ([agentsecops-merge.md](agentsecops-merge.md) §3.1 `engine/ap
 6. **Never the arguments.** An approval holds the SHA-256 of the call's arguments, so the
    approvals table never becomes a second copy of what the audit redacts.
 
+7. **Decided where people already look.** Pending approvals are the SSE event `approval` and
+   an Approvals tab in the console's inspector (service and agent), next to the agent's
+   lessons, with the agents' quarantines on top (#39). Denying takes a reason in the tab, as the
+   API requires.
+
 ## What it does not do yet
 
-- A console page and an SSE event for pending approvals (#39): today they are read with
-  `GET /api/v1/approvals?status=pending`.
 - Named approvers per tool (with Tutela's permission model).

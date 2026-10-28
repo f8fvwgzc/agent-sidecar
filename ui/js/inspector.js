@@ -10,11 +10,13 @@ import { LearningTab } from './tab-learning.js';
 import { YamlTab } from './tab-yaml.js';
 import { InstancesTab } from './tab-instances.js';
 import { OverviewTab } from './tab-overview.js';
+import { ApprovalsTab } from './tab-approvals.js';
 
 const TAB_CLASSES = {
   config: ['Config', ConfigTab],
   traffic: ['Traffic', TrafficTab],
   learning: ['Learning', LearningTab],
+  approvals: ['Approvals', ApprovalsTab],
   yaml: ['YAML', YamlTab],
   instances: ['Instances', InstancesTab],
   overview: ['Overview', OverviewTab],
@@ -33,8 +35,8 @@ export function targetFor(node) {
 
 /** Which tabs a target gets; services without a stored charter only have overview and instances. */
 export function tabsFor(target, hasCharter) {
-  if (target.kind === 'agent') return ['config', 'traffic', 'learning', 'yaml', 'instances'];
-  if (target.kind === 'service') return hasCharter ? ['overview', 'traffic', 'learning', 'yaml', 'instances'] : ['overview', 'instances'];
+  if (target.kind === 'agent') return ['config', 'traffic', 'learning', 'approvals', 'yaml', 'instances'];
+  if (target.kind === 'service') return hasCharter ? ['overview', 'traffic', 'learning', 'approvals', 'yaml', 'instances'] : ['overview', 'instances'];
   if (target.kind === 'app') return hasCharter ? ['overview', 'traffic', 'yaml', 'instances'] : ['overview', 'instances'];
   return ['overview'];
 }

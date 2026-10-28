@@ -1206,11 +1206,13 @@ pub enum SseEvent {
     CpAudit(CpAuditRecord),
     Lagged(LaggedEvent),
     Reset(ResetEvent),
+    /// An approval of a tool call was asked for, decided or expired (CONTRACT.md §5.4).
+    Approval(crate::secops::Approval),
 }
 
 impl SseEvent {
     /// Every event name, in the order of design §10.2.
-    pub const NAMES: [&'static str; 10] = [
+    pub const NAMES: [&'static str; 11] = [
         "audit",
         "graph",
         "registry",
@@ -1221,6 +1223,7 @@ impl SseEvent {
         "cp_audit",
         "lagged",
         "reset",
+        "approval",
     ];
 
     /// The SSE `event:` field.
@@ -1236,6 +1239,7 @@ impl SseEvent {
             SseEvent::CpAudit(_) => "cp_audit",
             SseEvent::Lagged(_) => "lagged",
             SseEvent::Reset(_) => "reset",
+            SseEvent::Approval(_) => "approval",
         }
     }
 
@@ -1252,12 +1256,14 @@ impl SseEvent {
             SseEvent::CpAudit(e) => serde_json::to_string(e),
             SseEvent::Lagged(e) => serde_json::to_string(e),
             SseEvent::Reset(e) => serde_json::to_string(e),
+            SseEvent::Approval(e) => serde_json::to_string(e),
         }
     }
 
     /// Parse an event from its `event:` name and `data:` JSON.
     pub fn parse(name: &str, data: &str) -> serde_json::Result<Self> {
         Ok(match name {
+            "approval" => SseEvent::Approval(serde_json::from_str(data)?),
             "audit" => SseEvent::Audit(serde_json::from_str(data)?),
             "graph" => SseEvent::Graph(serde_json::from_str(data)?),
             "registry" => SseEvent::Registry(serde_json::from_str(data)?),

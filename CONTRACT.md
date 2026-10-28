@@ -1087,6 +1087,10 @@ tools:
   one; at most 2000 characters): an editor of the namespace; `409 not_pending` when it is decided
   or expired already. Audited as `approval_approve` / `approval_deny` (reason `<tool> in run
   <request_id>[: why]`). An approval holds the hash of the arguments, never the arguments.
+  Every new, decided or expired approval is the SSE event `approval` (the approval, scoped to its
+  service's namespace), and the console's inspector has an Approvals tab per service and agent:
+  pending ones first with the time left, approve, deny with a reason, and the agents'
+  quarantines.
 - **Changing it** needs admin, and removing an `approval` is a weakened change (§6.1).
 
 ### 5.5 Risk scores
