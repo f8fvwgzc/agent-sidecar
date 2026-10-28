@@ -1358,6 +1358,14 @@ Audit records become evidence when embassy chains and seals them (design:
     chain is visible to a caller who may see every namespace it has records of (else `404`); a
     bundle whose records carry payloads (`telemetry.control_plane_payloads`) needs the payload
     permission (else `403`).
+  - **Retention.** With `ledger.retention_days` in the ControlPlaneConfig (1 to 36500; absent =
+    kept for good), embassy purges, hourly, every chain whose last entry is older than that and
+    that a seal covers entirely (SQL migration 7). It first writes a purge record (the chain, its
+    entry count, its head and the covering seal's statement), and only then may the triggers let
+    the chain's rows go; a chain with entries no seal covers is never purged, and nothing else may
+    delete. A bundle exported before a purge still verifies (it holds everything it needs). A
+    purged run answers `404` with when it was purged; a record that arrives for it later is not
+    kept. Each purge is audited (`ledger_purge`, actor `embassy:retention`).
 
 ## 7. Kubernetes packaging
 

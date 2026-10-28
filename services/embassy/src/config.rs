@@ -85,6 +85,19 @@ pub struct ControlPlaneConfig {
     /// Risk scoring of agents (crate::secops::risk, CONTRACT.md §5.5).
     #[serde(default)]
     pub risk: RiskConfig,
+    /// The evidence ledger (crate::secops::ledger, CONTRACT.md §6.3).
+    #[serde(default)]
+    pub ledger: LedgerConfig,
+}
+
+/// `ledger`: how long the evidence ledger keeps a run.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LedgerConfig {
+    /// Days after its last entry a run's chain is purged (only a chain a seal covers entirely);
+    /// absent = kept for good. 1 to 36500.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_days: Option<u32>,
 }
 
 /// `risk`: what the risk score does (crate::secops::risk).
@@ -110,6 +123,7 @@ impl Default for ControlPlaneConfig {
             policy: None,
             events: EventsConfig::default(),
             risk: RiskConfig::default(),
+            ledger: LedgerConfig::default(),
         }
     }
 }
@@ -379,6 +393,11 @@ impl ControlPlaneConfig {
     /// may not appear in a join token.
     pub fn validate(&self, cp_namespace: &str) -> Result<(), Vec<String>> {
         let mut errs = Vec::new();
+        if let Some(d) = self.ledger.retention_days
+            && !(1..=36_500).contains(&d)
+        {
+            errs.push(format!("ledger.retention_days must be 1..=36500, not {d}"));
+        }
         if let Some(q) = self.risk.quarantine_score
             && !(q.is_finite() && q >= 0.0)
         {
