@@ -806,7 +806,7 @@ With `readOnlyRootFilesystem: true`, `/run/agentsc` is already an `emptyDir` in 
 
 With the Helm chart, **turn the sidecar image allow-list on**: set `images.agentscd.digest` to the digest of the release's `agentscd` image (the release asset `IMAGE_DIGESTS`, or the `Digest:` line of `docker buildx imagetools inspect ghcr.io/f8fvwgzc/agent-sidecar/agentscd:<version>`). Without a digest the list (`sidecar_images.allowed_digests` in the ControlPlaneConfig) is empty and not enforced: any image may run as the sidecar, and embassy-ca logs `SIDECAR IMAGE ALLOW-LIST IS OFF` at start-up. With it, the injector injects only allowed digests, IssueCertificate refuses certificates (first ones and renewals) to pods whose running sidecar image is not allowed, and the chart's ValidatingAdmissionPolicy `agentsc-sidecar-integrity` refuses such pods. During an upgrade keep the previous digest in `injection.allowedImageDigests` until every pod has been replaced. The chart README's "Sidecar integrity" section has the details.
 
-**7. Review charters in CI.** There is no CI config in the repo. Validate every charter in every pull request. `agentsc charter validate` exits 1 and prints the errors:
+**7. Review charters in CI.** agent-sidecar ships no CI config for your charters (its own workflows only check this repository). Validate every charter in every pull request. `agentsc charter validate` exits 1 and prints the errors:
 
 ```bash
 # for every charter your repository holds
@@ -853,8 +853,8 @@ These are true for the current code. "Not built yet" means there is no code for 
 9. **Refusal fallbacks are not enabled.** A model refusal is returned as `model.refusal`.
 10. **No NetworkPolicy is shipped for your pods.** The Helm chart's NetworkPolicy covers embassy only ([Production checklist](#production-checklist-recommendations)).
 11. **Audit output is basic.** There are two sinks (stdout and file). There is no shipping and no file rotation. A failing sink keeps at most 4 MiB of records in memory ([Audit sink failures](#audit-sink-failures)).
-12. **No metrics and no trace export.** There is no metrics endpoint. Trace ids are propagated, but spans are not exported to a tracing backend. They exist only in the audit records.
-13. **The manifests are a demo.** The namespace `agentsc-demo` and the services `orders,inventory` are hard-coded in the Job and the kustomization. The images are `:dev` tags built inside minikube. No images are published.
+12. **No metrics endpoint to scrape.** The sidecar and embassy expose no Prometheus endpoint. Telemetry is pushed instead: with an OTLP endpoint (the environment's, or `telemetry.otlp_endpoint` when `--otlp-endpoint-allow` allows it), the sidecar exports its audit records as OTLP/HTTP traces and cumulative metrics (CONTRACT.md §3.3).
+13. **The kustomize manifests are a demo.** The namespace `agentsc-demo` and the services `orders,inventory` are hard-coded in the Job and the kustomization, and they use `:dev` images built inside minikube. Releases publish the `agentscd` and `embassy` images to GHCR (`ghcr.io/f8fvwgzc/agent-sidecar/...`), which the Helm chart uses.
 14. **The readiness probe uses a fixed address.** `agentsc-ready` always calls `127.0.0.1:3500`.
 
 Fixed limits and timeouts in the code:
