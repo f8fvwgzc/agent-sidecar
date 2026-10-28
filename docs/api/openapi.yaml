@@ -128,6 +128,7 @@ tags:
   - name: memory
   - name: proposals
   - name: registry
+  - name: ledger
   - name: events
   - name: traces
   - name: health
@@ -1068,6 +1069,119 @@ paths:
         "503":
           $ref: "#/components/responses/SecopsUnavailable"
 
+  /ledger/runs:
+    get:
+      tags: [ledger]
+      operationId: listLedgerRuns
+      summary: The runs the evidence ledger holds (CONTRACT.md §6.3), the most recently appended first.
+      description: Only runs whose every namespace the caller may see.
+      x-required-role: viewer
+      parameters:
+        - name: namespace
+          in: query
+          schema:
+            $ref: "#/components/schemas/DnsLabel"
+        - name: service
+          in: query
+          schema:
+            $ref: "#/components/schemas/DnsLabel"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 50
+      responses:
+        "200":
+          description: The runs' heads.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ChainHead"
+        "400":
+          $ref: "#/components/responses/Invalid"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+        "503":
+          $ref: "#/components/responses/SecopsUnavailable"
+
+  /ledger/runs/{chain}:
+    parameters:
+      - $ref: "#/components/parameters/Chain"
+    get:
+      tags: [ledger]
+      operationId: getLedgerRun
+      summary: One run's head. 404 when the caller may not see one of its namespaces.
+      x-required-role: viewer
+      responses:
+        "200":
+          description: The head.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChainHead"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+        "503":
+          $ref: "#/components/responses/SecopsUnavailable"
+
+  /ledger/runs/{chain}/bundle:
+    parameters:
+      - $ref: "#/components/parameters/Chain"
+    get:
+      tags: [ledger]
+      operationId: getLedgerBundle
+      summary: The run's evidence bundle, sealed up to its newest entry first; verify it with `agentsc verify`.
+      description: |
+        With a signing key the chain is sealed up to its newest entry before it is exported.
+        403 when the run's records carry payloads and the caller lacks the payload permission.
+        Audited as `ledger_export`. `Content-Disposition` names it `run-<chain>.evidence.json`.
+      x-required-role: viewer
+      responses:
+        "200":
+          description: The bundle.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvidenceBundle"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+        "503":
+          $ref: "#/components/responses/SecopsUnavailable"
+
+  /ledger/keys:
+    get:
+      tags: [ledger]
+      operationId: getLedgerKeys
+      summary: The ledger's public keys (the same as the unauthenticated `/.well-known/jwks.json`).
+      x-required-role: viewer
+      responses:
+        "200":
+          description: The keys, current first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Jwks"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+
   /proposals:
     get:
       tags: [proposals]
@@ -1456,6 +1570,25 @@ paths:
         "421":
           $ref: "#/components/responses/MisdirectedRequest"
 
+  /.well-known/jwks.json:
+    servers:
+      - url: /
+    get:
+      tags: [ledger]
+      operationId: wellKnownJwks
+      summary: The evidence ledger's public keys, for `agentsc verify --keys` (no authentication; served at the root).
+      security: []
+      x-required-role: none
+      responses:
+        "200":
+          description: The keys, current first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Jwks"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+
   /healthz:
     get:
       tags: [health]
@@ -1511,6 +1644,14 @@ components:
       description: Session cookie from `POST /login` (HMAC-SHA256 signed `{token_name, exp}`, 12 h).
 
   parameters:
+    Chain:
+      name: chain
+      in: path
+      required: true
+      description: A ledger chain, a run's `request_id` (or `service:<namespace>%2F<service>` for a service's records outside runs).
+      schema:
+        type: string
+        maxLength: 300
     AgentId:
       name: id
       in: path
@@ -2744,6 +2885,103 @@ components:
     ProposalStatus:
       type: string
       enum: [pending, approved, rejected]
+    ChainHead:
+      type: object
+      required: [chain, entries, head, sealed, updated_at, services]
+      properties:
+        chain:
+          type: string
+        entries:
+          type: integer
+          minimum: 0
+        head:
+          type: string
+          description: The last entry's hash (hex).
+        sealed:
+          type: integer
+          description: How many entries the newest seal covers (0 = none).
+        updated_at:
+          type: string
+        services:
+          type: array
+          items:
+            type: object
+            required: [namespace, service]
+            properties:
+              namespace:
+                $ref: "#/components/schemas/DnsLabel"
+              service:
+                $ref: "#/components/schemas/DnsLabel"
+    EvidenceBundle:
+      type: object
+      description: CONTRACT.md §6.3; the format is the crate agentsc-ledger.
+      additionalProperties: false
+      required: [format, exported_at, chain, entries, seals]
+      properties:
+        format:
+          const: agentsc-evidence-bundle/v1
+        exported_at:
+          type: string
+        chain:
+          type: string
+        entries:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [seq, ingested_at, record, prev_hash, hash]
+            properties:
+              seq:
+                type: integer
+              ingested_at:
+                type: string
+              record:
+                $ref: "#/components/schemas/AuditRecord"
+              prev_hash:
+                type: string
+              hash:
+                type: string
+        seals:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [statement, signature, kid]
+            properties:
+              statement:
+                type: string
+                description: The exact signed text of `{chain, entries, head, kid, sealed_at, type}`.
+              signature:
+                type: string
+                description: Ed25519, hex.
+              kid:
+                type: string
+    Jwks:
+      type: object
+      required: [keys]
+      properties:
+        keys:
+          type: array
+          items:
+            type: object
+            required: [kty, crv, x, kid, alg, use, status]
+            properties:
+              kty:
+                const: OKP
+              crv:
+                const: Ed25519
+              x:
+                type: string
+              kid:
+                type: string
+                description: The RFC 7638 thumbprint of the key.
+              alg:
+                const: EdDSA
+              use:
+                const: sig
+              status:
+                type: string
+                enum: [current, retired]
     RegistryAgent:
       type: object
       description: One agent of the registry (CONTRACT.md §5.3).
@@ -3030,6 +3268,7 @@ components:
             - agent_retired
             - agent_alias_put
             - agent_alias_delete
+            - ledger_export
         namespace:
           oneOf:
             - type: string

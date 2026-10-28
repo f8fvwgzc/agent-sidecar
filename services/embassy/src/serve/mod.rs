@@ -239,6 +239,18 @@ pub struct ServeArgs {
     /// `postgres`, `<dir>/.secops.sqlite3` for `file:<dir>`, and none for `kubernetes`.
     #[arg(long, env = "AGENTSC_SECOPS_STORE")]
     pub secops_store: Option<StoreSpec>,
+    /// The evidence ledger's signing key: a file with a 32-byte Ed25519 seed in standard base64
+    /// (`embassy ledger-key create`), e.g. a mounted Secret. Without it, chains are kept and
+    /// nothing is sealed.
+    #[arg(long, env = "AGENTSC_LEDGER_KEY_FILE")]
+    pub ledger_key_file: Option<PathBuf>,
+    /// A public key (hex, base64 or base64url) that sealed before and is published as retired,
+    /// so its seals still verify (repeatable; env comma-separated).
+    #[arg(long, env = "AGENTSC_LEDGER_RETIRED_KEYS", value_delimiter = ',')]
+    pub ledger_retired_key: Vec<String>,
+    /// Seconds a ledger chain has no new entry before it is sealed.
+    #[arg(long, env = "AGENTSC_LEDGER_SEAL_AFTER", default_value_t = 10)]
+    pub ledger_seal_after: u64,
     /// ControlPlaneConfig file (reloaded on change).
     #[arg(long)]
     pub config: Option<PathBuf>,
@@ -873,6 +885,7 @@ pub async fn start(
                 auto_adopt: args.auto_adopt,
                 trust_domain: args.trust_domain.clone(),
                 api_rate_limit: args.api_limit(),
+                ledger_seal_after: Duration::from_secs(args.ledger_seal_after),
                 ..Default::default()
             },
             shutdown.clone(),
@@ -882,6 +895,17 @@ pub async fn start(
         }
         if let Some(s) = secops.clone() {
             let _ = h.secops.set(s);
+            let keys = crate::secops::ledger::LedgerKeys::load(
+                args.ledger_key_file.as_deref(),
+                &args.ledger_retired_key,
+            )?;
+            match keys.signer() {
+                Some(k) => tracing::info!(kid = k.kid(), "the evidence ledger seals with this key"),
+                None => tracing::warn!(
+                    "EVIDENCE LEDGER SEALS ARE OFF: no --ledger-key-file, chains are kept but not signed"
+                ),
+            }
+            let _ = h.ledger.set(Arc::new(keys));
         }
         for c in [Ca, Webhook] {
             if args.has(c) {

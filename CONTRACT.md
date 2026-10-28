@@ -1267,6 +1267,26 @@ Audit records become evidence when embassy chains and seals them (design:
   taken off the end or added after the last seal fails `seals`; a removed or reordered one fails
   both; an edited statement or a wrong key fails `seals`.
 
+- **In embassy.** Every record a sidecar sends (after the drop rules, with `agent_id` filled) is
+  appended to its chain in the AgentSecOps store (§5.3: SQLite or PostgreSQL migration 3;
+  `<dir>/.secops.sqlite3` with a file store). Entries, seals and heads are append-only (store
+  triggers refuse an update, a delete, an entry that does not follow its chain's head, and a seal
+  of entries that do not exist). Appends to one chain serialize across replicas.
+  - **Keys.** `--ledger-key-file` (env `AGENTSC_LEDGER_KEY_FILE`): a 32-byte Ed25519 seed in
+    standard base64, written by `embassy ledger-key create --out <file>`; `embassy ledger-key show
+    <file>` prints its `kid` and public key. `--ledger-retired-key <public key>` (repeatable) keeps
+    an old key published. Without a key file chains are kept and nothing is sealed.
+  - **Sealing.** A chain with entries no seal covers is sealed once it had no new entry for
+    `--ledger-seal-after` seconds (10); an export seals first. Replicas may race: the first seal
+    of each length is kept.
+  - **API** (`/api/v1`, docs/api/openapi.yaml): `GET /ledger/runs?namespace=&service=&limit=`
+    (newest first, 50, at most 500), `GET /ledger/runs/{chain}` (the head: `entries`, `head`,
+    `sealed`, `updated_at`, `services`), `GET /ledger/runs/{chain}/bundle` (audited
+    `ledger_export`), `GET /ledger/keys`, and the unauthenticated `GET /.well-known/jwks.json`. A
+    chain is visible to a caller who may see every namespace it has records of (else `404`); a
+    bundle whose records carry payloads (`telemetry.control_plane_payloads`) needs the payload
+    permission (else `403`).
+
 ## 7. Kubernetes packaging
 
 `deploy/` is a kustomize tree, applied with `kubectl apply -k deploy/`:

@@ -1,7 +1,7 @@
 # The evidence ledger
 
-Status: the format and the offline verifier are implemented (#28, crate `agentsc-ledger`,
-`agentsc verify`); embassy's storage, sealing and export follow (#29). Contract:
+Status: implemented: the format and the offline verifier (#28, crate `agentsc-ledger`,
+`agentsc verify`), and embassy's storage, sealing and export (#29). Contract:
 [CONTRACT.md](../../CONTRACT.md) §6.3. Part of the AgentSecOps merge
 ([agentsecops-merge.md](agentsecops-merge.md) §3.1, step "Ledger").
 
@@ -44,8 +44,25 @@ as a bundle that anyone with the public keys can check offline.
    32-byte Ed25519 seed in standard base64 (nexc's `NEXC_SIGNING_KEY` form). The crate uses
    `ring`, the provider the workspace's rustls already links. No new crypto dependency.
 
+8. **embassy appends after the drop rules, in one transaction per batch.** What the ledger
+   holds is what the control plane accepted, with the `agent_id` it filled. A ledger failure is
+   logged and counted, never pushed back on the sidecar: its records still reach the live views.
+9. **The database is the floor under the hashes.** Triggers make entries, seals and heads
+   append-only, refuse an entry that does not follow its chain's head, and refuse a seal of
+   entries that do not exist, so a bug or a hand edit cannot leave a chain that verifies wrong.
+   A record is kept as its canonical text (`text` in PostgreSQL, never `jsonb`).
+10. **Sealing waits for a quiet chain.** A run's records arrive over seconds from several
+    sidecars; sealing each one would sign a statement per record. The sealer signs a chain once
+    it has had no new entry for `--ledger-seal-after`; an export seals first, so a bundle is
+    always sealed up to its last entry when there is a key. Without a key file the ledger still
+    chains, and embassy logs that seals are off.
+11. **Scope follows the records.** A run can cross namespaces; its bundle is for callers who may
+    see all of them, and payloads (only present with `telemetry.control_plane_payloads`) need
+    the payload permission, as in the live views.
+
 ## What it does not do yet
 
 - Verify nexc-engine's own bundles (`nexc-evidence-bundle/v1`). That belongs to the data import
   of the merge (step 7), when nexc's spans and audit chain are imported byte for byte.
-- Retention and purging of old chains.
+- Retention and purging of old chains (#31).
+- Keys from Tutela's vault instead of a file: the vault has no key-signing API yet.

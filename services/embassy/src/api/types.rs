@@ -937,6 +937,8 @@ pub enum CpAction {
     AgentAliasPut,
     /// An alias was taken from an agent.
     AgentAliasDelete,
+    /// A run's evidence bundle was exported (`reason`: the run, its entries and seals).
+    LedgerExport,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

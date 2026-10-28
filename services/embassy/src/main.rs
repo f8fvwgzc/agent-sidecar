@@ -25,6 +25,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: TokenCmd,
     },
+    /// The evidence ledger's signing key (`--ledger-key-file`).
+    LedgerKey {
+        #[command(subcommand)]
+        cmd: LedgerKeyCmd,
+    },
     /// Create a new CA (ca.crt, ca.key) in a directory.
     CaInit {
         #[arg(long)]
@@ -83,6 +88,25 @@ struct Domains {
 }
 
 #[derive(Subcommand)]
+enum LedgerKeyCmd {
+    /// Write a new Ed25519 seed (standard base64, mode 0600) to a file that does not exist yet,
+    /// and print its key id and public key.
+    Create {
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Print the key id and public key of a key file.
+    Show { file: PathBuf },
+}
+
+/// `kid` and `x` of a key, as the JWKS publishes them.
+fn print_key(key: &agentsc_ledger::SigningKey) {
+    let jwk = key.jwk(agentsc_ledger::KeyStatus::Current);
+    println!("kid: {}", jwk.kid);
+    println!("public key (base64url): {}", jwk.x);
+}
+
+#[derive(Subcommand)]
 enum TokenCmd {
     /// Print a new token (att_ + 43 base64url characters) once, and its ControlPlaneConfig entry.
     Create(embassy::token::CreateArgs),
@@ -105,6 +129,28 @@ async fn main() -> anyhow::Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     match Cli::parse().cmd {
         Cmd::Serve(args) => embassy::serve::run(*args).await?,
+        Cmd::LedgerKey {
+            cmd: LedgerKeyCmd::Create { out },
+        } => {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let seed = agentsc_ledger::SigningKey::generate_seed_text()?;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&out)
+                .with_context(|| format!("create {}", out.display()))?;
+            writeln!(f, "{seed}")?;
+            print_key(&agentsc_ledger::SigningKey::from_seed_text(&seed)?);
+        }
+        Cmd::LedgerKey {
+            cmd: LedgerKeyCmd::Show { file },
+        } => {
+            let text = std::fs::read_to_string(&file)
+                .with_context(|| format!("read {}", file.display()))?;
+            print_key(&agentsc_ledger::SigningKey::from_seed_text(&text)?);
+        }
         Cmd::Token {
             cmd: TokenCmd::Create(args),
         } => {

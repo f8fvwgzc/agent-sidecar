@@ -928,6 +928,7 @@ version = "0.2.0"
 dependencies = [
  "agentsc-charter",
  "agentsc-common",
+ "agentsc-ledger",
  "agentsc-pki",
  "agentsc-proto",
  "anyhow",

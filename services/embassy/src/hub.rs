@@ -46,6 +46,8 @@ pub struct HubOptions {
     pub trust_domain: String,
     /// `--api-rate-limit` / `--api-burst` (ratelimit.rs).
     pub api_rate_limit: crate::ratelimit::RateLimit,
+    /// `--ledger-seal-after`: how long a ledger chain has no new entry before it is sealed.
+    pub ledger_seal_after: Duration,
 }
 
 impl Default for HubOptions {
@@ -56,6 +58,7 @@ impl Default for HubOptions {
             keepalive: crate::api::KEEPALIVE,
             trust_domain: agentsc_common::identity::DEFAULT_TRUST_DOMAIN.into(),
             api_rate_limit: crate::ratelimit::API_DEFAULT,
+            ledger_seal_after: crate::secops::ledger::DEFAULT_SEAL_AFTER,
         }
     }
 }
@@ -85,6 +88,10 @@ pub struct Hub {
     pub store: Arc<dyn Store>,
     /// The AgentSecOps data (crate::secops), set once at start; unset without a SQL store.
     pub secops: std::sync::OnceLock<Arc<dyn crate::secops::SecOpsStore>>,
+    /// The evidence ledger's keys (crate::secops::ledger), set once at start.
+    pub ledger: std::sync::OnceLock<Arc<crate::secops::ledger::LedgerKeys>>,
+    /// Audit records the ledger did not take (a store error).
+    pub ledger_failures: std::sync::atomic::AtomicU64,
     pub config: Arc<ArcSwap<ControlPlaneConfig>>,
     pub cp_audit: Arc<CpAudit>,
     pub auth: Auth,
@@ -249,6 +256,8 @@ impl Hub {
         Arc::new(Self {
             store,
             secops: std::sync::OnceLock::new(),
+            ledger: std::sync::OnceLock::new(),
+            ledger_failures: std::sync::atomic::AtomicU64::new(0),
             config,
             cp_audit,
             auth,
@@ -319,7 +328,12 @@ impl Hub {
             tokio::spawn(cp_audit_pump(self.clone(), cp_rx, shutdown.clone())),
             tokio::spawn(graph_events(self.clone(), shutdown.clone())),
             tokio::spawn(minute_ticks(self.clone(), shutdown.clone())),
-            tokio::spawn(expire_notes(self.clone(), shutdown)),
+            tokio::spawn(expire_notes(self.clone(), shutdown.clone())),
+            tokio::spawn(crate::secops::ledger::sealer(
+                self.clone(),
+                self.opts.ledger_seal_after,
+                shutdown,
+            )),
         ]
     }
 }
