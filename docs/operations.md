@@ -629,6 +629,11 @@ See [Creating agents](guides/creating-agents.md) for what to put in a charter.
 
 ## Upgrade notes
 
+### Risk scores
+
+- **The SQL stores migrate on start** to SQLite schema version 6 and PostgreSQL migration 6 (`agent_baselines`, `agent_risk`).
+- **Runs already in the ledger are scored on start** and learned into new baselines, so the first scores come from runs the agents already made. Turn on `risk.quarantine_score` only once the baselines have runs.
+
 ### Approvals
 
 - **The SQL stores migrate on start** to SQLite schema version 5 and PostgreSQL migration 5 (`approvals`).
@@ -994,6 +999,17 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "X-Agentsc-CSRF: 1" -H "Con
 ```
 
 `/deny` needs a reason. A call nobody decides within its `timeout_s` (600 s by default) is refused (`approval.expired`). It also ends early if the run's own deadline comes first. A sidecar with no control plane refuses every call of such a tool (`approval.unavailable`). `agentsc logs <svc> --rule approval.` shows what was granted, denied or expired.
+
+### Risk scores
+
+embassy scores each agent's part of every run against its own baseline (CONTRACT.md §5.5): nothing until an agent has 3 runs, then up to 10 for a run unlike its usual ones. `GET /api/v1/agents/$AGENT_ID/risk` shows the newest score and its reasons. To quarantine automatically, set a threshold in the ControlPlaneConfig:
+
+```yaml
+risk:
+  quarantine_score: 6   # absent = never quarantine by score
+```
+
+An agent quarantined by its score shows `quarantine.by: embassy:risk`, and the reason gives the score and what made it. Release it by hand (`POST /agents/{id}/release`) once you have looked.
 
 ### The evidence ledger
 

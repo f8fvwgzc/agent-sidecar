@@ -333,6 +333,11 @@ impl Hub {
                 self.clone(),
                 shutdown.clone(),
             )),
+            tokio::spawn(crate::secops::risk::scorer(
+                self.clone(),
+                self.opts.ledger_seal_after,
+                shutdown.clone(),
+            )),
             tokio::spawn(crate::secops::ledger::sealer(
                 self.clone(),
                 self.opts.ledger_seal_after,

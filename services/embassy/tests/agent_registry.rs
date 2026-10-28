@@ -602,7 +602,14 @@ async fn a_quarantine_reaches_the_sidecars_and_a_release_lifts_it() {
     assert_eq!(r.status, 200, "{}", r.text);
     assert_eq!(r.body["quarantine"]["reason"], "risk 7.5 over 6");
     assert_eq!(r.body["quarantine"]["by"], "alice");
-    let pushed = sc.next_quarantine().await;
+    // an earlier push (a registry sync) may come first: wait for the one that names ops
+    let mut pushed = sc.next_quarantine().await;
+    for _ in 0..10 {
+        if pushed.contains_key("ops") {
+            break;
+        }
+        pushed = sc.next_quarantine().await;
+    }
     assert_eq!(
         pushed.get("ops").map(String::as_str),
         Some("risk 7.5 over 6")

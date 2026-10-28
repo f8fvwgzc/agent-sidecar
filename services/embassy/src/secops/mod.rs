@@ -17,6 +17,7 @@ use crate::store::{Actor, ServiceKey, StoreError};
 pub mod approvals;
 pub mod ledger;
 pub mod registry;
+pub mod risk;
 
 /// Whether an agent is declared by its service's stored charter now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -280,6 +281,17 @@ pub const PENDING_MAX: usize = 16;
 /// The longest decision reason, in characters.
 pub const MAX_DECISION_REASON: usize = 2000;
 
+/// One run's risk score of one agent (CONTRACT.md §5.5).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RiskRow {
+    pub agent_id: String,
+    pub chain: String,
+    pub score: f64,
+    pub reasons: Vec<String>,
+    pub novelty: f64,
+    pub scored_at: String,
+}
+
 /// The longest alias, in bytes.
 pub const MAX_ALIAS_BYTES: usize = 256;
 /// The most aliases one agent has.
@@ -358,6 +370,36 @@ pub trait SecOpsStore: Send + Sync {
     /// Release agent `id`. [`StoreError::Conflict`] (`"not quarantined"`) when it is not
     /// quarantined. Emits [`crate::store::StoreEvent::AgentsChanged`].
     async fn release_agent(&self, id: &str) -> Result<AgentEntry, StoreError>;
+
+    /// Chains not scored yet whose last entry came at or before `quiet_before`, oldest first.
+    async fn risk_unscored(
+        &self,
+        quiet_before: &str,
+        limit: usize,
+    ) -> Result<Vec<String>, StoreError>;
+
+    /// Mark `chain` scored; `false` when it was already (another replica took it).
+    async fn risk_claim(&self, chain: &str) -> Result<bool, StoreError>;
+
+    /// An agent's baseline: how many runs it learned, and its state (JSON); `None` before any.
+    async fn get_baseline(&self, agent_id: &str) -> Result<Option<(u64, String)>, StoreError>;
+
+    /// Write an agent's baseline if it still has `expected` runs learned (`None`: it has none);
+    /// `false` when another replica learned one meanwhile (read it again and retry).
+    async fn put_baseline(
+        &self,
+        agent_id: &str,
+        expected: Option<u64>,
+        runs: u64,
+        state: &str,
+        at: &str,
+    ) -> Result<bool, StoreError>;
+
+    /// Keep one run's score.
+    async fn put_risk(&self, row: &RiskRow) -> Result<(), StoreError>;
+
+    /// An agent's newest score.
+    async fn latest_risk(&self, agent_id: &str) -> Result<Option<RiskRow>, StoreError>;
 
     /// Keep a new pending approval (module `approvals`); see [`ApprovalPut`].
     async fn put_approval(&self, a: &Approval) -> Result<ApprovalPut, StoreError>;
