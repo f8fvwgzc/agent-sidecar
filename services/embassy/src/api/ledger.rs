@@ -31,9 +31,18 @@ fn visible(ident: &Identity, head: &ChainHead) -> bool {
 
 async fn visible_head(hub: &Hub, ident: &Identity, chain: &str) -> Result<ChainHead, Fail> {
     let missing = || Fail::not_found(format!("no run {chain} in the ledger"));
-    match secops(hub)?.ledger_head(chain).await {
+    let store = secops(hub)?;
+    match store.ledger_head(chain).await {
         Ok(h) if visible(ident, &h) => Ok(h),
-        Ok(_) | Err(StoreError::NotFound) => Err(missing()),
+        Ok(_) => Err(missing()),
+        Err(StoreError::NotFound) => match store.ledger_purged(chain).await {
+            // only callers who may see some namespace learn that it was purged, and when
+            Ok(Some(p)) if !ident.namespaces.is_empty() => Err(Fail::not_found(format!(
+                "run {chain} was purged at {} ({} entries, head {}); a bundle exported before still verifies",
+                p.purged_at, p.entries, p.head
+            ))),
+            _ => Err(missing()),
+        },
         Err(e) => Err(Fail::store(e, "")),
     }
 }

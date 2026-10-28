@@ -60,9 +60,14 @@ as a bundle that anyone with the public keys can check offline.
     see all of them, and payloads (only present with `telemetry.control_plane_payloads`) need
     the payload permission, as in the live views.
 
+12. **Purging keeps the evidence of the purge.** Only a whole chain that a seal covers is purged
+    (#31), never part of one: what is left always verifies, and so does any bundle exported
+    before. The covering seal's statement, the entry count and the head stay in a purge record,
+    written before the rows go; the delete triggers let a chain's rows go only once that record
+    exists, so the one way to delete is the audited one (nexc-engine's `evidence_purged`).
+
 ## What it does not do yet
 
 - Verify nexc-engine's own bundles (`nexc-evidence-bundle/v1`). That belongs to the data import
   of the merge (step 7), when nexc's spans and audit chain are imported byte for byte.
-- Retention and purging of old chains (#31).
 - Keys from Tutela's vault instead of a file: the vault has no key-signing API yet.

@@ -467,3 +467,181 @@ async fn without_a_key_chains_are_kept_and_nothing_is_sealed() {
     assert_eq!(failed, ["seals"]);
     env.stop().await;
 }
+
+// ---- retention (#31) ------------------------------------------------------------------------------
+
+/// Purging removes only whole chains a seal covers, leaves a purge record, and never touches a
+/// bundle exported before: it still verifies with the keys alone.
+async fn purge_rules(store: Arc<dyn SecOpsStore>) -> Bundle {
+    let keys = LedgerKeys::with_signer(SigningKey::from_seed(&[5; 32]));
+    let t0 = "2026-10-29T10:00:00.000Z";
+    store
+        .ledger_append(
+            t0,
+            &[
+                lr("old", "orders", 0),
+                lr("old", "orders", 1),
+                lr("open", "orders", 0),
+                lr("partly", "orders", 0),
+            ],
+        )
+        .await
+        .unwrap();
+    for chain in ["old", "partly"] {
+        let h = store.ledger_head(chain).await.unwrap();
+        assert!(seal_head(store.as_ref(), &keys, &h).await.unwrap());
+    }
+    store
+        .ledger_append(t0, &[lr("partly", "orders", 1)])
+        .await
+        .unwrap();
+    let bundle = Bundle {
+        format: agentsc_ledger::BUNDLE_FORMAT.into(),
+        exported_at: t0.into(),
+        chain: "old".into(),
+        entries: store.ledger_entries("old").await.unwrap(),
+        seals: store.ledger_seals("old").await.unwrap(),
+    };
+    assert!(verify_bundle(&bundle, &keys.jwks()).ok);
+
+    // nothing is older than the cut-off yet
+    assert!(
+        store
+            .ledger_purge(t0, 10, "embassy:retention", "t1")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let gone = store
+        .ledger_purge("2099-01-01T00:00:00.000Z", 10, "embassy:retention", "t1")
+        .await
+        .unwrap();
+    assert_eq!(
+        gone.iter().map(|c| c.chain.as_str()).collect::<Vec<_>>(),
+        ["old"],
+        "only a whole sealed chain"
+    );
+    let p = store.ledger_purged("old").await.unwrap().unwrap();
+    assert_eq!(
+        (p.entries, p.head.as_str()),
+        (2, bundle.entries[1].hash.as_str())
+    );
+    assert_eq!(
+        p.seal,
+        bundle.seals.last().unwrap().statement,
+        "the covering seal is kept"
+    );
+    assert_eq!(
+        store.ledger_head("old").await,
+        Err(embassy::store::StoreError::NotFound)
+    );
+    assert!(store.ledger_entries("old").await.unwrap().is_empty());
+    // the bundle exported before still verifies; what is left still holds
+    assert!(
+        verify_bundle(&bundle, &keys.jwks()).ok,
+        "a purge never breaks an exported bundle"
+    );
+    for chain in ["open", "partly"] {
+        check_chain(chain, &store.ledger_entries(chain).await.unwrap()).unwrap();
+    }
+    // a late record of the purged run is not kept; a second purge finds nothing
+    store
+        .ledger_append("t2", &[lr("old", "orders", 9)])
+        .await
+        .unwrap();
+    assert!(store.ledger_entries("old").await.unwrap().is_empty());
+    assert!(
+        store
+            .ledger_purge("2099-01-01T00:00:00.000Z", 10, "x", "t3")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    bundle
+}
+
+#[tokio::test]
+async fn the_sqlite_ledger_purges_whole_sealed_chains_and_nothing_else() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("embassy.db");
+    let store = SqliteStore::open(&path).unwrap();
+    purge_rules(store.clone()).await;
+    drop(store);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    for sql in [
+        "DELETE FROM ledger_entries WHERE chain = 'open'",
+        "DELETE FROM ledger_heads WHERE chain = 'partly'",
+        "DELETE FROM ledger_purges",
+        "INSERT INTO ledger_purges VALUES ('partly', 2, '0000000000000000000000000000000000000000000000000000000000000000', 's', 't', 't', 'x')",
+    ] {
+        assert!(conn.execute_batch(sql).is_err(), "{sql}");
+    }
+}
+
+#[tokio::test]
+async fn the_postgres_ledger_purges_whole_sealed_chains_and_nothing_else() {
+    let Some((a, _, raw)) = pg().await else {
+        return;
+    };
+    purge_rules(a).await;
+    for sql in [
+        "DELETE FROM ledger_entries WHERE chain = 'open'",
+        "DELETE FROM ledger_heads WHERE chain = 'partly'",
+        "DELETE FROM ledger_purges",
+        "TRUNCATE ledger_chain_services CASCADE",
+    ] {
+        assert!(raw.batch_execute(sql).await.is_err(), "{sql}");
+    }
+}
+
+#[tokio::test]
+async fn a_purged_run_is_gone_from_the_api_and_its_bundle_still_verifies() {
+    let env = ledger_env(true).await;
+    env.create("orders", &orders_yaml()).await;
+    let _sc = send(&env, vec![quiet("agent_invocation", json!({}))]).await;
+    common::eventually("sealed", || async {
+        env.get(&format!("/ledger/runs/{RUN}"), "alice").await.body["sealed"] == 1
+    })
+    .await;
+    let bundle: Bundle = serde_json::from_value(
+        env.get(&format!("/ledger/runs/{RUN}/bundle"), "alice")
+            .await
+            .body,
+    )
+    .unwrap();
+    let keys = jwks(&env).await;
+    let n = embassy::secops::ledger::purge_before(&env.hub, "2099-01-01T00:00:00.000Z")
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+    let r = env.get(&format!("/ledger/runs/{RUN}"), "alice").await;
+    assert_eq!(r.status, 404);
+    assert!(r.details().contains("was purged at"), "{}", r.text);
+    assert!(verify_bundle(&bundle, &keys).ok);
+    let audit = env.hub.store.cp_audit(200).await.unwrap();
+    let purge = audit
+        .iter()
+        .find(|r| r.action == CpAction::LedgerPurge)
+        .unwrap();
+    assert_eq!(purge.actor, "embassy:retention");
+    assert!(
+        purge
+            .reason
+            .as_deref()
+            .unwrap()
+            .starts_with("1 chain(s), 1 entries"),
+        "{purge:?}"
+    );
+    // retention must be 1..=36500 days
+    let mut cfg = embassy::config::ControlPlaneConfig::default();
+    cfg.ledger.retention_days = Some(0);
+    assert!(
+        cfg.validate("agentsc-system")
+            .unwrap_err()
+            .iter()
+            .any(|e| e.contains("retention_days"))
+    );
+    cfg.ledger.retention_days = Some(30);
+    assert!(cfg.validate("agentsc-system").is_ok());
+    env.stop().await;
+}

@@ -281,6 +281,20 @@ pub const PENDING_MAX: usize = 16;
 /// The longest decision reason, in characters.
 pub const MAX_DECISION_REASON: usize = 2000;
 
+/// What is left of a purged chain (CONTRACT.md §6.3): how many entries it had, its head, and the
+/// seal that covered every entry, which still verifies a bundle exported before the purge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PurgedChain {
+    pub chain: String,
+    pub entries: u64,
+    pub head: String,
+    /// The covering seal's statement, exactly as signed.
+    pub seal: String,
+    pub last_entry_at: String,
+    pub purged_at: String,
+    pub purged_by: String,
+}
+
 /// One run's risk score of one agent (CONTRACT.md §5.5).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RiskRow {
@@ -370,6 +384,21 @@ pub trait SecOpsStore: Send + Sync {
     /// Release agent `id`. [`StoreError::Conflict`] (`"not quarantined"`) when it is not
     /// quarantined. Emits [`crate::store::StoreEvent::AgentsChanged`].
     async fn release_agent(&self, id: &str) -> Result<AgentEntry, StoreError>;
+
+    /// Purge at most `limit` whole chains that a seal covers entirely and whose last entry came
+    /// before `before`, oldest first: each leaves a [`PurgedChain`] record (`at`, `by`) and loses
+    /// its entries, seals and head. A chain with entries no seal covers is never purged. Records
+    /// that arrive for a purged chain later are not kept.
+    async fn ledger_purge(
+        &self,
+        before: &str,
+        limit: usize,
+        by: &str,
+        at: &str,
+    ) -> Result<Vec<PurgedChain>, StoreError>;
+
+    /// The purge record of `chain`, if it was purged.
+    async fn ledger_purged(&self, chain: &str) -> Result<Option<PurgedChain>, StoreError>;
 
     /// Chains not scored yet whose last entry came at or before `quiet_before`, oldest first.
     async fn risk_unscored(

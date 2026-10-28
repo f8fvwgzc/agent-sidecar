@@ -947,6 +947,8 @@ pub enum CpAction {
     ApprovalApprove,
     /// A tool call was denied.
     ApprovalDeny,
+    /// Old ledger chains were purged (`reason`: how many, and the cut-off).
+    LedgerPurge,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

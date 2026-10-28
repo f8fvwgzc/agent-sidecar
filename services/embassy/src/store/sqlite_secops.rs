@@ -10,8 +10,8 @@ use super::{SqliteStore, checked_key, now_ts};
 use crate::secops::{
     AgentChange, AgentEntry, AgentFilter, AgentStatus, Approval, ApprovalFilter, ApprovalPut,
     ApprovalStatus, ChainFilter, ChainHead, ChainService, LedgerRecord, MAX_ALIASES, PENDING_MAX,
-    QuarantineState, RegistryChange, RiskRow, SecOpsStore, SyncPlan, by_chain, check_alias,
-    check_reason,
+    PurgedChain, QuarantineState, RegistryChange, RiskRow, SecOpsStore, SyncPlan, by_chain,
+    check_alias, check_reason,
 };
 use crate::store::StoreEvent;
 use crate::store::{Actor, ServiceKey, StoreError};
@@ -368,6 +368,77 @@ impl SecOpsStore for SqliteStore {
         Ok(out)
     }
 
+    async fn ledger_purge(
+        &self,
+        before: &str,
+        limit: usize,
+        by: &str,
+        at: &str,
+    ) -> Result<Vec<PurgedChain>, StoreError> {
+        let (before, by, at) = (before.to_string(), by.to_string(), at.to_string());
+        self.run(move |conn| {
+            let tx = conn.transaction()?;
+            let due: Vec<(String, i64, String, String, String)> = {
+                let mut stmt = tx.prepare_cached(
+                    "SELECT h.chain, h.entries, h.head, h.updated_at, s.statement FROM ledger_heads h \
+                     JOIN ledger_seals s ON s.chain = h.chain AND s.entries = h.entries \
+                     WHERE h.entries > 0 AND h.sealed = h.entries AND h.updated_at < ?1 \
+                     ORDER BY h.updated_at LIMIT ?2",
+                )?;
+                stmt.query_map(params![before, limit as i64], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                })?
+                .collect::<Result<_, _>>()?
+            };
+            let mut out = Vec::new();
+            for (chain, entries, head, last, seal) in due {
+                tx.execute(
+                    "INSERT INTO ledger_purges (chain, entries, head, seal, last_entry_at, purged_at, purged_by) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![chain, entries, head, seal, last, at, by],
+                )?;
+                for table in ["ledger_chain_services", "ledger_seals", "ledger_entries", "ledger_heads"] {
+                    tx.execute(&format!("DELETE FROM {table} WHERE chain = ?1"), params![chain])?;
+                }
+                out.push(PurgedChain {
+                    chain,
+                    entries: unsigned(entries),
+                    head,
+                    seal,
+                    last_entry_at: last,
+                    purged_at: at.clone(),
+                    purged_by: by.clone(),
+                });
+            }
+            tx.commit()?;
+            Ok(out)
+        })
+        .await
+    }
+
+    async fn ledger_purged(&self, chain: &str) -> Result<Option<PurgedChain>, StoreError> {
+        let chain = chain.to_string();
+        self.run(move |conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT chain, entries, head, seal, last_entry_at, purged_at, purged_by FROM ledger_purges WHERE chain = ?1",
+                    params![chain],
+                    |r| {
+                        Ok(PurgedChain {
+                            chain: r.get(0)?,
+                            entries: unsigned(r.get(1)?),
+                            head: r.get(2)?,
+                            seal: r.get(3)?,
+                            last_entry_at: r.get(4)?,
+                            purged_at: r.get(5)?,
+                            purged_by: r.get(6)?,
+                        })
+                    },
+                )
+                .optional()?)
+        })
+        .await
+    }
+
     async fn risk_unscored(
         &self,
         quiet_before: &str,
@@ -640,6 +711,17 @@ impl SecOpsStore for SqliteStore {
             let tx = conn.transaction()?;
             let mut appended = 0u64;
             for (chain, recs) in groups {
+                let purged: Option<i64> = tx
+                    .query_row(
+                        "SELECT 1 FROM ledger_purges WHERE chain = ?1",
+                        params![chain],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if purged.is_some() {
+                    // a late record of a purged run: its chain is gone for good
+                    continue;
+                }
                 tx.execute(
                     "INSERT INTO ledger_heads (chain, updated_at) VALUES (?1, ?2) \
                      ON CONFLICT (chain) DO NOTHING",

@@ -181,3 +181,82 @@ pub async fn sealer(hub: Arc<Hub>, seal_after: Duration, shutdown: CancellationT
         }
     }
 }
+
+/// The actor of a purge by retention.
+pub const PURGE_ACTOR: &str = "embassy:retention";
+/// How often [`purger`] runs.
+pub const PURGE_TICK: Duration = Duration::from_secs(3600);
+/// Chains purged at most per transaction.
+const PURGE_BATCH: usize = 500;
+
+/// Purge the whole sealed chains whose last entry came before `before`, in batches, and audit
+/// what went (one `ledger_purge` record per batch). Returns how many chains were purged.
+pub async fn purge_before(hub: &Hub, before: &str) -> Result<usize, StoreError> {
+    let Some(store) = hub.secops() else {
+        return Ok(0);
+    };
+    let mut total = 0;
+    loop {
+        let gone = store
+            .ledger_purge(before, PURGE_BATCH, PURGE_ACTOR, &crate::cp_audit::now_ts())
+            .await?;
+        if gone.is_empty() {
+            return Ok(total);
+        }
+        total += gone.len();
+        let entries: u64 = gone.iter().map(|c| c.entries).sum();
+        let actor = crate::store::Actor {
+            name: PURGE_ACTOR.into(),
+            kind: crate::store::ActorKind::System,
+            role: None,
+        };
+        let mut rec = crate::cp_audit::CpAudit::entry(
+            crate::api::types::CpAction::LedgerPurge,
+            &actor,
+            crate::api::types::CpResult::Ok,
+        );
+        rec.reason = Some(format!(
+            "{} chain(s), {entries} entries, last entry before {before}",
+            gone.len()
+        ));
+        hub.cp_audit.record(rec).await;
+        if gone.len() < PURGE_BATCH {
+            return Ok(total);
+        }
+    }
+}
+
+/// Purge by `ledger.retention_days` every [`PURGE_TICK`] (the first a minute after start).
+pub async fn purger(hub: Arc<Hub>, shutdown: CancellationToken) {
+    if hub.secops().is_none() {
+        return;
+    }
+    let mut first = true;
+    loop {
+        let wait = if first {
+            Duration::from_secs(60)
+        } else {
+            PURGE_TICK
+        };
+        first = false;
+        tokio::select! {
+            () = tokio::time::sleep(wait) => {}
+            () = shutdown.cancelled() => return,
+        }
+        let Some(days) = hub.config.load().ledger.retention_days else {
+            continue;
+        };
+        let before = (chrono::Utc::now() - chrono::Duration::days(i64::from(days)))
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string();
+        match purge_before(&hub, &before).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(
+                chains = n,
+                days,
+                "ledger: purged chains past their retention"
+            ),
+            Err(e) => tracing::warn!(error = %e, "ledger: purging failed"),
+        }
+    }
+}

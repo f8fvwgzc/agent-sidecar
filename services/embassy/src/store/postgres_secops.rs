@@ -13,8 +13,8 @@ use super::{PgStore, checked_key, now_ts};
 use crate::secops::{
     AgentChange, AgentEntry, AgentFilter, AgentStatus, Approval, ApprovalFilter, ApprovalPut,
     ApprovalStatus, ChainFilter, ChainHead, ChainService, LedgerRecord, MAX_ALIASES, PENDING_MAX,
-    QuarantineState, RegistryChange, RiskRow, SecOpsStore, SyncPlan, by_chain, check_alias,
-    check_reason,
+    PurgedChain, QuarantineState, RegistryChange, RiskRow, SecOpsStore, SyncPlan, by_chain,
+    check_alias, check_reason,
 };
 use crate::store::StoreEvent;
 use crate::store::{Actor, ServiceKey, StoreError};
@@ -377,6 +377,73 @@ impl SecOpsStore for PgStore {
         Ok(out)
     }
 
+    async fn ledger_purge(
+        &self,
+        before: &str,
+        limit: usize,
+        by: &str,
+        at: &str,
+    ) -> Result<Vec<PurgedChain>, StoreError> {
+        let mut client = self.client().await?;
+        let tx = client.transaction().await?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let due = tx
+            .query(
+                "SELECT h.chain, h.entries, h.head, h.updated_at, s.statement FROM ledger_heads h \
+                 JOIN ledger_seals s ON s.chain = h.chain AND s.entries = h.entries \
+                 WHERE h.entries > 0 AND h.sealed = h.entries AND h.updated_at < $1 \
+                 ORDER BY h.updated_at LIMIT $2 FOR UPDATE OF h SKIP LOCKED",
+                &[&before, &limit],
+            )
+            .await?;
+        let mut out = Vec::new();
+        for r in &due {
+            let (chain, entries, head, last, seal): (String, i64, String, String, String) =
+                (r.get(0), r.get(1), r.get(2), r.get(3), r.get(4));
+            tx.execute(
+                "INSERT INTO ledger_purges (chain, entries, head, seal, last_entry_at, purged_at, purged_by) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                &[&chain, &entries, &head, &seal, &last, &at, &by],
+            )
+            .await?;
+            for table in [
+                "ledger_chain_services",
+                "ledger_seals",
+                "ledger_entries",
+                "ledger_heads",
+            ] {
+                tx.execute(&format!("DELETE FROM {table} WHERE chain = $1"), &[&chain])
+                    .await?;
+            }
+            out.push(PurgedChain {
+                chain,
+                entries: unsigned(entries),
+                head,
+                seal,
+                last_entry_at: last,
+                purged_at: at.to_string(),
+                purged_by: by.to_string(),
+            });
+        }
+        tx.commit().await?;
+        Ok(out)
+    }
+
+    async fn ledger_purged(&self, chain: &str) -> Result<Option<PurgedChain>, StoreError> {
+        let client = self.client().await?;
+        Ok(client
+            .query_opt("SELECT chain, entries, head, seal, last_entry_at, purged_at, purged_by FROM ledger_purges WHERE chain = $1", &[&chain])
+            .await?
+            .map(|r| PurgedChain {
+                chain: r.get(0),
+                entries: unsigned(r.get(1)),
+                head: r.get(2),
+                seal: r.get(3),
+                last_entry_at: r.get(4),
+                purged_at: r.get(5),
+                purged_by: r.get(6),
+            }))
+    }
+
     async fn risk_unscored(
         &self,
         quiet_before: &str,
@@ -657,6 +724,14 @@ impl SecOpsStore for PgStore {
         let tx = client.transaction().await?;
         let mut appended = 0u64;
         for (chain, recs) in by_chain(records) {
+            if tx
+                .query_opt("SELECT 1 FROM ledger_purges WHERE chain = $1", &[&chain])
+                .await?
+                .is_some()
+            {
+                // a late record of a purged run: its chain is gone for good
+                continue;
+            }
             tx.execute(
                 "INSERT INTO ledger_heads (chain, updated_at) VALUES ($1, $2) \
                  ON CONFLICT (chain) DO NOTHING",

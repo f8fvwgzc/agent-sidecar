@@ -648,7 +648,7 @@ See [Creating agents](guides/creating-agents.md) for what to put in a charter.
 
 - **The SQL stores migrate on start** to SQLite schema version 3 and PostgreSQL migration 3 (the `ledger_*` tables).
 - **Create a signing key** (`embassy ledger-key create`) and pass `--ledger-key-file` to every replica, or the ledger runs without seals.
-- **Storage grows** with every audit record the sidecars send. Plan for it, since there is no retention yet (#31).
+- **Storage grows** with every audit record the sidecars send; `ledger.retention_days` (SQL migration 7) purges old, sealed runs.
 
 ### Agent registry
 
@@ -1027,7 +1027,7 @@ agentsc verify run.evidence.json --keys jwks.json
 
   It prints one `ok` / `FAIL` line per check and exits 0 (verifies), 1 (a check fails) or 2 (unreadable). A run whose records carry payloads (`telemetry.control_plane_payloads`) needs a token with payload access.
 - **Sealing** happens once a chain has had no new entry for `--ledger-seal-after` seconds (10), and before every export.
-- **Backups.** The ledger is append-only in the database (triggers refuse updates, deletes and truncation), so a restore is the only way to roll it back, and a restored copy keeps verifying. It grows with the audit volume; there is no retention yet (#31).
+- **Backups.** The ledger is append-only in the database (triggers refuse updates, deletes and truncation), so a restore is the only way to roll it back, and a restored copy keeps verifying. It grows with the audit volume: set `ledger.retention_days` in the ControlPlaneConfig to purge runs that many days after their last entry (only runs a seal covers entirely; each purge leaves a purge record and a `ledger_purge` audit line). Export the bundles you must keep longer before they are purged: they still verify after.
 
 ```bash
 psql "$AGENTSC_POSTGRES_URL" -c "SELECT chain, entries, sealed, updated_at FROM ledger_heads ORDER BY updated_at DESC LIMIT 20"
