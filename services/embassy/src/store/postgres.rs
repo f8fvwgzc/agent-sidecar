@@ -224,7 +224,7 @@ impl MakeRustls {
             }
         }
         let config = rustls::ClientConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
+            rustls::crypto::aws_lc_rs::default_provider(),
         ))
         .with_safe_default_protocol_versions()
         .map_err(pg_err)?
@@ -1827,7 +1827,7 @@ mod tests {
         let key =
             rustls::pki_types::PrivateKeyDer::from_pem_slice(leaf.key_pem.as_bytes()).unwrap();
         let server = rustls::ServerConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
+            rustls::crypto::aws_lc_rs::default_provider(),
         ))
         .with_safe_default_protocol_versions()
         .unwrap()

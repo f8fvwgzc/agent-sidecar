@@ -40,7 +40,7 @@ address of `--http-addr`, over UDP, next to the TCP listener:
 - **One certificate.** The QUIC endpoint uses the serving certificate's rustls configuration
   with ALPN `h3`. Its certificate resolver reads the current certificate on every handshake, so
   renewals reach QUIC connections exactly as they reach TCP ones.
-- **Dependencies.** `quinn` (QUIC, with the `ring` provider the rest of the binary uses) and
+- **Dependencies.** `quinn` (QUIC, with the `aws-lc-rs` provider the rest of the binary uses; `ring` until #44) and
   `h3`/`h3-quinn` (HTTP/3 framing). They are behind the Cargo feature `http3`, on by default;
   `--no-default-features` builds an embassy that refuses `--http3` at start-up with a clear
   message.

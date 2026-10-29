@@ -126,7 +126,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .init();
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     match Cli::parse().cmd {
         Cmd::Serve(args) => embassy::serve::run(*args).await?,
         Cmd::LedgerKey {

@@ -116,7 +116,7 @@ impl Env {
     }
 
     pub async fn start_with(opts: Opts) -> Env {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let dir = tempfile::tempdir().unwrap();
         let ca = agentsc_pki::ca_init().unwrap();
         let ca_dir = dir.path().join("ca");

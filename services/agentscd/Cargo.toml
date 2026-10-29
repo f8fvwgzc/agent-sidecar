@@ -59,7 +59,7 @@ rand.workspace = true
 arc-swap = "1"
 # The mesh and the control-plane connections run rustls themselves, so the certificate can be
 # swapped after a renewal (design §6.3); tonic links the same tokio-rustls.
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12", "logging"] }
 # CPU sampling for flamegraphs, off by default: --features profiling, then AGENTSC_PROFILE=<prefix>.
 pprof = { version = "0.15", default-features = false, features = ["flamegraph"], optional = true }
 

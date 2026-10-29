@@ -42,7 +42,8 @@ as a bundle that anyone with the public keys can check offline.
    the last seal, is found even though the chain left still holds.
 7. **Keys come from a file until Tutela's vault has an API for them.** The signing key is a
    32-byte Ed25519 seed in standard base64 (nexc's `NEXC_SIGNING_KEY` form). The crate uses
-   `ring`, the provider the workspace's rustls already links. No new crypto dependency.
+   `aws-lc-rs`, the provider the workspace's rustls links (Tutela INTEGRATION §1; `ring` until
+   #44). No new crypto dependency.
 
 8. **embassy appends after the drop rules, in one transaction per batch.** What the ledger
    holds is what the control plane accepted, with the `agent_id` it filled. A ledger failure is

@@ -232,7 +232,7 @@ impl ServingCertSource {
     }
 
     fn provider() -> Arc<CryptoProvider> {
-        Arc::new(rustls::crypto::ring::default_provider())
+        Arc::new(rustls::crypto::aws_lc_rs::default_provider())
     }
 
     fn runtime(what: &str) -> anyhow::Result<tokio::runtime::Handle> {

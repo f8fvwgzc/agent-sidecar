@@ -19,7 +19,7 @@
 //! check and exits 0, 1 or 2.
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-use ring::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
+use aws_lc_rs::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -223,7 +223,7 @@ impl SigningKey {
     /// A new random seed, as a key file holds it.
     pub fn generate_seed_text() -> Result<String, KeyError> {
         let mut seed = [0u8; 32];
-        ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut seed)
+        aws_lc_rs::rand::SecureRandom::fill(&aws_lc_rs::rand::SystemRandom::new(), &mut seed)
             .map_err(|_| KeyError::Seed)?;
         Ok(STANDARD.encode(seed))
     }
