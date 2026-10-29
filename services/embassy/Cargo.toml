@@ -64,7 +64,7 @@ http-body-util = "0.1"
 # `--store sqlite:<path>` (docs/adr/0003-sqlite-store-schema.md): one embedded database with the
 # schema in src/store/schema.sql. `bundled` compiles SQLite in, so the image needs no system
 # library.
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 # `--store postgres` (store/postgres.rs): the client, a pool per replica, and the system roots
 # for `sslmode=require` (TLS through tokio-rustls above, no other TLS stack).
 tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }
