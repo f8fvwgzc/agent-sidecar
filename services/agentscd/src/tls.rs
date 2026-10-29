@@ -38,7 +38,7 @@ pub const CONTROL_PLANE_URI: &str = "spiffe://agentsc/control-plane";
 pub type TlsCell = Arc<ArcSwapOption<WorkloadTls>>;
 
 pub fn provider() -> Arc<CryptoProvider> {
-    Arc::new(rustls::crypto::ring::default_provider())
+    Arc::new(rustls::crypto::aws_lc_rs::default_provider())
 }
 
 /// The workload's certificate, key and trust roots, parsed once.

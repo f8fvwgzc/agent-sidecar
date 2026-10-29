@@ -162,7 +162,7 @@ mod tests {
     const HOUR: Duration = Duration::from_secs(3600);
 
     fn provider() -> Arc<rustls::crypto::CryptoProvider> {
-        Arc::new(rustls::crypto::ring::default_provider())
+        Arc::new(rustls::crypto::aws_lc_rs::default_provider())
     }
 
     fn roots(pem: &str) -> Arc<RootCertStore> {

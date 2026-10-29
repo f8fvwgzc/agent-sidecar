@@ -65,8 +65,8 @@ impl Sidecar {
 /// Load the charter and TLS material, bind every listener, start the runtime supervisor and, in
 /// managed mode, the certificate and control-plane tasks.
 pub async fn start(config: Config) -> anyhow::Result<Sidecar> {
-    // tonic (ring) and reqwest (aws-lc-rs) both link a rustls provider; pick one process-wide.
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    // One rustls provider process-wide, aws-lc-rs (Tutela INTEGRATION §1).
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let (state, startup, file_error) = AppState::build(config.clone()).await?;
     let state = Arc::new(state);
     let mut tasks = Vec::new();

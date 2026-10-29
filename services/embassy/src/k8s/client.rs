@@ -207,11 +207,10 @@ impl KubeClient {
 
     /// The in-cluster configuration (or the local kubeconfig).
     ///
-    /// kube-rs takes rustls' process-wide default crypto provider, which rustls cannot pick by
-    /// itself when more than one provider is compiled in (the workspace has `ring`; other
-    /// dependencies bring `aws-lc-rs`): `ring` is installed unless a default exists already.
+    /// kube-rs takes rustls' process-wide default crypto provider: aws-lc-rs, the only one compiled
+    /// in (Tutela INTEGRATION §1), is installed unless a default exists already.
     pub async fn try_default() -> anyhow::Result<Self> {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let client = kube::Client::try_default()
             .await
             .map_err(|e| anyhow::anyhow!("connect to the Kubernetes API: {e}"))?;

@@ -198,8 +198,8 @@ impl FakeCp {
     /// Serve with a certificate whose only URI SAN is `uri` (an impostor when it is not the
     /// control plane's).
     pub async fn start_with(addr: &str, ca: PemBundle, uri: &str) -> FakeCp {
-        // tonic's TLS takes the process-wide provider; the sidecar picks ring the same way
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        // tonic's TLS takes the process-wide provider; the sidecar picks aws-lc-rs the same way
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let serving = serving_cert(&ca, uri);
         let shared = Arc::new(Shared {
             ttl: Mutex::new(Duration::from_secs(3600)),

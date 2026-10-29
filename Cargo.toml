@@ -27,7 +27,7 @@ futures = "0.3"
 async-trait = "0.1"
 
 # gRPC
-tonic = { version = "0.14", features = ["tls-ring"] }
+tonic = { version = "0.14", features = ["tls-aws-lc"] }
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
 prost = "0.14"
@@ -40,9 +40,11 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 http = "1"
 
 # TLS / PKI
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12", "logging"] }
 rustls-pki-types = { version = "1", features = ["std"] }
-rcgen = { version = "0.14", default-features = false, features = ["pem", "ring", "x509-parser"] }
+rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc_rs", "x509-parser"] }
+# The one crypto library (Tutela INTEGRATION §1: every binary installs the aws-lc-rs rustls provider).
+aws-lc-rs = "1"
 x509-parser = "0.18"
 pem = "4"
 

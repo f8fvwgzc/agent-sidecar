@@ -15,8 +15,8 @@ use rcgen::{
     CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
     KeyUsagePurpose, PublicKeyData, SanType, SerialNumber, SignatureAlgorithm,
 };
-use ring::rand::SecureRandom;
-use ring::signature::{
+use aws_lc_rs::rand::SecureRandom;
+use aws_lc_rs::signature::{
     ECDSA_P256_SHA256_ASN1, ECDSA_P256_SHA384_ASN1, UnparsedPublicKey, VerificationAlgorithm,
 };
 use rustls_pki_types::pem::PemObject;
@@ -189,7 +189,7 @@ impl VerifiedPublicKey {
     /// Lowercase hex SHA-256 of [`Self::spki_der`]: the public-key fingerprint audit records
     /// carry (`cert_issue`, `cert_denied`).
     pub fn sha256_hex(&self) -> String {
-        hex_lower(ring::digest::digest(&ring::digest::SHA256, &self.spki_der).as_ref())
+        hex_lower(aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, &self.spki_der).as_ref())
     }
 }
 
@@ -324,7 +324,7 @@ fn is_dns_label(s: &str) -> bool {
 /// the public key, which repeats when a key is renewed).
 fn random_serial() -> Result<SerialNumber, PkiError> {
     let mut bytes = [0u8; 16];
-    ring::rand::SystemRandom::new()
+    aws_lc_rs::rand::SystemRandom::new()
         .fill(&mut bytes)
         .map_err(|_| PkiError::Invalid("the system random generator failed".into()))?;
     // positive, and no leading zero byte
