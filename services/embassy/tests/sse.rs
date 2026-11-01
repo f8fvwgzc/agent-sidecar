@@ -196,7 +196,8 @@ async fn filters_scope_and_payloads() {
             .await
             .expect("cp_audit and config");
         match f.event.as_str() {
-            "cp_audit" => cp = Some(f),
+            // the registry's `agent_registered` records race with `charter_put`
+            "cp_audit" if f.data["action"] == "charter_put" => cp = Some(f),
             "config" => config = Some(f),
             _ => {}
         }
