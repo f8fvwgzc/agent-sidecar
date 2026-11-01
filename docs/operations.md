@@ -654,7 +654,31 @@ auth:
 - **ID token lifetime:** at most 10 minutes (Tutela's limit). Keycloak's default is 5.
 - **Failed sign-ins** are audited as `login_failed` with the reason, and count against the same limit as failed tokens.
 
+## Forwarding audit records to the ledger
+
+Another service can append its signed `audit.v1` records to the evidence ledger (Tutela's audit log, when it forwards). Name it in the ControlPlaneConfig:
+
+```yaml
+auth:
+  tokens:
+    - { name: tutela-forwarder, role: viewer, sha256: "<hex>", namespaces: ["forwarded"] }
+ledger:
+  producers:
+    - service: tutelad                # the records' `service`
+      token: tutela-forwarder         # the auth.tokens entry it calls with
+      keys: ["<Ed25519 public key>"]  # as --ledger-retired-key takes them; list both while rotating
+```
+
+- `POST /api/v1/ledger/append` takes up to 500 records. A 200 means all of them are durable; anything else means none is, so the producer retries the whole request.
+- `gap: true` in an acknowledgement means the producer's `seq` skipped: records are lost or held back. The record is kept, and the log says so.
+- A `login`-style audit record, `ledger_append`, is written per request. A record whose `(service, id)` came before with another payload is refused and logged as an error: treat that as an incident.
+- Records live in chains named `forwarded:<service>:<tenant>:<day>`, namespace `forwarded`, and export as bundles like a run's. `ledger.retention_days` applies to them too. Their `(service, id)` rows stay after a purge, so a late retry is still answered.
+
 ## Upgrade notes
+
+### Ledger Append API
+
+- **The SQL stores migrate on start** to SQLite schema version 8 and PostgreSQL migration 8 (`ledger_forwarded`).
 
 ### Console sign-in
 

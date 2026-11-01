@@ -67,6 +67,17 @@ as a bundle that anyone with the public keys can check offline.
     written before the rows go; the delete triggers let a chain's rows go only once that record
     exists, so the one way to delete is the audited one (nexc-engine's `evidence_purged`).
 
+13. **The Append API acknowledges only what is durable.** Tutela's forwarder marks a record
+    shipped when `POST /api/v1/ledger/append` answers 200, so the request is one transaction and a
+    200 means all of it committed. The key is Tutela's own, `(service, id)`: a retry gets the place
+    the record already has, and the same key with another payload is refused and logged as an
+    error. Only a producer in `ledger.producers` may call, with its own token, for its own
+    `service`, and every record must verify against that producer's Ed25519 keys. The record is
+    kept as received, so a newer writer's fields stay and the signature still verifies. A producer
+    gets one chain per tenant and day, so a chain ends, is sealed and can be purged like a run's. A
+    gap in the producer's `seq` is reported in the acknowledgement and logged, and the record is
+    still taken: refusing it would lose the record that shows the gap.
+
 ## What it does not do yet
 
 - Verify nexc-engine's own bundles (`nexc-evidence-bundle/v1`). That belongs to the data import

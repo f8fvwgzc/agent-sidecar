@@ -158,6 +158,40 @@ impl SyncPlan {
     }
 }
 
+/// One record another service forwards ([`SecOpsStore::ledger_forward`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForwardedRecord {
+    /// The key a retry is known by: `(record.service, id)`.
+    pub id: String,
+    /// The tenant the producer's `seq` counts in.
+    pub tenant: String,
+    pub producer_seq: u64,
+    /// SHA-256 of the record's canonical JSON: the same key with another digest is refused.
+    pub digest: String,
+    pub record: LedgerRecord,
+}
+
+/// Where a forwarded record is, once the transaction that holds it has committed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ForwardedAck {
+    pub id: String,
+    pub chain: String,
+    pub seq: u64,
+    pub hash: String,
+    /// It was here already: this is its first place, and nothing new was written.
+    pub duplicate: bool,
+    /// The producer's `seq` did not follow the last one it sent for this tenant: records are
+    /// lost or held back.
+    pub gap: bool,
+}
+
+/// The refusal of a key that came before with another payload (Tutela CONTRACTS.md 9.3).
+pub fn forwarded_differs(service: &str, id: &str) -> StoreError {
+    StoreError::Invalid(vec![format!(
+        "record {service}/{id} came before with another payload"
+    )])
+}
+
 /// One audit record for the ledger ([`SecOpsStore::ledger_append`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct LedgerRecord {
@@ -462,6 +496,15 @@ pub trait SecOpsStore: Send + Sync {
     /// two replicas appending to the same chains never wait on each other in a cycle), all taken
     /// in at `ingested_at`. Each chain's head is locked while its entries are appended, so
     /// replicas appending to one chain serialize. Returns how many entries were appended.
+    /// Append forwarded records in one transaction: all of them are durable when this returns,
+    /// or none is. `StoreError::Invalid` when a record's key is here with another digest, or its
+    /// chain was purged.
+    async fn ledger_forward(
+        &self,
+        received_at: &str,
+        records: &[ForwardedRecord],
+    ) -> Result<Vec<ForwardedAck>, StoreError>;
+
     async fn ledger_append(
         &self,
         ingested_at: &str,

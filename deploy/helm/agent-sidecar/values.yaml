@@ -83,6 +83,8 @@ issuance:
 
 # Optional write policy, checked after the charter validator (ControlPlaneConfig `policy`).
 policy: {}
+# ControlPlaneConfig `ledger`, as it is: `retention_days`, `producers` (docs/operations.md).
+ledger: {}
 #  require_authz_default_deny: true
 #  http_origin_allowlist: ["https://api.partner.example"]
 #  forbid_learning_auto: false

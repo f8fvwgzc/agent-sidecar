@@ -907,6 +907,7 @@ pub enum CpAction {
     Login,
     LoginFailed,
     Logout,
+    LedgerAppend,
     CharterPut,
     AgentPost,
     AgentPut,

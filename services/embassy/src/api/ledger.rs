@@ -16,6 +16,7 @@ use super::{Authed, Query};
 use crate::auth::Identity;
 use crate::cp_audit::CpAudit;
 use crate::hub::Hub;
+use crate::secops::ledger::MAX_APPEND;
 use crate::secops::{ChainFilter, ChainHead};
 use crate::store::StoreError;
 
@@ -166,4 +167,95 @@ pub async fn keys(State(hub): State<Arc<Hub>>, Authed(_): Authed) -> Response {
 /// Public keys are public: no authentication.
 pub async fn well_known_jwks(State(hub): State<Arc<Hub>>) -> Response {
     Json(jwks(&hub)).into_response()
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppendRequest {
+    records: Vec<serde_json::Value>,
+}
+
+/// `POST /ledger/append`: the acknowledged Append API (CONTRACT.md §6.3). A record counts as
+/// shipped only once this answers 200: every record of the request is committed by then, or none
+/// is. A retry of the same `(service, id)` gets the place the record already has.
+pub async fn append(
+    State(hub): State<Arc<Hub>>,
+    Authed(ident): Authed,
+    super::JsonBody(req): super::JsonBody<AppendRequest>,
+) -> Result<Response, Fail> {
+    let store = secops(&hub)?;
+    let config = hub.config.load();
+    let producer = config
+        .ledger
+        .producers
+        .iter()
+        .find(|p| ident.oidc.is_none() && p.token == ident.name)
+        .ok_or_else(|| Fail::forbidden(["this caller is not a producer in ledger.producers"]))?;
+    if req.records.is_empty() || req.records.len() > MAX_APPEND {
+        return Err(Fail::invalid([format!(
+            "records must hold 1 to {MAX_APPEND} records, not {}",
+            req.records.len()
+        )]));
+    }
+    let now = crate::cp_audit::now_ts();
+    let day = now.get(..10).unwrap_or(&now);
+    let mut problems = Vec::new();
+    let mut records = Vec::with_capacity(req.records.len());
+    for (i, raw) in req.records.iter().enumerate() {
+        match crate::secops::ledger::forwarded(producer, raw, day) {
+            Ok(r) => records.push(r),
+            Err(e) => problems.push(format!("records[{i}]: {e}")),
+        }
+    }
+    let audit = |result, reason: String| {
+        let mut rec = CpAudit::entry(CpAction::LedgerAppend, &ident.actor(), result);
+        rec.reason = Some(reason);
+        rec
+    };
+    if !problems.is_empty() {
+        tracing::warn!(
+            producer = producer.service,
+            ?problems,
+            "ledger: forwarded records refused"
+        );
+        hub.cp_audit
+            .record(audit(CpResult::Denied, problems.join("; ")))
+            .await;
+        return Err(Fail::invalid(problems));
+    }
+    let acks = match store.ledger_forward(&now, &records).await {
+        Ok(acks) => acks,
+        Err(StoreError::Invalid(why)) => {
+            // the same key with another payload: someone rewrote a record, or the producer is broken
+            tracing::error!(
+                producer = producer.service,
+                ?why,
+                "ledger: forwarded records refused"
+            );
+            hub.cp_audit
+                .record(audit(CpResult::Denied, why.join("; ")))
+                .await;
+            return Err(Fail::invalid(why));
+        }
+        Err(e) => return Err(Fail::store(e, "")),
+    };
+    let duplicates = acks.iter().filter(|a| a.duplicate).count();
+    let gaps = acks.iter().filter(|a| a.gap).count();
+    if gaps > 0 {
+        tracing::warn!(
+            producer = producer.service,
+            gaps,
+            "ledger: a producer's seq has a gap: records are lost or held back"
+        );
+    }
+    hub.cp_audit
+        .record(audit(
+            CpResult::Ok,
+            format!(
+                "{} record(s), {duplicates} already here, {gaps} after a gap",
+                acks.len()
+            ),
+        ))
+        .await;
+    Ok(Json(serde_json::json!({ "acknowledged": acks })).into_response())
 }

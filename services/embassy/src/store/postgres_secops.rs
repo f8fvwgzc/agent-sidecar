@@ -12,9 +12,9 @@ use tokio_postgres::Row;
 use super::{PgStore, checked_key, now_ts};
 use crate::secops::{
     AgentChange, AgentEntry, AgentFilter, AgentStatus, Approval, ApprovalFilter, ApprovalPut,
-    ApprovalStatus, ChainFilter, ChainHead, ChainService, LedgerRecord, MAX_ALIASES, PENDING_MAX,
-    PurgedChain, QuarantineState, RegistryChange, RiskRow, SecOpsStore, SyncPlan, by_chain,
-    check_alias, check_reason,
+    ApprovalStatus, ChainFilter, ChainHead, ChainService, ForwardedAck, ForwardedRecord,
+    LedgerRecord, MAX_ALIASES, PENDING_MAX, PurgedChain, QuarantineState, RegistryChange, RiskRow,
+    SecOpsStore, SyncPlan, by_chain, check_alias, check_reason, forwarded_differs,
 };
 use crate::store::StoreEvent;
 use crate::store::{Actor, ServiceKey, StoreError};
@@ -779,6 +779,133 @@ impl SecOpsStore for PgStore {
         }
         tx.commit().await?;
         Ok(appended)
+    }
+
+    async fn ledger_forward(
+        &self,
+        received_at: &str,
+        records: &[ForwardedRecord],
+    ) -> Result<Vec<ForwardedAck>, StoreError> {
+        let mut client = self.client().await?;
+        let tx = client.transaction().await?;
+        let mut acks = Vec::with_capacity(records.len());
+        for f in records {
+            let r = &f.record;
+            // one forwarder's records at a time, so `seq` and the keys are read as they stand
+            let lock = format!("ledger_forwarded:{}", r.service);
+            tx.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                &[&lock],
+            )
+            .await?;
+            let known = tx
+                .query_opt(
+                    "SELECT digest, chain, seq, hash FROM ledger_forwarded \
+                     WHERE service = $1 AND id = $2",
+                    &[&r.service, &f.id],
+                )
+                .await?;
+            if let Some(row) = known {
+                let digest: String = row.get(0);
+                if digest != f.digest {
+                    return Err(forwarded_differs(&r.service, &f.id));
+                }
+                acks.push(ForwardedAck {
+                    id: f.id.clone(),
+                    chain: row.get(1),
+                    seq: unsigned(row.get(2)),
+                    hash: row.get(3),
+                    duplicate: true,
+                    gap: false,
+                });
+                continue;
+            }
+            if tx
+                .query_opt("SELECT 1 FROM ledger_purges WHERE chain = $1", &[&r.chain])
+                .await?
+                .is_some()
+            {
+                return Err(StoreError::Invalid(vec![format!(
+                    "chain {} was purged",
+                    r.chain
+                )]));
+            }
+            let last: Option<i64> = tx
+                .query_one(
+                    "SELECT max(producer_seq) FROM ledger_forwarded \
+                     WHERE service = $1 AND tenant = $2",
+                    &[&r.service, &f.tenant],
+                )
+                .await?
+                .get(0);
+            tx.execute(
+                "INSERT INTO ledger_heads (chain, updated_at) VALUES ($1, $2) \
+                 ON CONFLICT (chain) DO NOTHING",
+                &[&r.chain, &received_at],
+            )
+            .await?;
+            let row = tx
+                .query_one(
+                    "SELECT entries, head FROM ledger_heads WHERE chain = $1 FOR UPDATE",
+                    &[&r.chain],
+                )
+                .await?;
+            let head: String = row.get(1);
+            let seq = unsigned(row.get(0));
+            let hash = agentsc_ledger::entry_hash(&head, &r.chain, seq, received_at, &r.record)
+                .ok_or_else(|| StoreError::Io(format!("chain {}: a bad head", r.chain)))?;
+            tx.execute(
+                "INSERT INTO ledger_entries (chain, seq, ingested_at, record, prev_hash, hash, \
+                 namespace, service, agent_id, kind) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                &[
+                    &r.chain,
+                    &signed(seq)?,
+                    &received_at,
+                    &agentsc_ledger::canonical_json(&r.record),
+                    &head,
+                    &hash,
+                    &r.namespace,
+                    &r.service,
+                    &r.agent_id,
+                    &r.kind,
+                ],
+            )
+            .await?;
+            tx.execute(
+                "INSERT INTO ledger_chain_services (chain, namespace, service) \
+                 VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+                &[&r.chain, &r.namespace, &r.service],
+            )
+            .await?;
+            let producer_seq = signed(f.producer_seq)?;
+            tx.execute(
+                "INSERT INTO ledger_forwarded (service, id, tenant, producer_seq, digest, chain, \
+                 seq, hash, received_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                &[
+                    &r.service,
+                    &f.id,
+                    &f.tenant,
+                    &producer_seq,
+                    &f.digest,
+                    &r.chain,
+                    &signed(seq)?,
+                    &hash,
+                    &received_at,
+                ],
+            )
+            .await?;
+            acks.push(ForwardedAck {
+                id: f.id.clone(),
+                chain: r.chain.clone(),
+                seq,
+                hash,
+                duplicate: false,
+                gap: last.is_some_and(|l| l + 1 != producer_seq),
+            });
+        }
+        tx.commit().await?;
+        Ok(acks)
     }
 
     async fn ledger_head(&self, chain: &str) -> Result<ChainHead, StoreError> {

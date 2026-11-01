@@ -264,6 +264,7 @@ pub fn api_routes() -> Router<Arc<Hub>> {
         .route("/ledger/runs/{chain}", get(ledger::get_run))
         .route("/ledger/runs/{chain}/bundle", get(ledger::bundle))
         .route("/ledger/keys", get(ledger::keys))
+        .route("/ledger/append", post(ledger::append))
         .route("/proposals", get(learning::list_proposals))
         .route("/proposals/{id}/approve", post(learning::approve))
         .route("/proposals/{id}/reject", post(learning::reject))

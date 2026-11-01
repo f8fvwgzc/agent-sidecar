@@ -49,6 +49,8 @@ pub struct Opts {
     pub args: Vec<String>,
     /// `auth.oidc`.
     pub oidc: Option<embassy::config::OidcConfig>,
+    /// `ledger.producers`.
+    pub producers: Vec<embassy::config::LedgerProducer>,
 }
 
 /// One response.
@@ -161,6 +163,7 @@ impl Env {
         }
         config.policy = opts.policy.clone();
         config.auth.oidc = opts.oidc.clone();
+        config.ledger.producers = opts.producers.clone();
         config.issuance.join_tokens = opts.join_tokens.clone();
         if let Some(r) = opts.retain_bytes {
             config.events.retain_bytes = r;
