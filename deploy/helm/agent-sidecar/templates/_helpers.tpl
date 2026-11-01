@@ -146,6 +146,9 @@ other field). embassy-ca applies sidecar_images; embassy reads the same file and
   "sidecar_images" (dict "allowed_digests" (include "agent-sidecar.sidecarImageDigests" . | fromJsonArray))
   "events" (dict "retain_bytes" (int64 .Values.events.retainBytes))
 -}}
+{{- with .Values.ledger -}}
+{{- $_ := set $cfg "ledger" . -}}
+{{- end -}}
 {{- if .Values.policy -}}
 {{- $_ := set $cfg "policy" .Values.policy -}}
 {{- end -}}

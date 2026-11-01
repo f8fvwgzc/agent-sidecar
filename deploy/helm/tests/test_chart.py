@@ -754,6 +754,13 @@ def config(docs: list[dict]) -> dict:
 
 
 @needs_helm
+def test_ledger_reaches_the_config(default: list[dict]) -> None:
+    docs = render("--set", "ledger.retention_days=90")
+    assert config(docs)["ledger"] == {"retention_days": 90}
+    assert "ledger" not in config(default)
+
+
+@needs_helm
 def test_oidc_reaches_the_config_and_its_secret_is_mounted(default: list[dict]) -> None:
     oidc = {"issuer": "https://kc.example.test/realms/acme", "client_id": "embassy"}
     docs = render(

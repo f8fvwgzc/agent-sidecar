@@ -48,7 +48,7 @@ pub const SCHEMA: &str = include_str!("schema.sql");
 /// The migrations after version 1, in order: `(version, SQL)`. 2 is the agent registry
 /// (`schema_v2.sql`), 3 the evidence ledger (`schema_v3.sql`), 4 quarantines (`schema_v4.sql`), 5
 /// approvals (`schema_v5.sql`), 6 risk (`schema_v6.sql`), 7 ledger purges
-/// (`schema_v7.sql`), all of [`crate::secops`].
+/// (`schema_v7.sql`), and 8 the Append API's records (`schema_v8.sql`), all of [`crate::secops`].
 pub const MIGRATIONS: &[(i64, &str)] = &[
     (2, include_str!("schema_v2.sql")),
     (3, include_str!("schema_v3.sql")),
@@ -56,9 +56,10 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
     (5, include_str!("schema_v5.sql")),
     (6, include_str!("schema_v6.sql")),
     (7, include_str!("schema_v7.sql")),
+    (8, include_str!("schema_v8.sql")),
 ];
 /// The `PRAGMA user_version` this code writes and expects.
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 /// Store events a slow subscriber may fall behind before it loses some.
 pub const EVENTS_CAPACITY: usize = 1024;
 /// How long a statement waits for a lock held by another connection (a CLI reading the file).
@@ -1059,6 +1060,7 @@ mod tests {
                 "cp_audit",
                 "ledger_chain_services",
                 "ledger_entries",
+                "ledger_forwarded",
                 "ledger_heads",
                 "ledger_purges",
                 "ledger_seals",

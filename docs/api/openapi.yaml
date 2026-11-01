@@ -1561,6 +1561,73 @@ paths:
         "503":
           $ref: "#/components/responses/SecopsUnavailable"
 
+  /ledger/append:
+    post:
+      tags: [ledger]
+      operationId: appendToLedger
+      summary: Append a producer's signed audit.v1 records, acknowledged (CONTRACT.md §6.3).
+      description: |
+        For a token named in `ledger.producers`. Every record is checked (the audit.v1 rules, the
+        producer's `service`, its Ed25519 signature) before any is written, and the request is one
+        transaction: a 200 means every record is durable, anything else means none is. A retry of
+        the same `(service, id)` is acknowledged with the place the record already has. The same key
+        with another payload is refused, audited and logged as an error.
+      x-required-role: none
+      parameters:
+        - $ref: "#/components/parameters/Csrf"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [records]
+              additionalProperties: false
+              properties:
+                records:
+                  type: array
+                  minItems: 1
+                  maxItems: 500
+                  items:
+                    type: object
+                    description: One audit.v1 record (Tutela CONTRACTS.md 9).
+      responses:
+        "200":
+          description: Durable, in the order of the request.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [acknowledged]
+                properties:
+                  acknowledged:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, chain, seq, hash, duplicate, gap]
+                      properties:
+                        id:
+                          type: string
+                        chain:
+                          type: string
+                        seq:
+                          type: integer
+                        hash:
+                          type: string
+                        duplicate:
+                          type: boolean
+                          description: It was here already, and this is its first place.
+                        gap:
+                          type: boolean
+                          description: The producer's `seq` did not follow its last one for this tenant.
+        "400":
+          $ref: "#/components/responses/Invalid"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
   /ledger/keys:
     get:
       tags: [ledger]

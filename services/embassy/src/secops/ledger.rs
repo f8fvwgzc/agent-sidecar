@@ -8,6 +8,9 @@
 //!   [`seal_now`] seals a chain at once (before an export). Replicas may seal the same chain at the
 //!   same time: the store keeps the first seal of each length. Without a key, chains are kept and
 //!   nothing is sealed (embassy says so at start).
+//! - **Forwarding.** A producer of `ledger.producers` (Tutela) appends its signed `audit.v1`
+//!   records with `POST /api/v1/ledger/append` ([`forwarded`], `api/ledger.rs`). Each producer has
+//!   one chain per tenant and day, so a chain ends, is sealed and can be purged like a run's.
 //! - **Keys.** The current key and the retired public keys are published as a JWKS
 //!   ([`LedgerKeys::jwks`]): `GET /.well-known/jwks.json` and `GET /api/v1/ledger/keys`.
 use std::path::Path;
@@ -180,6 +183,87 @@ pub async fn sealer(hub: Arc<Hub>, seal_after: Duration, shutdown: CancellationT
             }
         }
     }
+}
+
+/// The namespace of forwarded records: they belong to no attache namespace, so only a caller of
+/// every namespace (or of this name) reads them.
+pub const FORWARDED_NAMESPACE: &str = "forwarded";
+/// The `kind` of a forwarded record.
+pub const FORWARDED_KIND: &str = "audit.v1";
+/// Records in one `POST /api/v1/ledger/append`.
+pub const MAX_APPEND: usize = 500;
+
+/// One `audit.v1` record checked against its producer, ready for the ledger. The error says what
+/// is wrong with it. The stored record is the object as it was received, never written out again:
+/// a newer producer's unknown fields stay, and the signature keeps verifying.
+pub fn forwarded(
+    producer: &crate::config::LedgerProducer,
+    raw: &serde_json::Value,
+    day: &str,
+) -> Result<super::ForwardedRecord, String> {
+    use tutela_contracts::audit::AuditEventV1;
+    let event: AuditEventV1 =
+        serde_json::from_value(raw.clone()).map_err(|e| format!("not an audit.v1 record: {e}"))?;
+    let service = event.service.to_string();
+    if service != producer.service {
+        return Err(format!(
+            "service {service:?} is not this token's producer ({:?})",
+            producer.service
+        ));
+    }
+    verify_producer(producer, raw)?;
+    let canonical = agentsc_ledger::canonical_json(raw);
+    let tenant = event.tenant.tid.to_string();
+    Ok(super::ForwardedRecord {
+        id: event.id.to_string(),
+        tenant: format!("{} {tenant}", event.tenant.iss),
+        producer_seq: event.seq,
+        digest: agentsc_ledger::sha256_hex(canonical.as_bytes()),
+        record: LedgerRecord {
+            chain: format!("forwarded:{service}:{tenant}:{day}"),
+            namespace: FORWARDED_NAMESPACE.to_string(),
+            service,
+            agent_id: event
+                .actor
+                .id
+                .as_agent()
+                .map(std::string::ToString::to_string),
+            kind: FORWARDED_KIND.to_string(),
+            record: raw.clone(),
+        },
+    })
+}
+
+/// The producer's Ed25519 signature (Tutela CONTRACTS.md 9.3): over the canonical JSON of the
+/// record as received, without `signature`, by the key `signature.key_id` names.
+fn verify_producer(
+    producer: &crate::config::LedgerProducer,
+    raw: &serde_json::Value,
+) -> Result<(), String> {
+    use base64::Engine as _;
+    let signature = &raw["signature"];
+    let (Some(kid), Some(value)) = (signature["key_id"].as_str(), signature["value"].as_str())
+    else {
+        return Err("no signature".to_string());
+    };
+    let key = producer
+        .keys
+        .iter()
+        .filter_map(|k| agentsc_ledger::parse_public_key(k).ok())
+        .find(|k| agentsc_ledger::kid_of(k) == kid)
+        .ok_or_else(|| format!("signature.key_id {kid} is not a key of this producer"))?;
+    let value = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| "signature.value is not base64url".to_string())?;
+    let mut signed = raw.clone();
+    if let Some(object) = signed.as_object_mut() {
+        object.remove("signature");
+    }
+    let message = agentsc_ledger::canonical_json(&signed);
+    if !agentsc_ledger::verify_signature(&key, message.as_bytes(), &value) {
+        return Err("the signature does not verify".to_string());
+    }
+    Ok(())
 }
 
 /// The actor of a purge by retention.

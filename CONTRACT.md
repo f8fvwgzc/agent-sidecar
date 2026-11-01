@@ -1377,6 +1377,17 @@ Audit records become evidence when embassy chains and seals them (design:
     purged run answers `404` with when it was purged; a record that arrives for it later is not
     kept. Each purge is audited (`ledger_purge`, actor `embassy:retention`).
 
+- **Append API.** `POST /api/v1/ledger/append` takes up to 500 signed `audit.v1` records (Tutela
+  CONTRACTS 9) from a producer in `ledger.producers`: only that producer's token, only its own
+  `service`, and each record must verify against its Ed25519 keys (over the canonical JSON of the
+  record as received, without `signature`). The request is one transaction, so a 200 means every
+  record is durable and anything else means none is. The answer lists `{id, chain, seq, hash,
+  duplicate, gap}` per record. A retry of a `(service, id)` gets the place it already has; the same
+  key with another payload is refused (`400`), audited and logged as an error. `gap` says the
+  producer's `seq` did not follow its last one for the tenant: the record is kept and the log says
+  so. Forwarded records are stored as received, in the chain `forwarded:<service>:<tid>:<day>` of
+  namespace `forwarded`, and are sealed, exported and purged like a run's.
+
 ## 7. Kubernetes packaging
 
 `deploy/` is a kustomize tree, applied with `kubectl apply -k deploy/`:

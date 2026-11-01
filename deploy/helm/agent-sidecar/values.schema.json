@@ -112,6 +112,7 @@
         }
       }
     },
+    "ledger": { "type": "object" },
     "issuance": {
       "type": "object",
       "additionalProperties": false,

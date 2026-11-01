@@ -60,6 +60,7 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
     (5, include_str!("postgres_schema_v5.sql")),
     (6, include_str!("postgres_schema_v6.sql")),
     (7, include_str!("postgres_schema_v7.sql")),
+    (8, include_str!("postgres_schema_v8.sql")),
 ];
 /// The channel of the store's notifications.
 pub const CHANNEL: &str = "agentsc_store";

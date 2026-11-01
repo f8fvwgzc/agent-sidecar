@@ -49,6 +49,7 @@ See [`values.yaml`](values.yaml); [`values.schema.json`](values.schema.json) ref
 | `auth.oidc`, `auth.oidcClientSecret.existingSecret` | `{}`, `""` | ControlPlaneConfig `auth.oidc`; a Secret with key `client-secret`, mounted at `/etc/agentsc/oidc` |
 | `issuance.kubernetes`, `issuance.workloadCertTTL`, `issuance.joinTokens` | `true`, `24h`, `[]` | |
 | `policy` | `{}` | ControlPlaneConfig `policy` |
+| `ledger` | `{}` | ControlPlaneConfig `ledger`: `retention_days`, `producers` |
 | `ca.existingSecret` | `""` | `<namespace>/<name>` of a CA to reuse (read-only) |
 | `trustDomain` | `agentsc` | SPIFFE trust domain: `spiffe://<trustDomain>/ns/<ns>/svc/<svc>` identities and `spiffe://<trustDomain>/control-plane`. embassy's `--trust-domain`; the injector gives every sidecar it injects the same `AGENTSC_TRUST_DOMAIN` |
 | `clusterDomain` | `cluster.local` | the Service names embassy serves as, embassy's `--cluster-domain` (workload certificate DNS SANs), and `AGENTSC_CLUSTER_DOMAIN` of injected sidecars (peer addresses) when not `cluster.local` |

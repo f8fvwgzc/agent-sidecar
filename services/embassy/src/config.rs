@@ -98,6 +98,21 @@ pub struct LedgerConfig {
     /// absent = kept for good. 1 to 36500.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention_days: Option<u32>,
+    /// Services that forward records with `POST /api/v1/ledger/append` (Tutela's audit log).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub producers: Vec<LedgerProducer>,
+}
+
+/// `ledger.producers[]`: one service whose signed `audit.v1` records the ledger takes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LedgerProducer {
+    /// The records' `service`.
+    pub service: String,
+    /// The `auth.tokens` entry it calls with. It may append and nothing more than its role says.
+    pub token: String,
+    /// Its Ed25519 public keys, as `--ledger-retired-key` takes them.
+    pub keys: Vec<String>,
 }
 
 /// `risk`: what the risk score does (crate::secops::risk).
@@ -299,6 +314,35 @@ fn check_namespaces(errs: &mut Vec<String>, at: &str, namespaces: &[String]) {
         }
         if !seen.insert(ns.as_str()) {
             errs.push(format!("{at}.namespaces[{j}] {ns:?} is listed twice"));
+        }
+    }
+}
+
+/// The rules of `ledger.producers`. `tokens`: the names `auth.tokens` uses.
+fn check_producers(errs: &mut Vec<String>, producers: &[LedgerProducer], tokens: &BTreeSet<&str>) {
+    let (mut services, mut callers) = (BTreeSet::new(), BTreeSet::new());
+    for (i, p) in producers.iter().enumerate() {
+        let at = format!("ledger.producers[{i}]");
+        if tutela_contracts::audit::ServiceName::parse(&p.service).is_err() {
+            errs.push(format!(
+                "{at}.service {:?} is not a service name",
+                p.service
+            ));
+        } else if !services.insert(p.service.as_str()) {
+            errs.push(format!("{at}.service {:?} is listed twice", p.service));
+        }
+        if !tokens.contains(p.token.as_str()) {
+            errs.push(format!("{at}.token {:?} is not in auth.tokens", p.token));
+        } else if !callers.insert(p.token.as_str()) {
+            errs.push(format!("{at}.token {:?} is listed twice", p.token));
+        }
+        if p.keys.is_empty() {
+            errs.push(format!("{at}.keys is empty"));
+        }
+        for (j, k) in p.keys.iter().enumerate() {
+            if let Err(e) = agentsc_ledger::parse_public_key(k) {
+                errs.push(format!("{at}.keys[{j}]: {e}"));
+            }
         }
     }
 }
@@ -622,6 +666,7 @@ impl ControlPlaneConfig {
         if let Some(o) = &self.auth.oidc {
             check_oidc(&mut errs, o, &names);
         }
+        check_producers(&mut errs, &self.ledger.producers, &names);
         if let Some(p) = &self.auth.session_key_file
             && p.as_os_str().is_empty()
         {
