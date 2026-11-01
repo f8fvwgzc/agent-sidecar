@@ -4,7 +4,7 @@
 # that signs in through Keycloak's own login form. Needs docker, curl and python3.
 #
 #   make oidc-check            check, then stop everything
-#   KEEP=1 make oidc-check     leave it running to try the console: http://localhost:18080
+#   KEEP=1 make oidc-check     leave it running to try the console: http://localhost:18090
 #                              (dev-admin / dev-only-password); stop it with Ctrl-C
 #
 # Every credential here is a test value of deploy/keycloak/dev-realm.json.
@@ -14,7 +14,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 EMBASSY=${EMBASSY:-$ROOT/target/debug/embassy}
 KEYCLOAK_IMAGE=${KEYCLOAK_IMAGE:-quay.io/keycloak/keycloak:26.0}
 KC_PORT=${KC_PORT:-18180}
-HTTP_PORT=18080 # the realm registers this redirect URI
+HTTP_PORT=18090 # the realm registers this redirect URI
 ISSUER=http://localhost:$KC_PORT/realms/attache-dev
 CONSOLE=http://localhost:$HTTP_PORT
 NAME=agentsc-oidc-check-$$
