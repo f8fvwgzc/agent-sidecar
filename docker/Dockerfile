@@ -13,6 +13,12 @@ ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
+# tutela-contracts is a git dependency of a private repository: cargo fetches it with the git CLI
+# over the SSH agent of `docker build --ssh default` (GitHub's published host key, no TOFU).
+COPY .cargo ./.cargo
+RUN mkdir -p -m 0700 /root/.ssh && \
+    echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" \
+      > /root/.ssh/known_hosts
 COPY proto proto
 COPY crates crates
 COPY services services
@@ -23,7 +29,8 @@ COPY docs/api docs/api
 # embassy embeds the console (ui/) at compile time. The UI has no build step: the files are served
 # as they are, so the context only has to contain them.
 COPY ui ui
-RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+RUN --mount=type=ssh \
+    --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/src/target,id=agentsc-target-${TARGETARCH} \
     cargo build --release --locked -p agentscd -p agentsc-cli -p embassy \

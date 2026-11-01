@@ -91,8 +91,8 @@ minikube-down:
 # Build the four images inside minikube's docker daemon so no registry is needed.
 build:
 	eval $$(minikube -p $(PROFILE) docker-env) && \
-	  docker build -f docker/Dockerfile --target agentscd -t agentsc/agentscd:dev . && \
-	  docker build -f docker/Dockerfile --target embassy  -t agentsc/embassy:dev . && \
+	  docker build --ssh default -f docker/Dockerfile --target agentscd -t agentsc/agentscd:dev . && \
+	  docker build --ssh default -f docker/Dockerfile --target embassy  -t agentsc/embassy:dev . && \
 	  docker build -t agentsc/orders:dev examples/orders && \
 	  docker build -t agentsc/inventory:dev examples/inventory
 	eval $$(minikube -p $(PROFILE) docker-env) && docker images 'agentsc/*'
@@ -150,7 +150,7 @@ demo-helm: minikube-up build
 # ---- v0.2: Docker Compose on one machine (docs/design/agent-platform.md §14) ------------------
 # The embassy image is built first: gen-env.sh makes the tokens with `embassy token create`.
 compose-up:
-	docker build -f docker/Dockerfile --target embassy -t agentsc/embassy:dev .
+	docker build --ssh default -f docker/Dockerfile --target embassy -t agentsc/embassy:dev .
 	EMBASSY="docker run --rm agentsc/embassy:dev" ./deploy/compose/gen-env.sh $(COMPOSE_ENV)
 	$(COMPOSE) up -d --build
 	@echo "console http://localhost:$${AGENTSC_CONSOLE_PORT:-8080} (AGENTSC_ADMIN_TOKEN in $(COMPOSE_ENV)), orders http://localhost:$${AGENTSC_ORDERS_PORT:-8081}, jaeger http://localhost:$${AGENTSC_JAEGER_PORT:-16686}"

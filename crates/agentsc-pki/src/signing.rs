@@ -10,14 +10,14 @@ use std::fmt;
 use std::time::{Duration as StdDuration, SystemTime, UNIX_EPOCH};
 
 use agentsc_common::identity::SpiffeId;
+use aws_lc_rs::rand::SecureRandom;
+use aws_lc_rs::signature::{
+    ECDSA_P256_SHA256_ASN1, ECDSA_P256_SHA384_ASN1, UnparsedPublicKey, VerificationAlgorithm,
+};
 use rcgen::string::Ia5String;
 use rcgen::{
     CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
     KeyUsagePurpose, PublicKeyData, SanType, SerialNumber, SignatureAlgorithm,
-};
-use aws_lc_rs::rand::SecureRandom;
-use aws_lc_rs::signature::{
-    ECDSA_P256_SHA256_ASN1, ECDSA_P256_SHA384_ASN1, UnparsedPublicKey, VerificationAlgorithm,
 };
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, CertificateSigningRequestDer};

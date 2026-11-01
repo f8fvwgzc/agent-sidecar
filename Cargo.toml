@@ -48,6 +48,9 @@ aws-lc-rs = "1"
 x509-parser = "0.18"
 pem = "4"
 
+# Tutela (identity and permissions), pinned to a release tag; private, fetched over SSH.
+tutela-contracts = { git = "ssh://git@github.com/f8fvwgzc/tutela.git", tag = "v0.1.0" }
+
 # Data
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }

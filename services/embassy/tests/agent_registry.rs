@@ -44,7 +44,7 @@ async fn registry_rules(store: Arc<dyn SecOpsStore>) {
         .unwrap()
         .entry
         .clone();
-    AgentId::parse(&ops.id).unwrap();
+    ops.id.parse::<AgentId>().unwrap();
     assert_eq!(ops.principal, format!("agent:{}", ops.id));
     assert_eq!(ops.status, AgentStatus::Active);
     assert!(
@@ -373,7 +373,7 @@ async fn a_stored_charter_registers_its_agents_and_the_api_resolves_them() {
     let listed = agents_of(&env.get("/agents?service=orders", "alice").await.body);
     let ops_id = listed.iter().find(|a| a.0 == "ops").unwrap().2.clone();
     assert!(listed.iter().all(|a| a.1 == "active"));
-    AgentId::parse(&ops_id).unwrap();
+    ops_id.parse::<AgentId>().unwrap();
     assert!(env.hub.secops().is_some());
 
     // scope: carol sees the namespace, dave (another namespace) sees nothing
