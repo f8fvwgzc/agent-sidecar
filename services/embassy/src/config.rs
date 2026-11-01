@@ -139,6 +139,109 @@ pub struct AuthConfig {
     /// (sessions then end when the process restarts).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_key_file: Option<PathBuf>,
+    /// Console sign-in through an OIDC issuer ([`crate::auth::oidc`]). Absent: tokens only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oidc: Option<OidcConfig>,
+}
+
+/// `auth.oidc`: an OIDC issuer the console signs people in through (Keycloak in Tutela's phases
+/// A and B). The endpoints default to Keycloak's paths under `issuer`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OidcConfig {
+    /// The exact `iss` of the tokens: `https://<host>/realms/<realm>`.
+    pub issuer: String,
+    /// The Tutela tenant this issuer speaks for, `ten_<uuidv7>` (the trust list's entry).
+    pub tenant: String,
+    /// This client at the issuer, and the audience of the ID token.
+    pub client_id: String,
+    /// The client secret of a confidential client. Absent: a public client (PKCE only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret_file: Option<PathBuf>,
+    /// This embassy's callback, as registered at the issuer: ends in
+    /// [`crate::auth::oidc::CALLBACK_PATH`].
+    pub redirect_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jwks_uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_session_endpoint: Option<String>,
+    /// The signature algorithms the issuer may use.
+    #[serde(default = "default_oidc_algs")]
+    pub algs: Vec<String>,
+    /// The issuer's host may resolve to private addresses (an internal Keycloak).
+    #[serde(default)]
+    pub private_host: bool,
+    /// `http` and loopback are allowed: a dev realm on this machine. Never in production.
+    #[serde(default)]
+    pub dev_loopback: bool,
+    /// The claim of the ID token that lists the person's groups.
+    #[serde(default = "default_groups_claim")]
+    pub groups_claim: String,
+    /// People by their subject at the issuer. Checked before `groups`.
+    #[serde(default)]
+    pub users: Vec<OidcUser>,
+    /// What a group gives its members: the first entry the person is in. Roles are never merged.
+    #[serde(default)]
+    pub groups: Vec<OidcGroup>,
+}
+
+fn default_oidc_algs() -> Vec<String> {
+    vec!["RS256".into(), "ES256".into()]
+}
+
+fn default_groups_claim() -> String {
+    "groups".into()
+}
+
+impl OidcConfig {
+    fn path(&self, set: Option<&String>, tail: &str) -> String {
+        set.cloned()
+            .unwrap_or_else(|| format!("{}/protocol/openid-connect/{tail}", self.issuer))
+    }
+
+    pub fn authorization_endpoint(&self) -> String {
+        self.path(self.authorization_endpoint.as_ref(), "auth")
+    }
+
+    pub fn token_endpoint(&self) -> String {
+        self.path(self.token_endpoint.as_ref(), "token")
+    }
+
+    pub fn jwks_uri(&self) -> String {
+        self.path(self.jwks_uri.as_ref(), "certs")
+    }
+
+    pub fn end_session_endpoint(&self) -> String {
+        self.path(self.end_session_endpoint.as_ref(), "logout")
+    }
+}
+
+/// `auth.oidc.users[]`: one person, by the issuer's subject (never an e-mail).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OidcUser {
+    pub sub: String,
+    /// DNS-1123 label, unique among people and tokens; the actor name in audit records.
+    pub name: String,
+    pub role: Role,
+    pub namespaces: Vec<String>,
+    #[serde(default)]
+    pub payloads: bool,
+}
+
+/// `auth.oidc.groups[]`: what one group gives its members. Their actor name is `oidc:<sub>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OidcGroup {
+    pub group: String,
+    pub role: Role,
+    pub namespaces: Vec<String>,
+    #[serde(default)]
+    pub payloads: bool,
 }
 
 /// `auth.anonymous`: what a request without credentials gets. `viewer` is honoured only with
@@ -165,6 +268,80 @@ pub struct TokenEntry {
     /// May see audit `input`/`output` payloads.
     #[serde(default)]
     pub payloads: bool,
+}
+
+/// The rules of a list of namespaces at `at`.
+fn check_namespaces(errs: &mut Vec<String>, at: &str, namespaces: &[String]) {
+    if namespaces.is_empty() {
+        errs.push(format!(
+            "{at}.namespaces is empty (use [\"*\"] for every namespace)"
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    for (j, ns) in namespaces.iter().enumerate() {
+        if ns == ALL_NAMESPACES {
+            if namespaces.len() > 1 {
+                errs.push(format!("{at}.namespaces: \"*\" must be the only entry"));
+            }
+        } else if !is_dns_label(ns) {
+            errs.push(format!(
+                "{at}.namespaces[{j}] {ns:?} is not a DNS-1123 label"
+            ));
+        }
+        if !seen.insert(ns.as_str()) {
+            errs.push(format!("{at}.namespaces[{j}] {ns:?} is listed twice"));
+        }
+    }
+}
+
+/// The rules of `auth.oidc`. `tokens`: the names `auth.tokens` uses.
+fn check_oidc(errs: &mut Vec<String>, o: &OidcConfig, tokens: &BTreeSet<&str>) {
+    if let Err(e) = crate::auth::oidc::verifier_config(o) {
+        errs.push(e);
+    }
+    let callback = crate::auth::oidc::CALLBACK_PATH;
+    match url::Url::parse(&o.redirect_url) {
+        Ok(u) if u.path() != callback => errs.push(format!(
+            "auth.oidc.redirect_url must end in {callback}, not {:?}",
+            u.path()
+        )),
+        Ok(u) if u.scheme() != "https" && !o.dev_loopback => {
+            errs.push("auth.oidc.redirect_url must be https".to_string());
+        }
+        Ok(_) => {}
+        Err(e) => errs.push(format!("auth.oidc.redirect_url: {e}")),
+    }
+    if o.users.is_empty() && o.groups.is_empty() {
+        errs.push("auth.oidc needs users or groups: nobody could sign in".to_string());
+    }
+    if o.groups_claim.is_empty() {
+        errs.push("auth.oidc.groups_claim is empty".to_string());
+    }
+    let (mut subs, mut names) = (BTreeSet::new(), BTreeSet::new());
+    for (i, u) in o.users.iter().enumerate() {
+        let at = format!("auth.oidc.users[{i}]");
+        if u.sub.is_empty() || u.sub.len() > 255 {
+            errs.push(format!("{at}.sub must be 1 to 255 characters"));
+        } else if !subs.insert(u.sub.as_str()) {
+            errs.push(format!("{at}.sub {:?} is listed twice", u.sub));
+        }
+        if !is_dns_label(&u.name) {
+            errs.push(format!("{at}.name {:?} is not a DNS-1123 label", u.name));
+        } else if tokens.contains(u.name.as_str()) || !names.insert(u.name.as_str()) {
+            errs.push(format!("{at}.name {:?} is used twice", u.name));
+        }
+        check_namespaces(errs, &at, &u.namespaces);
+    }
+    let mut groups = BTreeSet::new();
+    for (i, g) in o.groups.iter().enumerate() {
+        let at = format!("auth.oidc.groups[{i}]");
+        if g.group.is_empty() || g.group.len() > 128 {
+            errs.push(format!("{at}.group must be 1 to 128 characters"));
+        } else if !groups.insert(g.group.as_str()) {
+            errs.push(format!("{at}.group {:?} is listed twice", g.group));
+        }
+        check_namespaces(errs, &at, &g.namespaces);
+    }
 }
 
 impl TokenEntry {
@@ -425,26 +602,10 @@ impl ControlPlaneConfig {
                 errs.push(format!("{at}.name {:?} is used twice", t.name));
             }
             check_sha256(&mut errs, &mut hashes, &at, &t.sha256);
-            if t.namespaces.is_empty() {
-                errs.push(format!(
-                    "{at}.namespaces is empty (use [\"*\"] for every namespace)"
-                ));
-            }
-            let mut seen = BTreeSet::new();
-            for (j, ns) in t.namespaces.iter().enumerate() {
-                if ns == ALL_NAMESPACES {
-                    if t.namespaces.len() > 1 {
-                        errs.push(format!("{at}.namespaces: \"*\" must be the only entry"));
-                    }
-                } else if !is_dns_label(ns) {
-                    errs.push(format!(
-                        "{at}.namespaces[{j}] {ns:?} is not a DNS-1123 label"
-                    ));
-                }
-                if !seen.insert(ns.as_str()) {
-                    errs.push(format!("{at}.namespaces[{j}] {ns:?} is listed twice"));
-                }
-            }
+            check_namespaces(&mut errs, &at, &t.namespaces);
+        }
+        if let Some(o) = &self.auth.oidc {
+            check_oidc(&mut errs, o, &names);
         }
         if let Some(p) = &self.auth.session_key_file
             && p.as_os_str().is_empty()

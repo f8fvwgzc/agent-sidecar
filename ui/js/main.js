@@ -368,7 +368,12 @@ function wireToolbar() {
   $('#btn-live').addEventListener('click', () => setLive(!state.live));
   $('#btn-signout').addEventListener('click', async () => {
     try {
-      await state.api.logout();
+      const res = await state.api.logout();
+      // a person from single sign-on: end the issuer's session too
+      if (res && res.data && res.data.end_session_url) {
+        location.assign(res.data.end_session_url);
+        return;
+      }
     } catch {
       /* the session may already be gone */
     }

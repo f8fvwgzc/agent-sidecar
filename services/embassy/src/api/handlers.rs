@@ -167,7 +167,16 @@ pub async fn logout(State(hub): State<Arc<Hub>>, Authed(ident): Authed) -> Respo
             CpResult::Ok,
         ))
         .await;
-    let mut resp = StatusCode::NO_CONTENT.into_response();
+    // a person's session at the issuer goes too, or signing in again would be silent
+    let end_session = ident
+        .oidc
+        .as_ref()
+        .and_then(|_| hub.auth.oidc())
+        .and_then(|o| o.end_session_url());
+    let mut resp = match end_session {
+        Some(url) => Json(serde_json::json!({ "end_session_url": url })).into_response(),
+        None => StatusCode::NO_CONTENT.into_response(),
+    };
     if let Ok(v) = HeaderValue::from_str(&hub.auth.clear_cookie()) {
         resp.headers_mut().insert(header::SET_COOKIE, v);
     }

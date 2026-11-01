@@ -37,6 +37,7 @@ mod learning;
 pub mod ledger;
 mod links;
 mod live;
+mod oidc;
 pub mod types;
 pub mod write;
 
@@ -198,6 +199,9 @@ pub fn api_routes() -> Router<Arc<Hub>> {
         .route("/login", post(handlers::login))
         .route("/logout", post(handlers::logout))
         .route("/whoami", get(handlers::whoami))
+        .route("/auth/methods", get(oidc::methods))
+        .route("/auth/oidc/login", get(oidc::login))
+        .route("/auth/oidc/callback", get(oidc::callback))
         .route("/authz/shadow", get(handlers::authz_shadow))
         .route("/graph", get(live::graph))
         .route("/services", get(handlers::services))

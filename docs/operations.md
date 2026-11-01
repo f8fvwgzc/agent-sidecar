@@ -627,7 +627,37 @@ Things to know:
 
 See [Creating agents](guides/creating-agents.md) for what to put in a charter.
 
+## Console sign-in through OIDC
+
+People sign in to the console through an OIDC issuer (Keycloak in Tutela's phases A and B), and `att_` tokens keep working next to it. Set `auth.oidc` in the ControlPlaneConfig (Helm: `auth.oidc`):
+
+```yaml
+auth:
+  oidc:
+    issuer: https://keycloak.example/realms/attache   # the exact `iss`
+    tenant: ten_0193a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2c  # the Tutela tenant this issuer speaks for
+    client_id: embassy                                # also the audience of the ID token
+    client_secret_file: /etc/agentsc/oidc/client-secret  # absent: a public client
+    redirect_url: https://embassy.example/api/v1/auth/oidc/callback
+    users:
+      - { sub: "<subject>", name: carla, role: admin, namespaces: ["*"] }
+    groups:
+      - { group: sre, role: editor, namespaces: [shop] }
+```
+
+- **At the issuer:** a client with the standard flow and PKCE S256, this `redirect_url`, and `https://embassy.example/` as a valid post-logout redirect. To use `groups`, add a group membership mapper to the ID token. The claim is `groups` unless `groups_claim` says otherwise, and Keycloak writes `/sre` when "Full group path" is on, so match what it sends.
+- **Who gets in:** `users` first, by the issuer's subject, then the first `groups` entry the person is in. Nothing else: an unknown person gets no session. Roles are never merged, because a role applies to all of a person's namespaces, and merging could raise it into a namespace it was never given.
+- **Leaving:** removing a person from `auth.oidc` ends their session at the next request. Disabling them only at the issuer does not: the session lasts up to 12 hours.
+- **Endpoints** default to Keycloak's paths under `issuer`. Set `authorization_endpoint`, `token_endpoint`, `jwks_uri` and `end_session_endpoint` for another issuer.
+- **Reaching the issuer:** calls go through `tutela-safenet`, so `https` and public addresses only. `private_host: true` allows the issuer's own host on a private network. `dev_loopback: true` allows `http` to loopback, for a dev realm on one machine; never set it in production.
+- **ID token lifetime:** at most 10 minutes (Tutela's limit). Keycloak's default is 5.
+- **Failed sign-ins** are audited as `login_failed` with the reason, and count against the same limit as failed tokens.
+
 ## Upgrade notes
+
+### Console sign-in
+
+- **`auth.oidc` is optional.** Without it nothing changes. Building from source now needs SSH read access to `f8fvwgzc/tutela`, as for `tutela-contracts`.
 
 ### Risk scores
 

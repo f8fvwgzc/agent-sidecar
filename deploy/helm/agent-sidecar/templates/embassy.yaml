@@ -132,6 +132,11 @@ spec:
             - name: session-key
               mountPath: /etc/agentsc/session
               readOnly: true
+            {{- with .Values.auth.oidcClientSecret.existingSecret }}
+            - name: oidc-client-secret
+              mountPath: /etc/agentsc/oidc
+              readOnly: true
+            {{- end }}
             - name: tls
               mountPath: /etc/agentsc/tls
               readOnly: true
@@ -147,6 +152,11 @@ spec:
             items:
               - key: key
                 path: key
+        {{- with .Values.auth.oidcClientSecret.existingSecret }}
+        - name: oidc-client-secret
+          secret:
+            secretName: {{ . }}
+        {{- end }}
         # Created and renewed by embassy-ca; the pod starts once it exists, and renewals reach the
         # mounted files without a restart.
         - name: tls

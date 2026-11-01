@@ -7,6 +7,24 @@ import { TOKEN_RE } from './util.js';
 let wired = false;
 let handler = null;
 
+/** What a `?signin=<code>` from the OIDC callback means. */
+const SSO_ERRORS = {
+  failed: 'Single sign-on did not complete. Try again.',
+  no_access: 'You signed in, but this control plane has no access set up for your account.',
+  rate_limited: 'Too many failed attempts. Try again in a minute.',
+};
+
+/** Show (and take out of the address bar) the outcome the callback left. */
+function showSsoOutcome() {
+  const params = new URLSearchParams(location.search);
+  const code = params.get('signin');
+  if (!code) return;
+  showError(SSO_ERRORS[code] || SSO_ERRORS.failed);
+  params.delete('signin');
+  const rest = params.toString();
+  history.replaceState(null, '', `${location.pathname}${rest ? `?${rest}` : ''}${location.hash}`);
+}
+
 function showError(msg) {
   const el = $('#signin-error');
   el.textContent = msg || '';
@@ -21,6 +39,13 @@ export function showSignin({ api, message, onSignedIn }) {
   note.textContent = message || '';
   note.hidden = !message;
   showError('');
+  showSsoOutcome();
+  api.authMethods().then(
+    (res) => {
+      $('#signin-sso').hidden = !res.data.oidc;
+    },
+    () => {},
+  );
   const input = $('#token');
   input.value = '';
   setTimeout(() => input.focus(), 0);

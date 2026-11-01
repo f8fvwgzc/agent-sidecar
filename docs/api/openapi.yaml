@@ -45,7 +45,8 @@ info:
       HMAC-SHA256-signed `{token_name, exp}` (lifetime 12 h) under the configured
       `auth.session_key_file` key. Attributes: `HttpOnly; SameSite=Strict; Path=/`, plus
       `Secure` when served over TLS. A session dies when its token is removed from the
-      config (the server re-resolves `token_name` on every request).
+      config (the server re-resolves `token_name` on every request). A person signed in through
+      `auth.oidc` holds the same cookie, with `(iss, sub, group)` in place of the token.
 
     Without either credential the API answers 401 (`unauthenticated`), except with
     `embassy serve --dev` and `auth.anonymous: viewer`, where an anonymous viewer is allowed.
@@ -183,6 +184,21 @@ paths:
       parameters:
         - $ref: "#/components/parameters/Csrf"
       responses:
+        "200":
+          description: |
+            Signed out, and the session was a person's from `auth.oidc`: the cookie is cleared, and
+            the console sends the browser to `end_session_url` to end the issuer's session too.
+          headers:
+            Set-Cookie:
+              $ref: "#/components/headers/SetSessionCookie"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [end_session_url]
+                properties:
+                  end_session_url:
+                    type: string
         "204":
           description: Signed out; the cookie is cleared (`Max-Age=0`).
           headers:
@@ -197,6 +213,81 @@ paths:
         "421":
           $ref: "#/components/responses/MisdirectedRequest"
 
+  /auth/methods:
+    get:
+      tags: [session]
+      operationId: getAuthMethods
+      summary: What the sign-in screen offers.
+      x-required-role: none
+      security: []
+      responses:
+        "200":
+          description: Tokens always; `oidc` when `auth.oidc` is configured.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token, oidc]
+                properties:
+                  token:
+                    type: boolean
+                  oidc:
+                    type: boolean
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+  /auth/oidc/login:
+    get:
+      tags: [session]
+      operationId: oidcLogin
+      summary: Start signing in at the OIDC issuer (a browser navigation).
+      description: |
+        Redirects to the issuer's authorization endpoint (code flow, PKCE S256, `state`, `nonce`)
+        and sets the signed `agentsc_oidc` cookie: `HttpOnly; SameSite=Lax; Path=/api/v1/auth/oidc`.
+      x-required-role: none
+      security: []
+      responses:
+        "303":
+          description: To the issuer.
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+  /auth/oidc/callback:
+    get:
+      tags: [session]
+      operationId: oidcCallback
+      summary: Come back from the OIDC issuer (a browser navigation).
+      description: |
+        Redeems `code`, verifies the ID token and sets the session cookie. Any failure redirects to
+        `/?signin=failed`, `/?signin=no_access` (a valid person with no entry in `auth.oidc`) or
+        `/?signin=rate_limited`, and says no more; the audit record has the reason.
+      x-required-role: none
+      security: []
+      parameters:
+        - name: code
+          in: query
+          schema:
+            type: string
+        - name: state
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Signed in. A small page moves on to the console.
+          headers:
+            Set-Cookie:
+              $ref: "#/components/headers/SetSessionCookie"
+          content:
+            text/html:
+              schema:
+                type: string
+        "303":
+          description: Refused, back to the sign-in screen.
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
   /whoami:
     get:
       tags: [session]

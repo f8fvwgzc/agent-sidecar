@@ -130,13 +130,15 @@ other field). embassy-ca applies sidecar_images; embassy reads the same file and
 {{- range .Values.issuance.joinTokens -}}
 {{- $joinTokens = append $joinTokens (dict "name" .name "sha256" .sha256 "namespace" .namespace "services" .services "expires_at" .expires_at) -}}
 {{- end -}}
+{{- $auth := dict
+  "tokens" $tokens
+  "anonymous" "none"
+  "session_key_file" "/etc/agentsc/session/key" }}
+{{- with .Values.auth.oidc }}{{- $_ := set $auth "oidc" . }}{{- end }}
 {{- $cfg := dict
   "apiVersion" "agentsc.io/v1alpha1"
   "kind" "ControlPlaneConfig"
-  "auth" (dict
-    "tokens" $tokens
-    "anonymous" "none"
-    "session_key_file" "/etc/agentsc/session/key")
+  "auth" $auth
   "issuance" (dict
     "kubernetes" .Values.issuance.kubernetes
     "workload_cert_ttl" .Values.issuance.workloadCertTTL

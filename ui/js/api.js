@@ -234,6 +234,10 @@ export class Api {
   logout() {
     return this.call('POST', '/logout').finally(() => this.clearCache());
   }
+  /** What the sign-in screen offers (public). */
+  authMethods() {
+    return this.call('GET', '/auth/methods');
+  }
   /** Forget the transport's validated copies (another session may be shown other data). */
   clearCache() {
     if (this.transport && this.transport.cache) this.transport.cache.clear();

@@ -39,6 +39,7 @@
         <input id="token" name="token" class="input mono" type="password" autocomplete="off" spellcheck="false" placeholder="att_…" required>
         <div id="signin-error" class="field-error" role="alert" hidden></div>
         <button id="signin-submit" type="submit" class="btn btn-primary btn-block">Sign in</button>
+        <a id="signin-sso" class="btn btn-block" href="/api/v1/auth/oidc/login" hidden>Sign in with SSO</a>
         <p class="field-hint">The token is exchanged once for a session cookie and is not kept by this page. An admin creates tokens with <code>embassy token create</code>.</p>
       </form>
     </section>

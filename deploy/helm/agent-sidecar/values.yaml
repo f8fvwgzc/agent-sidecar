@@ -61,6 +61,13 @@ auth:
     # keeps it across upgrades (it reads the live Secret with `lookup`; tools that cannot, such as
     # Argo CD, should set this instead).
     existingSecret: ""
+  # Console sign-in through an OIDC issuer: ControlPlaneConfig's `auth.oidc`, as it is
+  # (docs/operations.md). Empty: tokens only.
+  oidc: {}
+  oidcClientSecret:
+    # A Secret with key `client-secret`, mounted at /etc/agentsc/oidc. Set
+    # `auth.oidc.client_secret_file: /etc/agentsc/oidc/client-secret` to use it.
+    existingSecret: ""
 
 issuance:
   # Accept Kubernetes projected service-account tokens (TokenReview, audience agentsc).

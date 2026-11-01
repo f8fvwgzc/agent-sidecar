@@ -754,6 +754,21 @@ def config(docs: list[dict]) -> dict:
 
 
 @needs_helm
+def test_oidc_reaches_the_config_and_its_secret_is_mounted(default: list[dict]) -> None:
+    oidc = {"issuer": "https://kc.example.test/realms/acme", "client_id": "embassy"}
+    docs = render(
+        "--set-json",
+        "auth.oidc=" + json.dumps(oidc),
+        "--set",
+        "auth.oidcClientSecret.existingSecret=oidc-client",
+    )
+    assert config(docs)["auth"]["oidc"] == oidc
+    volumes = find(docs, "Deployment", "embassy")["spec"]["template"]["spec"]["volumes"]
+    assert {"name": "oidc-client-secret", "secret": {"secretName": "oidc-client"}} in volumes
+    assert "oidc" not in config(default)["auth"]
+
+
+@needs_helm
 def test_config_secret_holds_the_control_plane_config(default: list[dict], full: list[dict]) -> None:
     assert config(default) == {
         "apiVersion": "agentsc.io/v1alpha1",
