@@ -222,6 +222,9 @@ def test_actions_are_pinned_to_commit_shas() -> None:
     uses = re.findall(r"uses:\s*(\S+)(.*)", RELEASE.read_text())
     assert uses
     for ref, comment in uses:
+        # a local action comes from the commit being released
+        if ref.startswith("./.github/actions/"):
+            continue
         assert re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", ref), ref
         assert re.search(r"# v\d+\.\d+\.\d+", comment), f"{ref}: name the tag in a comment"
 

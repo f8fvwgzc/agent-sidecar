@@ -24,6 +24,7 @@ services:
       context: ../..
       dockerfile: docker/Dockerfile
       target: embassy
+      ssh: [default] # the Tutela git dependencies
     # Before serving, embassy publishes the CA certificate (never the key) to the agentsc-ca volume
     # that every sidecar mounts read-only. The CA itself (ca.crt, ca.key: the --ca-dir layout) is in
     # the embassy-data volume, which only embassy mounts; the first start creates it with
@@ -78,6 +79,7 @@ services:
       context: ../..
       dockerfile: docker/Dockerfile
       target: agentscd
+      ssh: [default] # the Tutela git dependencies
     command:
       - --control-plane=embassy:15012
       - --ca-file=/agentsc-ca/ca.crt

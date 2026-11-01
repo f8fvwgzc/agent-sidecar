@@ -19,7 +19,7 @@ use crate::cp_audit::CpAudit;
 use crate::hub::Hub;
 use crate::secops::{AgentEntry, AgentFilter, AgentStatus, SecOpsStore};
 use crate::store::StoreError;
-use agentsc_common::principal::{AgentId, Principal};
+use agentsc_common::principal::{AgentId, Principal, service_of};
 
 /// The SecOps store, or 503 `secops_unavailable`.
 pub fn secops(hub: &Hub) -> Result<&Arc<dyn SecOpsStore>, Fail> {
@@ -34,7 +34,7 @@ pub fn secops(hub: &Hub) -> Result<&Arc<dyn SecOpsStore>, Fail> {
 /// Agent `id`, if the caller may see it; else 404 (as for an agent that does not exist).
 async fn visible_agent(hub: &Hub, ident: &Identity, id: &str) -> Result<AgentEntry, Fail> {
     let missing = || Fail::not_found(format!("no agent {id}"));
-    if AgentId::parse(id).is_err() {
+    if id.parse::<AgentId>().is_err() {
         return Err(Fail::invalid([format!(
             "{id:?} is not an agent id (agt_<uuidv7>)"
         )]));
@@ -109,14 +109,17 @@ pub async fn resolve_principal(
     };
     let store = secops(&hub)?;
     let missing = || Fail::not_found(format!("no principal {text}"));
-    let resolved = match Principal::parse(text) {
-        Ok(Principal::Agent(id)) => Resolved::Agent {
-            agent: visible_agent(&hub, &ident, id.as_str()).await?,
+    let parsed = text.parse::<Principal>().ok();
+    let resolved = match parsed.as_ref() {
+        Some(Principal::Agent(id)) => Resolved::Agent {
+            agent: visible_agent(&hub, &ident, &id.to_string()).await?,
         },
-        Ok(Principal::Workload(w)) => {
-            if w.trust_domain != hub.opts.trust_domain || !ident.allows_namespace(&w.namespace) {
+        Some(p @ Principal::Workload(_)) => {
+            let Some(w) = service_of(p).filter(|w| {
+                w.trust_domain == hub.opts.trust_domain && ident.allows_namespace(&w.namespace)
+            }) else {
                 return Err(missing());
-            }
+            };
             let agents = store
                 .list_agents(&AgentFilter {
                     namespace: Some(w.namespace.clone()),
@@ -132,7 +135,7 @@ pub async fn resolve_principal(
                 agents,
             }
         }
-        Err(_) => match store.resolve_alias(text).await {
+        _ => match store.resolve_alias(text).await {
             Ok(a) if ident.allows_namespace(&a.namespace) => Resolved::Agent { agent: a },
             Ok(_) | Err(StoreError::NotFound) => return Err(missing()),
             Err(e) => return Err(Fail::store(e, "")),

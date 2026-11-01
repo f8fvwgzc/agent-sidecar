@@ -203,7 +203,7 @@ pub fn apply_agent_ids(state: &AppState, u: AgentIds) {
     let ids: std::collections::HashMap<String, String> = u
         .ids
         .into_iter()
-        .filter(|(_, id)| agentsc_common::principal::AgentId::parse(id).is_ok())
+        .filter(|(_, id)| id.parse::<agentsc_common::principal::AgentId>().is_ok())
         .collect();
     tracing::debug!(agents = ids.len(), "agent registry ids applied");
     state.audit.writer().set_agent_ids(ids);

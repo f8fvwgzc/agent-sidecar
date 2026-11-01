@@ -15,7 +15,7 @@ use crate::secops::{
 };
 use crate::store::StoreEvent;
 use crate::store::{Actor, ServiceKey, StoreError};
-use agentsc_common::principal::AgentId;
+use agentsc_common::principal::new_agent_id;
 
 const AGENT_SELECT: &str = "SELECT id, namespace, service, name, status, created_at, updated_at, \
      quarantined_at, quarantine_reason, quarantined_by FROM agents";
@@ -164,7 +164,7 @@ impl SecOpsStore for SqliteStore {
             let now = now_ts();
             let mut changes = Vec::new();
             for name in &plan.register {
-                let id = AgentId::generate();
+                let id = new_agent_id().to_string();
                 tx.execute(
                     "INSERT INTO agents (id, namespace, service, name, status, created_at, updated_at) \
                      VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?5)",

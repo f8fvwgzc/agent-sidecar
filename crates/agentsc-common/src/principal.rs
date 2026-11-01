@@ -1,145 +1,53 @@
 //! Principals as Tutela names them (CONTRACT.md §5.3, docs/design/agent-registry.md).
 //!
-//! On the wire a principal is one string, `<kind>:<id>`. attache names two kinds:
+//! On the wire a principal is one string, `<kind>:<id>`. The types are Tutela's own
+//! (`tutela-contracts` at the `v0.1.0` tag, `principal.rs` and `id.rs`), re-exported here, so
+//! attache reads and writes exactly what Tutela does. attache mints two kinds:
 //!
 //! - `agent:agt_<uuidv7>`: an agent of the registry, minted by embassy when a charter first
-//!   declares it. The id is the agent's, not the service's: it never changes while the agent keeps
-//!   its `(namespace, service, name)`, and is never reused for another agent.
+//!   declares it ([`new_agent_id`]). The id is the agent's, not the service's: it never changes
+//!   while the agent keeps its `(namespace, service, name)`, and is never reused for another agent.
 //! - `workload:spiffe://<trust domain>/ns/<namespace>/svc/<service>`: a workload, the identity in
-//!   every certificate embassy issues ([`crate::identity::SpiffeId`]).
-//!
-//! The text rules are Tutela's (`tutela-contracts`, `principal.rs` and `id.rs`): a UUIDv7 in its
-//! 36-character lowercase form, with version digit `7` and variant digit `8`, `9`, `a` or `b`.
-//! attache checks the text itself instead of linking `tutela-contracts`, which has no tagged
-//! release yet (#26); the conformance tests below use Tutela's own examples.
-use std::fmt;
-use std::str::FromStr;
+//!   every certificate embassy issues ([`crate::identity::SpiffeId`], [`workload`],
+//!   [`service_of`]).
+pub use tutela_contracts::id::Uuid7;
+pub use tutela_contracts::principal::{
+    AgentId, Principal, PrincipalError, PrincipalKind, WorkloadId,
+};
 
 use crate::identity::SpiffeId;
 
-/// The prefix of an agent id.
-pub const AGENT_ID_PREFIX: &str = "agt_";
-/// The kind prefix of an agent principal.
-pub const AGENT_KIND: &str = "agent:";
-/// The kind prefix of a workload principal.
-pub const WORKLOAD_KIND: &str = "workload:";
-
-/// Why a principal or an agent id was rejected.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum PrincipalError {
-    #[error("an agent id must start with `agt_`")]
-    AgentPrefix,
-    #[error("a UUIDv7 must be exactly 36 characters")]
-    UuidLength,
-    #[error("a UUIDv7 must have `-` after the 8th, 12th, 16th and 20th hex digit")]
-    UuidHyphen,
-    #[error("a UUIDv7 must use lowercase hex digits (0-9, a-f) only")]
-    UuidHex,
-    #[error("the UUID version digit must be 7")]
-    UuidVersion,
-    #[error("the UUID variant digit must be 8, 9, a or b")]
-    UuidVariant,
-    #[error("a principal is `agent:agt_<uuidv7>` or `workload:spiffe://<td>/ns/<ns>/svc/<svc>`")]
-    Kind,
-    #[error("a workload principal names `spiffe://<trust domain>/ns/<namespace>/svc/<service>`")]
-    Workload,
+/// A fresh agent id: a UUIDv7 of now, so ids sort by creation time.
+pub fn new_agent_id() -> AgentId {
+    AgentId::new(uuid7_now())
 }
 
-/// Checks a UUIDv7 in Tutela's text form.
-fn check_uuid7(s: &str) -> Result<(), PrincipalError> {
-    let b = s.as_bytes();
-    if b.len() != 36 {
-        return Err(PrincipalError::UuidLength);
-    }
-    for (i, &c) in b.iter().enumerate() {
-        if matches!(i, 8 | 13 | 18 | 23) {
-            if c != b'-' {
-                return Err(PrincipalError::UuidHyphen);
-            }
-        } else if !matches!(c, b'0'..=b'9' | b'a'..=b'f') {
-            return Err(PrincipalError::UuidHex);
-        }
-    }
-    if b[14] != b'7' {
-        return Err(PrincipalError::UuidVersion);
-    }
-    if !matches!(b[19], b'8' | b'9' | b'a' | b'b') {
-        return Err(PrincipalError::UuidVariant);
-    }
-    Ok(())
+/// A UUIDv7 of now.
+pub fn uuid7_now() -> Uuid7 {
+    Uuid7::from_uuid(uuid::Uuid::now_v7()).expect("now_v7 sets version 7 and the RFC 9562 variant")
 }
 
-/// An agent id, `agt_<uuidv7>`.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct AgentId(String);
-
-impl AgentId {
-    /// A fresh id: a UUIDv7 of now, so ids sort by creation time.
-    pub fn generate() -> AgentId {
-        AgentId(format!("{AGENT_ID_PREFIX}{}", uuid::Uuid::now_v7()))
-    }
-
-    /// `agt_<uuidv7>`, exactly as Tutela reads it.
-    pub fn parse(s: &str) -> Result<AgentId, PrincipalError> {
-        let uuid = s
-            .strip_prefix(AGENT_ID_PREFIX)
-            .ok_or(PrincipalError::AgentPrefix)?;
-        check_uuid7(uuid)?;
-        Ok(AgentId(s.to_string()))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    /// The principal, `agent:agt_<uuidv7>`.
-    pub fn principal(&self) -> String {
-        format!("{AGENT_KIND}{}", self.0)
-    }
+/// A UUIDv7 in Tutela's text form made of `bytes`: the version and variant bits are set and the
+/// rest is kept, so the same bytes always give the same id (embassy's derived caller ids).
+pub fn uuid7_from_bytes(bytes: [u8; 16]) -> Uuid7 {
+    let uuid = uuid::Builder::from_bytes(bytes)
+        .with_version(uuid::Version::SortRand)
+        .with_variant(uuid::Variant::RFC4122)
+        .into_uuid();
+    Uuid7::from_uuid(uuid).expect("the builder set version 7 and the RFC 9562 variant")
 }
 
-impl fmt::Display for AgentId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
+/// The workload principal of a service identity. `None` only for a URI Tutela's SPIFFE rules
+/// refuse (attache's own are always accepted).
+pub fn workload(id: &SpiffeId) -> Option<Principal> {
+    WorkloadId::parse(&id.uri()).ok().map(Principal::Workload)
 }
 
-impl FromStr for AgentId {
-    type Err = PrincipalError;
-    fn from_str(s: &str) -> Result<AgentId, PrincipalError> {
-        AgentId::parse(s)
-    }
-}
-
-/// A principal attache names.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Principal {
-    Agent(AgentId),
-    Workload(SpiffeId),
-}
-
-impl Principal {
-    /// `agent:agt_<uuidv7>` or `workload:spiffe://<td>/ns/<ns>/svc/<svc>`.
-    pub fn parse(s: &str) -> Result<Principal, PrincipalError> {
-        if let Some(id) = s.strip_prefix(AGENT_KIND) {
-            return AgentId::parse(id).map(Principal::Agent);
-        }
-        if let Some(uri) = s.strip_prefix(WORKLOAD_KIND) {
-            return SpiffeId::parse(uri)
-                .map(Principal::Workload)
-                .ok_or(PrincipalError::Workload);
-        }
-        Err(PrincipalError::Kind)
-    }
-}
-
-impl fmt::Display for Principal {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Principal::Agent(id) => write!(f, "{AGENT_KIND}{id}"),
-            Principal::Workload(w) => write!(f, "{WORKLOAD_KIND}{}", w.uri()),
-        }
-    }
+/// The attache service identity a principal names: a `workload:` principal of the form
+/// `spiffe://<trust domain>/ns/<namespace>/svc/<service>`. Any other principal, or another
+/// SPIFFE path (Tutela's examples use `/sa/`, tutela#29), names none.
+pub fn service_of(p: &Principal) -> Option<SpiffeId> {
+    p.as_workload().and_then(|w| SpiffeId::parse(w.as_str()))
 }
 
 #[cfg(test)]
@@ -151,78 +59,67 @@ mod tests {
 
     #[test]
     fn tutelas_agent_principal_reads_and_prints_the_same() {
-        let p = Principal::parse(TUTELA_AGENT).unwrap();
+        let p: Principal = TUTELA_AGENT.parse().unwrap();
         assert_eq!(p.to_string(), TUTELA_AGENT);
-        let Principal::Agent(id) = p else { panic!() };
-        assert_eq!(id.as_str(), "agt_0193a1b2-c3d4-7b33-9c44-5d6e7f809102");
-        assert_eq!(id.principal(), TUTELA_AGENT);
+        let id = p.as_agent().unwrap();
+        assert_eq!(id.to_string(), "agt_0193a1b2-c3d4-7b33-9c44-5d6e7f809102");
+        assert_eq!(Principal::Agent(*id).to_string(), TUTELA_AGENT);
     }
 
     #[test]
     fn a_generated_id_is_a_uuidv7_tutela_accepts() {
         for _ in 0..64 {
-            let id = AgentId::generate();
-            assert_eq!(AgentId::parse(id.as_str()).unwrap(), id);
+            let id = new_agent_id();
+            assert_eq!(id.to_string().parse::<AgentId>().unwrap(), id);
         }
-        let (a, b) = (AgentId::generate(), AgentId::generate());
-        assert!(
-            a < b || a.as_str()[..17] == b.as_str()[..17],
-            "ids sort by time"
-        );
+        let (a, b) = (new_agent_id().to_string(), new_agent_id().to_string());
+        assert!(a < b || a[..17] == b[..17], "ids sort by time");
     }
 
     #[test]
-    fn each_rule_has_its_error() {
+    fn ids_from_the_same_bytes_are_the_same_uuidv7() {
+        let bytes = [0xab; 16];
+        let a = uuid7_from_bytes(bytes);
+        assert_eq!(a, uuid7_from_bytes(bytes));
+        assert_ne!(a, uuid7_from_bytes([0xcd; 16]));
+        let text = a.to_string();
+        assert_eq!(text.as_bytes()[14], b'7');
+        assert!(matches!(text.as_bytes()[19], b'8' | b'9' | b'a' | b'b'));
+        assert_eq!(text.parse::<Uuid7>().unwrap(), a);
+    }
+
+    #[test]
+    fn each_broken_rule_is_refused() {
         let ok = "agt_0193a1b2-c3d4-7b33-9c44-5d6e7f809102";
-        AgentId::parse(ok).unwrap();
-        let cases = [
-            (
-                "usr_0193a1b2-c3d4-7b33-9c44-5d6e7f809102",
-                PrincipalError::AgentPrefix,
-            ),
-            (
-                "agt_0193a1b2-c3d4-7b33-9c44-5d6e7f80910",
-                PrincipalError::UuidLength,
-            ),
-            (
-                "agt_0193a1b2xc3d4-7b33-9c44-5d6e7f809102",
-                PrincipalError::UuidHyphen,
-            ),
-            (
-                "agt_0193A1B2-c3d4-7b33-9c44-5d6e7f809102",
-                PrincipalError::UuidHex,
-            ),
-            (
-                "agt_0193a1b2-c3d4-4b33-9c44-5d6e7f809102",
-                PrincipalError::UuidVersion,
-            ),
-            (
-                "agt_0193a1b2-c3d4-7b33-cc44-5d6e7f809102",
-                PrincipalError::UuidVariant,
-            ),
-        ];
-        for (s, err) in cases {
-            assert_eq!(AgentId::parse(s), Err(err), "{s}");
+        ok.parse::<AgentId>().unwrap();
+        for bad in [
+            "usr_0193a1b2-c3d4-7b33-9c44-5d6e7f809102", // prefix
+            "agt_0193a1b2-c3d4-7b33-9c44-5d6e7f80910",  // length
+            "agt_0193a1b2xc3d4-7b33-9c44-5d6e7f809102", // hyphen
+            "agt_0193A1B2-c3d4-7b33-9c44-5d6e7f809102", // hex
+            "agt_0193a1b2-c3d4-4b33-9c44-5d6e7f809102", // version
+            "agt_0193a1b2-c3d4-7b33-cc44-5d6e7f809102", // variant
+        ] {
+            assert!(bad.parse::<AgentId>().is_err(), "{bad}");
         }
-        assert_eq!(
-            Principal::parse(&format!("user:{ok}")),
-            Err(PrincipalError::Kind)
-        );
+        assert!(format!("nobody:{ok}").parse::<Principal>().is_err());
+        assert!(format!("user:{ok}").parse::<Principal>().is_err());
     }
 
     #[test]
     fn a_workload_principal_is_attaches_service_identity() {
         let w = "workload:spiffe://agentsc/ns/shop/svc/orders";
-        let p = Principal::parse(w).unwrap();
-        assert_eq!(
-            p,
-            Principal::Workload(SpiffeId::new("agentsc", "shop", "orders"))
-        );
+        let p: Principal = w.parse().unwrap();
+        let id = SpiffeId::new("agentsc", "shop", "orders");
+        assert_eq!(service_of(&p), Some(id.clone()));
+        assert_eq!(workload(&id), Some(p.clone()));
         assert_eq!(p.to_string(), w);
-        // Tutela's example path (`/sa/`) names no attache workload (tutela#29)
-        assert_eq!(
-            Principal::parse("workload:spiffe://prod-eu1.attache.example.test/ns/shop/sa/orders"),
-            Err(PrincipalError::Workload)
-        );
+        // Tutela's example path (`/sa/`) is a valid principal that names no attache workload
+        // (tutela#29), and neither does an agent
+        let other: Principal = "workload:spiffe://prod-eu1.attache.example.test/ns/shop/sa/orders"
+            .parse()
+            .unwrap();
+        assert_eq!(service_of(&other), None);
+        assert_eq!(service_of(&TUTELA_AGENT.parse().unwrap()), None);
     }
 }
