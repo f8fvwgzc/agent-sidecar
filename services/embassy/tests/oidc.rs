@@ -270,6 +270,8 @@ impl Rig {
                     c.contains("HttpOnly") && c.contains("SameSite=Strict"),
                     "{c}"
                 );
+                // a person's session is short: an hour, not a token's 12
+                assert!(c.contains("Max-Age=3600"), "{c}");
                 c.split(';').next().unwrap().to_string()
             })
     }
@@ -549,6 +551,8 @@ fn the_configuration_is_checked() {
     assert!(check(|v| v["algs"] = json!(["none"])).contains("auth.oidc.algs"));
     assert!(check(|v| v["redirect_url"] = json!("https://e.test/cb")).contains("must end in"));
     assert!(check(|v| v["groups"] = json!([])).contains("nobody could sign in"));
+    assert!(check(|v| v["session_seconds"] = json!(60)).contains("session_seconds"));
+    assert!(check(|v| v["session_seconds"] = json!(86400)).contains("session_seconds"));
     assert!(
         check(|v| v["users"] = json!([
             {"sub": "a", "name": "Not A Label", "role": "admin", "namespaces": ["*"]}

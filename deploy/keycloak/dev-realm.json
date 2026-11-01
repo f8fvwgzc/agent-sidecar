@@ -1,0 +1,101 @@
+{
+  "realm": "attache-dev",
+  "displayName": "attache dev realm: test values only",
+  "enabled": true,
+  "sslRequired": "none",
+  "accessTokenLifespan": 300,
+  "registrationAllowed": false,
+  "clients": [
+    {
+      "clientId": "attache-console",
+      "name": "attache console",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "dev-only-client-secret",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "http://localhost:18080/api/v1/auth/oidc/callback"
+      ],
+      "webOrigins": [],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:18080/"
+      },
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "config": {
+            "full.path": "false",
+            "id.token.claim": "true",
+            "access.token.claim": "false",
+            "userinfo.token.claim": "false",
+            "claim.name": "groups"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "id": "0b9f3a1e-7c44-4d7b-9a55-5d3c8e7f1a01",
+      "username": "dev-admin",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Dev",
+      "lastName": "Admin",
+      "email": "dev-admin@example.test",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "dev-only-password",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "id": "0b9f3a1e-7c44-4d7b-9a55-5d3c8e7f1a03",
+      "username": "dev-operator",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Dev",
+      "lastName": "Operator",
+      "email": "dev-operator@example.test",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "dev-only-password",
+          "temporary": false
+        }
+      ],
+      "groups": [
+        "/operators"
+      ]
+    },
+    {
+      "id": "0b9f3a1e-7c44-4d7b-9a55-5d3c8e7f1a02",
+      "username": "dev-stranger",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Dev",
+      "lastName": "Stranger",
+      "email": "dev-stranger@example.test",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "dev-only-password",
+          "temporary": false
+        }
+      ]
+    }
+  ],
+  "groups": [
+    {
+      "name": "operators"
+    }
+  ]
+}

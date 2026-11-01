@@ -301,8 +301,8 @@ impl Auth {
     }
 
     /// A new session cookie value for a person of `auth.oidc`.
-    pub fn new_oidc_session(&self, subject: &oidc::OidcSubject) -> String {
-        let exp = chrono::Utc::now().timestamp() + session::LIFETIME.as_secs() as i64;
+    pub fn new_oidc_session(&self, subject: &oidc::OidcSubject, seconds: u32) -> String {
+        let exp = chrono::Utc::now().timestamp() + i64::from(seconds);
         session::sign_oidc(&self.key.load(), subject, exp)
     }
 
@@ -395,10 +395,14 @@ impl Auth {
 
     /// `Set-Cookie` for a new session.
     pub fn session_cookie(&self, value: &str) -> String {
+        self.session_cookie_for(value, session::LIFETIME.as_secs())
+    }
+
+    /// `Set-Cookie` for a new session of `seconds`.
+    pub fn session_cookie_for(&self, value: &str, seconds: u64) -> String {
         let mut c = format!(
-            "{}={value}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}",
+            "{}={value}; HttpOnly; SameSite=Strict; Path=/; Max-Age={seconds}",
             session::COOKIE,
-            session::LIFETIME.as_secs()
         );
         if self.secure_cookies {
             c.push_str("; Secure");

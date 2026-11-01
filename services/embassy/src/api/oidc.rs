@@ -121,7 +121,8 @@ pub async fn callback(
             return Ok(refuse(&hub, ip, "no_access", why).await);
         }
     };
-    let value = hub.auth.new_oidc_session(&subject);
+    let seconds = issuer.config.session_seconds;
+    let value = hub.auth.new_oidc_session(&subject, seconds);
     let actor = Actor {
         name: grant.name,
         kind: ActorKind::Session,
@@ -135,7 +136,10 @@ pub async fn callback(
         SIGNED_IN,
     )
         .into_response();
-    let page = with_cookie(page, &hub.auth.session_cookie(&value));
+    let page = with_cookie(
+        page,
+        &hub.auth.session_cookie_for(&value, u64::from(seconds)),
+    );
     Ok(with_cookie(
         page,
         &oidc::clear_state_cookie(hub.auth.secure_cookies),

@@ -176,6 +176,27 @@ jobs:
 
   # Blocking: a new advisory against a dependency fails CI until the dependency is fixed, or the
   # advisory is accepted with a reason in deny.toml and .cargo/audit.toml.
+  # Console sign-in against a real Keycloak dev realm (Tutela INTEGRATION §1, standalone mode).
+  oidc-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/tutela-ssh
+        with:
+          key: ${{ secrets.TUTELA_READ_KEY }}
+
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends protobuf-compiler
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Sign in through Keycloak
+        run: make oidc-check
+
   audit:
     name: Dependency audit (cargo-deny, cargo-audit, pip-audit)
     runs-on: ubuntu-24.04

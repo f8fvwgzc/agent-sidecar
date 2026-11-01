@@ -181,6 +181,11 @@ pub struct OidcConfig {
     /// The claim of the ID token that lists the person's groups.
     #[serde(default = "default_groups_claim")]
     pub groups_claim: String,
+    /// How long a person's session lasts, 300 to 43200. It is also how long someone disabled only
+    /// at the issuer keeps access, so it is short: signing in again is one click while the issuer's
+    /// own session lives.
+    #[serde(default = "default_oidc_session_seconds")]
+    pub session_seconds: u32,
     /// People by their subject at the issuer. Checked before `groups`.
     #[serde(default)]
     pub users: Vec<OidcUser>,
@@ -195,6 +200,10 @@ fn default_oidc_algs() -> Vec<String> {
 
 fn default_groups_claim() -> String {
     "groups".into()
+}
+
+fn default_oidc_session_seconds() -> u32 {
+    3600
 }
 
 impl OidcConfig {
@@ -313,6 +322,12 @@ fn check_oidc(errs: &mut Vec<String>, o: &OidcConfig, tokens: &BTreeSet<&str>) {
     }
     if o.users.is_empty() && o.groups.is_empty() {
         errs.push("auth.oidc needs users or groups: nobody could sign in".to_string());
+    }
+    if !(300..=43_200).contains(&o.session_seconds) {
+        errs.push(format!(
+            "auth.oidc.session_seconds must be 300..=43200, not {}",
+            o.session_seconds
+        ));
     }
     if o.groups_claim.is_empty() {
         errs.push("auth.oidc.groups_claim is empty".to_string());

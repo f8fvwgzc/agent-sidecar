@@ -647,7 +647,8 @@ auth:
 
 - **At the issuer:** a client with the standard flow and PKCE S256, this `redirect_url`, and `https://embassy.example/` as a valid post-logout redirect. To use `groups`, add a group membership mapper to the ID token. The claim is `groups` unless `groups_claim` says otherwise, and Keycloak writes `/sre` when "Full group path" is on, so match what it sends.
 - **Who gets in:** `users` first, by the issuer's subject, then the first `groups` entry the person is in. Nothing else: an unknown person gets no session. Roles are never merged, because a role applies to all of a person's namespaces, and merging could raise it into a namespace it was never given.
-- **Leaving:** removing a person from `auth.oidc` ends their session at the next request. Disabling them only at the issuer does not: the session lasts up to 12 hours.
+- **Leaving:** removing a person from `auth.oidc` ends their session at the next request. Disabling them only at the issuer does not: they keep the session until it expires. So it lasts `session_seconds`, an hour by default (300 to 43200), and signing in again is one click while the issuer's session lives.
+- **Trying it:** `make oidc-check` runs a real Keycloak dev realm in Docker (`deploy/keycloak/dev-realm.json`, test values only) and signs in through its login form. `KEEP=1 make oidc-check` leaves it running.
 - **Endpoints** default to Keycloak's paths under `issuer`. Set `authorization_endpoint`, `token_endpoint`, `jwks_uri` and `end_session_endpoint` for another issuer.
 - **Reaching the issuer:** calls go through `tutela-safenet`, so `https` and public addresses only. `private_host: true` allows the issuer's own host on a private network. `dev_loopback: true` allows `http` to loopback, for a dev realm on one machine; never set it in production.
 - **ID token lifetime:** at most 10 minutes (Tutela's limit). Keycloak's default is 5.

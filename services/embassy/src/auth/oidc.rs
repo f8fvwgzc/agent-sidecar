@@ -14,8 +14,9 @@
 //!    groups could raise a role into a namespace it was never given. No match: no session.
 //! 4. The session is the usual `agentsc_session` cookie (HttpOnly, `SameSite=Strict`), holding
 //!    `(iss, sub, group)`. As with tokens, the configuration is read again on every request, so a
-//!    person who leaves `auth.oidc` loses the session at once. A person removed at the issuer
-//!    keeps it until it expires ([`super::session::LIFETIME`]).
+//!    person who leaves `auth.oidc` loses the session at once. A person disabled only at the
+//!    issuer keeps it until it expires, so it lasts `session_seconds`, an hour by default, and not
+//!    the 12 hours of a token's session: signing in again is one click.
 //!
 //! All outbound calls go through `tutela-safenet`: `https` to public addresses only, unless
 //! `private_host` names the issuer's host or `dev_loopback` allows loopback.
