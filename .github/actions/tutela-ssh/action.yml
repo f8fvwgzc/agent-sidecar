@@ -1,0 +1,21 @@
+name: Tutela read access
+description: >-
+  Loads a deploy key with read access to the private f8fvwgzc/tutela repository into an SSH agent,
+  so cargo (git-fetch-with-cli, see .cargo/config.toml) and `docker build --ssh default` can fetch
+  the Tutela git dependencies.
+inputs:
+  key:
+    description: The private half of a read-only deploy key of f8fvwgzc/tutela (secret TUTELA_READ_KEY).
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Start an SSH agent with the key
+      shell: bash
+      env:
+        KEY: ${{ inputs.key }}
+      run: |
+        eval "$(ssh-agent -s)" > /dev/null
+        printf '%s\n' "$KEY" | ssh-add - 2> /dev/null
+        echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
+        echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"

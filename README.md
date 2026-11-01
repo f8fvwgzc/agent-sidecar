@@ -39,7 +39,7 @@ flowchart LR
 
 ## Quick start
 
-You need Rust (`cargo`), `protoc`, `uv`, Go, `python3` and `curl`. No Kubernetes and no API key.
+You need Rust (`cargo`), `protoc`, `uv`, Go, `python3` and `curl`. No Kubernetes and no API key. The Tutela crates are a private git dependency pinned to a tag, so `cargo` needs an SSH agent with read access to `f8fvwgzc/tutela`.
 
 ```bash
 git clone https://github.com/f8fvwgzc/agent-sidecar.git && cd agent-sidecar

@@ -17,9 +17,9 @@
 //! `security/signing.rs`, `bin/nexc_verify.rs`): a SHA-256 chain from 32 zero bytes over sorted
 //! JSON, Ed25519 over the exact statement bytes, RFC 7638 key ids, and a verifier that runs every
 //! check and exits 0, 1 or 2.
+use aws_lc_rs::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-use aws_lc_rs::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};

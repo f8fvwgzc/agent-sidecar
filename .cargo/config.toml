@@ -1,0 +1,5 @@
+# tutela-contracts is a git dependency of a private repository (ssh://git@github.com/f8fvwgzc/tutela):
+# fetch it with the git CLI so cargo uses the SSH agent locally (and a deploy key or read token in
+# CI and `docker build --ssh default`).
+[net]
+git-fetch-with-cli = true

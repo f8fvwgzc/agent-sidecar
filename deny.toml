@@ -58,3 +58,5 @@ wildcards = "allow"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Tutela (identity and permissions), pinned to a release tag; private, fetched over SSH.
+allow-git = ["ssh://git@github.com/f8fvwgzc/tutela.git"]
