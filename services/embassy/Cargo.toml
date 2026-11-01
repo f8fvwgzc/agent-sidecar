@@ -13,6 +13,8 @@ agentsc-pki.workspace = true
 agentsc-common.workspace = true
 tutela-contracts.workspace = true
 tutela-pdp.workspace = true
+tutela-safenet.workspace = true
+tutela-sdk.workspace = true
 agentsc-ledger.workspace = true
 agentsc-charter.workspace = true
 agentsc-proto.workspace = true
@@ -83,5 +85,6 @@ default = ["http3"]
 http3 = ["dep:quinn", "dep:h3", "dep:h3-quinn"]
 
 [dev-dependencies]
+aws-lc-rs.workspace = true
 tempfile.workspace = true
 rcgen.workspace = true

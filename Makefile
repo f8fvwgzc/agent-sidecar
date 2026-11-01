@@ -21,7 +21,7 @@ COMPOSE_ENV := deploy/compose/.env
 PACKAGING_PYTEST := uv run --no-project --with pytest==8.4.2 --with pyyaml==6.0.2 --with cel-python==0.5.0 python -m pytest -q
 .PHONY: local-demo platform-demo e2e-helm all build-host test test-rust test-python test-live fmt lint proto schema validate \
         minikube-up minikube-down build deploy charters undeploy demo logs logs-denied secret-anthropic clean dev-certs \
-        compose-up compose-down helm-lint helm-template demo-helm packaging-test
+        compose-up compose-down helm-lint helm-template demo-helm packaging-test oidc-check
 
 all: build-host test
 
@@ -178,6 +178,11 @@ local-demo:
 # tokens, a live agent edit. CI runs it with CHECK_ONLY=1; run it yourself to keep it up for the console.
 platform-demo:
 	CHECK_ONLY=$${CHECK_ONLY:-1} ./scripts/local-platform.sh
+
+# Console sign-in against a real Keycloak dev realm, in Docker (scripts/oidc-check.sh).
+oidc-check:
+	cargo build -q -p embassy
+	./scripts/oidc-check.sh
 
 demo: $(AGENTSC)
 	AGENTSC=$(AGENTSC) NS=$(NS) KUBE_CONTEXT=$(KUBE_CONTEXT) ./scripts/demo.sh

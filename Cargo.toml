@@ -51,6 +51,8 @@ pem = "4"
 # Tutela (identity and permissions), pinned to a release tag; private, fetched over SSH.
 tutela-contracts = { git = "ssh://git@github.com/f8fvwgzc/tutela.git", tag = "v0.1.0" }
 tutela-pdp = { git = "ssh://git@github.com/f8fvwgzc/tutela.git", tag = "v0.1.0" }
+tutela-safenet = { git = "ssh://git@github.com/f8fvwgzc/tutela.git", tag = "v0.1.0" }
+tutela-sdk = { git = "ssh://git@github.com/f8fvwgzc/tutela.git", tag = "v0.1.0" }
 
 # Data
 serde = { version = "1", features = ["derive"] }

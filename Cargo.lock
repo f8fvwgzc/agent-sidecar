@@ -936,6 +936,7 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "async-trait",
+ "aws-lc-rs",
  "axum",
  "base64 0.23.1",
  "bytes",
@@ -981,6 +982,8 @@ dependencies = [
  "tracing-subscriber",
  "tutela-contracts",
  "tutela-pdp",
+ "tutela-safenet",
+ "tutela-sdk",
  "url",
  "uuid",
  "x509-parser",
@@ -3929,6 +3932,39 @@ dependencies = [
  "thiserror",
  "toml",
  "tutela-contracts",
+]
+
+[[package]]
+name = "tutela-safenet"
+version = "0.0.0"
+source = "git+ssh://git@github.com/f8fvwgzc/tutela.git?tag=v0.1.0#e7406a0ae7e7b67bc939c07c73b07e0ca95259b8"
+dependencies = [
+ "reqwest",
+ "rustls",
+ "rustls-platform-verifier",
+ "thiserror",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "tutela-sdk"
+version = "0.0.0"
+source = "git+ssh://git@github.com/f8fvwgzc/tutela.git?tag=v0.1.0#e7406a0ae7e7b67bc939c07c73b07e0ca95259b8"
+dependencies = [
+ "aws-lc-rs",
+ "base64 0.23.1",
+ "http",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-postgres",
+ "tower-layer",
+ "tower-service",
+ "tutela-contracts",
+ "tutela-pdp",
+ "tutela-safenet",
 ]
 
 [[package]]

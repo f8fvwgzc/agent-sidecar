@@ -5,6 +5,8 @@
 //! - **Sessions**: `POST /login` sets the `agentsc_session` cookie, an HMAC-SHA256-signed
 //!   `{token_name, exp}` ([`session`]); the token is looked up again on every request, so a
 //!   session dies when its token leaves the config.
+//! - **People**: console sign-in through an OIDC issuer, `auth.oidc` ([`oidc`]). The session is the
+//!   same cookie, and the configuration is looked up again on every request.
 //! - **Login rate limit**: 5 failures per minute per client IP ([`LoginLimiter`]).
 //! - **`--dev`**: an anonymous viewer when the config says `auth.anonymous: viewer`, and a
 //!   one-time admin token ([`Auth::with_dev_token`]).
@@ -19,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use subtle::ConstantTimeEq;
 
 use crate::api::types::WhoAmI;
@@ -27,6 +29,7 @@ use crate::config::{ALL_NAMESPACES, Anonymous, ControlPlaneConfig, Role, TokenEn
 use crate::store::{Actor, ActorKind};
 
 pub mod http;
+pub mod oidc;
 pub mod session;
 
 /// Failed logins allowed per client IP and window.
@@ -54,6 +57,8 @@ pub struct Identity {
     /// [`session::fingerprint`] of the token hash this identity was admitted with ("" when
     /// anonymous): a rotated token ends its sessions and open streams.
     pub token_fp: String,
+    /// Signed in through `auth.oidc`: who, as the session holds it.
+    pub oidc: Option<oidc::OidcSubject>,
 }
 
 impl Identity {
@@ -66,6 +71,21 @@ impl Identity {
             kind,
             anonymous: false,
             token_fp: session::fingerprint(&t.sha256),
+            oidc: None,
+        }
+    }
+
+    /// A person of `auth.oidc`.
+    pub fn from_oidc(subject: &oidc::OidcSubject, grant: oidc::Grant) -> Self {
+        Self {
+            name: grant.name,
+            role: grant.role,
+            namespaces: grant.namespaces,
+            payloads: grant.payloads,
+            kind: ActorKind::Session,
+            anonymous: false,
+            token_fp: String::new(),
+            oidc: Some(subject.clone()),
         }
     }
 
@@ -79,6 +99,7 @@ impl Identity {
             kind: ActorKind::Token,
             anonymous: true,
             token_fp: String::new(),
+            oidc: None,
         }
     }
 
@@ -103,7 +124,10 @@ impl Identity {
     /// Who Tutela's shadow check asks about ([`crate::authz`]).
     pub fn caller(&self) -> crate::authz::Caller {
         crate::authz::Caller {
-            principal: crate::authz::token_principal(&self.name),
+            principal: match &self.oidc {
+                Some(o) => crate::authz::user_principal(&o.iss, &o.sub),
+                None => crate::authz::token_principal(&self.name),
+            },
             role: self.role,
             namespaces: self.namespaces.clone(),
         }
@@ -174,6 +198,8 @@ pub struct Auth {
     key: ArcSwap<Vec<u8>>,
     /// Generated at start; used while the config names no key file.
     generated: Vec<u8>,
+    /// `auth.oidc`, ready to use.
+    oidc: ArcSwapOption<oidc::Oidc>,
     dev: bool,
     dev_token: Option<TokenEntry>,
     /// Session cookies get `Secure` (`--http-tls`).
@@ -223,6 +249,7 @@ impl Auth {
         let auth = Self {
             key: ArcSwap::from_pointee(generated.clone()),
             generated,
+            oidc: ArcSwapOption::empty(),
             config,
             dev,
             dev_token: None,
@@ -247,15 +274,36 @@ impl Auth {
         self
     }
 
-    /// Use the session key `config` names (or the generated one): at start and on every
-    /// config reload, before the config is installed.
+    /// Use the session key and the OIDC issuer `config` names (or the generated key): at start
+    /// and on every config reload, before the config is installed.
     pub fn reload_key(&self, config: &ControlPlaneConfig) -> anyhow::Result<()> {
         let key = match &config.auth.session_key_file {
             Some(path) => read_session_key(path)?,
             None => self.generated.clone(),
         };
+        let issuer = match &config.auth.oidc {
+            Some(o) => Some(Arc::new(oidc::Oidc::load(o)?)),
+            None => None,
+        };
         self.key.store(Arc::new(key));
+        self.oidc.store(issuer);
         Ok(())
+    }
+
+    /// `auth.oidc`, when configured.
+    pub fn oidc(&self) -> Option<Arc<oidc::Oidc>> {
+        self.oidc.load_full()
+    }
+
+    /// The key session and sign-in cookies are signed with.
+    pub fn session_key(&self) -> Arc<Vec<u8>> {
+        self.key.load_full()
+    }
+
+    /// A new session cookie value for a person of `auth.oidc`.
+    pub fn new_oidc_session(&self, subject: &oidc::OidcSubject, seconds: u32) -> String {
+        let exp = chrono::Utc::now().timestamp() + i64::from(seconds);
+        session::sign_oidc(&self.key.load(), subject, exp)
     }
 
     /// Whether `auth.anonymous: viewer` is honoured now (`--dev` only).
@@ -308,6 +356,10 @@ impl Auth {
     pub fn from_session(&self, value: &str) -> Option<Identity> {
         let now = chrono::Utc::now().timestamp();
         let claims = session::verify(&self.key.load(), value, now)?;
+        if let Some(subject) = &claims.oidc {
+            let grant = self.oidc()?.grant(subject)?;
+            return Some(Identity::from_oidc(subject, grant));
+        }
         let config = self.config.load();
         self.entries(&config)
             .iter()
@@ -329,6 +381,12 @@ impl Auth {
         if ident.anonymous {
             return self.anonymous_allowed();
         }
+        if let Some(subject) = &ident.oidc {
+            return self
+                .oidc()
+                .and_then(|o| o.grant(subject))
+                .is_some_and(|g| g.role == ident.role);
+        }
         let config = self.config.load();
         self.entries(&config)
             .iter()
@@ -337,10 +395,14 @@ impl Auth {
 
     /// `Set-Cookie` for a new session.
     pub fn session_cookie(&self, value: &str) -> String {
+        self.session_cookie_for(value, session::LIFETIME.as_secs())
+    }
+
+    /// `Set-Cookie` for a new session of `seconds`.
+    pub fn session_cookie_for(&self, value: &str, seconds: u64) -> String {
         let mut c = format!(
-            "{}={value}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}",
+            "{}={value}; HttpOnly; SameSite=Strict; Path=/; Max-Age={seconds}",
             session::COOKIE,
-            session::LIFETIME.as_secs()
         );
         if self.secure_cookies {
             c.push_str("; Secure");

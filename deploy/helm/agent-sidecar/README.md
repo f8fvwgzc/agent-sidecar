@@ -46,6 +46,7 @@ See [`values.yaml`](values.yaml); [`values.schema.json`](values.schema.json) ref
 | `images.embassy`, `images.agentscd` | `ghcr.io/f8fvwgzc/agent-sidecar/{embassy,agentscd}:<appVersion>` | `digest` wins over `tag` |
 | `auth.tokens` | `[]` | `{name, role, sha256, namespaces, payloads}` |
 | `auth.sessionKey.existingSecret` | `""` | Secret with key `key`; empty: the chart keeps a random one |
+| `auth.oidc`, `auth.oidcClientSecret.existingSecret` | `{}`, `""` | ControlPlaneConfig `auth.oidc`; a Secret with key `client-secret`, mounted at `/etc/agentsc/oidc` |
 | `issuance.kubernetes`, `issuance.workloadCertTTL`, `issuance.joinTokens` | `true`, `24h`, `[]` | |
 | `policy` | `{}` | ControlPlaneConfig `policy` |
 | `ca.existingSecret` | `""` | `<namespace>/<name>` of a CA to reuse (read-only) |

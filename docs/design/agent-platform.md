@@ -304,6 +304,16 @@ auth:
       payloads: true              # may see request/response payloads
   anonymous: none                 # none | viewer (only honoured with --dev)
   session_key_file: /etc/agentsc/session/key   # 32+ random bytes; HMAC key for session cookies (generated in memory if absent)
+  oidc:                           # console sign-in through an OIDC issuer (docs/operations.md)
+    issuer: https://keycloak.example/realms/attache
+    tenant: ten_0193a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2c
+    client_id: embassy
+    client_secret_file: /etc/agentsc/oidc/client-secret
+    redirect_url: https://embassy.example/api/v1/auth/oidc/callback
+    users:                        # by the issuer's subject, never an e-mail
+      - { sub: "<subject>", name: carla, role: admin, namespaces: ["*"] }
+    groups:                       # the first entry the person is in; roles are never merged
+      - { group: sre, role: editor, namespaces: [shop] }
 issuance:
   kubernetes: true
   workload_cert_ttl: 24h

@@ -47,6 +47,8 @@ pub struct Opts {
     pub join_tokens: Vec<embassy::config::JoinTokenEntry>,
     /// Extra `embassy serve` flags.
     pub args: Vec<String>,
+    /// `auth.oidc`.
+    pub oidc: Option<embassy::config::OidcConfig>,
 }
 
 /// One response.
@@ -158,6 +160,7 @@ impl Env {
             config.auth.anonymous = Anonymous::Viewer;
         }
         config.policy = opts.policy.clone();
+        config.auth.oidc = opts.oidc.clone();
         config.issuance.join_tokens = opts.join_tokens.clone();
         if let Some(r) = opts.retain_bytes {
             config.events.retain_bytes = r;
