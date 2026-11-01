@@ -29,6 +29,7 @@
 //! | [`names`] | A2 | DNS-1123 names and hex checks shared by the modules above |
 pub mod api;
 pub mod auth;
+pub mod authz;
 pub mod ca;
 pub mod ca_components;
 pub mod config;

@@ -167,9 +167,111 @@ pub fn weakened(old: &Charter, new: &Charter) -> Vec<String> {
     out
 }
 
-/// The role a write from `old` (the stored charter) to `new` needs (design §8.3), and, when that
-/// is admin, one `"<field> requires admin"` reason per field that needs it. Any write needs at
-/// least editor. Editors may change agents' `system`, `model`, `skills`, `harness`, `budgets`,
+/// The permission keys of a charter write, in Tutela's `<type>:<action>` form (design §8.3,
+/// `services/embassy/tutela.resources.toml`). [`WRITE`] is what an editor holds; every key in
+/// [`ADMIN_KEYS`] is a change class only an admin may make.
+pub mod perm {
+    /// Any charter write.
+    pub const WRITE: &str = "service:write";
+    /// `service`: its name, namespace, app port and service accounts.
+    pub const EDIT_SERVICE: &str = "service:edit_service";
+    /// `mesh`.
+    pub const EDIT_MESH: &str = "service:edit_mesh";
+    /// `audit`.
+    pub const EDIT_AUDIT: &str = "service:edit_audit";
+    /// `telemetry`.
+    pub const EDIT_TELEMETRY: &str = "service:edit_telemetry";
+    /// The `guardrails` rules (not the `allowed_tools` / `allowed_services` entries).
+    pub const EDIT_GUARDRAILS: &str = "service:edit_guardrails";
+    /// `authz.default`, `authz.services`, `authz.taint` and any non-local `authz.callers` rule.
+    pub const EDIT_AUTHZ: &str = "service:edit_authz";
+    /// An existing agent's `type`.
+    pub const EDIT_AGENT_TYPE: &str = "service:edit_agent_type";
+    /// Setting an agent's `learning.mode` to `auto`.
+    pub const ENABLE_AUTO_LEARNING: &str = "service:enable_auto_learning";
+    /// An agent's `taint`, or a tool's `label` or `effect`.
+    pub const EDIT_TAINT: &str = "service:edit_taint";
+    /// A tool's `approval`.
+    pub const EDIT_APPROVALS: &str = "service:edit_approvals";
+    /// A tool aimed at another namespace, on a target no tool had before.
+    pub const OPEN_NAMESPACE_EDGE: &str = "service:open_namespace_edge";
+    /// An `http` tool on an origin no tool had before, or one with no origin.
+    pub const OPEN_HTTP_ORIGIN: &str = "service:open_http_origin";
+    /// A service's first charter written with `PUT`.
+    pub const CREATE_CHARTER: &str = "service:create_charter";
+    /// Rolling a charter back.
+    pub const ROLLBACK: &str = "service:rollback";
+    /// Replacing a stored charter that no longer validates.
+    pub const REPLACE_INVALID: &str = "service:replace_invalid";
+
+    /// Every key beyond [`WRITE`].
+    pub const ADMIN_KEYS: [&str; 15] = [
+        EDIT_SERVICE,
+        EDIT_MESH,
+        EDIT_AUDIT,
+        EDIT_TELEMETRY,
+        EDIT_GUARDRAILS,
+        EDIT_AUTHZ,
+        EDIT_AGENT_TYPE,
+        ENABLE_AUTO_LEARNING,
+        EDIT_TAINT,
+        EDIT_APPROVALS,
+        OPEN_NAMESPACE_EDGE,
+        OPEN_HTTP_ORIGIN,
+        CREATE_CHARTER,
+        ROLLBACK,
+        REPLACE_INVALID,
+    ];
+}
+
+/// What a write needs: [`perm::WRITE`] always, and one [`Need`] per change that takes more.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Required {
+    pub needs: Vec<Need>,
+}
+
+/// One change beyond [`perm::WRITE`]: the key it takes and why, as `"<field> requires admin"`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Need {
+    pub key: &'static str,
+    pub reason: String,
+}
+
+impl Required {
+    /// One more need.
+    pub fn add(&mut self, key: &'static str, reason: impl Into<String>) {
+        self.needs.push(Need {
+            key,
+            reason: reason.into(),
+        });
+    }
+
+    /// The permission keys, sorted: always [`perm::WRITE`], then the others.
+    pub fn keys(&self) -> BTreeSet<&'static str> {
+        std::iter::once(perm::WRITE)
+            .chain(self.needs.iter().map(|n| n.key))
+            .collect()
+    }
+
+    /// The role that holds [`Required::keys`], the old check (the shadow dual run still lets it
+    /// decide): editor for [`perm::WRITE`] alone, otherwise admin.
+    pub fn role(&self) -> Role {
+        if self.needs.is_empty() {
+            Role::Editor
+        } else {
+            Role::Admin
+        }
+    }
+
+    /// One reason per change, in the order they were found.
+    pub fn reasons(&self) -> Vec<String> {
+        self.needs.iter().map(|n| n.reason.clone()).collect()
+    }
+}
+
+/// The permission keys a write from `old` (the stored charter) to `new` needs (design §8.3), and
+/// one `"<field> requires admin"` reason per field that takes more than [`perm::WRITE`]. Any write
+/// needs at least [`perm::WRITE`], which editors hold. Editors may change agents' `system`, `model`, `skills`, `harness`, `budgets`,
 /// `practices`, `learning` (except setting `mode: auto`) and tools of type `service` and `agent`
 /// within the namespace (a target `<service>.<namespace>` no tool had before needs admin);
 /// top-level `skills`; the `guardrails.allowed_tools` / `allowed_services` entries; the agent
@@ -181,44 +283,80 @@ pub fn weakened(old: &Charter, new: &Charter) -> Vec<String> {
 /// a new `http` tool origin.
 ///
 /// A service without a stored charter has nothing to diff against, so callers decide its first
-/// charter with [`first_charter_role`] instead (design §8.3): adopting a pending charter
+/// charter with [`first_charter`] instead (design §8.3): adopting a pending charter
 /// (`POST .../adopt`) needs **editor** (the validator and the policy still apply), while creating
 /// it with `PUT .../charter` needs **admin**.
-pub fn required_role(old: &Charter, new: &Charter) -> (Role, Vec<String>) {
-    let mut admin: Vec<String> = Vec::new();
-    let mut need = |changed: bool, field: &str| {
+pub fn required_permissions(old: &Charter, new: &Charter) -> Required {
+    let mut admin = Required::default();
+    let mut need = |changed: bool, key: &'static str, field: &str| {
         if changed {
-            admin.push(format!("{field} requires admin"));
+            admin.add(key, format!("{field} requires admin"));
         }
     };
 
     // service, mesh, audit, telemetry: admin only
     let (os, ns) = (&old.service, &new.service);
-    need(os.name != ns.name, "service.name");
-    need(os.namespace != ns.namespace, "service.namespace");
-    need(os.app_port != ns.app_port, "service.app_port");
+    need(os.name != ns.name, perm::EDIT_SERVICE, "service.name");
+    need(
+        os.namespace != ns.namespace,
+        perm::EDIT_SERVICE,
+        "service.namespace",
+    );
+    need(
+        os.app_port != ns.app_port,
+        perm::EDIT_SERVICE,
+        "service.app_port",
+    );
     need(
         sorted(&os.service_accounts) != sorted(&ns.service_accounts),
+        perm::EDIT_SERVICE,
         "service.service_accounts",
     );
-    need(old.mesh.port != new.mesh.port, "mesh.port");
-    need(old.mesh.peers != new.mesh.peers, "mesh.peers");
-    need(old.audit.sink != new.audit.sink, "audit.sink");
-    need(old.audit.file != new.audit.file, "audit.file");
-    need(old.audit.redact != new.audit.redact, "audit.redact");
+    need(old.mesh.port != new.mesh.port, perm::EDIT_MESH, "mesh.port");
+    need(
+        old.mesh.peers != new.mesh.peers,
+        perm::EDIT_MESH,
+        "mesh.peers",
+    );
+    need(
+        old.audit.sink != new.audit.sink,
+        perm::EDIT_AUDIT,
+        "audit.sink",
+    );
+    need(
+        old.audit.file != new.audit.file,
+        perm::EDIT_AUDIT,
+        "audit.file",
+    );
+    need(
+        old.audit.redact != new.audit.redact,
+        perm::EDIT_AUDIT,
+        "audit.redact",
+    );
     let (ot, nt) = (old.telemetry_or_default(), new.telemetry_or_default());
     need(
         ot.otlp_endpoint != nt.otlp_endpoint,
+        perm::EDIT_TELEMETRY,
         "telemetry.otlp_endpoint",
     );
-    need(ot.traces != nt.traces, "telemetry.traces");
-    need(ot.metrics != nt.metrics, "telemetry.metrics");
+    need(
+        ot.traces != nt.traces,
+        perm::EDIT_TELEMETRY,
+        "telemetry.traces",
+    );
+    need(
+        ot.metrics != nt.metrics,
+        perm::EDIT_TELEMETRY,
+        "telemetry.metrics",
+    );
     need(
         ot.export_payloads != nt.export_payloads,
+        perm::EDIT_TELEMETRY,
         "telemetry.export_payloads",
     );
     need(
         ot.control_plane_payloads != nt.control_plane_payloads,
+        perm::EDIT_TELEMETRY,
         "telemetry.control_plane_payloads",
     );
 
@@ -226,22 +364,41 @@ pub fn required_role(old: &Charter, new: &Charter) -> (Role, Vec<String>) {
     let (og, ng) = (&old.guardrails, &new.guardrails);
     need(
         og.max_input_bytes != ng.max_input_bytes,
+        perm::EDIT_GUARDRAILS,
         "guardrails.max_input_bytes",
     );
-    need(og.pii_redact != ng.pii_redact, "guardrails.pii_redact");
+    need(
+        og.pii_redact != ng.pii_redact,
+        perm::EDIT_GUARDRAILS,
+        "guardrails.pii_redact",
+    );
     need(
         rules(&og.input_deny) != rules(&ng.input_deny),
+        perm::EDIT_GUARDRAILS,
         "guardrails.input_deny",
     );
     need(
         rules(&og.output_deny) != rules(&ng.output_deny),
+        perm::EDIT_GUARDRAILS,
         "guardrails.output_deny",
     );
 
     // authz: default and services are admin; callers per the local / non-local split
-    need(old.authz.default != new.authz.default, "authz.default");
-    need(old.authz.services != new.authz.services, "authz.services");
-    need(old.authz.taint != new.authz.taint, "authz.taint");
+    need(
+        old.authz.default != new.authz.default,
+        perm::EDIT_AUTHZ,
+        "authz.default",
+    );
+    need(
+        old.authz.services != new.authz.services,
+        perm::EDIT_AUTHZ,
+        "authz.services",
+    );
+    need(
+        old.authz.taint != new.authz.taint,
+        perm::EDIT_AUTHZ,
+        "authz.taint",
+    );
     let deleted: BTreeSet<&str> = old
         .agents
         .iter()
@@ -262,7 +419,10 @@ pub fn required_role(old: &Charter, new: &Charter) -> (Role, Vec<String>) {
         }
     }
     for id in identities {
-        admin.push(format!("authz.callers rule for {id} requires admin"));
+        admin.add(
+            perm::EDIT_AUTHZ,
+            format!("authz.callers rule for {id} requires admin"),
+        );
     }
 
     // agents: created and deleted ones are editor; per agent, only `type`, `learning.mode: auto`
@@ -274,18 +434,24 @@ pub fn required_role(old: &Charter, new: &Charter) -> (Role, Vec<String>) {
         if let Some(p) = prev
             && p.agent_type != a.agent_type
         {
-            admin.push(format!("agents.{}.type requires admin", a.name));
+            admin.add(
+                perm::EDIT_AGENT_TYPE,
+                format!("agents.{}.type requires admin", a.name),
+            );
         }
         let was_auto = prev.is_some_and(|p| p.learning_or_default().mode == LearningMode::Auto);
         if a.learning_or_default().mode == LearningMode::Auto && !was_auto {
-            admin.push(format!(
-                "agents.{}.learning.mode: auto requires admin",
-                a.name
-            ));
+            admin.add(
+                perm::ENABLE_AUTO_LEARNING,
+                format!("agents.{}.learning.mode: auto requires admin", a.name),
+            );
         }
         // taint policy is security policy: any change to it, or to a tool's label or effect
         if prev.map(|p| &p.taint) != Some(&a.taint) && (prev.is_some() || a.taint.is_some()) {
-            admin.push(format!("agents.{}.taint requires admin", a.name));
+            admin.add(
+                perm::EDIT_TAINT,
+                format!("agents.{}.taint requires admin", a.name),
+            );
         }
         for t in &a.tools {
             let before = prev.and_then(|p| p.tools.iter().find(|x| x.name == t.name));
@@ -294,19 +460,22 @@ pub fn required_role(old: &Charter, new: &Charter) -> (Role, Vec<String>) {
                 None => t.label.is_some() || t.effect.is_some(),
             };
             if changed {
-                admin.push(format!(
-                    "agents.{}.tools.{} label or effect requires admin",
-                    a.name, t.name
-                ));
+                admin.add(
+                    perm::EDIT_TAINT,
+                    format!(
+                        "agents.{}.tools.{} label or effect requires admin",
+                        a.name, t.name
+                    ),
+                );
             }
             // an approval is a person between the agent and the call: only an admin changes it
             if before.map(|b| &b.approval) != Some(&t.approval)
                 && (before.is_some() || t.approval.is_some())
             {
-                admin.push(format!(
-                    "agents.{}.tools.{} approval requires admin",
-                    a.name, t.name
-                ));
+                admin.add(
+                    perm::EDIT_APPROVALS,
+                    format!("agents.{}.tools.{} approval requires admin", a.name, t.name),
+                );
             }
         }
         // a tool aimed at another namespace opens an edge editors may not open (design §8.3:
@@ -315,32 +484,43 @@ pub fn required_role(old: &Charter, new: &Charter) -> (Role, Vec<String>) {
             if let Some(s) = t.service.as_deref().filter(|s| is_qualified_peer(s))
                 && !old_remote.contains(s)
             {
-                admin.push(format!(
-                    "agents.{}.tools.{} (service {s} in another namespace) requires admin",
-                    a.name, t.name
-                ));
+                admin.add(
+                    perm::OPEN_NAMESPACE_EDGE,
+                    format!(
+                        "agents.{}.tools.{} (service {s} in another namespace) requires admin",
+                        a.name, t.name
+                    ),
+                );
             }
         }
         for t in a.tools.iter().filter(|t| t.tool_type == ToolType::Http) {
             let origin = t.url.as_deref().and_then(http_origin);
             match origin {
                 Some(o) if old_origins.contains(&o) => {}
-                Some(o) => admin.push(format!(
-                    "agents.{}.tools.{} (new http origin {o}) requires admin",
-                    a.name, t.name
-                )),
-                None => admin.push(format!("agents.{}.tools.{} requires admin", a.name, t.name)),
+                Some(o) => admin.add(
+                    perm::OPEN_HTTP_ORIGIN,
+                    format!(
+                        "agents.{}.tools.{} (new http origin {o}) requires admin",
+                        a.name, t.name
+                    ),
+                ),
+                None => admin.add(
+                    perm::OPEN_HTTP_ORIGIN,
+                    format!("agents.{}.tools.{} requires admin", a.name, t.name),
+                ),
             }
         }
     }
 
     let mut seen = BTreeSet::new();
-    admin.retain(|r| seen.insert(r.clone()));
-    if admin.is_empty() {
-        (Role::Editor, admin)
-    } else {
-        (Role::Admin, admin)
-    }
+    admin.needs.retain(|n| seen.insert(n.reason.clone()));
+    admin
+}
+
+/// The old answer of [`required_permissions`]: the role, and the reasons when that is admin.
+pub fn required_role(old: &Charter, new: &Charter) -> (Role, Vec<String>) {
+    let required = required_permissions(old, new);
+    (required.role(), required.reasons())
 }
 
 /// How a service without a stored charter gets its first one (design §8.3).
@@ -353,16 +533,24 @@ pub enum FirstCharter {
     Put,
 }
 
-/// The role that creating a service's first stored charter needs: editor to adopt a pending
-/// charter, admin to write one with `PUT` (the validator and the policy apply either way).
-pub fn first_charter_role(via: FirstCharter) -> (Role, Vec<String>) {
-    match via {
-        FirstCharter::Adopt => (Role::Editor, Vec::new()),
-        FirstCharter::Put => (
-            Role::Admin,
-            vec!["a first charter written with PUT requires admin".into()],
-        ),
+/// What creating a service's first stored charter needs: [`perm::WRITE`] to adopt a pending
+/// charter, [`perm::CREATE_CHARTER`] as well to write one with `PUT` (the validator and the policy
+/// apply either way).
+pub fn first_charter(via: FirstCharter) -> Required {
+    let mut required = Required::default();
+    if via == FirstCharter::Put {
+        required.add(
+            perm::CREATE_CHARTER,
+            "a first charter written with PUT requires admin",
+        );
     }
+    required
+}
+
+/// The old answer of [`first_charter`]: the role, and the reasons when that is admin.
+pub fn first_charter_role(via: FirstCharter) -> (Role, Vec<String>) {
+    let required = first_charter(via);
+    (required.role(), required.reasons())
 }
 
 fn sorted(v: &[String]) -> Vec<&String> {

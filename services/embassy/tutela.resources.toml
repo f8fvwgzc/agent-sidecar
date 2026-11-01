@@ -1,0 +1,61 @@
+# attache's part of a tenant's permission model (Tutela docs/MANIFEST.md, INTEGRATION §3 step 3).
+# embassy compiles this file with tutela-pdp (src/authz.rs). The action keys are the ones
+# `agentsc_charter::diff::perm` names, one per change class only an admin may make; a test keeps
+# the two equal.
+version = 1
+
+[app]
+name     = "attache"
+audience = "embassy"
+
+[types.namespace]
+parent    = "org"
+container = true
+label     = "Namespace"
+
+[types.service]
+parent = "namespace"
+label  = "Service"
+
+[types.service.actions]
+edit_service         = { needs = "write" }
+edit_mesh            = { needs = "write" }
+edit_audit           = { needs = "write" }
+edit_telemetry       = { needs = "write" }
+edit_guardrails      = { needs = "write" }
+edit_authz           = { needs = "write" }
+edit_agent_type      = { needs = "write" }
+enable_auto_learning = { needs = "write" }
+edit_taint           = { needs = "write" }
+edit_approvals       = { needs = "write" }
+open_namespace_edge  = { needs = "write" }
+open_http_origin     = { needs = "write" }
+create_charter       = { needs = "write" }
+rollback             = { needs = "write" }
+replace_invalid      = { needs = "write" }
+
+[roles.editor]
+label  = "Editor"
+grants = { namespace = "read", service = "write" }
+
+[roles.admin]
+label = "Admin"
+
+[roles.admin.grants]
+namespace                      = "read"
+service                        = "write"
+"service:edit_service"         = true
+"service:edit_mesh"            = true
+"service:edit_audit"           = true
+"service:edit_telemetry"       = true
+"service:edit_guardrails"      = true
+"service:edit_authz"           = true
+"service:edit_agent_type"      = true
+"service:enable_auto_learning" = true
+"service:edit_taint"           = true
+"service:edit_approvals"       = true
+"service:open_namespace_edge"  = true
+"service:open_http_origin"     = true
+"service:create_charter"       = true
+"service:rollback"             = true
+"service:replace_invalid"      = true

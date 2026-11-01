@@ -485,6 +485,7 @@ async fn on_hello(
                     let writer = Writer {
                         actor: actor.clone(),
                         role: None,
+                        caller: None,
                     };
                     let result = write::write(
                         hub,

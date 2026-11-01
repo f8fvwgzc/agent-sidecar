@@ -63,6 +63,7 @@ pub fn writer(ident: &Identity) -> Writer {
     Writer {
         actor: ident.actor(),
         role: Some(ident.role),
+        caller: Some(ident.caller()),
     }
 }
 
@@ -175,6 +176,15 @@ pub async fn logout(State(hub): State<Arc<Hub>>, Authed(ident): Authed) -> Respo
 
 pub async fn whoami(Authed(ident): Authed) -> Response {
     Json(ident.whoami()).into_response()
+}
+
+/// `GET /authz/shadow`: Tutela's decisions next to the role check (design §8.3).
+pub async fn authz_shadow(
+    State(hub): State<Arc<Hub>>,
+    Authed(ident): Authed,
+) -> Result<Response, Fail> {
+    require_role(&ident, Role::Admin)?;
+    Ok(Json(hub.shadow.report()).into_response())
 }
 
 // ---- services ----------------------------------------------------------------------------------
