@@ -452,12 +452,18 @@ an oversized plain charter before it is parsed.
   an update with `config.invalid`; the control plane refuses such a write with 400
   `config.restart_required` while instances are connected.
 - `agentsc_charter::diff::weakened` lists the changes that reduce protection (§6, `config`
-  records) and `agentsc_charter::diff::required_role` the role a change needs (viewer < editor <
-  admin, with one `"<field> requires admin"` reason per field that needs admin; any change to
+  records) and `agentsc_charter::diff::required_permissions` the permission keys a change needs:
+  `service:write` always, plus one key per change class only an admin may make
+  (`agentsc_charter::diff::perm`, the custom actions of `services/embassy/tutela.resources.toml`),
+  each with a `"<field> requires admin"` reason. Read as roles (`Required::role`, viewer < editor <
+  admin) that is editor for `service:write` alone and admin otherwise; any change to
   `agents[].taint`, and setting or changing a tool's `label` or `effect`, needs admin; the
-  level-6 fields need editor, and two of their changes are weakened, §6.1). A service with
-  no stored charter has nothing to diff: `agentsc_charter::diff::first_charter_role` says that
-  adopting a pending charter needs editor and a first `PUT` needs admin.
+  level-6 fields need editor, and two of their changes are weakened, §6.1. A service with no stored
+  charter has nothing to diff: `agentsc_charter::diff::first_charter` says that adopting a pending
+  charter needs `service:write` and a first `PUT` needs `service:create_charter` as well.
+- embassy checks those keys in two ways during Tutela's shadow dual run: the role check decides,
+  and `tutela-pdp` runs next to it under attache's manifest. A difference is logged with target
+  `tutela.shadow` and counted (`GET /api/v1/authz/shadow`, admin); it changes no decision.
 
 ## 4. Wire protocol
 

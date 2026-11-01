@@ -2,7 +2,10 @@
 //! role a change needs (§8.3).
 mod common;
 
-use agentsc_charter::diff::{Role, required_role, restart_required, weakened};
+use agentsc_charter::diff::{
+    FirstCharter, Role, first_charter, perm, required_permissions, required_role, restart_required,
+    weakened,
+};
 use agentsc_charter::*;
 use common::*;
 
@@ -715,4 +718,60 @@ fn the_inbound_taint_rule_needs_admin_and_loosening_it_is_weakening() {
     let (role, reasons) = required_role(&off, &old);
     assert_eq!(role, Role::Admin);
     assert!(reasons.iter().any(|r| r == "authz.taint requires admin"));
+}
+
+// --- required_permissions: the keys behind the roles ---------------------------------------------
+
+#[test]
+fn a_write_needs_the_key_of_its_change_class() {
+    fn keys(edit: impl FnOnce(&mut Charter)) -> Vec<&'static str> {
+        let (old, new) = changed(edit);
+        required_permissions(&old, &new)
+            .keys()
+            .into_iter()
+            .collect()
+    }
+    // nothing beyond write: an editor's change
+    let (old, _) = changed(|_| {});
+    let same = required_permissions(&old, &old);
+    assert_eq!(same.keys().into_iter().collect::<Vec<_>>(), [perm::WRITE]);
+    assert_eq!(same.role(), Role::Editor);
+    assert!(same.reasons().is_empty());
+    assert_eq!(keys(|c| c.agents[0].system = "New.".into()), [perm::WRITE]);
+
+    assert_eq!(keys(|c| c.mesh.port += 1), [perm::EDIT_MESH, perm::WRITE]);
+    assert_eq!(
+        keys(|c| c.guardrails.pii_redact = !c.guardrails.pii_redact),
+        [perm::EDIT_GUARDRAILS, perm::WRITE]
+    );
+    assert_eq!(
+        keys(|c| c.audit.redact.push("input.context.x".into())),
+        [perm::EDIT_AUDIT, perm::WRITE]
+    );
+    assert_eq!(
+        keys(|c| c.agents[0].taint = Some(TaintSpec {
+            mode: TaintMode::Enforce,
+            input: TaintLabel::Untrusted,
+        })),
+        [perm::EDIT_TAINT, perm::WRITE]
+    );
+    // two changes, two keys, and the role is the old answer
+    let (old, new) = changed(|c| {
+        c.mesh.port += 1;
+        c.guardrails.pii_redact = !c.guardrails.pii_redact;
+    });
+    let both = required_permissions(&old, &new);
+    assert_eq!(both.keys().len(), 3);
+    assert_eq!(both.role(), Role::Admin);
+    assert_eq!(
+        required_role(&old, &new),
+        (Role::Admin, both.reasons()),
+        "required_role is the keys read as a role"
+    );
+
+    let adopt = first_charter(FirstCharter::Adopt);
+    assert_eq!(adopt.role(), Role::Editor);
+    let put = first_charter(FirstCharter::Put);
+    assert!(put.keys().contains(perm::CREATE_CHARTER));
+    assert_eq!(put.role(), Role::Admin);
 }

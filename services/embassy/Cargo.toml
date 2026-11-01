@@ -11,6 +11,8 @@ publish.workspace = true
 [dependencies]
 agentsc-pki.workspace = true
 agentsc-common.workspace = true
+tutela-contracts.workspace = true
+tutela-pdp.workspace = true
 agentsc-ledger.workspace = true
 agentsc-charter.workspace = true
 agentsc-proto.workspace = true

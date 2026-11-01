@@ -198,6 +198,7 @@ pub fn api_routes() -> Router<Arc<Hub>> {
         .route("/login", post(handlers::login))
         .route("/logout", post(handlers::logout))
         .route("/whoami", get(handlers::whoami))
+        .route("/authz/shadow", get(handlers::authz_shadow))
         .route("/graph", get(live::graph))
         .route("/services", get(handlers::services))
         .route(

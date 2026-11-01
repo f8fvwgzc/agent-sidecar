@@ -92,6 +92,8 @@ pub struct Hub {
     pub ledger: std::sync::OnceLock<Arc<crate::secops::ledger::LedgerKeys>>,
     /// Audit records the ledger did not take (a store error).
     pub ledger_failures: std::sync::atomic::AtomicU64,
+    /// Tutela's decision next to the role check on charter writes.
+    pub shadow: crate::authz::Shadow,
     pub config: Arc<ArcSwap<ControlPlaneConfig>>,
     pub cp_audit: Arc<CpAudit>,
     pub auth: Auth,
@@ -258,6 +260,7 @@ impl Hub {
             secops: std::sync::OnceLock::new(),
             ledger: std::sync::OnceLock::new(),
             ledger_failures: std::sync::atomic::AtomicU64::new(0),
+            shadow: crate::authz::Shadow::new(),
             config,
             cp_audit,
             auth,

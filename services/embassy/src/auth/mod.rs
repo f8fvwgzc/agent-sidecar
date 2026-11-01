@@ -100,6 +100,15 @@ impl Identity {
         }
     }
 
+    /// Who Tutela's shadow check asks about ([`crate::authz`]).
+    pub fn caller(&self) -> crate::authz::Caller {
+        crate::authz::Caller {
+            principal: crate::authz::token_principal(&self.name),
+            role: self.role,
+            namespaces: self.namespaces.clone(),
+        }
+    }
+
     pub fn whoami(&self) -> WhoAmI {
         WhoAmI {
             name: self.name.clone(),

@@ -2,11 +2,12 @@
 //! version-skew check → (restart-only fields while instances are connected) → store, and the
 //! control-plane audit record of the attempt.
 use agentsc_charter::Charter;
-use agentsc_charter::diff::{self, FirstCharter};
+use agentsc_charter::diff::{self, FirstCharter, Required, perm};
 use serde_json::Value;
 
 use super::error::Fail;
 use super::types::{CpAction, CpResult, ErrorCode};
+use crate::authz::Caller;
 use crate::config::{PolicyConfig, Role};
 use crate::cp_audit::CpAudit;
 use crate::hub::Hub;
@@ -122,30 +123,37 @@ fn role_of(r: diff::Role) -> Role {
     }
 }
 
-/// The role a write needs (design §8.3) and why: on the diff against the stored charter, or for
-/// a service's first charter by the way it comes (editor to adopt, admin to `PUT`). A stored
-/// charter that no longer parses can only be replaced by an admin.
-pub fn needed_role(stored: Option<&StoredCharter>, new: &Charter, via: Via) -> (Role, Vec<String>) {
-    let (role, reasons) = match stored {
-        None => diff::first_charter_role(match via {
+/// What a write needs (design §8.3) and why: on the diff against the stored charter, or for a
+/// service's first charter by the way it comes (editor to adopt, admin to `PUT`). A stored charter
+/// that no longer parses can only be replaced by an admin.
+pub fn needed(stored: Option<&StoredCharter>, new: &Charter, via: Via) -> Required {
+    let mut required = match stored {
+        None => diff::first_charter(match via {
             Via::Adopt => FirstCharter::Adopt,
             _ => FirstCharter::Put,
         }),
         Some(s) => match Charter::from_yaml(&s.yaml) {
-            Ok(old) => diff::required_role(&old, new),
-            Err(_) => (
-                diff::Role::Admin,
-                vec!["replacing a stored charter that no longer validates requires admin".into()],
-            ),
+            Ok(old) => diff::required_permissions(&old, new),
+            Err(_) => {
+                let mut r = Required::default();
+                r.add(
+                    perm::REPLACE_INVALID,
+                    "replacing a stored charter that no longer validates requires admin",
+                );
+                r
+            }
         },
     };
-    let mut role = role_of(role);
-    let mut reasons = reasons;
-    if via == Via::Rollback && role < Role::Admin {
-        role = Role::Admin;
-        reasons.push("rollback requires admin".into());
+    if via == Via::Rollback {
+        required.add(perm::ROLLBACK, "rollback requires admin");
     }
-    (role, reasons)
+    required
+}
+
+/// The role a write needs, the old check: [`needed`] as a role and its reasons.
+pub fn needed_role(stored: Option<&StoredCharter>, new: &Charter, via: Via) -> (Role, Vec<String>) {
+    let required = needed(stored, new, via);
+    (role_of(required.role()), required.reasons())
 }
 
 /// Design §7 version skew: the charter must load on the lowest `charter_schema_level` of the
@@ -225,6 +233,8 @@ pub fn restart_problems_yaml(
 pub struct Writer {
     pub actor: Actor,
     pub role: Option<Role>,
+    /// Who Tutela's shadow check asks about (`None` with no role: nothing to compare).
+    pub caller: Option<Caller>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -246,8 +256,15 @@ pub async fn write(
         return Err(Fail::invalid(policy));
     }
     if let Some(role) = writer.role {
-        let (need, reasons) = needed_role(stored, &cand.charter, via);
-        if role < need {
+        let required = needed(stored, &cand.charter, via);
+        let need = role_of(required.role());
+        // The old check decides (stage 1 of the shadow dual run); Tutela's answer is only logged.
+        let allowed = role >= need;
+        if let Some(caller) = &writer.caller {
+            hub.shadow.compare(caller, &required.keys(), key, allowed);
+        }
+        if !allowed {
+            let reasons = required.reasons();
             return Err(Fail::forbidden(if reasons.is_empty() {
                 vec![format!("this write requires {need}")]
             } else {

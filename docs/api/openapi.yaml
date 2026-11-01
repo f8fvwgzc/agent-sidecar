@@ -1318,6 +1318,29 @@ paths:
         "503":
           $ref: "#/components/responses/SecopsUnavailable"
 
+  /authz/shadow:
+    get:
+      tags: [session]
+      operationId: getAuthzShadow
+      summary: Tutela's decisions next to the role check on charter writes, in this process.
+      description: |
+        Stage 1 of the shadow dual run (design §8.3): the role check decides, and `tutela-pdp` runs
+        next to it on the same permission keys. A mismatch is also logged with target
+        `tutela.shadow`. The counts are per process and start at zero.
+      x-required-role: admin
+      responses:
+        "200":
+          description: The counts and the newest mismatches, newest last.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthzShadow"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
   /principals:
     get:
       tags: [registry]
@@ -2186,6 +2209,49 @@ components:
         token:
           type: string
           pattern: "^att_[A-Za-z0-9_-]{43}$"
+    AuthzShadow:
+      type: object
+      required: [stage, checks, matches, mismatches, errors, recent]
+      properties:
+        stage:
+          type: string
+          enum: [shadow]
+        checks:
+          type: integer
+        matches:
+          type: integer
+        mismatches:
+          type: integer
+        errors:
+          type: integer
+          description: Checks Tutela could not answer. Never an allow, and not a mismatch.
+        recent:
+          type: array
+          items:
+            type: object
+            required: [at, principal, namespace, service, keys, denied, old, new]
+            properties:
+              at:
+                type: string
+              principal:
+                type: string
+                description: An opaque principal, `sa:sa_<uuidv7>` or `user:usr_<uuidv7>`.
+              namespace:
+                type: string
+              service:
+                type: string
+              keys:
+                type: array
+                items:
+                  type: string
+              denied:
+                type: array
+                items:
+                  type: string
+              old:
+                type: boolean
+              new:
+                type: boolean
     WhoAmI:
       type: object
       additionalProperties: false
