@@ -8,7 +8,7 @@
 # docker/Dockerfile.dockerignore (an allowlist).
 ARG BINARIES=source
 
-FROM rust:1.99-bookworm AS binaries-source
+FROM rust:1.99.0-bookworm AS binaries-source
 ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler && rm -rf /var/lib/apt/lists/*
 WORKDIR /src

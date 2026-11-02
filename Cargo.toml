@@ -5,6 +5,7 @@ members = ["crates/*", "services/*"]
 [workspace.package]
 version = "0.2.0"
 edition = "2024"
+rust-version = "1.99"
 license = "MIT"
 repository = "https://github.com/f8fvwgzc/agent-sidecar"
 homepage = "https://f8fvwgzc.github.io/agent-sidecar/"

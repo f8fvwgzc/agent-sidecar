@@ -27,8 +27,10 @@ defaults:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  # Same toolchain as docker/Dockerfile (rust:1.99-bookworm).
-  RUST_TOOLCHAIN: "1.99"
+  # The channel of rust-toolchain.toml, and docker/Dockerfile's rust:1.99.0-bookworm. It has to be
+  # the same name: rust-toolchain.toml outranks `rustup default`, so a target installed on any other
+  # toolchain would not be there for the build.
+  RUST_TOOLCHAIN: "1.99.0"
   ZIG_VERSION: "0.14.1"
   # Same uv as docker/Dockerfile (ghcr.io/astral-sh/uv:<version>), for `make packaging-test`.
   UV_VERSION: "0.10.12"

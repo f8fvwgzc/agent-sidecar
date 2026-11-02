@@ -3,6 +3,7 @@ name = "agentsc-proto"
 description = "Generated gRPC clients, servers and messages for agentsc (CONTRACT.md §4)."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

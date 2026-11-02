@@ -26,6 +26,7 @@ DOCKERFILE = ROOT / "docker/Dockerfile"
 DOCKERIGNORE = ROOT / "docker/Dockerfile.dockerignore"
 PROBE = ROOT / "docker/agentsc-http-ready"
 RELEASE = ROOT / ".github/workflows/release.yml"
+TOOLCHAIN = ROOT / "rust-toolchain.toml"
 
 
 def stages() -> dict[str, list[str]]:
@@ -68,11 +69,12 @@ def test_stages_and_binary_sources() -> None:
         assert f"target/release/{binary}" in build
 
 
-def test_rust_toolchain_matches_the_release_workflow() -> None:
+def test_rust_toolchain_is_the_same_everywhere() -> None:
+    channel = re.search(r'^channel = "([^"]+)"$', TOOLCHAIN.read_text(), re.MULTILINE).group(1)
     [base] = [line for line in stages()["binaries-source"] if line.startswith("FROM ")]
-    version = re.search(r"rust:(\d+\.\d+)", base).group(1)
+    assert re.search(r"rust:(\d+\.\d+\.\d+)", base).group(1) == channel
     workflow = yaml.safe_load(RELEASE.read_text())
-    assert workflow["env"]["RUST_TOOLCHAIN"] == version
+    assert workflow["env"]["RUST_TOOLCHAIN"] == channel
 
 
 def test_agentscd_image_is_unchanged_plus_a_writable_state_dir() -> None:

@@ -8,7 +8,7 @@ Commands on this page use the code names: `agentscd` is the sidecar, `agentsc` i
 
 | Tool | What needs it | Version set in the repo |
 | ---- | ------------- | ----------------------- |
-| Rust toolchain: `cargo`, `clippy`, `rustfmt` | local demo, tests, lint, the `agentsc` CLI | not pinned on your machine. Use a recent stable Rust: the crates use edition 2024. The Docker image builds with `rust:1.99`. |
+| Rust toolchain: `cargo`, `clippy`, `rustfmt` | local demo, tests, lint, the `agentsc` CLI | `rust-toolchain.toml` pins 1.99.0 with `clippy` and `rustfmt`; `rustup` installs them on first use. The Docker image builds with `rust:1.99.0`. |
 | `protoc` (Protocol Buffers compiler) | building the sidecar on your machine. `crates/agentsc-proto/build.rs` compiles the files in `proto/`. | not pinned |
 | `uv` | the Python runtime, the inventory app in the local demo, the Python tests | not pinned on your machine. The image uses `uv` 0.10.12. |
 | Python | the agent runtime | 3.12 or newer (`runtime/pyproject.toml`) |
