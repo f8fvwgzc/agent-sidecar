@@ -190,6 +190,8 @@ fn parse_dns_name(s: &str) -> Result<String, String> {
 }
 
 /// Every flag of `embassy serve` (design §8.1).
+// The fields' doc comments are the `--help` text, where `<name>` is a placeholder, not HTML.
+#[allow(rustdoc::invalid_html_tags)]
 #[derive(Debug, Clone, Args)]
 pub struct ServeArgs {
     /// Comma-separated components to run: ca, webhook, controlplane, api, ui.
@@ -953,6 +955,7 @@ pub async fn start(
     }
 
     let mut http_addr = None;
+    // Only the `http3` feature assigns this.
     #[allow(unused_mut, unused_assignments)]
     let mut http3_addr = None;
     if (args.has(Api) || args.has(Ui))
@@ -962,6 +965,7 @@ pub async fn start(
             Some(d) => crate::ui_assets::UiFiles::Dir(d.clone()),
             None => crate::ui_assets::UiFiles::Embedded,
         });
+        // Only the `http3` feature adds a layer (Alt-Svc).
         #[allow(unused_mut)]
         let mut app = crate::api::router(h.clone(), args.has(Api), ui);
         let listener = tokio::net::TcpListener::bind(args.http_addr)

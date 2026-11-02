@@ -237,6 +237,8 @@ pub struct Writer {
     pub caller: Option<Caller>,
 }
 
+// The parts of one write, from different places in each handler: a struct would be built only to
+// make this call.
 #[allow(clippy::too_many_arguments)]
 /// The checks of every write, then the store. `stored` is what the caller read; `precondition`
 /// makes sure it is still current when the store writes.
@@ -340,6 +342,7 @@ pub async fn audit_write(
 }
 
 /// Validate `yaml` and write it, audited as `action`.
+// [`write`]'s arguments, passed on, and what the audit record adds.
 #[allow(clippy::too_many_arguments)]
 pub async fn audited_write(
     hub: &Hub,

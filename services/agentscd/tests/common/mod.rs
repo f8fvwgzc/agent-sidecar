@@ -1,5 +1,6 @@
 //! Shared rigs for the sidecar's integration tests: a scriptable fake runtime on `runtime.sock`,
 //! a client for `sidecar.sock`, audit log readers and a standalone sidecar.
+// Every test binary compiles this module and uses only part of it.
 #![allow(dead_code)]
 
 pub mod cp;

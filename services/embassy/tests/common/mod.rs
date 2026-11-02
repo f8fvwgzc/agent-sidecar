@@ -1,5 +1,6 @@
 //! A running `embassy serve` (components `controlplane,api,ui`, a temporary file store, a test
 //! CA) and clients for it: HTTP with tokens of every role, SSE, and sidecars over mTLS.
+// Every test binary compiles this module and uses only part of it.
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;

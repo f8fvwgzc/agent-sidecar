@@ -47,6 +47,7 @@ fn opt(s: &str) -> Value {
 /// A `config` record (design §5): agent null, caller `control-plane` or `file`, callee `charter`
 /// / `memory` / `certificate`, input `{source, epoch, version, sha256, weakened}`. It belongs to
 /// no trace.
+// One argument per field of the record; none has a default, so a builder would only move them.
 #[allow(clippy::too_many_arguments)]
 pub fn build_config_record(
     caller: &str,
@@ -84,6 +85,7 @@ pub fn build_config_record(
 }
 
 /// [`build_config_record`], written.
+// Its arguments, passed on, and the state to write to.
 #[allow(clippy::too_many_arguments)]
 pub fn config_record(
     state: &AppState,

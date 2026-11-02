@@ -224,6 +224,7 @@ impl Outbox {
 }
 
 /// A span start for the timeline (design §6.4): the span the closing audit record will carry.
+// One argument per field of the span; none has a default, so a builder would only move them.
 #[allow(clippy::too_many_arguments)]
 pub fn span(
     kind: &str,

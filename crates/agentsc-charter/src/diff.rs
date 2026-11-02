@@ -168,8 +168,8 @@ pub fn weakened(old: &Charter, new: &Charter) -> Vec<String> {
 }
 
 /// The permission keys of a charter write, in Tutela's `<type>:<action>` form (design §8.3,
-/// `services/embassy/tutela.resources.toml`). [`WRITE`] is what an editor holds; every key in
-/// [`ADMIN_KEYS`] is a change class only an admin may make.
+/// `services/embassy/tutela.resources.toml`). [`perm::WRITE`] is what an editor holds; every key in
+/// [`perm::ADMIN_KEYS`] is a change class only an admin may make.
 pub mod perm {
     /// Any charter write.
     pub const WRITE: &str = "service:write";
