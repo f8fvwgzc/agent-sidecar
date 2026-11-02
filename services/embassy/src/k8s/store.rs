@@ -1279,7 +1279,7 @@ impl Inner {
         if let Err(e) = agentsc_charter::Charter::from_value(&doc) {
             let errors = match e {
                 agentsc_charter::CharterError::Invalid(list) => list.join("; "),
-                other => other.to_string(),
+                other => agentsc_common::error::chain(&other),
             };
             self.mark_invalid(key, generation, &errors).await?;
             record.result = CpResult::Invalid;

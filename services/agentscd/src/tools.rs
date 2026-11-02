@@ -851,7 +851,7 @@ impl SidecarTools for ToolsService {
                 Err(e) => Err(status_with_rule(
                     Code::Unavailable,
                     RULE_MESH_UNAVAILABLE,
-                    &e.to_string(),
+                    &format!("{e:#}"),
                 )),
                 Ok(mut client) => {
                     let headers = req
@@ -1023,7 +1023,7 @@ impl SidecarTools for ToolsService {
                     &req.target_agent,
                     "error",
                     RULE_MESH_UNAVAILABLE,
-                    &e.to_string(),
+                    &format!("{e:#}"),
                 ),
                 Ok(mut client) => {
                     let msg = InvokeAgentRequest {

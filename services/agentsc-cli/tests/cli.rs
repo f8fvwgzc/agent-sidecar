@@ -362,7 +362,7 @@ fn verify_says_what_holds_and_exits_0_1_or_2() {
     assert_eq!(code, 2, "{err}");
     let (code, _, err) = run(&["verify", jwks.to_str().unwrap(), "--key", &public]);
     assert_eq!(code, 2, "{err}");
-    assert!(err.contains("not an evidence bundle"), "{err}");
+    assert!(err.contains("parse the evidence bundle"), "{err}");
     let (code, _, err) = run(&["verify", b, "--key", "abcd"]);
     assert_eq!(code, 2, "{err}");
     // stdin

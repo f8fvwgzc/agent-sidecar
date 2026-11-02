@@ -124,7 +124,7 @@ pub async fn issue(state: &AppState) -> anyhow::Result<WorkloadTls> {
         resp.ca_pem
     };
     let tls = WorkloadTls::from_pems(&ca_pem, &resp.cert_pem, &key.serialize_pem())
-        .context("the issued certificate")?;
+        .context("load the issued certificate")?;
     let id = &tls.material.identity;
     anyhow::ensure!(
         id.uri() == state.self_identity,

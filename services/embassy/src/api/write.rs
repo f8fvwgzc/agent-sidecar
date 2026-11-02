@@ -40,7 +40,7 @@ pub struct Candidate {
 fn lines(e: agentsc_charter::CharterError) -> Vec<String> {
     match e {
         agentsc_charter::CharterError::Invalid(v) => v,
-        other => vec![other.to_string()],
+        other => vec![agentsc_common::error::chain(&other)],
     }
 }
 
@@ -383,6 +383,17 @@ mod tests {
         assert!(e.reason().contains("service.name"), "{}", e.reason());
         let e = candidate(&ServiceKey::new("shop", "orders"), "service: [".into()).unwrap_err();
         assert_eq!(e.code(), ErrorCode::Invalid);
+        // the parser's own words reach the caller
+        let e = candidate(
+            &ServiceKey::new("shop", "orders"),
+            format!("{yaml}\nextra: 1\n"),
+        )
+        .unwrap_err();
+        assert!(
+            e.reason().contains("unknown field `extra`"),
+            "{}",
+            e.reason()
+        );
     }
 
     #[test]

@@ -123,7 +123,8 @@ pub fn apply_charter(state: &AppState, cand: CharterCandidate) -> Result<Arc<Loa
             .as_ref()
             .is_some_and(|c| c.source != Source::ControlPlane);
     let checked = (|| {
-        let charter = Charter::from_yaml(&cand.text).map_err(|e| e.to_string())?;
+        let charter =
+            Charter::from_yaml(&cand.text).map_err(|e| agentsc_common::error::chain(&e))?;
         check_identity(state, &charter)?;
         if let Some(cur) = &current
             && !replaces_startup

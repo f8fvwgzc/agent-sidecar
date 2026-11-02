@@ -136,13 +136,13 @@ fn verify(args: &VerifyArgs) -> anyhow::Result<bool> {
         std::fs::read_to_string(&args.bundle).with_context(|| format!("reading {}", args.bundle))?
     };
     let bundle: agentsc_ledger::Bundle =
-        serde_json::from_str(&text).context("the bundle is not an evidence bundle")?;
+        serde_json::from_str(&text).context("parse the evidence bundle")?;
     let keys = match (&args.keys, &args.key) {
         (Some(path), _) => {
             let t = std::fs::read_to_string(path)
                 .with_context(|| format!("reading {}", path.display()))?;
             serde_json::from_str::<agentsc_ledger::Jwks>(&t)
-                .with_context(|| format!("{} is not a JWKS", path.display()))?
+                .with_context(|| format!("parse {} as a JWKS", path.display()))?
         }
         (None, Some(k)) => agentsc_ledger::Jwks::single(&agentsc_ledger::parse_public_key(k)?),
         (None, None) => anyhow::bail!("--keys or --key is required"),
@@ -172,7 +172,11 @@ fn main() {
                 0
             }
             Err(e) => {
-                eprintln!("invalid: {}\n{e}", file.display());
+                eprintln!(
+                    "invalid: {}\n{}",
+                    file.display(),
+                    agentsc_common::error::chain(&e)
+                );
                 1
             }
         },
@@ -202,14 +206,18 @@ fn main() {
                 0
             }
             Err(e) => {
-                eprintln!("invalid: {}\n{e}", file.display());
+                eprintln!(
+                    "invalid: {}\n{}",
+                    file.display(),
+                    agentsc_common::error::chain(&e)
+                );
                 1
             }
         },
         Cmd::Logs(args) => match logs(args) {
             Ok(()) => 0,
             Err(e) => {
-                eprintln!("error: {e}");
+                eprintln!("error: {e:#}");
                 1
             }
         },

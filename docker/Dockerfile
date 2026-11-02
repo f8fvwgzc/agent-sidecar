@@ -66,7 +66,8 @@ COPY --chmod=0755 docker/agentsc-ready /usr/local/bin/agentsc-ready
 RUN groupadd --gid 10001 agentsc && useradd --uid 10001 --gid 10001 --create-home agentsc \
     && install -d -o 10001 -g 10001 -m 0755 /run/agentsc /var/log/agentsc \
     && install -d -o 10001 -g 10001 -m 0700 /run/agentsc/state
-ENV PATH=/app/.venv/bin:$PATH AGENTSC_RUNTIME_CMD=agentsc-runtime RUST_LOG=info
+ENV PATH=/app/.venv/bin:$PATH AGENTSC_RUNTIME_CMD=agentsc-runtime RUST_LOG=info \
+    RUST_BACKTRACE=1 RUST_LIB_BACKTRACE=0
 USER 10001:10001
 EXPOSE 3500 50001 50002
 ENTRYPOINT ["agentscd"]
@@ -89,6 +90,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && install -d -o 10001 -g 10001 -m 0755 /agentsc-ca
 COPY --from=binaries /out/embassy /usr/local/bin/embassy
 COPY --chmod=0755 docker/agentsc-http-ready /usr/local/bin/agentsc-http-ready
+ENV RUST_BACKTRACE=1 RUST_LIB_BACKTRACE=0
 USER 10001:10001
 EXPOSE 8080 9443 15012
 ENTRYPOINT ["embassy"]

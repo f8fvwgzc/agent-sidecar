@@ -120,6 +120,14 @@ pub fn rejects(c: &Charter, needle: &str) {
     assert!(msg.contains(needle), "expected {needle:?} in:\n{msg}");
 }
 
+/// The error and its source, as `agentsc_common::error::chain` prints them.
+pub fn report(e: &dyn std::error::Error) -> String {
+    match e.source() {
+        Some(source) => format!("{e}: {source}"),
+        None => e.to_string(),
+    }
+}
+
 /// Assert the charter is valid.
 pub fn accepts(c: &Charter) {
     if let Err(e) = c.validate() {

@@ -444,7 +444,7 @@ fn unknown_fields_reach_the_validator_instead_of_being_pruned() {
             .unwrap()
             .insert(field.into(), json!(true));
         assert_eq!(errors(&cr), Vec::<String>::new(), "{at}/{field} is kept");
-        let err = Charter::from_value(&cr).unwrap_err().to_string();
+        let err = common::report(&Charter::from_value(&cr).unwrap_err());
         assert!(
             err.contains(&format!("unknown field `{field}`")),
             "{at}: {err}"

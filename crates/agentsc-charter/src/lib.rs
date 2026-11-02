@@ -904,11 +904,11 @@ pub struct AuditSpec {
 
 #[derive(Debug, thiserror::Error)]
 pub enum CharterError {
-    #[error("cannot read charter: {0}")]
+    #[error("cannot read charter")]
     Io(#[from] std::io::Error),
-    #[error("charter is not valid YAML or has unknown fields: {0}")]
+    #[error("charter is not valid YAML or has unknown fields")]
     Parse(#[from] serde_yaml_ng::Error),
-    #[error("charter has unknown fields or wrong types: {0}")]
+    #[error("charter has unknown fields or wrong types")]
     Json(#[from] serde_json::Error),
     #[error("charter is invalid:\n{}", .0.iter().map(|e| format!("  - {e}")).collect::<Vec<_>>().join("\n"))]
     Invalid(Vec<String>),
@@ -1529,8 +1529,7 @@ impl Charter {
                 "charter is {json} bytes serialized, more than the {MAX_CHARTER_BYTES} allowed"
             ));
         }
-        let yaml = self
-            .to_yaml()
+        let yaml = serde_yaml_ng::to_string(self)
             .map_err(|e| format!("charter cannot be serialized: {e}"))?
             .len();
         if yaml > MAX_CHARTER_BYTES {
@@ -2112,6 +2111,11 @@ pub fn json_schema() -> serde_json::Value {
 mod tests {
     use super::*;
 
+    /// What the parser said: a parse error's own message does not repeat it.
+    fn source_text(e: &CharterError) -> String {
+        std::error::Error::source(e).map_or_else(String::new, ToString::to_string)
+    }
+
     const ORDERS: &str = include_str!("../../../examples/charters/orders.charter.yaml");
     const INVENTORY: &str = include_str!("../../../examples/charters/inventory.charter.yaml");
 
@@ -2225,7 +2229,7 @@ mod tests {
             "pii_redact: true\n  pii_redaction: true",
         );
         let err = Charter::from_yaml(&bad).unwrap_err();
-        let msg = err.to_string();
+        let msg = source_text(&err);
         assert!(msg.contains("unknown field `pii_redaction`"), "{msg}");
         assert!(msg.contains("guardrails"), "{msg}");
     }
@@ -2234,7 +2238,7 @@ mod tests {
     fn top_level_unknown_field_is_rejected() {
         let bad = format!("{ORDERS}\nextra: 1\n");
         let err = Charter::from_yaml(&bad).unwrap_err();
-        assert!(err.to_string().contains("unknown field `extra`"));
+        assert!(source_text(&err).contains("unknown field `extra`"));
     }
 
     #[test]

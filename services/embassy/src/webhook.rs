@@ -1181,7 +1181,7 @@ pub async fn validate_charter(state: &WebhookState, req: &AdmissionRequest) -> D
         Err(Some(e)) => {
             let errors = match e {
                 agentsc_charter::CharterError::Invalid(list) => list.join("; "),
-                other => other.to_string(),
+                other => agentsc_common::error::chain(&other),
             };
             (
                 Decision::deny(400, format!("the Charter is invalid: {errors}")),

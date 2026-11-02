@@ -27,13 +27,13 @@ pub const LEAF_TTL_DAYS: i64 = 365;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PkiError {
-    #[error("certificate generation failed: {0}")]
+    #[error("certificate generation failed")]
     Rcgen(#[from] rcgen::Error),
     #[error("certificate parse failed: {0}")]
     Parse(String),
-    #[error("pem: {0}")]
+    #[error("pem")]
     Pem(#[from] rustls_pki_types::pem::Error),
-    #[error("io: {0}")]
+    #[error("io")]
     Io(#[from] std::io::Error),
     /// A certificate signing request that is malformed, not ECDSA P-256, or whose
     /// self-signature does not verify.

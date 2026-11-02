@@ -66,11 +66,11 @@ pub fn bind(
     let mut tls = rustls::ServerConfig::clone(&tls);
     tls.alpn_protocols = vec![ALPN_H3.to_vec()];
     let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls)
-        .context("the serving certificate's TLS configuration cannot carry QUIC")?;
+        .context("turn the serving certificate's TLS configuration into a QUIC one")?;
     let mut config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
     let mut transport = quinn::TransportConfig::default();
     transport.max_idle_timeout(Some(
-        quinn::IdleTimeout::try_from(IDLE_TIMEOUT).context("QUIC idle timeout")?,
+        quinn::IdleTimeout::try_from(IDLE_TIMEOUT).context("set the QUIC idle timeout")?,
     ));
     transport.max_concurrent_bidi_streams(MAX_CONCURRENT_STREAMS.into());
     config.transport_config(Arc::new(transport));
@@ -107,7 +107,7 @@ pub async fn serve(
                 }
             };
             if let Err(e) = connection(conn, peer, app, stop).await {
-                tracing::debug!(%peer, error = %e, "HTTP/3 connection ended with an error");
+                tracing::debug!(%peer, error = format!("{e:#}"), "HTTP/3 connection ended with an error");
             }
         });
     }
@@ -137,7 +137,7 @@ async fn connection(
                     match resolver.resolve_request().await {
                         Ok((req, stream)) => {
                             if let Err(e) = respond(req, stream, peer, app).await {
-                                tracing::debug!(%peer, error = %e, "HTTP/3 request failed");
+                                tracing::debug!(%peer, error = format!("{e:#}"), "HTTP/3 request failed");
                             }
                         }
                         Err(e) => {

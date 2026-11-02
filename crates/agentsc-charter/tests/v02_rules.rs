@@ -111,9 +111,7 @@ fn unknown_fields_in_new_blocks_are_rejected() {
             "tool",
         ),
     ] {
-        let err = Charter::from_yaml(&V02.replacen(from, to, 1))
-            .unwrap_err()
-            .to_string();
+        let err = common::report(&Charter::from_yaml(&V02.replacen(from, to, 1)).unwrap_err());
         assert!(err.contains(&format!("unknown field `{field}`")), "{err}");
     }
 }

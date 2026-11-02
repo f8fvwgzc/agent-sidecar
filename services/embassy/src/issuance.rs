@@ -600,7 +600,7 @@ impl Issuer {
         let key = match agentsc_pki::verify_csr_p256(&req.csr_pem) {
             Ok(k) => k,
             Err(e) => {
-                let d = deny(Code::InvalidArgument, e.to_string());
+                let d = deny(Code::InvalidArgument, agentsc_common::error::chain(&e));
                 self.audit(&req, None, None, Err(&d)).await;
                 return Err(Status::new(d.code, d.message));
             }

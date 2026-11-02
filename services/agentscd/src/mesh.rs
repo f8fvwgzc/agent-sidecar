@@ -133,7 +133,10 @@ fn inbound<T>(
                 )),
                 Err(e) => Err(Verdict::deny(
                     RULE_IDENTITY,
-                    format!("client certificate unreadable: {e}"),
+                    format!(
+                        "client certificate unreadable: {}",
+                        agentsc_common::error::chain(&e)
+                    ),
                 )),
             },
         },

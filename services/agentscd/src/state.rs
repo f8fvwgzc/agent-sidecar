@@ -187,7 +187,7 @@ impl AppState {
                         source: crate::loaded::Source::State,
                     }),
                     Err(e) => {
-                        tracing::warn!(error = %e, "persisted charter in the state dir is invalid; ignored");
+                        tracing::warn!(error = %agentsc_common::error::chain(&e), "persisted charter in the state dir is invalid; ignored");
                         None
                     }
                 }
@@ -286,7 +286,7 @@ impl AppState {
         };
         let trust_roots = match &trust_pem {
             Some(pem) => Some(Arc::new(
-                crate::tls::roots_from_pem(pem).context("control-plane trust roots")?,
+                crate::tls::roots_from_pem(pem).context("parse the control-plane trust roots")?,
             )),
             None if managed => anyhow::bail!(
                 "managed mode needs trust roots: --ca-file, AGENTSC_CA_PEM or {}/ca.crt",
@@ -320,7 +320,7 @@ impl AppState {
             budgets: Arc::new(Budgets::new()),
             audit,
             providers: crate::gateway::Providers::from_config(&config)
-                .context("model gateway providers")?,
+                .context("set up the model gateway providers")?,
             // A followed redirect would reach what authz and the origin check never saw (another
             // host, the metadata IP, this sidecar's own API); a 3xx goes back to the caller as is.
             http: reqwest::Client::builder()

@@ -595,7 +595,7 @@ impl<'de> Deserialize<'de> for HumanDuration {
 /// Why a config could not be used.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    #[error("read {path}: {source}")]
+    #[error("read {path}")]
     Read {
         path: PathBuf,
         source: std::io::Error,
@@ -1030,5 +1030,7 @@ events:
         assert!(matches!(err, ConfigError::Invalid(_)), "{err}");
         let err = ControlPlaneConfig::load(&dir.path().join("missing.yaml"), "x").unwrap_err();
         assert!(err.to_string().contains("missing.yaml"), "{err}");
+        let text = agentsc_common::error::chain(&err);
+        assert_eq!(text.matches("No such file").count(), 1, "{text}");
     }
 }

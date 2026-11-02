@@ -77,6 +77,13 @@ def test_rust_toolchain_is_the_same_everywhere() -> None:
     assert workflow["env"]["RUST_TOOLCHAIN"] == channel
 
 
+def test_images_print_a_backtrace_on_panic_and_capture_none_on_errors() -> None:
+    for name in ("agentscd", "embassy"):
+        env = " ".join(instruction(stages()[name], "ENV")).split()
+        assert "RUST_BACKTRACE=1" in env
+        assert "RUST_LIB_BACKTRACE=0" in env
+
+
 def test_agentscd_image_is_unchanged_plus_a_writable_state_dir() -> None:
     s = stages()["agentscd"]
     assert instruction(s, "ENTRYPOINT") == ['["agentscd"]']

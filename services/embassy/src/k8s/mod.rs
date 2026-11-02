@@ -21,7 +21,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, Weak};
 
-use anyhow::{Context, anyhow, bail};
+use anyhow::{Context, bail};
 use k8s_openapi::ByteString;
 use k8s_openapi::api::core::v1::Secret;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -101,7 +101,7 @@ pub async fn report_synced(
 pub async fn open_kube_store(args: &ServeArgs) -> anyhow::Result<Arc<KubeStore>> {
     let client = KubeClient::try_default()
         .await
-        .context("--store kubernetes")?;
+        .context("connect to the Kubernetes API for --store kubernetes")?;
     match CharterApi::list(&client).await {
         Ok(_) => {}
         Err(ApiError::NotFound) => bail!(
@@ -135,9 +135,9 @@ pub async fn open_kube_store(args: &ServeArgs) -> anyhow::Result<Arc<KubeStore>>
 /// exist a new CA is created in it (the chart's default `agentsc-ca`); with `ca.existingSecret`
 /// the Secret exists and is only read.
 pub async fn load_ca_secret(namespace: &str, name: &str) -> anyhow::Result<CaMaterial> {
-    let api = KubeClient::try_default()
-        .await
-        .with_context(|| format!("--ca-secret {namespace}/{name}"))?;
+    let api = KubeClient::try_default().await.with_context(|| {
+        format!("connect to the Kubernetes API for --ca-secret {namespace}/{name}")
+    })?;
     load_or_create_ca(&api, namespace, name).await
 }
 
@@ -169,7 +169,7 @@ pub async fn load_or_create_ca(
                 return CaMaterial::from_pems(crt, key).with_context(|| what.clone());
             }
             Ok(None) => {
-                let ca = agentsc_pki::ca_init().map_err(|e| anyhow!("{what}: {e}"))?;
+                let ca = agentsc_pki::ca_init().with_context(|| what.clone())?;
                 let secret = Secret {
                     metadata: ObjectMeta {
                         name: Some(name.to_string()),

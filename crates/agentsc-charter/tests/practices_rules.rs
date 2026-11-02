@@ -235,18 +235,17 @@ fn unknown_fields_inside_practices_are_rejected() {
             "ask",
         ),
     ] {
-        let err = Charter::from_yaml(&v02_with(block))
-            .unwrap_err()
-            .to_string();
+        let err = common::report(&Charter::from_yaml(&v02_with(block)).unwrap_err());
         assert!(err.contains(&format!("unknown field `{field}`")), "{err}");
     }
-    let err = Charter::from_yaml(&V02.replacen(
-        "      max_proposals_per_hour: 10\n",
-        "      max_proposals_per_hour: 10\n      evidence: true\n",
-        1,
-    ))
-    .unwrap_err()
-    .to_string();
+    let err = common::report(
+        &Charter::from_yaml(&V02.replacen(
+            "      max_proposals_per_hour: 10\n",
+            "      max_proposals_per_hour: 10\n      evidence: true\n",
+            1,
+        ))
+        .unwrap_err(),
+    );
     assert!(err.contains("unknown field `evidence`"), "{err}");
 }
 

@@ -44,7 +44,7 @@ flowchart LR
 
 ### Log level
 
-The sidecar log level comes from the `RUST_LOG` environment variable. The image and the demo Deployments set `RUST_LOG=info`. Set `RUST_LOG=debug` on the `agentscd` container for more detail. The runtime always logs at `INFO`. It has no setting for this.
+The sidecar log level comes from the `RUST_LOG` environment variable. The image and the demo Deployments set `RUST_LOG=info`. Set `RUST_LOG=debug` on the `agentscd` container for more detail. The runtime always logs at `INFO`. It has no setting for this. The images set `RUST_BACKTRACE=1` and `RUST_LIB_BACKTRACE=0`: a panic prints a backtrace, and an ordinary error does not spend time capturing one.
 
 ### Audit sink: stdout or file
 

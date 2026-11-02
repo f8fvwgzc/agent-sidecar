@@ -317,7 +317,7 @@ impl Gateway {
         Ok(Arc::new(Self {
             tenants,
             platform: c.map(platform_routes).unwrap_or_default(),
-            client: super::client().map_err(|e| e.to_string())?,
+            client: super::client().map_err(|e| format!("{e:#}"))?,
             budgets: Arc::new(Budgets::new()),
             audit: settings.audit,
             payloads: settings.audit_payloads,

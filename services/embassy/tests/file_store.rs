@@ -459,12 +459,9 @@ async fn external_edits_are_validated_stored_and_audited() {
         unreachable!()
     };
     assert_eq!(rec.result, embassy::api::types::CpResult::Invalid);
-    assert!(
-        rec.reason
-            .as_deref()
-            .unwrap()
-            .contains("invalid and was ignored")
-    );
+    let reason = rec.reason.as_deref().unwrap();
+    assert!(reason.contains("invalid and was ignored"), "{reason}");
+    assert!(reason.contains("missing field"), "{reason}");
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(rx.try_recv().is_err(), "audited once");
     assert_eq!(store.get_charter(&key).await.unwrap().version, "2");

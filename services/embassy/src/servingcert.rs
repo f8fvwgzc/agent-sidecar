@@ -136,28 +136,29 @@ fn load(
     key_pem: &str,
     ca_pem: &str,
 ) -> anyhow::Result<Loaded> {
-    let chain = agentsc_pki::certs_from_pem(cert_pem).context("the serving certificate")?;
+    let chain = agentsc_pki::certs_from_pem(cert_pem).context("parse the serving certificate")?;
     let leaf = chain
         .first()
         .ok_or_else(|| anyhow!("the serving certificate is empty"))?;
-    let not_after = agentsc_pki::not_after_of(leaf).context("the serving certificate")?;
+    let not_after =
+        agentsc_pki::not_after_of(leaf).context("read the serving certificate's expiry")?;
     let key = PrivateKeyDer::from_pem_slice(key_pem.as_bytes())
         .map_err(|e| anyhow!("the serving key: {e}"))?;
     let certified = CertifiedKey::from_der(chain.clone(), key, provider)
-        .context("the serving key does not fit the serving certificate")?;
+        .context("pair the serving key with the serving certificate")?;
 
-    let roots_der = agentsc_pki::certs_from_pem(ca_pem).context("the CA bundle")?;
+    let roots_der = agentsc_pki::certs_from_pem(ca_pem).context("parse the CA bundle")?;
     let ca_pem = agentsc_pki::certs_to_pem(&roots_der);
     let mut roots = RootCertStore::empty();
     for (i, root) in roots_der.into_iter().enumerate() {
         roots
             .add(root)
-            .with_context(|| format!("CA bundle certificate {}", i + 1))?;
+            .with_context(|| format!("add CA bundle certificate {}", i + 1))?;
     }
     let client_verifier =
         WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider.clone())
             .build()
-            .context("the client-certificate verifier")?;
+            .context("build the client-certificate verifier")?;
     Ok(Loaded {
         pem: Arc::new(ServingCert {
             cert_pem: agentsc_pki::certs_to_pem(&chain),
@@ -217,7 +218,7 @@ impl ServingCertSource {
     ) -> anyhow::Result<Self> {
         let builder = ServerConfig::builder_with_provider(provider.clone())
             .with_safe_default_protocol_versions()
-            .context("TLS protocol versions")?;
+            .context("set the TLS protocol versions")?;
         let (changes, _) = watch::channel(loaded.pem.clone());
         Ok(Self {
             shared: Arc::new(Shared {
@@ -294,7 +295,7 @@ impl ServingCertSource {
         let files = DirFiles::read(&dir)?;
         let provider = Self::provider();
         let loaded = load(&provider, &files.cert, &files.key, &files.ca)
-            .with_context(|| format!("the serving certificate in {}", dir.display()))?;
+            .with_context(|| format!("load the serving certificate in {}", dir.display()))?;
         let mut source = Self::build(loaded, provider, format!("directory {}", dir.display()))?;
         let shared = Arc::downgrade(&source.shared);
         let task = runtime.spawn(poll_dir(shared, dir, every, files));
@@ -905,7 +906,7 @@ mod tests {
             .unwrap();
         write_dir(dir.path(), &leaf.cert_pem, &other.key_pem, ca.roots_pem());
         let e = format!("{:#}", ServingCertSource::from_dir(dir.path()).unwrap_err());
-        assert!(e.contains("does not fit"), "{e}");
+        assert!(e.contains("pair the serving key"), "{e}");
         write_dir(dir.path(), &leaf.cert_pem, &leaf.key_pem, "no certificates");
         let e = format!("{:#}", ServingCertSource::from_dir(dir.path()).unwrap_err());
         assert!(e.contains("CA bundle"), "{e}");

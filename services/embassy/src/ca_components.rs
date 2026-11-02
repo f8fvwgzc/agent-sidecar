@@ -58,14 +58,14 @@ pub async fn spawn(ctx: Arc<ServeContext>) -> anyhow::Result<Vec<Task>> {
         listeners.grpc = Some(
             TcpListener::bind(args.grpc_addr)
                 .await
-                .with_context(|| format!("--grpc-addr {}", args.grpc_addr))?,
+                .with_context(|| format!("bind --grpc-addr {}", args.grpc_addr))?,
         );
     }
     if args.has(Component::Webhook) {
         listeners.webhook = Some(
             TcpListener::bind(args.webhook_addr)
                 .await
-                .with_context(|| format!("--webhook-addr {}", args.webhook_addr))?,
+                .with_context(|| format!("bind --webhook-addr {}", args.webhook_addr))?,
         );
     }
     spawn_with(ctx, listeners, None).await
@@ -112,7 +112,7 @@ pub async fn spawn_with(
                     shutdown.cancelled_owned(),
                 )
                 .await
-                .context("the IssueCertificate server")
+                .context("serve IssueCertificate")
         }));
     }
 
