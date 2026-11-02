@@ -476,7 +476,7 @@ impl ServeArgs {
     pub fn load_config(&self) -> anyhow::Result<ControlPlaneConfig> {
         match &self.config {
             Some(path) => ControlPlaneConfig::load(path, &self.cp_namespace)
-                .with_context(|| format!("--config {}", path.display())),
+                .with_context(|| format!("load --config {}", path.display())),
             None => Ok(ControlPlaneConfig::default()),
         }
     }
@@ -636,8 +636,8 @@ fn file_store_validator(
     Arc::new(
         move |key: &crate::store::ServiceKey, yaml: &str, previous: Option<&str>| {
             let json = crate::store::file::default_validator(key, yaml, previous)?;
-            let charter =
-                agentsc_charter::Charter::from_yaml(yaml).map_err(|e| vec![e.to_string()])?;
+            let charter = agentsc_charter::Charter::from_yaml(yaml)
+                .map_err(|e| vec![agentsc_common::error::chain(&e)])?;
             let mut problems =
                 crate::api::write::policy_problems(config.load().policy.as_ref(), &charter);
             if let Some(h) = hub.get().and_then(std::sync::Weak::upgrade) {
@@ -671,7 +671,7 @@ async fn open_postgres(
 ) -> anyhow::Result<Arc<crate::store::postgres::PgStore>> {
     let url = match &args.postgres_url_file {
         Some(path) => std::fs::read_to_string(path)
-            .with_context(|| format!("--postgres-url-file {}", path.display()))?
+            .with_context(|| format!("read --postgres-url-file {}", path.display()))?
             .trim()
             .to_string(),
         None => std::env::var("AGENTSC_POSTGRES_URL").unwrap_or_default(),
@@ -689,7 +689,7 @@ async fn open_postgres(
         allow_plaintext: args.postgres_allow_plaintext,
     })
     .await
-    .with_context(|| format!("{flag} postgres"))
+    .with_context(|| format!("open {flag} postgres"))
 }
 
 async fn open_store(
@@ -702,14 +702,14 @@ async fn open_store(
         Some(StoreSpec::File(dir)) => {
             let fs = crate::store::file::FileStore::open(dir.clone())
                 .await
-                .with_context(|| format!("--store file:{}", dir.display()))?;
+                .with_context(|| format!("open --store file:{}", dir.display()))?;
             fs.set_validator(file_store_validator(config.clone(), hub.clone()));
             let secops: Option<Arc<dyn crate::secops::SecOpsStore>> = if args.secops_store.is_none()
             {
                 let path = dir.join(".secops.sqlite3");
                 Some(
                     crate::store::sqlite::SqliteStore::open(path.clone())
-                        .with_context(|| format!("the SecOps store {}", path.display()))?,
+                        .with_context(|| format!("open the SecOps store {}", path.display()))?,
                 )
             } else {
                 None
@@ -718,7 +718,7 @@ async fn open_store(
         }
         Some(StoreSpec::Sqlite(path)) => {
             let db = crate::store::sqlite::SqliteStore::open(path.clone())
-                .with_context(|| format!("--store sqlite:{}", path.display()))?;
+                .with_context(|| format!("open --store sqlite:{}", path.display()))?;
             (Some(db.clone()), Some(db))
         }
         Some(StoreSpec::Postgres) => {
@@ -731,7 +731,7 @@ async fn open_store(
         None => secops,
         Some(StoreSpec::Sqlite(path)) => Some(
             crate::store::sqlite::SqliteStore::open(path.clone())
-                .with_context(|| format!("--secops-store sqlite:{}", path.display()))?,
+                .with_context(|| format!("open --secops-store sqlite:{}", path.display()))?,
         ),
         Some(StoreSpec::Postgres) => Some(open_postgres(args, "--secops-store").await?),
         Some(_) => anyhow::bail!("--secops-store is sqlite:<path> or postgres"),
@@ -797,7 +797,7 @@ async fn reload_config(
                 tracing::info!(path = %path.display(), "reloaded the ControlPlaneConfig");
             }
             Err(e) => {
-                tracing::error!(path = %path.display(), error = %e, "the changed --config is invalid; the running config stays");
+                tracing::error!(path = %path.display(), error = %agentsc_common::error::chain(&e), "the changed --config is invalid; the running config stays");
             }
         }
     }
@@ -840,10 +840,9 @@ pub async fn start(
             args.dns_names.clone(),
         )?))
     } else if let Some(dir) = &args.tls_dir {
-        Some(Arc::new(
-            ServingCertSource::from_dir(dir)
-                .with_context(|| format!("--tls-dir {}", dir.display()))?,
-        ))
+        Some(Arc::new(ServingCertSource::from_dir(dir).with_context(
+            || format!("load --tls-dir {}", dir.display()),
+        )?))
     } else {
         bail!("the serving certificate needs the ca component or --tls-dir")
     };

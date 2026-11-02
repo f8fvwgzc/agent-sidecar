@@ -57,7 +57,7 @@ pub async fn login(State(hub): State<Arc<Hub>>) -> Result<Response, Fail> {
     let now = chrono::Utc::now().timestamp();
     let (location, state) = issuer
         .begin(&hub.auth.session_key(), now)
-        .map_err(Fail::internal)?;
+        .map_err(|e| Fail::internal(format!("{e:#}")))?;
     let cookie = oidc::state_cookie(&state, hub.auth.secure_cookies);
     Ok(with_cookie(see_other(&location), &cookie))
 }

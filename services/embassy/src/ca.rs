@@ -61,13 +61,13 @@ impl CaMaterial {
         };
         let crt = read("ca.crt")?;
         let key = read("ca.key")?;
-        Self::from_pems(&crt, &key).with_context(|| format!("the CA in {}", dir.display()))
+        Self::from_pems(&crt, &key).with_context(|| format!("load the CA in {}", dir.display()))
     }
 
     /// From the text of `ca.crt` and `ca.key`.
     pub fn from_pems(crt: &str, key: &str) -> anyhow::Result<Self> {
-        let roots = agentsc_pki::certs_from_pem(crt).context("ca.crt")?;
-        let signer = CaKeyPair::from_pems(crt, key).context("ca.key and ca.crt")?;
+        let roots = agentsc_pki::certs_from_pem(crt).context("parse ca.crt")?;
+        let signer = CaKeyPair::from_pems(crt, key).context("pair ca.key with ca.crt")?;
         Ok(Self {
             roots_pem: agentsc_pki::certs_to_pem(&roots),
             signer,

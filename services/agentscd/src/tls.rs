@@ -121,12 +121,12 @@ impl WorkloadTls {
             .ok_or_else(|| anyhow::anyhow!("tls.crt holds no certificate"))?;
         let key =
             PrivateKeyDer::from_pem_slice(material.key_pem.as_bytes()).context("parse tls.key")?;
-        let certified = CertifiedKey::from_der(chain, key, &provider)
-            .context("tls.key does not match tls.crt")?;
-        let roots = Arc::new(roots_from_pem(&material.ca_pem).context("ca.crt")?);
+        let certified =
+            CertifiedKey::from_der(chain, key, &provider).context("pair tls.key with tls.crt")?;
+        let roots = Arc::new(roots_from_pem(&material.ca_pem).context("parse ca.crt")?);
         let client_verifier = WebPkiClientVerifier::builder_with_provider(roots.clone(), provider)
             .build()
-            .context("client verifier")?;
+            .context("build the client verifier")?;
         let (not_before, not_after) = validity(&leaf)?;
         Ok(Self {
             cert_sha256: agentsc_common::audit::sha256_hex(&leaf),

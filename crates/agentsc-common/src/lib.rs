@@ -2,6 +2,7 @@
 pub mod audit;
 pub mod authz;
 pub mod budget;
+pub mod error;
 pub mod guardrails;
 pub mod identity;
 pub mod llm_contract;

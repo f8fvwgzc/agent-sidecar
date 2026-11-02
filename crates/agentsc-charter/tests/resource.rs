@@ -25,7 +25,7 @@ spec:
 "#;
 
 fn err(text: &str) -> String {
-    Charter::from_yaml(text).unwrap_err().to_string()
+    common::report(&Charter::from_yaml(text).unwrap_err())
 }
 
 #[test]
@@ -148,7 +148,7 @@ fn from_value_reads_both_forms() {
     assert!(e.contains("must equal spec.service.name"), "{e}");
     let mut unknown = plain.clone();
     unknown["guardrails"]["pii_redaction"] = json!(true);
-    let e = Charter::from_value(&unknown).unwrap_err().to_string();
+    let e = common::report(&Charter::from_value(&unknown).unwrap_err());
     assert!(e.contains("unknown field `pii_redaction`"), "{e}");
     let mut invalid = plain;
     invalid["service"]["name"] = json!("Orders");

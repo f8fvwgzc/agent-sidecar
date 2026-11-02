@@ -343,6 +343,19 @@ async fn issuance_hello_heartbeats_and_updates() {
     assert!(!a.applied && a.error.contains("service.app_port"), "{a:?}");
     assert_eq!(m.state().loaded().unwrap().version, "3");
 
+    // a charter that does not parse is refused with the parser's own words
+    let mut not_parsed = charter_update("e1", "5", &charter(&audit));
+    if let Some(control_message::Msg::Charter(update)) = &mut not_parsed.msg {
+        update.charter_yaml.push_str("\nextra: 1\n");
+    }
+    cp.push(not_parsed).await;
+    let a = ack(&cp, "charter", "5").await;
+    assert!(
+        !a.applied && a.error.contains("unknown field `extra`"),
+        "{a:?}"
+    );
+    assert_eq!(m.state().loaded().unwrap().version, "3");
+
     // 8. unknown control messages are ignored; the stream stays up
     cp.push(ControlMessage { msg: None }).await;
 

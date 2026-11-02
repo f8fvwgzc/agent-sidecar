@@ -78,7 +78,8 @@ pub fn default_validator(
     yaml: &str,
     _previous: Option<&str>,
 ) -> Result<Value, Vec<String>> {
-    let charter = agentsc_charter::Charter::from_yaml(yaml).map_err(|e| vec![e.to_string()])?;
+    let charter = agentsc_charter::Charter::from_yaml(yaml)
+        .map_err(|e| vec![agentsc_common::error::chain(&e)])?;
     let mut errs = Vec::new();
     if charter.service.name != key.service {
         errs.push(format!(

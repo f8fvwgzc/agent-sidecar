@@ -160,11 +160,11 @@ fn policy(config: &OidcConfig) -> anyhow::Result<tutela_safenet::Policy> {
         policy = policy.dev_loopback();
     }
     if config.private_host {
-        let url = url::Url::parse(&config.issuer).context("auth.oidc.issuer")?;
+        let url = url::Url::parse(&config.issuer).context("parse auth.oidc.issuer")?;
         let host = url.host_str().context("auth.oidc.issuer has no host")?;
         policy = policy
             .allow_private_host(host)
-            .context("auth.oidc.private_host")?;
+            .context("allow auth.oidc.private_host")?;
     }
     Ok(policy)
 }
@@ -173,7 +173,8 @@ impl Oidc {
     /// For `config`, reading the client secret: JWKS and the token endpoint go through
     /// `tutela-safenet`. Needs the process's rustls provider installed first.
     pub fn load(config: &OidcConfig) -> anyhow::Result<Oidc> {
-        let source = SafenetSource::new(policy(config)?).context("auth.oidc: the JWKS client")?;
+        let source =
+            SafenetSource::new(policy(config)?).context("build the auth.oidc JWKS client")?;
         Self::with_source(config, Arc::new(source))
     }
 
@@ -184,7 +185,8 @@ impl Oidc {
             source,
             Arc::new(SystemClock),
         );
-        let http = tutela_safenet::Client::new(policy(config)?).context("auth.oidc: the client")?;
+        let http =
+            tutela_safenet::Client::new(policy(config)?).context("build the auth.oidc client")?;
         let client_secret = config
             .client_secret_file
             .as_deref()
@@ -208,7 +210,7 @@ impl Oidc {
         };
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(pending.verifier.as_bytes()));
         let mut url = url::Url::parse(&self.config.authorization_endpoint())
-            .context("auth.oidc.authorization_endpoint")?;
+            .context("parse auth.oidc.authorization_endpoint")?;
         url.query_pairs_mut()
             .append_pair("response_type", "code")
             .append_pair("scope", "openid")
@@ -363,7 +365,7 @@ fn claims_of(token: &str) -> Option<serde_json::Value> {
 
 fn read_secret(path: &Path) -> anyhow::Result<String> {
     let text = std::fs::read_to_string(path)
-        .with_context(|| format!("auth.oidc.client_secret_file {}", path.display()))?;
+        .with_context(|| format!("read auth.oidc.client_secret_file {}", path.display()))?;
     let secret = text.trim();
     if secret.is_empty() {
         anyhow::bail!("auth.oidc.client_secret_file {} is empty", path.display());

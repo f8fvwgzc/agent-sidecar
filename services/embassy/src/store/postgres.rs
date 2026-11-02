@@ -95,6 +95,9 @@ impl std::fmt::Debug for PgOptions {
     }
 }
 
+/// `Display` only, and that is the point: a [`tokio_postgres::Error`] keeps the server's `DbError`
+/// as its source, whose `DETAIL` line holds row values, and this text reaches logs, audit reasons
+/// and API responses. Never walk its sources here.
 fn pg_err(e: impl std::fmt::Display) -> StoreError {
     StoreError::Io(format!("postgres: {e}"))
 }
@@ -210,8 +213,13 @@ impl MakeRustls {
             Some(path) => {
                 let pem = std::fs::read_to_string(path)
                     .map_err(|e| StoreError::Io(format!("{}: {e}", path.display())))?;
-                let certs = agentsc_pki::certs_from_pem(&pem)
-                    .map_err(|e| StoreError::Io(format!("{}: {e}", path.display())))?;
+                let certs = agentsc_pki::certs_from_pem(&pem).map_err(|e| {
+                    StoreError::Io(format!(
+                        "{}: {}",
+                        path.display(),
+                        agentsc_common::error::chain(&e)
+                    ))
+                })?;
                 for c in certs {
                     roots
                         .add(c)
@@ -1633,6 +1641,36 @@ impl Store for PgStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The value is in the error's source, one step from a reader, and stays there.
+    #[tokio::test]
+    async fn a_database_error_keeps_row_values_out_of_its_text() {
+        let Ok(url) = std::env::var("AGENTSC_TEST_POSTGRES_URL") else {
+            eprintln!("AGENTSC_TEST_POSTGRES_URL is not set: this test did not run");
+            return;
+        };
+        let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+            .await
+            .unwrap();
+        tokio::spawn(connection);
+        client
+            .batch_execute(
+                "CREATE TEMP TABLE row_values (k text PRIMARY KEY);
+                 INSERT INTO row_values VALUES ('a-row-value')",
+            )
+            .await
+            .unwrap();
+        let e = client
+            .execute("INSERT INTO row_values VALUES ('a-row-value')", &[])
+            .await
+            .unwrap_err();
+        let source = std::error::Error::source(&e).unwrap().to_string();
+        assert!(source.contains("a-row-value"), "{source}");
+        let StoreError::Io(text) = StoreError::from(e) else {
+            panic!("not an Io error");
+        };
+        assert_eq!(text, "postgres: db error");
+    }
 
     #[test]
     fn events_survive_the_notification_round_trip() {

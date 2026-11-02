@@ -47,17 +47,17 @@ impl LedgerKeys {
         let signer = match key_file {
             Some(path) => {
                 let text = std::fs::read_to_string(path)
-                    .with_context(|| format!("--ledger-key-file {}", path.display()))?;
+                    .with_context(|| format!("read --ledger-key-file {}", path.display()))?;
                 Some(
                     SigningKey::from_seed_text(&text)
-                        .with_context(|| format!("--ledger-key-file {}", path.display()))?,
+                        .with_context(|| format!("parse --ledger-key-file {}", path.display()))?,
                 )
             }
             None => None,
         };
         let retired = retired
             .iter()
-            .map(|k| agentsc_ledger::parse_public_key(k).context("--ledger-retired-key"))
+            .map(|k| agentsc_ledger::parse_public_key(k).context("parse --ledger-retired-key"))
             .collect::<anyhow::Result<Vec<_>>>()?;
         if let Some(s) = &signer
             && retired.iter().any(|r| *r == s.public_key())
