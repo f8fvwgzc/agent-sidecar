@@ -332,6 +332,7 @@ impl<'a> Call<'a> {
     }
 
     /// The record of what was actually attempted (`service_call` / `agent_call` / `http_call`).
+    // One argument per field of the record; none has a default, so a builder would only move them.
     #[allow(clippy::too_many_arguments)]
     fn attempt(
         &self,
@@ -642,6 +643,8 @@ impl ToolsService {
         ]
     }
 
+    // The parts of one request, from different places in the caller: a struct would be built only
+    // to make this call.
     #[allow(clippy::too_many_arguments)]
     async fn call_local_app(
         &self,

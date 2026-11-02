@@ -896,6 +896,8 @@ pub struct AuditSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
     /// Dotted paths inside `input`/`output` replaced by "[redacted]".
+    // schemars copies this comment into the charter schema, so it stays as it is.
+    #[allow(rustdoc::broken_intra_doc_links)]
     #[serde(default)]
     pub redact: Vec<String>,
 }

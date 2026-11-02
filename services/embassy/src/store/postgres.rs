@@ -15,7 +15,7 @@
 //! transaction (delivered on commit) with the event, the writing replica's id and the schema.
 //! Each replica `LISTEN`s on a connection of its own and turns the other replicas' notifications
 //! into store events. A listen connection that breaks is opened again, and the replica then
-//! emits every live service's charter and memory again ([`PgStore::resync`]), so what it missed
+//! emits every live service's charter and memory again (`resync`), so what it missed
 //! meanwhile is not lost.
 //!
 //! **Connection.** A `postgres://` connection string (from a file or the environment, never

@@ -1,4 +1,5 @@
 //! Records and helpers shared by the integration tests.
+// Every test binary compiles this module and uses only part of it.
 #![allow(dead_code)]
 
 use agentsc_common::audit::{AuditRecord, Direction, Kind, Tokens};

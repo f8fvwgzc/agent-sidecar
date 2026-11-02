@@ -280,6 +280,7 @@ pub fn payload_bytes(v: &Value) -> Vec<u8> {
 
 impl AuditRecord {
     /// A record with hashes computed from the full payloads; call `redact` before writing.
+    // One argument per field of the record; none has a default, so a builder would only move them.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         kind: Kind,

@@ -232,8 +232,8 @@ const INJECTED_FIELD_ENV: [(&str, &str); 2] = [
 ///   `AGENTSC_CA_ADDRESS`, `AGENTSC_K8S_TOKEN_FILE`, `AGENTSC_TRUST_DOMAIN`,
 ///   `AGENTSC_STATE_DIR` and `AGENTSC_NO_RUNTIME=true` with the injected values,
 ///   `AGENTSC_CA_PEM` with roots of the
-///   CA only ([`only_roots_of`]), the pod-specific literals
-///   ([`INJECTED_LITERAL_ENV`]) and fields ([`INJECTED_FIELD_ENV`]), `ANTHROPIC_API_KEY` from
+///   CA only (`only_roots_of`), the pod-specific literals
+///   (`INJECTED_LITERAL_ENV`) and fields (`INJECTED_FIELD_ENV`), `ANTHROPIC_API_KEY` from
 ///   a Secret's key `ANTHROPIC_API_KEY`, and the template's [`TEMPLATE_ENV_ALLOWED`];
 ///   `agentsc-runtime` only the template's [`RUNTIME_TEMPLATE_ENV`]; neither has `envFrom` or
 ///   lifecycle hooks, and no probe but exec [`READY_COMMAND`] (`agentscd`'s; the runtime has
