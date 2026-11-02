@@ -3,6 +3,7 @@ name = "embassy"
 description = "agentsc control plane: CA, certificate issuance, Connect, REST/SSE API and UI (CONTRACT.md §5, §7; docs/design/agent-platform.md §7-§10)."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

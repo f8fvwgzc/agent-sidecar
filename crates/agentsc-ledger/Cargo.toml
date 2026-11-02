@@ -3,6 +3,7 @@ name = "agentsc-ledger"
 description = "The evidence ledger's format: hash-chained audit records, Ed25519 seals, JWKS, bundles and their offline verification (CONTRACT.md §6.3)."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

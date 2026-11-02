@@ -3,6 +3,7 @@ name = "agentsc-otel"
 description = "OpenTelemetry export of agentsc audit records as OTLP/HTTP JSON traces and metrics (design agent-platform §9)."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

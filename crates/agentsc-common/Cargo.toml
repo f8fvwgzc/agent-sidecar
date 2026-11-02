@@ -3,6 +3,7 @@ name = "agentsc-common"
 description = "Audit records, trace context, identity, authz, guardrails and budgets shared by agentscd and the CLI (CONTRACT.md §5, §6)."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

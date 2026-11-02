@@ -3,6 +3,7 @@ name = "agentsc-pki"
 description = "CA and SPIFFE-style leaf certificate issuance and parsing for the agentsc mesh (CONTRACT.md §5)."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
