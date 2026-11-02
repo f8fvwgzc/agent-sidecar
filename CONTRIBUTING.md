@@ -23,6 +23,8 @@ make local-demo   # end-to-end demo with two sidecars and mTLS
 
 If you change a proto file, run `make proto` and commit the regenerated Python stubs. If you change the charter types, run `make schema` and commit `schemas/charter.schema.json`. A test fails when the schema drifts.
 
+This repo uses Symposium for the Rust guidance coding agents follow. Set it up with `cargo install symposium --locked`, then `cargo agents init --add-agent claude`.
+
 ## Pull requests
 
 - Keep one topic per pull request.
