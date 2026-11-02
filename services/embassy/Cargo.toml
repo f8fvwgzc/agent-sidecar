@@ -59,8 +59,7 @@ tracing-subscriber.workspace = true
 hyper = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["server", "server-auto", "http1", "http2", "tokio", "service"] }
 x509-parser.workspace = true
-kube = { version = "4.2", default-features = false, features = ["client", "runtime", "rustls-tls", "aws-lc-rs", "admission"] }
-k8s-openapi = { version = "0.28", default-features = false, features = ["std", "v1_32"] }
+kube = { version = "5", default-features = false, features = ["client", "runtime", "rustls-tls", "aws-lc-rs", "admission"] }
 # Conditional GETs (ETag / 304, docs/adr/0002-response-caching.md) read response bodies and
 # their size hints; the HTTP/3 bridge streams them frame by frame.
 bytes = "1"
@@ -69,7 +68,7 @@ http-body-util = "0.1"
 # `--store sqlite:<path>` (docs/adr/0003-sqlite-store-schema.md): one embedded database with the
 # schema in src/store/schema.sql. `bundled` compiles SQLite in, so the image needs no system
 # library.
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 # `--store postgres` (store/postgres.rs): the client, a pool per replica, and the system roots
 # for `sslmode=require` (TLS through tokio-rustls above, no other TLS stack).
 tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }
@@ -80,6 +79,7 @@ rustls-native-certs = "0.8"
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs", "log"], optional = true }
 h3 = { version = "0.0.8", optional = true }
 h3-quinn = { version = "0.0.10", optional = true }
+k8s-openapi = { version = "0.29", default-features = false, features = ["std", "v1_33"] }
 
 [features]
 default = ["http3"]

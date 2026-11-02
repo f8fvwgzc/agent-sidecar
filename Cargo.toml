@@ -47,7 +47,6 @@ rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc
 # The one crypto library (Tutela INTEGRATION §1: every binary installs the aws-lc-rs rustls provider).
 aws-lc-rs = "1"
 x509-parser = "0.18"
-pem = "4"
 
 # Tutela (identity and permissions), pinned to a release tag; private, fetched over SSH.
 tutela-contracts = { git = "ssh://git@github.com/f8fvwgzc/tutela.git", tag = "v0.1.0" }
