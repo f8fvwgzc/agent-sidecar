@@ -88,7 +88,7 @@ pub async fn get_agent(
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Resolved {
     /// `agent:agt_<uuidv7>`, or an alias of an agent.
-    Agent { agent: AgentEntry },
+    Agent { agent: Box<AgentEntry> },
     /// `workload:spiffe://<td>/ns/<ns>/svc/<svc>`: a service and its active agents.
     Workload {
         principal: String,
@@ -112,7 +112,7 @@ pub async fn resolve_principal(
     let parsed = text.parse::<Principal>().ok();
     let resolved = match parsed.as_ref() {
         Some(Principal::Agent(id)) => Resolved::Agent {
-            agent: visible_agent(&hub, &ident, &id.to_string()).await?,
+            agent: Box::new(visible_agent(&hub, &ident, &id.to_string()).await?),
         },
         Some(p @ Principal::Workload(_)) => {
             let Some(w) = service_of(p).filter(|w| {
@@ -136,7 +136,7 @@ pub async fn resolve_principal(
             }
         }
         _ => match store.resolve_alias(text).await {
-            Ok(a) if ident.allows_namespace(&a.namespace) => Resolved::Agent { agent: a },
+            Ok(a) if ident.allows_namespace(&a.namespace) => Resolved::Agent { agent: Box::new(a) },
             Ok(_) | Err(StoreError::NotFound) => return Err(missing()),
             Err(e) => return Err(Fail::store(e, "")),
         },
