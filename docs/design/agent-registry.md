@@ -12,7 +12,7 @@ mints it, and how the rest of attache learns it.
 
 1. **The principal is Tutela's: `agent:agt_<uuidv7>`.** Tutela defines the principal kinds, and
    other cores will check tokens whose `act.sub` names an agent. `agentsc_common::principal`
-   re-exports the types of `tutela-contracts`, pinned to the `v0.1.0` tag (#26), and adds only
+   re-exports the types of `tutela-contracts`, pinned to a release tag (`v0.1.0` in #26, `v0.2.0` since #76), and adds only
    what attache mints: a fresh id, and the mapping between a `workload:` principal and a service
    identity. Conformance tests run Tutela's own examples.
 2. **embassy mints the ids, from the charter.** Tutela's integration plan makes attache's
