@@ -568,6 +568,103 @@ impl<'a> Call<'a> {
         }
     }
 
+    /// A tool with `delegation` (schema level 8, delegation.rs): the delegated token its call
+    /// carries in `Authorization`, from embassy for the person whose token came with the
+    /// invocation. `None` for a tool without `delegation`. It fails closed.
+    async fn delegation_gate(
+        &self,
+        tool: &ToolSpec,
+        input: &Value,
+    ) -> Result<Option<String>, Status> {
+        use crate::delegation::{RULE_NO_SUBJECT, RULE_REFUSED, RULE_UNAVAILABLE, WAIT};
+        let Some(d) = &tool.delegation else {
+            return Ok(None);
+        };
+        let state = &self.svc.state;
+        if !state.managed {
+            return Err(self.deny(
+                input,
+                Verdict::deny(
+                    RULE_UNAVAILABLE,
+                    format!(
+                        "{} acts for a person, and this sidecar has no control plane to ask for a token",
+                        tool.name
+                    ),
+                ),
+            ));
+        }
+        let Some(subject) = state.delegations.subject(&self.c.request_id) else {
+            return Err(self.deny(
+                input,
+                Verdict::deny(
+                    RULE_NO_SUBJECT,
+                    format!(
+                        "{} acts for a person, and the invocation carried no person's token ({})",
+                        tool.name,
+                        crate::delegation::SUBJECT_HEADER
+                    ),
+                ),
+            ));
+        };
+        if let Some(t) = state
+            .delegations
+            .kept(&self.c.request_id, &self.c.agent, &d.audience)
+        {
+            return Ok(Some(t));
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        let rx = state.delegations.ask(agentsc_proto::DelegationRequest {
+            id: id.clone(),
+            agent: self.c.agent.clone(),
+            audience: d.audience.clone(),
+            subject_token: subject,
+            run_id: self.c.request_id.clone(),
+            node_id: format!("{}.{}", self.c.agent, tool.name),
+        });
+        match tokio::time::timeout(deadline::budget(self.deadline, WAIT), rx).await {
+            Ok(Ok(r)) if !r.access_token.is_empty() => {
+                state.delegations.keep(
+                    &self.c.request_id,
+                    &self.c.agent,
+                    &d.audience,
+                    &r.access_token,
+                    r.expires_in,
+                );
+                Ok(Some(r.access_token))
+            }
+            Ok(Ok(r)) => {
+                let rule = if r.error.starts_with(RULE_UNAVAILABLE) {
+                    RULE_UNAVAILABLE
+                } else {
+                    RULE_REFUSED
+                };
+                Err(self.deny(
+                    input,
+                    Verdict::deny(
+                        rule,
+                        format!(
+                            "{}: no token for audience {}: {}",
+                            tool.name, d.audience, r.error
+                        ),
+                    ),
+                ))
+            }
+            _ => {
+                state.delegations.forget(&id);
+                Err(self.deny(
+                    input,
+                    Verdict::deny(
+                        RULE_UNAVAILABLE,
+                        format!(
+                            "{}: the control plane gave no token for audience {} in time",
+                            tool.name, d.audience
+                        ),
+                    ),
+                ))
+            }
+        }
+    }
+
     /// The call returned data to the run: the run now carries the tool's label.
     fn taint_mark(&self, tool: &ToolSpec) {
         self.svc
@@ -1204,6 +1301,7 @@ impl SidecarTools for ToolsService {
         call.taint_gate(spec, tool, &input)?;
         call.quarantine_gate(&input)?;
         call.approval_gate(tool, &input).await?;
+        let bearer = call.delegation_gate(tool, &input).await?;
         let method = req.method.to_ascii_uppercase();
         let mismatch = |url: &str| {
             Verdict::deny(
@@ -1272,9 +1370,15 @@ impl SidecarTools for ToolsService {
             .request(m, url.clone())
             .timeout(deadline::budget(call.deadline, deadline::HTTP_TIMEOUT));
         for (k, val) in &req.headers {
-            if !is_reserved_header(k) {
+            // a delegated token replaces any Authorization the model wrote
+            if !is_reserved_header(k)
+                && !(bearer.is_some() && k.eq_ignore_ascii_case("authorization"))
+            {
                 hreq = hreq.header(k, val);
             }
+        }
+        if let Some(token) = &bearer {
+            hreq = hreq.header("authorization", format!("Bearer {token}"));
         }
         hreq = hreq
             .header("traceparent", child.traceparent())

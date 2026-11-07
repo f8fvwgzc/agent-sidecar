@@ -1131,6 +1131,7 @@ mod tests {
             label: None,
             effect: None,
             approval: None,
+            delegation: None,
         };
         assert_eq!(
             tool_target("shop", "orders", &tool("billing.finance")).as_deref(),

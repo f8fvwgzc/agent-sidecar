@@ -36,8 +36,9 @@ pub const MAX_TOKENS_PER_CALL_LIMIT: u32 = 128_000;
 /// (`<service>.<namespace>` in `tools[].service` or as a `mesh.peers` key, which an older
 /// sidecar would take for a service of its own namespace), 6 = agent practices
 /// (`agents[].practices`, `learning.require_evidence`, `learning.contrast_runs`,
-/// `learning.scopes`; agent-practices design), 7 = approvals (`tools[].approval`).
-pub const CHARTER_SCHEMA_LEVEL: u32 = 7;
+/// `learning.scopes`; agent-practices design), 7 = approvals (`tools[].approval`), 8 = delegated
+/// agent tokens (`tools[].delegation`).
+pub const CHARTER_SCHEMA_LEVEL: u32 = 8;
 /// A charter is at most this many bytes, measured the same way whatever form it arrived in
 /// ([`Charter::validate`]): its JSON serialization and its plain YAML ([`Charter::to_yaml`], the
 /// text `CharterUpdate.charter_yaml` and the file store carry) are each at most this size, so a
@@ -669,6 +670,30 @@ pub struct ToolSpec {
     /// = no approval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<ApprovalSpec>,
+    /// `http` tools: each call carries a delegated agent token for this audience in
+    /// `Authorization`, obtained from Tutela for the person whose token the invocation carried
+    /// (schema level 8, CONTRACT.md §5.3). Absent = no token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation: Option<DelegationSpec>,
+}
+
+/// `tools[].delegation`: the call acts for the invoking person, with a delegated agent token
+/// (`typ: agent+jwt`) of exactly this audience (Tutela CONTRACTS.md 4.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DelegationSpec {
+    /// The downstream service's audience, as Tutela registers it (`delegation_aware`):
+    /// `^[a-z][a-z0-9-]{0,62}$`.
+    #[schemars(regex(pattern = r"^[a-z][a-z0-9-]{0,62}$"))]
+    pub audience: String,
+}
+
+/// `true` for an audience in Tutela's grammar (CONTRACTS.md 4.2): `[a-z][a-z0-9-]{0,62}`.
+pub fn is_audience(s: &str) -> bool {
+    let mut chars = s.chars();
+    s.len() <= 63
+        && chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 /// The default and the largest `tools[].approval.timeout_s` (nexc-engine's).
@@ -992,7 +1017,8 @@ impl Charter {
     /// 4 for `authz.taint`, 5 for a peer in another namespace (a tool whose `service` is
     /// `<service>.<namespace>`, a `mesh.peers` key of that form), 6 for the practice fields
     /// (`agents[].practices`, `learning.require_evidence`, `learning.contrast_runs`,
-    /// `learning.scopes`; agent-practices design), 7 for a tool with an `approval`. A tool is
+    /// `learning.scopes`; agent-practices design), 7 for a tool with an `approval`, 8 for a tool
+    /// with a `delegation`. A tool is
     /// listed once, at the highest level it needs. Empty lists count as unused: they are left out
     /// when the charter is serialized.
     pub fn level_fields(&self) -> Vec<(String, u32)> {
@@ -1035,7 +1061,9 @@ impl Charter {
                 out.push((format!("agents.{}.taint", a.name), 3));
             }
             for t in &a.tools {
-                let level = if t.approval.is_some() {
+                let level = if t.delegation.is_some() {
+                    8
+                } else if t.approval.is_some() {
                     7
                 } else if t.service.as_deref().is_some_and(is_qualified_peer) {
                     5
@@ -1144,8 +1172,11 @@ impl Charter {
             if let Some(Value::Array(tools)) = map.get_mut("tools") {
                 for t in tools.iter_mut() {
                     if let Value::Object(t) = t {
+                        // the sidecar's own: the runtime's ToolSpec forbids unknown fields
                         t.remove("label");
                         t.remove("effect");
+                        t.remove("approval");
+                        t.remove("delegation");
                         if t.get("type") == Some(&json!("agent")) && !t.contains_key("parameters") {
                             t.insert("parameters".into(), agent_tool_parameters());
                         }
@@ -1317,6 +1348,17 @@ impl Charter {
                     errs.push(format!(
                         "{tt}: approval.timeout_s must be 1..={APPROVAL_TIMEOUT_MAX_S}"
                     ));
+                }
+                if let Some(d) = &tool.delegation {
+                    if tool.tool_type != ToolType::Http {
+                        errs.push(format!("{tt}: delegation is for http tools only"));
+                    }
+                    if !is_audience(&d.audience) {
+                        errs.push(format!(
+                            "{tt}: delegation.audience {:?} is not an audience ([a-z][a-z0-9-]{{0,62}})",
+                            d.audience
+                        ));
+                    }
                 }
                 if let Some(p) = &tool.parameters
                     && !p.is_object()
@@ -2159,6 +2201,7 @@ mod tests {
             label: None,
             effect: None,
             approval: None,
+            delegation: None,
         };
         c.agents[0].tools.push(stock("inventory.warehouse"));
         c.mesh
@@ -2465,6 +2508,7 @@ mod tests {
             label: None,
             effect: None,
             approval: None,
+            delegation: None,
         });
         let err = c.validate().unwrap_err().to_string();
         assert!(err.contains("empty segment"), "{err}");
@@ -2488,5 +2532,32 @@ mod tests {
             json_schema(),
             "run `agentsc charter schema > schemas/charter.schema.json`"
         );
+    }
+
+    /// `tools[].delegation` (schema level 8): only on http tools, a Tutela audience, and never sent
+    /// to the runtime (nor `approval`: the runtime's ToolSpec forbids unknown fields).
+    #[test]
+    fn a_delegation_is_an_http_tools_and_stays_with_the_sidecar() {
+        let base = "apiVersion: agentsc.io/v1alpha1\nkind: Charter\nservice: {name: a, namespace: b, app_port: 1}\nagents:\n  - name: x\n    model: mock\n    tools:\n      - name: ask\n        description: Ask.\n        type: http\n        method: POST\n        url: https://symphony.example.test/v1/ask\n        approval: {timeout_s: 5}\n        delegation: {audience: symphony}\n";
+        let c = Charter::from_yaml(base).unwrap();
+        assert_eq!(c.schema_level(), 8);
+        let spec = c.runtime_spec("x", &[]);
+        let tool = &spec["tools"][0];
+        assert_eq!(tool["name"], "ask");
+        assert!(
+            tool.get("delegation").is_none() && tool.get("approval").is_none(),
+            "{tool}"
+        );
+        let bad = base.replace("audience: symphony", "audience: Symphony");
+        let e = Charter::from_yaml(&bad).unwrap_err().to_string();
+        assert!(e.contains("is not an audience"), "{e}");
+        let service = base
+            .replace(
+                "type: http",
+                "type: service\n        service: orders\n        path: /x",
+            )
+            .replace("        url: https://symphony.example.test/v1/ask\n", "");
+        let e = Charter::from_yaml(&service).unwrap_err().to_string();
+        assert!(e.contains("delegation is for http tools only"), "{e}");
     }
 }

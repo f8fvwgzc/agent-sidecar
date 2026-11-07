@@ -225,6 +225,7 @@ mod tests {
             label: None,
             effect: None,
             approval: None,
+            delegation: None,
         }
     }
 

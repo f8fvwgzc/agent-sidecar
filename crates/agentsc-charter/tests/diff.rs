@@ -384,6 +384,7 @@ fn editors_may_change_agents_skills_and_local_callers() {
             label: None,
             effect: None,
             approval: None,
+            delegation: None,
         });
         c.agents[0].tools.push(ToolSpec {
             name: "stock".into(),
@@ -398,6 +399,7 @@ fn editors_may_change_agents_skills_and_local_callers() {
             label: None,
             effect: None,
             approval: None,
+            delegation: None,
         });
         c.guardrails.allowed_tools.remove("support");
     });

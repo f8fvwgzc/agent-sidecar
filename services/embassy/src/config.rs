@@ -124,6 +124,28 @@ pub struct TutelaConfig {
     /// The issuer of the agents' own tokens. Absent: embassy signs none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_tokens: Option<AgentTokensConfig>,
+    /// Delegated agent tokens for `tools[].delegation` (crate::tutela::delegation). Needs
+    /// `agent_tokens`. Absent: none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation: Option<DelegationConfig>,
+}
+
+/// `tutela.delegation`: an agent acts for the person whose token its invocation carried, with a
+/// delegated token from `tutelad` (Tutela CONTRACTS.md 4.5, 4.8).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DelegationConfig {
+    /// attache's own audience: the person's token an app sends with an invocation is addressed to
+    /// it, and registered in `tutelad`'s trust file.
+    pub audience: String,
+    /// attache's audience is `delegation_aware` (as in `tutelad`'s trust file): a delegated token
+    /// (another system's agent acting for a person) is taken as the subject too, and attache's
+    /// agent becomes one more actor of its chain. `false`: such a token is refused.
+    #[serde(default)]
+    pub delegation_aware: bool,
+    /// The downstream audiences an agent may get a token for; a `tools[].delegation.audience`
+    /// outside this list is refused. Each must be `delegation_aware` in `tutelad`.
+    pub audiences: Vec<String>,
 }
 
 /// `tutela.agent_tokens`: embassy as a Tutela-format issuer of access tokens whose `sub` is an
@@ -407,6 +429,21 @@ fn check_tutela(errs: &mut Vec<String>, t: &TutelaConfig) {
         }
         if a.key_file.as_os_str().is_empty() {
             errs.push("tutela.agent_tokens.key_file is empty".into());
+        }
+    }
+    if let Some(d) = &t.delegation {
+        if t.agent_tokens.is_none() {
+            errs.push("tutela.delegation needs tutela.agent_tokens (the actor)".into());
+        }
+        for (i, a) in std::iter::once(&d.audience).chain(&d.audiences).enumerate() {
+            if !agentsc_charter::is_audience(a) || a == "tutela-admin" {
+                let at = if i == 0 {
+                    "tutela.delegation.audience".to_string()
+                } else {
+                    format!("tutela.delegation.audiences[{}]", i - 1)
+                };
+                errs.push(format!("{at} {a:?} is not an audience"));
+            }
         }
     }
 }

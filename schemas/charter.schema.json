@@ -361,6 +361,17 @@
             }
           ],
           "description": "A person must approve each call before it runs (schema level 7, CONTRACT.md §5.4). Absent\n= no approval."
+        },
+        "delegation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DelegationSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`http` tools: each call carries a delegated agent token for this audience in\n`Authorization`, obtained from Tutela for the person whose token the invocation carried\n(schema level 8, CONTRACT.md §5.3). Absent = no token."
         }
       },
       "required": [
@@ -419,6 +430,21 @@
         }
       },
       "description": "`tools[].approval`: each call waits for a person's decision (CONTRACT.md §5.4)."
+    },
+    "DelegationSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "audience": {
+          "type": "string",
+          "description": "The downstream service's audience, as Tutela registers it (`delegation_aware`):\n`^[a-z][a-z0-9-]{0,62}$`.",
+          "pattern": "^[a-z][a-z0-9-]{0,62}$"
+        }
+      },
+      "required": [
+        "audience"
+      ],
+      "description": "`tools[].delegation`: the call acts for the invoking person, with a delegated agent token\n(`typ: agent+jwt`) of exactly this audience (Tutela CONTRACTS.md 4.5)."
     },
     "Budgets": {
       "type": "object",

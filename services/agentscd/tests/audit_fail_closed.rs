@@ -161,6 +161,7 @@ async fn fail_closed_refuses_new_work_while_the_audit_sink_fails_and_recovers() 
         label: None,
         effect: None,
         approval: None,
+        delegation: None,
     });
     ord.guardrails
         .allowed_tools

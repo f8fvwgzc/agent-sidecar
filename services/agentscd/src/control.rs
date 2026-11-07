@@ -246,6 +246,10 @@ pub fn handle(state: &AppState, msg: ControlMessage) -> Option<SidecarMessage> {
             state.approvals.decide(d);
             None
         }
+        Some(control_message::Msg::DelegationResponse(r)) => {
+            state.delegations.answer(r);
+            None
+        }
         None => {
             if !UNKNOWN_LOGGED.swap(true, Ordering::Relaxed) {
                 tracing::info!("ignoring a control message of a kind this sidecar does not know");
@@ -311,8 +315,9 @@ async fn session(state: &Arc<AppState>, addr: &str) -> (bool, anyhow::Result<()>
         }
     };
     tracing::info!(%addr, "connected to the control plane");
-    // calls still waiting for an approval ask again on this stream
+    // calls still waiting for an approval or a delegated token ask again on this stream
     state.approvals.resend_all();
+    state.delegations.resend_all();
     let timing = state.config.timing.clone();
     let mut beat = tokio::time::interval(timing.heartbeat);
     beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -353,6 +358,14 @@ async fn session(state: &Arc<AppState>, addr: &str) -> (bool, anyhow::Result<()>
                 let mut r = Ok(());
                 for q in requests {
                     r = send(SidecarMessage { msg: Some(sidecar_message::Msg::ApprovalRequest(q)) }).await;
+                    if r.is_err() { break; }
+                }
+                r
+            },
+            requests = state.delegations.next_requests() => {
+                let mut r = Ok(());
+                for q in requests {
+                    r = send(SidecarMessage { msg: Some(sidecar_message::Msg::DelegationRequest(q)) }).await;
                     if r.is_err() { break; }
                 }
                 r

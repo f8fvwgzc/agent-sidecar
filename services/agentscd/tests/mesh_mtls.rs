@@ -106,6 +106,7 @@ fn orders_calling(root: &std::path::Path, name: &str, target: &str, addr: &str) 
         label: None,
         effect: None,
         approval: None,
+        delegation: None,
     });
     ord.guardrails
         .allowed_tools
@@ -214,6 +215,7 @@ async fn mesh_mtls_end_to_end() {
         label: None,
         effect: None,
         approval: None,
+        delegation: None,
     });
     // and an http tool aimed at the same fake app, to check the URL template on InvokeHttp
     ops.tools.push(ToolSpec {
@@ -232,6 +234,7 @@ async fn mesh_mtls_end_to_end() {
         label: None,
         effect: None,
         approval: None,
+        delegation: None,
     });
     let allowed = ord
         .guardrails
