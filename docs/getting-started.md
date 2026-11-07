@@ -236,6 +236,27 @@ The namespace `agentsc-demo` is also written in `deploy/namespace.yaml`, `deploy
 
 The bootstrap Job keeps its CA Secret in its own namespace. So each namespace gets its own CA. Mesh calls across namespaces are not supported out of the box.
 
+### The Helm demo on kind
+
+`make demo-helm` (the v0.2 chart, with injection) also runs on a [kind](https://kind.sigs.k8s.io/) cluster instead of minikube, and `make e2e-helm` then tests it end to end:
+
+```bash
+make demo-helm CLUSTER=kind KIND_CLUSTER=agentsc
+make e2e-helm  CLUSTER=kind KIND_CLUSTER=agentsc
+make kind-down CLUSTER=kind KIND_CLUSTER=agentsc
+```
+
+| Variable | Default | Used for |
+| -------- | ------- | -------- |
+| `CLUSTER` | `minikube` | `kind`: create or reuse the kind cluster, build the four images on this machine's docker and load them with `kind load` |
+| `KIND_CLUSTER` | `agentsc` | the kind cluster's name; `KUBE_CONTEXT` becomes `kind-<name>` |
+| `KIND_IMAGE` | kind's default | another node image, such as the chart's lower Kubernetes versions (see [docs/verification.md](verification.md) for the versions checked) |
+| `SKIP_BUILD` | empty | `1`: load the `agentsc/*:dev` images already built |
+| `KIND_ARCHIVE` | empty | load a `docker save` archive of the four images instead (when docker's disk is short) |
+| `HELM_ARGS` | empty | more chart arguments, e.g. `-f deploy/helm/agent-sidecar/ci/tutela-values.yaml` |
+
+kind writes the new context into your kubeconfig and makes it the current one. Set `KUBECONFIG` to a file of its own if you keep other clusters there.
+
 ### What `make deploy` creates
 
 ```mermaid

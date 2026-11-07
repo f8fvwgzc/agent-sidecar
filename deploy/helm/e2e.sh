@@ -50,7 +50,9 @@ echo "▶ requests across pods"
 sleep 2
 calls=$(api GET /graph | py "print(sum((e.get('stats') or {}).get('calls',0) for e in d['edges'] if e['source'].startswith('agent:') and e['target'].startswith('agent:')))")
 [[ $calls -gt 0 ]] && ok "agent-to-agent call over mTLS seen in the graph ($calls)" || die "no agent-to-agent traffic in /graph"
-denied=$(kc -n "$NS" logs deploy/inventory -c agentscd --tail=500 | grep -c '"rule":"authz.services.deny-admin"' || true)
+# Every inventory pod (deploy/inventory picks one, which can be the old one still terminating
+# right after the demo's rollout restart).
+denied=$(kc -n "$NS" logs -l app=inventory -c agentscd --tail=500 | grep -c '"rule":"authz.services.deny-admin"' || true)
 [[ $denied -gt 0 ]] && ok "admin reset denied by the inventory sidecar ($denied audit lines)" || die "no deny-admin record in inventory"
 runs=$(api GET /traces | py "print(len(d))")
 [[ $runs -gt 0 ]] && ok "timeline has $runs runs" || die "no runs in /traces"
@@ -71,12 +73,15 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://localhost:$API_PORT
 [[ $code == 409 ]] && ok "an edit based on version $v gets 409" || die "stale edit answered $code"
 
 echo "▶ kubectl edits of a Charter are validated and pushed"
+# An update, as kubectl edit makes it (replace, not apply: an applied resourceVersion would stay in
+# the last-applied annotation and break the next make demo-helm's apply of the charters).
 kc -n "$NS" get charter inventory -o json | python3 -c '
 import json,sys; d=json.load(sys.stdin)
 for a in d["spec"]["agents"]:
     if a["name"]=="stock-analyst": a["system"]=a["system"].rstrip()+" (kubectl edit)"
-d["metadata"]={"name":d["metadata"]["name"],"namespace":d["metadata"]["namespace"],"resourceVersion":d["metadata"]["resourceVersion"]}
-d.pop("status",None); print(json.dumps(d))' | kc apply -f - >/dev/null
+m=d["metadata"]; keep=("name","namespace","resourceVersion","annotations","labels")
+d["metadata"]={k: m[k] for k in keep if k in m}
+d.pop("status",None); print(json.dumps(d))' | kc replace -f - >/dev/null
 for _ in $(seq 1 40); do
   kv=$(api GET /services/$NS/inventory/charter | py "print(d['version'])"); [[ $kv != "$nv" ]] && break; sleep 0.5
 done
@@ -124,13 +129,15 @@ for c in agentsc-runtime agentscd; do
 done
 
 echo "▶ identity cannot be borrowed"
+# Both embassy-ca replicas: either may answer the spoofing pod.
+CA_PODS=app.kubernetes.io/component=embassy-ca
 # A pod that claims to be orders, but runs as the default service account: the CA refuses it.
 kc -n "$NS" run e2e-spoof --image=agentsc/inventory:dev --image-pull-policy=Never \
   --labels=agentsc.io/inject=true --annotations=agentsc.io/service=orders --annotations=agentsc.io/app-port=8000 >/dev/null
 for _ in $(seq 1 40); do
-  kc -n "$CP_NS" logs deploy/embassy-ca --tail=200 2>/dev/null | grep -q '"action":"cert_denied".*e2e-spoof\|e2e-spoof.*"action":"cert_denied"' && break; sleep 1
+  kc -n "$CP_NS" logs -l "$CA_PODS" --tail=200 2>/dev/null | grep -q '"action":"cert_denied".*e2e-spoof\|e2e-spoof.*"action":"cert_denied"' && break; sleep 1
 done
-kc -n "$CP_NS" logs deploy/embassy-ca --tail=300 2>/dev/null | grep '"cert_denied"' | grep -q 'orders' \
+kc -n "$CP_NS" logs -l "$CA_PODS" --tail=300 2>/dev/null | grep '"cert_denied"' | grep -q 'orders' \
   && ok "the CA refused a certificate for orders to a pod with the wrong service account" \
   || die "no cert_denied for the spoofing pod"
 ready=$(kc -n "$NS" get pod e2e-spoof -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
