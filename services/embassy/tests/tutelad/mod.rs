@@ -48,6 +48,8 @@ assignable_to = ["sa"]
 /// The audiences of the trust file besides `tutela-authz` (which is delegation-aware).
 pub const DELEGATION_AWARE: &str = "symphony";
 pub const NOT_DELEGATION_AWARE: &str = "crm-api";
+/// attache's own audience: people's tokens reach attache addressed to it (delegation-aware).
+pub const ATTACHE: &str = "attache";
 
 pub fn now() -> u64 {
     SystemTime::now()
@@ -203,6 +205,9 @@ pub struct Tenant {
     pub attache: PathBuf,
     /// The credentials of the app `other` (`viewer`: no admin key).
     pub other: PathBuf,
+    /// The credentials of the app `owner` (the seeded `owner`: every admin key), for what a
+    /// tenant's admin does in a test (revoke a person).
+    pub owner: PathBuf,
 }
 
 /// A running `tutelad`.
@@ -351,6 +356,8 @@ impl Tutelad {
                      "roles": [{"role": "agent_admin", "scope": "org"}]},
                     {"name": "other", "secret": format!("{name}-other"),
                      "roles": [{"role": "viewer", "scope": "org"}]},
+                    {"name": "owner", "secret": format!("{name}-owner"),
+                     "roles": [{"role": "owner", "scope": "org"}]},
                 ],
             });
             let plan_file = dir.path().join(format!("plan-{name}.json"));
@@ -371,6 +378,7 @@ impl Tutelad {
                 tid,
                 attache: secrets.join(format!("{name}-attache.json")),
                 other: secrets.join(format!("{name}-other.json")),
+                owner: secrets.join(format!("{name}-owner.json")),
             });
         }
         let (a, b) = (tenants[0].clone(), tenants[1].clone());
@@ -397,12 +405,17 @@ delegation_aware = true
 [[audience]]
 name = "{unaware}"
 delegation_aware = false
+
+[[audience]]
+name = "{attache}"
+delegation_aware = true
 "#,
             idp = idp.iss,
             emb = embassy_iss,
             a = a.tid,
             aware = DELEGATION_AWARE,
             unaware = NOT_DELEGATION_AWARE,
+            attache = ATTACHE,
         );
         std::fs::write(dir.path().join("trust.toml"), trust).unwrap();
         let mut t = Tutelad {
@@ -517,6 +530,28 @@ delegation_aware = false
                     "urn:ietf:params:oauth:token-type:access_token",
                 ),
                 ("audience", "tutela-authz"),
+            ])
+            .await;
+        assert_eq!(r.0, 200, "{}", r.1);
+        r.1["access_token"].as_str().unwrap().to_string()
+    }
+
+    /// A person's token for `audience`, as an app hands it to attache: the IdP's token (`life`
+    /// seconds) exchanged at `tutelad` with no client authentication, kept as `azp`
+    /// `people-app` (no app of the tenant, so attache's app may exchange it again).
+    pub async fn person_token_for(&self, sub: &str, audience: &str, life: u64) -> String {
+        let r = self
+            .post_form(&[
+                (
+                    "grant_type",
+                    "urn:ietf:params:oauth:grant-type:token-exchange",
+                ),
+                ("subject_token", &self.idp.person(sub, life)),
+                (
+                    "subject_token_type",
+                    "urn:ietf:params:oauth:token-type:access_token",
+                ),
+                ("audience", audience),
             ])
             .await;
         assert_eq!(r.0, 200, "{}", r.1);
