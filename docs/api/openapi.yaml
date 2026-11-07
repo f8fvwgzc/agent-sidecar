@@ -1205,6 +1205,39 @@ paths:
         "503":
           $ref: "#/components/responses/SecopsUnavailable"
 
+  /agents/{id}/revoke-tokens:
+    parameters:
+      - $ref: "#/components/parameters/AgentId"
+    post:
+      tags: [registry]
+      operationId: revokeAgentTokens
+      summary: >-
+        Revoke every token the agent holds at tutelad (RevokeSessions): its epoch goes up and it
+        stays enabled. Fails closed: 503 `tutela_unavailable` without a `tutela` section or when
+        tutelad does not answer; 409 when the agent is not registered in tutelad yet. Audited as
+        `agent_tokens_revoked`.
+      x-required-role: admin
+      parameters:
+        - $ref: "#/components/parameters/Csrf"
+      responses:
+        "200":
+          description: The agent, with its new epoch in `tutela`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegistryAgent"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+        "503":
+          $ref: "#/components/responses/TutelaUnavailable"
   /approvals:
     get:
       tags: [approvals]
@@ -2055,6 +2088,35 @@ paths:
         "421":
           $ref: "#/components/responses/MisdirectedRequest"
 
+  /.well-known/agent-jwks.json:
+    servers:
+      - url: /
+    get:
+      tags: [registry]
+      operationId: agentJwks
+      summary: >-
+        The P-256 key embassy signs its agents' own tokens with (`tutela.agent_tokens`), for
+        tutelad's trust file (no authentication; served at the root). 404 when it signs none.
+      security: []
+      x-required-role: none
+      responses:
+        "200":
+          description: "`{\"keys\": [<EC JWK, kid the RFC 7638 thumbprint, alg ES256>]}`."
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [keys]
+                properties:
+                  keys:
+                    type: array
+                    items:
+                      type: object
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "421":
+          $ref: "#/components/responses/MisdirectedRequest"
+
   /healthz:
     get:
       tags: [health]
@@ -2253,6 +2315,14 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
+    TutelaUnavailable:
+      description: |
+        503 `tutela_unavailable`: an action that needs tutelad, refused because this embassy has
+        no `tutela` section or tutelad did not answer (crate::tutela; it fails closed).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
     Forbidden:
       description: The role is not enough for this request or this diff, or the CSRF header is missing.
       content:
@@ -2352,6 +2422,7 @@ components:
             - rate_limited
             - internal
             - secops_unavailable
+            - tutela_unavailable
         details:
           type: array
           items:
@@ -3593,6 +3664,23 @@ components:
                   type: string
                 by:
                   type: string
+        tutela:
+          type: object
+          description: >-
+            The agent's principal in tutelad, once embassy registered it there (a `tutela`
+            section, CONTRACT.md §5.3): what tutelad last answered. Absent before.
+          required: [principal, epoch, disabled, synced_at]
+          properties:
+            principal:
+              type: string
+              description: "`agent:agt_<uuidv7>`, made by tutelad (not the registry's id)."
+            epoch:
+              type: integer
+              minimum: 0
+            disabled:
+              type: boolean
+            synced_at:
+              type: string
     ResolvedPrincipal:
       oneOf:
         - type: object
@@ -3855,6 +3943,7 @@ components:
             - agent_released
             - approval_approve
             - approval_deny
+            - agent_tokens_revoked
         namespace:
           oneOf:
             - type: string
