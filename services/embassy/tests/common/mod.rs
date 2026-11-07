@@ -56,6 +56,11 @@ pub struct Opts {
     pub tutela: Option<embassy::config::TutelaConfig>,
     /// `--http-addr`; `None` = `127.0.0.1:0`.
     pub http_addr: Option<String>,
+    /// The file store's directory, to start again on the same data; `None` = a new one.
+    pub store_dir: Option<std::path::PathBuf>,
+    /// An `auth.tokens` entry `tutela-forwarder` (viewer of `forwarded`) with this token, the
+    /// same across restarts (docs/operations.md "Forwarding audit records to the ledger").
+    pub forwarder_token: Option<String>,
 }
 
 /// One response.
@@ -163,6 +168,16 @@ impl Env {
             config.auth.tokens.push(entry(name, &t, role, ns, payloads));
             tokens.insert(name.to_string(), t);
         }
+        if let Some(t) = &opts.forwarder_token {
+            config.auth.tokens.push(entry(
+                "tutela-forwarder",
+                t,
+                Role::Viewer,
+                &["forwarded"],
+                false,
+            ));
+            tokens.insert("tutela-forwarder".to_string(), t.clone());
+        }
         if opts.dev_anonymous {
             config.auth.anonymous = Anonymous::Viewer;
         }
@@ -174,7 +189,10 @@ impl Env {
         if let Some(r) = opts.retain_bytes {
             config.events.retain_bytes = r;
         }
-        let store_dir = dir.path().join("store");
+        let store_dir = opts
+            .store_dir
+            .clone()
+            .unwrap_or_else(|| dir.path().join("store"));
         let store = format!("file:{}", store_dir.display());
         let mut argv: Vec<String> = vec![
             "serve".into(),

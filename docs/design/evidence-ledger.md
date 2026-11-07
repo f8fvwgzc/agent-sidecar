@@ -78,6 +78,13 @@ as a bundle that anyone with the public keys can check offline.
     gap in the producer's `seq` is reported in the acknowledgement and logged, and the record is
     still taken: refusing it would lose the record that shows the gap.
 
+14. **Tutela's forwarder is the first producer, tested against the real thing.** A real
+    `tutelad` v0.2.0 forwards to the real Append API in `services/embassy/tests/tutela_forwarding.rs`
+    (Tutela's own test uses a stand-in of this API). For the records it writes (ASCII keys,
+    integers, no fractions: CONTRACTS.md 9.1), its RFC 8785 canonical JSON and this ledger's
+    sorted compact JSON are the same bytes, so its signatures verify here; every chain arrives
+    in order with no gap, and shipping resumes after either side restarts.
+
 ## What it does not do yet
 
 - Verify nexc-engine's own bundles (`nexc-evidence-bundle/v1`). That belongs to the data import
