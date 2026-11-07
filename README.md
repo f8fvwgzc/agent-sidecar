@@ -111,7 +111,7 @@ Check a charter with `cargo run -p agentsc-cli -- charter validate <file>`.
 | [Operations](docs/operations.md) | Audit logs, the CLI, troubleshooting, production checklist, limitations. |
 | [LLM connection](docs/LLM-CONNECTION.md) | The platform's `LLM_*` contract, and the standalone model gateway (`agentsc-gateway`): wire formats, tenants, own keys, budgets. |
 | [Decision records](docs/adr/README.md) | Why HTTP/3 for the console, the response caches, the SQLite store, the default-on agent practices and agents in Tutela's `tutelad` are built the way they are. |
-| [Verification status](docs/verification.md) | What was checked outside the tests (images, Kubernetes 1.29 to 1.34 on kind, release builds), and what only GitHub Actions can still run. |
+| [Verification status](docs/verification.md) | What was checked outside the tests (images, Kubernetes 1.29 to 1.34 on kind, release builds, console sign-in through Keycloak), and what only GitHub Actions can still run. |
 | [CONTRACT.md](CONTRACT.md) | Full reference: wire protocol, charter, authz order, audit record. |
 
 ## Status

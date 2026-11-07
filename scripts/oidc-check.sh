@@ -12,7 +12,8 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 EMBASSY=${EMBASSY:-$ROOT/target/debug/embassy}
-KEYCLOAK_IMAGE=${KEYCLOAK_IMAGE:-quay.io/keycloak/keycloak:26.0}
+# Keycloak 26.8.1, pinned by digest (docs/adr/0008-keycloak-for-oidc-check.md).
+KEYCLOAK_IMAGE=${KEYCLOAK_IMAGE:-quay.io/keycloak/keycloak:26.8.1-1@sha256:a78d6b79572168cb25886b80a8b5b8d4ed4390743e3eecb810538683e209dd6b}
 KC_PORT=${KC_PORT:-18180}
 HTTP_PORT=18090 # the realm registers this redirect URI
 ISSUER=http://localhost:$KC_PORT/realms/attache-dev
@@ -46,6 +47,9 @@ for _ in $(seq 1 120); do
   sleep 1
 done
 curl -sf "$ISSUER/.well-known/openid-configuration" >/dev/null || fail "Keycloak did not start"
+# Keycloak stamps the tokens with the clock of Docker's VM, which can lag the host's after a sleep.
+skew=$(($(docker exec "$NAME" date +%s) - $(date +%s)))
+((skew > -60 && skew < 60)) || fail "Docker's clock is ${skew} s off this machine's; tokens would not verify"
 
 printf '%s\n' dev-only-client-secret >"$WORK/client-secret"
 head -c 32 /dev/urandom >"$WORK/session-key"
@@ -125,7 +129,29 @@ python3 -c 'import json, sys; assert "/protocol/openid-connect/logout" in json.l
   fail "logout said $out"
 code=$(curl -s -o /dev/null -w '%{http_code}' -b "$jar" "$CONSOLE/api/v1/whoami")
 [[ $code == 401 ]] || fail "after sign-out whoami answered $code"
-echo "ok: sign-out ended the session and points at Keycloak's own sign-out"
+# The console then sends the browser to Keycloak's sign-out with client_id and
+# post_logout_redirect_uri (no id_token_hint: the console keeps no ID token). Keycloak asks to
+# confirm; confirmed, it ends its own session and sends the browser back to the console.
+end_session=$(python3 -c 'import json, sys; print(json.loads(sys.argv[1])["end_session_url"])' "$out")
+page=$(curl -sf -c "$jar" -b "$jar" "$end_session") || fail "Keycloak refused $end_session"
+# the confirmation form's action is relative to Keycloak's origin
+action=$(python3 -c '
+import html, re, sys, urllib.parse
+m = re.search(r"<form[^>]*action=\"([^\"]+)\"", sys.stdin.read())
+print(urllib.parse.urljoin(sys.argv[1], html.unescape(m.group(1))) if m else "")' "$end_session" <<<"$page")
+grep -q 'data-page-id="login-logout-confirm"' <<<"$page" && [[ -n $action ]] ||
+  fail "no sign-out confirmation from Keycloak: $(head -c 300 <<<"$page")"
+session_code=$(python3 -c '
+import re, sys
+m = re.search(r"name=\"session_code\"[^>]*value=\"([^\"]+)\"", sys.stdin.read())
+print(m.group(1) if m else "")' <<<"$page")
+end=$(curl -s -L -o /dev/null -w '%{url_effective}' -c "$jar" -b "$jar" \
+  --data-urlencode "session_code=$session_code" --data-urlencode "confirmLogout=Yes" "$action")
+[[ $end == "$CONSOLE/" ]] || fail "Keycloak's sign-out ended at $end"
+# Keycloak's session is gone: a new sign-in shows the login form again.
+form=$(curl -sfL -c "$jar" -b "$jar" "$CONSOLE/api/v1/auth/oidc/login") || fail "the login page did not load"
+grep -q 'name="password"' <<<"$form" || fail "Keycloak still had a session after its sign-out"
+echo "ok: sign-out ended the session here and at Keycloak, and came back to the console"
 
 if [[ ${KEEP:-} == 1 ]]; then
   echo "running: console $CONSOLE, Keycloak $ISSUER (dev-admin / dev-only-password). Ctrl-C stops it."
