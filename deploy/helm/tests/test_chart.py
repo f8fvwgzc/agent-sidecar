@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -744,6 +745,61 @@ def test_network_policy_is_optional_and_guards_the_api(default: list[dict], full
     closed = render("--set", "networkPolicy.enabled=true")
     ports = [r["ports"][0]["port"] for r in find(closed, "NetworkPolicy", "embassy")["spec"]["ingress"]]
     assert ports == [15012], "no httpFrom: nothing may reach 8080"
+    assert "egress" not in find(closed, "NetworkPolicy", "embassy")["spec"], "egress is not restricted by default"
+
+
+def egress_rules(docs: list[dict]) -> list[tuple[list[tuple[int, str]], list[dict] | None]]:
+    policy = find(docs, "NetworkPolicy", "embassy")["spec"]
+    assert policy["policyTypes"] == ["Ingress", "Egress"]
+    return [([(p["port"], p["protocol"]) for p in r["ports"]], r.get("to")) for r in policy["egress"]]
+
+
+EGRESS_DNS = ([(53, "UDP"), (53, "TCP")], None)
+EGRESS_API = ([(443, "TCP"), (6443, "TCP")], None)
+
+
+@needs_helm
+def test_restricted_egress_reaches_dns_the_api_server_and_extra_rules() -> None:
+    extra = [{"to": [{"ipBlock": {"cidr": "10.0.0.5/32"}}], "ports": [{"port": 5432, "protocol": "TCP"}]}]
+    docs = render(
+        "--set",
+        "networkPolicy.enabled=true",
+        "--set",
+        "networkPolicy.egress=true",
+        "--set-json",
+        "networkPolicy.egressExtra=" + json.dumps(extra),
+    )
+    assert egress_rules(docs) == [EGRESS_DNS, EGRESS_API, ([(5432, "TCP")], extra[0]["to"])]
+    # no tutela section: no way to tutelad
+    assert 8080 not in [p for ports, _ in egress_rules(docs) for p, _proto in ports]
+
+
+@needs_helm
+def test_network_policy_lets_embassy_reach_tutelad_when_the_section_is_set() -> None:
+    # egress not restricted: nothing to open
+    docs = render_tutela("--set", "networkPolicy.enabled=true")
+    assert find(docs, "NetworkPolicy", "embassy")["spec"]["policyTypes"] == ["Ingress"]
+    # restricted: tutelad's port, anywhere
+    docs = render_tutela("--set", "networkPolicy.enabled=true", "--set", "networkPolicy.egress=true")
+    assert egress_rules(docs) == [EGRESS_DNS, EGRESS_API, ([(8080, "TCP")], None)]
+    # restricted to tutelad's pods on its port
+    to = [
+        {
+            "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "tutela"}},
+            "podSelector": {"matchLabels": {"app.kubernetes.io/name": "tutela"}},
+        }
+    ]
+    docs = render_tutela(
+        "--set",
+        "networkPolicy.enabled=true",
+        "--set",
+        "networkPolicy.egress=true",
+        "--set",
+        "networkPolicy.tuteladPort=9443",
+        "--set-json",
+        "networkPolicy.tuteladTo=" + json.dumps(to),
+    )
+    assert egress_rules(docs) == [EGRESS_DNS, EGRESS_API, ([(9443, "TCP")], to)]
 
 
 # ---- ControlPlaneConfig and session key ---------------------------------------------------
@@ -773,6 +829,169 @@ def test_oidc_reaches_the_config_and_its_secret_is_mounted(default: list[dict]) 
     volumes = find(docs, "Deployment", "embassy")["spec"]["template"]["spec"]["volumes"]
     assert {"name": "oidc-client-secret", "secret": {"secretName": "oidc-client"}} in volumes
     assert "oidc" not in config(default)["auth"]
+
+
+TUTELA = {
+    "credentials": "/etc/agentsc/tutela",
+    "url": "https://tutela.tutela.svc:8080",
+    "private_host": True,
+    "agent_tokens": {"issuer": "https://agentsc.example.test", "key_file": "/etc/agentsc/tutela-agent/key.pem"},
+    "delegation": {"audience": "attache", "audiences": ["symphony"]},
+}
+TUTELA_SECRETS = [
+    "--set",
+    "tutelaCredentials.existingSecret=attache-tutela",
+    "--set",
+    "tutelaAgentKey.existingSecret=attache-tutela-agent",
+]
+# The keys `tutelad bootstrap` writes for an app (Tutela CONTRACTS.md 7.13.9).
+TUTELA_KEYS = ["client_id", "client_secret", "tenant", "issuer", "token_url"]
+
+
+def render_tutela(*args: str) -> list[dict]:
+    return render("--set-json", "tutela=" + json.dumps(TUTELA), *TUTELA_SECRETS, *args)
+
+
+@needs_helm
+def test_tutela_reaches_the_config_and_its_secrets_are_mounted(default: list[dict]) -> None:
+    docs = render_tutela()
+    assert config(docs)["tutela"] == TUTELA
+    spec = find(docs, "Deployment", "embassy")["spec"]["template"]["spec"]
+    assert {
+        "name": "tutela-credentials",
+        "secret": {"secretName": "attache-tutela", "items": [{"key": k, "path": k} for k in TUTELA_KEYS]},
+    } in spec["volumes"]
+    assert {
+        "name": "tutela-agent-key",
+        "secret": {"secretName": "attache-tutela-agent", "items": [{"key": "key.pem", "path": "key.pem"}]},
+    } in spec["volumes"]
+    mounts = {m["name"]: m for m in container(find(docs, "Deployment", "embassy"))["volumeMounts"]}
+    assert mounts["tutela-credentials"] == {
+        "name": "tutela-credentials",
+        "mountPath": "/etc/agentsc/tutela",
+        "readOnly": True,
+    }
+    assert mounts["tutela-agent-key"] == {
+        "name": "tutela-agent-key",
+        "mountPath": "/etc/agentsc/tutela-agent",
+        "readOnly": True,
+    }
+    # the paths the section names are the mounted files
+    assert TUTELA["agent_tokens"]["key_file"] == mounts["tutela-agent-key"]["mountPath"] + "/key.pem"
+    assert TUTELA["credentials"] == mounts["tutela-credentials"]["mountPath"]
+    # embassy-ca never calls tutelad: no Secret of it there
+    ca_spec = find(docs, "Deployment", "embassy-ca")["spec"]["template"]["spec"]
+    assert not [v for v in ca_spec["volumes"] if v["name"].startswith("tutela")]
+    # off by default
+    assert "tutela" not in config(default)
+    default_spec = find(default, "Deployment", "embassy")["spec"]["template"]["spec"]
+    assert not [v for v in default_spec["volumes"] if v["name"].startswith("tutela")]
+
+
+@needs_helm
+def test_tutela_without_agent_tokens_needs_only_the_credentials() -> None:
+    section = {"credentials": "/etc/agentsc/tutela", "private_host": True}
+    docs = render(
+        "--set-json", "tutela=" + json.dumps(section), "--set", "tutelaCredentials.existingSecret=attache-tutela"
+    )
+    assert config(docs)["tutela"] == section
+    volumes = find(docs, "Deployment", "embassy")["spec"]["template"]["spec"]["volumes"]
+    assert [v["name"] for v in volumes if v["name"].startswith("tutela")] == ["tutela-credentials"]
+
+
+@needs_helm
+def test_tutela_needs_its_secrets() -> None:
+    err = render_fails("--set-json", "tutela=" + json.dumps(TUTELA))
+    assert "tutelaCredentials.existingSecret" in err
+    err = render_fails(
+        "--set-json", "tutela=" + json.dumps(TUTELA), "--set", "tutelaCredentials.existingSecret=attache-tutela"
+    )
+    assert "tutelaAgentKey.existingSecret" in err
+
+
+@needs_helm
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"url": "https://tutela.tutela.svc:8080"},  # no credentials
+        {**TUTELA, "privateHost": True},  # embassy refuses unknown keys
+        {**TUTELA, "sync_seconds": 1},
+        {**TUTELA, "agent_tokens": {"issuer": "https://agentsc.example.test"}},
+    ],
+)
+def test_values_schema_refuses_a_bad_tutela_section(bad: dict) -> None:
+    render_fails("--set-json", "tutela=" + json.dumps(bad), *TUTELA_SECRETS)
+
+
+def test_embassy_takes_the_rendered_tutela_section(tmp_path: Path) -> None:
+    """The real embassy loads the chart's ControlPlaneConfig with the Secrets laid out as mounted."""
+    binary = os.environ.get("EMBASSY_BIN")
+    if not (binary and Path(binary).exists()):
+        pytest.skip("EMBASSY_BIN is not set (make packaging-test builds and sets it)")
+    if shutil.which("helm") is None or shutil.which("openssl") is None:
+        pytest.skip("needs helm and openssl")
+    etc = tmp_path / "etc"
+    cfg_text = find(render_tutela(), "Secret", "embassy-config")["stringData"]["config.yaml"]
+    cfg_text = cfg_text.replace("/etc/agentsc/", f"{etc}/")
+    (etc / "session").mkdir(parents=True)
+    (etc / "session/key").write_bytes(os.urandom(32))
+    creds = {
+        "client_id": "app_0193a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2c",
+        "client_secret": "tut_sk_test_only",
+        "tenant": "ten_0193a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b",
+        "issuer": "https://tutela.tutela.svc:8080",
+        "token_url": "https://tutela.tutela.svc:8080/oauth2/token",
+    }
+    (etc / "tutela").mkdir()
+    for k, v in creds.items():
+        (etc / "tutela" / k).write_text(v)
+    (etc / "tutela-agent").mkdir()
+    subprocess.run(
+        [
+            "openssl",
+            "genpkey",
+            "-algorithm",
+            "EC",
+            "-pkeyopt",
+            "ec_paramgen_curve:P-256",
+            "-out",
+            str(etc / "tutela-agent/key.pem"),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    (tmp_path / "config.yaml").write_text(cfg_text)
+    log = tmp_path / "embassy.log"
+    with log.open("w") as out:
+        subprocess.run([binary, "ca-init", "--out", str(tmp_path / "ca")], check=True, capture_output=True)
+        proc = subprocess.Popen(
+            [
+                binary,
+                "serve",
+                "--components=controlplane,api,ca",
+                f"--ca-dir={tmp_path / 'ca'}",
+                f"--store=file:{tmp_path / 'store'}",
+                f"--config={tmp_path / 'config.yaml'}",
+                "--http-addr=127.0.0.1:0",
+                "--grpc-addr=127.0.0.1:0",
+            ],
+            stdout=out,
+            stderr=subprocess.STDOUT,
+            env={**os.environ, "RUST_LOG": "info"},
+        )
+        try:
+            for _ in range(100):
+                text = log.read_text()
+                if "tutela: agents are principals of tutelad" in text or proc.poll() is not None:
+                    break
+                time.sleep(0.1)
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+    text = log.read_text()
+    assert "tutela: agents are principals of tutelad" in text, text
+    assert creds["tenant"] in text and creds["client_id"] in text, text
+    assert creds["client_secret"] not in text
 
 
 @needs_helm

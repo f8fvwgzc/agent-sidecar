@@ -1088,7 +1088,7 @@ With Tutela's `tutelad` (v0.2.0) in front, agents are principals there too ([ADR
    tenants = ["ten_..."]                                             # the app's tenant
    ```
 
-**At embassy** (the ControlPlaneConfig, with the Secret mounted; the Helm chart has no `tutela` value yet, [#82](https://github.com/f8fvwgzc/agent-sidecar/issues/82), so put it in the file `embassy serve --config` reads):
+**At embassy** (the ControlPlaneConfig, with the Secret mounted; with the Helm chart, see below):
 
 ```yaml
 tutela:
@@ -1101,6 +1101,15 @@ tutela:
     key_file: /etc/agentsc/tutela-agent/key.pem   # openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256
 ```
 
+- **With the Helm chart:** the value `tutela` is this section, as it is. `tutelaCredentials.existingSecret` names the Secret the bootstrap job wrote (mounted at `/etc/agentsc/tutela`; a Secret without one of the five keys keeps the pod from starting), and `tutelaAgentKey.existingSecret` a Secret with key `key.pem` (mounted at `/etc/agentsc/tutela-agent`). The chart refuses to render the section without the first, and `agent_tokens` without the second. With `networkPolicy.enabled`, add tutelad's pods to `networkPolicy.httpFrom` (it fetches embassy's agent JWKS and forwards its audit log to port 8080); with `networkPolicy.egress` too, embassy reaches tutelad on `networkPolicy.tuteladPort` (8080, the Tutela chart's port) and only at `networkPolicy.tuteladTo` when set. `deploy/helm/agent-sidecar/ci/tutela-values.yaml` has all of it:
+
+  ```bash
+  kubectl -n agentsc-system create secret generic attache-tutela-agent --from-file=key.pem=agent-key.pem
+  helm upgrade --install agent-sidecar deploy/helm/agent-sidecar -n agentsc-system \
+    -f deploy/helm/agent-sidecar/ci/tutela-values.yaml   # copy it and set your issuer, URL and peers
+  ```
+
+  The sync registers the agents of the registry, which lives in the AgentSecOps store, and the chart cannot give embassy one yet ([#85](https://github.com/f8fvwgzc/agent-sidecar/issues/85)): with the chart alone embassy loads the section (the log says `tutela: agents are principals of tutelad`) but has no agents to register.
 - **What you see.** `GET /api/v1/agents/$AGENT_ID` carries `tutela: {principal, epoch, disabled, synced_at}` once the agent is registered. The `tutela:` log lines say what each sync did; a failed call is a `warn` with its cause, and the sync runs again in 5 s.
 - **When tutelad is down** nothing in attache waits: charters, the registry and quarantines work, and the sidecars refuse a quarantined agent. A new agent is registered, and a quarantine reaches tutelad, when it is back. What needs tutelad's answer fails closed: no agent token is signed for an agent that is not registered and enabled there, and `POST /api/v1/agents/$AGENT_ID/revoke-tokens` answers `503 tutela_unavailable`.
 - **Revoking an agent's tokens** without a quarantine: `POST /api/v1/agents/$AGENT_ID/revoke-tokens` (admin) raises its epoch at tutelad; the agent stays enabled, and its next tokens carry the new epoch.

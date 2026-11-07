@@ -149,6 +149,15 @@ other field). embassy-ca applies sidecar_images; embassy reads the same file and
 {{- with .Values.ledger -}}
 {{- $_ := set $cfg "ledger" . -}}
 {{- end -}}
+{{- with .Values.tutela -}}
+{{- if not $.Values.tutelaCredentials.existingSecret -}}
+{{- fail "tutela needs tutelaCredentials.existingSecret: the app's Secret from tutelad bootstrap, mounted at /etc/agentsc/tutela" -}}
+{{- end -}}
+{{- if and .agent_tokens (not $.Values.tutelaAgentKey.existingSecret) -}}
+{{- fail "tutela.agent_tokens needs tutelaAgentKey.existingSecret: a Secret with key.pem, mounted at /etc/agentsc/tutela-agent" -}}
+{{- end -}}
+{{- $_ := set $cfg "tutela" . -}}
+{{- end -}}
 {{- if .Values.policy -}}
 {{- $_ := set $cfg "policy" .Values.policy -}}
 {{- end -}}
