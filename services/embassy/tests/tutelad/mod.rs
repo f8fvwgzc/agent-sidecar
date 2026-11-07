@@ -227,6 +227,8 @@ pub struct Tutelad {
     child: Option<tokio::process::Child>,
     admin: tokio_postgres::Client,
     db: String,
+    base: url::Url,
+    extra: Vec<(String, String)>,
 }
 
 async fn run(bin: &Path, args: &[&str], envs: &[(&str, &str)]) -> String {
@@ -250,6 +252,11 @@ impl Tutelad {
     /// A deployment whose trust file lists `embassy_port`'s agent-token issuer
     /// (`http://127.0.0.1:<port>`, JWKS at `/.well-known/agent-jwks.json`) for tenant A.
     pub async fn start(embassy_port: u16) -> Option<Tutelad> {
+        Self::start_with(embassy_port, Vec::new()).await
+    }
+
+    /// [`Tutelad::start`] with more settings for `tutelad serve` (forwarding to the ledger).
+    pub async fn start_with(embassy_port: u16, extra: Vec<(String, String)>) -> Option<Tutelad> {
         let e = env()?;
         let dir = tempfile::tempdir().unwrap();
         let admin = connect(&conn_string(
@@ -432,6 +439,8 @@ delegation_aware = true
             child: None,
             admin,
             db,
+            base: e.base.clone(),
+            extra,
             dir,
         };
         t.serve().await;
@@ -460,6 +469,7 @@ delegation_aware = true
             .env("TUTELA_REVISION_CHECK_MS", "200")
             .env("TUTELA_SHUTDOWN_DRAIN_SECS", "0")
             .env("TUTELA_LOG", "info")
+            .envs(self.extra.iter().map(|(k, v)| (k.as_str(), v.as_str())))
             .stdout(Stdio::from(log.try_clone().unwrap()))
             .stderr(Stdio::from(log))
             .kill_on_drop(true)
@@ -489,6 +499,35 @@ delegation_aware = true
             let _ = c.kill().await;
             let _ = c.wait().await;
         }
+    }
+
+    /// A superuser connection to this deployment's database (row-level security does not apply).
+    pub async fn superuser(&self) -> tokio_postgres::Client {
+        connect(&conn_string(
+            &self.base,
+            &self.db,
+            self.base.username(),
+            self.base.password().unwrap_or(""),
+        ))
+        .await
+    }
+
+    /// Per audit chain (a tenant id, or the deployment's): its last `seq`, and how far the
+    /// forwarder has shipped it (0 before any).
+    pub async fn audit_heads(&self) -> std::collections::BTreeMap<String, (i64, i64)> {
+        let db = self.superuser().await;
+        let rows = db
+            .query(
+                "SELECT r.tenant_id, max(r.seq), coalesce(max(f.shipped_seq), 0) \
+                 FROM tutela.audit_record r LEFT JOIN tutela.audit_forward f \
+                 ON f.tenant_id = r.tenant_id GROUP BY r.tenant_id",
+                &[],
+            )
+            .await
+            .unwrap();
+        rows.iter()
+            .map(|r| (r.get::<_, String>(0), (r.get(1), r.get(2))))
+            .collect()
     }
 
     pub fn log(&self) -> String {
