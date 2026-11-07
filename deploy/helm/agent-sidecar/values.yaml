@@ -89,6 +89,27 @@ ledger: {}
 #  http_origin_allowlist: ["https://api.partner.example"]
 #  forbid_learning_auto: false
 
+# ControlPlaneConfig `tutela`, as it is: embassy as an app of Tutela's tutelad, whose agents are
+# principals there (docs/operations.md "Agents in tutelad"). Empty: embassy never calls tutelad.
+# The two Secrets below are mounted at the paths the section names:
+#   tutela:
+#     credentials: /etc/agentsc/tutela                  # tutelaCredentials.existingSecret
+#     url: https://tutela.tutela.svc:8080               # absent: the credentials' issuer
+#     private_host: true                                # tutelad on the cluster network
+#     agent_tokens:                                     # optional: sign the agents' own tokens
+#       issuer: https://agentsc.example.com
+#       key_file: /etc/agentsc/tutela-agent/key.pem     # tutelaAgentKey.existingSecret
+# Only embassy reads it (embassy-ca ignores the section).
+tutela: {}
+tutelaCredentials:
+  # The Secret `tutelad bootstrap` writes for attache's app (keys client_id, client_secret, tenant,
+  # issuer, token_url), mounted at /etc/agentsc/tutela. A missing key keeps the pod from starting.
+  existingSecret: ""
+tutelaAgentKey:
+  # A Secret with key `key.pem`: the P-256 PKCS#8 key embassy signs its agents' tokens with
+  # (tutela.agent_tokens.key_file), mounted at /etc/agentsc/tutela-agent.
+  existingSecret: ""
+
 events:
   retainBytes: 67108864         # ring of recent audit records for the UI (1 MiB..16 GiB)
 
@@ -200,14 +221,29 @@ embassy:
   logLevel: info
 
 networkPolicy:
-  # Restrict ingress to embassy: Connect (15012) stays open to sidecars in every namespace; the
-  # API/UI port 8080 only admits the peers below (kubectl port-forward is unaffected).
+  # Restrict ingress to embassy (and, with `egress`, its egress): Connect (15012) stays open to
+  # sidecars in every namespace; the API/UI port 8080 only admits the peers below (kubectl
+  # port-forward is unaffected).
   enabled: false
-  # NetworkPolicyPeer list allowed to reach 8080, e.g. the ingress controller:
+  # NetworkPolicyPeer list allowed to reach 8080, e.g. the ingress controller, and tutelad when it
+  # fetches embassy's agent JWKS or forwards its audit log to the ledger in the cluster:
   #   - namespaceSelector:
   #       matchLabels:
   #         kubernetes.io/metadata.name: ingress-nginx
   httpFrom: []
+  # true: restrict embassy's egress too (policyTypes Egress), to DNS, the Kubernetes API server
+  # (apiServerPorts, also https to OIDC issuers), tutelad when `tutela` is set (tuteladPort, to
+  # tuteladTo) and egressExtra. false: egress is not restricted, so embassy reaches all of them.
+  egress: false
+  apiServerPorts: [443, 6443]
+  # tutelad's pod port (the Tutela chart's service.port) and its pods as NetworkPolicyPeers, e.g.
+  #   - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: tutela}}
+  #     podSelector: {matchLabels: {app.kubernetes.io/name: tutela, app.kubernetes.io/component: server}}
+  # Empty: that port anywhere.
+  tuteladPort: 8080
+  tuteladTo: []
+  # More NetworkPolicyEgressRule entries (an OTLP collector, PostgreSQL).
+  egressExtra: []
 
 rbac:
   # Aggregate agentsc-charter-view into the built-in view, edit and admin ClusterRoles, and

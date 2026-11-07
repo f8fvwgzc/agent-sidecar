@@ -137,6 +137,16 @@ spec:
               mountPath: /etc/agentsc/oidc
               readOnly: true
             {{- end }}
+            {{- with .Values.tutelaCredentials.existingSecret }}
+            - name: tutela-credentials
+              mountPath: /etc/agentsc/tutela
+              readOnly: true
+            {{- end }}
+            {{- with .Values.tutelaAgentKey.existingSecret }}
+            - name: tutela-agent-key
+              mountPath: /etc/agentsc/tutela-agent
+              readOnly: true
+            {{- end }}
             - name: tls
               mountPath: /etc/agentsc/tls
               readOnly: true
@@ -156,6 +166,26 @@ spec:
         - name: oidc-client-secret
           secret:
             secretName: {{ . }}
+        {{- end }}
+        # The keys `tutelad bootstrap` writes, one file each (tutela.credentials reads the
+        # directory). Listed, so a Secret without one of them keeps the pod from starting.
+        {{- with .Values.tutelaCredentials.existingSecret }}
+        - name: tutela-credentials
+          secret:
+            secretName: {{ . }}
+            items:
+              {{- range list "client_id" "client_secret" "tenant" "issuer" "token_url" }}
+              - key: {{ . }}
+                path: {{ . }}
+              {{- end }}
+        {{- end }}
+        {{- with .Values.tutelaAgentKey.existingSecret }}
+        - name: tutela-agent-key
+          secret:
+            secretName: {{ . }}
+            items:
+              - key: key.pem
+                path: key.pem
         {{- end }}
         # Created and renewed by embassy-ca; the pod starts once it exists, and renewals reach the
         # mounted files without a restart.

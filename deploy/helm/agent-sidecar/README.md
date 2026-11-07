@@ -12,7 +12,7 @@ The agent-sidecar control plane for Kubernetes 1.29 or newer (design: `docs/desi
 | ValidatingAdmissionPolicy and Binding `agentsc-sidecar-integrity` | Only where the cluster serves `admissionregistration.k8s.io/v1` ValidatingAdmissionPolicy (Kubernetes 1.30+). The API server's own check of agent pods after every webhook; see [Sidecar integrity](#sidecar-integrity). |
 | Secrets `embassy-config`, `agentsc-session-key` | The ControlPlaneConfig (API tokens as SHA-256 only, the sidecar image allow-list) and the session-cookie key. |
 | RBAC | ClusterRole `agentsc-embassy` (both service accounts; the design's rules plus `delete` on `charters`, see below), Role `agentsc-embassy-secrets` (embassy-ca only), Role `agentsc-embassy-cp-audit` (both service accounts; the control-plane audit, see below), user ClusterRoles `agentsc-charter-view` and `agentsc-charter-edit`. |
-| NetworkPolicy `embassy` (optional) | Port 15012 open to sidecars, port 8080 only for `networkPolicy.httpFrom`. |
+| NetworkPolicy `embassy` (optional) | Port 15012 open to sidecars, port 8080 only for `networkPolicy.httpFrom`. With `networkPolicy.egress`, embassy reaches only DNS, the API server ports (and https), tutelad when `tutela` is set, and `networkPolicy.egressExtra`. |
 
 ## Install
 
@@ -50,6 +50,9 @@ See [`values.yaml`](values.yaml); [`values.schema.json`](values.schema.json) ref
 | `issuance.kubernetes`, `issuance.workloadCertTTL`, `issuance.joinTokens` | `true`, `24h`, `[]` | |
 | `policy` | `{}` | ControlPlaneConfig `policy` |
 | `ledger` | `{}` | ControlPlaneConfig `ledger`: `retention_days`, `producers` |
+| `tutela` | `{}` | ControlPlaneConfig `tutela`, as it is: embassy as an app of Tutela's `tutelad`, its agents principals there (`docs/operations.md`, "Agents in tutelad"). Rendering fails without `tutelaCredentials.existingSecret`, and `agent_tokens` without `tutelaAgentKey.existingSecret` |
+| `tutelaCredentials.existingSecret` | `""` | the Secret `tutelad bootstrap` writes for attache's app (`client_id`, `client_secret`, `tenant`, `issuer`, `token_url`), mounted at `/etc/agentsc/tutela` (`tutela.credentials`); a missing key keeps the pod from starting |
+| `tutelaAgentKey.existingSecret` | `""` | a Secret with key `key.pem` (P-256, PKCS#8), mounted at `/etc/agentsc/tutela-agent` (`tutela.agent_tokens.key_file: /etc/agentsc/tutela-agent/key.pem`) |
 | `ca.existingSecret` | `""` | `<namespace>/<name>` of a CA to reuse (read-only) |
 | `trustDomain` | `agentsc` | SPIFFE trust domain: `spiffe://<trustDomain>/ns/<ns>/svc/<svc>` identities and `spiffe://<trustDomain>/control-plane`. embassy's `--trust-domain`; the injector gives every sidecar it injects the same `AGENTSC_TRUST_DOMAIN` |
 | `clusterDomain` | `cluster.local` | the Service names embassy serves as, embassy's `--cluster-domain` (workload certificate DNS SANs), and `AGENTSC_CLUSTER_DOMAIN` of injected sidecars (peer addresses) when not `cluster.local` |
@@ -60,7 +63,9 @@ See [`values.yaml`](values.yaml); [`values.schema.json`](values.schema.json) ref
 | `embassy.resources` | requests 100m/256Mi, limit 1Gi | |
 | `embassy.httpTLS`, `embassy.dnsNames` | `false`, `[]` | API over TLS; extra Host names (Ingress) |
 | `embassy.http3` | `false` | API and console over HTTP/3 too (QUIC on UDP 8080, advertised with `Alt-Svc`); needs `httpTLS` |
-| `networkPolicy.enabled`, `networkPolicy.httpFrom` | `false`, `[]` | |
+| `networkPolicy.enabled`, `networkPolicy.httpFrom` | `false`, `[]` | add tutelad's pods to `httpFrom` when it fetches embassy's agent JWKS or forwards its audit log inside the cluster |
+| `networkPolicy.egress`, `networkPolicy.apiServerPorts`, `networkPolicy.egressExtra` | `false`, `[443, 6443]`, `[]` | restrict embassy's egress too: DNS, the API server ports (and https anywhere on them), extra NetworkPolicyEgressRules |
+| `networkPolicy.tuteladPort`, `networkPolicy.tuteladTo` | `8080`, `[]` | with `egress` and `tutela`: tutelad's pod port, and its pods (empty: that port anywhere) |
 
 ## Sidecar integrity
 
