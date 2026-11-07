@@ -183,7 +183,8 @@ pub mod perm {
     pub const EDIT_TELEMETRY: &str = "service:edit_telemetry";
     /// The `guardrails` rules (not the `allowed_tools` / `allowed_services` entries).
     pub const EDIT_GUARDRAILS: &str = "service:edit_guardrails";
-    /// `authz.default`, `authz.services`, `authz.taint` and any non-local `authz.callers` rule.
+    /// `authz.default`, `authz.services`, `authz.taint`, any non-local `authz.callers` rule, and
+    /// a tool's `delegation` (the agent acts with the invoking person's authority).
     pub const EDIT_AUTHZ: &str = "service:edit_authz";
     /// An existing agent's `type`.
     pub const EDIT_AGENT_TYPE: &str = "service:edit_agent_type";
@@ -475,6 +476,19 @@ pub fn required_permissions(old: &Charter, new: &Charter) -> Required {
                 admin.add(
                     perm::EDIT_APPROVALS,
                     format!("agents.{}.tools.{} approval requires admin", a.name, t.name),
+                );
+            }
+            // a delegation lets the agent act with the invoking person's authority at another
+            // service (CONTRACT.md §5.3): only an admin adds, changes or removes one
+            if before.map(|b| &b.delegation) != Some(&t.delegation)
+                && (before.is_some() || t.delegation.is_some())
+            {
+                admin.add(
+                    perm::EDIT_AUTHZ,
+                    format!(
+                        "agents.{}.tools.{} delegation requires admin",
+                        a.name, t.name
+                    ),
                 );
             }
         }
