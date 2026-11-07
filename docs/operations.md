@@ -1088,7 +1088,7 @@ With Tutela's `tutelad` (v0.2.0) in front, agents are principals there too ([ADR
    tenants = ["ten_..."]                                             # the app's tenant
    ```
 
-**At embassy** (the ControlPlaneConfig; Helm: `tutela`), with the Secret mounted:
+**At embassy** (the ControlPlaneConfig, with the Secret mounted; the Helm chart has no `tutela` value yet, [#82](https://github.com/f8fvwgzc/agent-sidecar/issues/82), so put it in the file `embassy serve --config` reads):
 
 ```yaml
 tutela:
