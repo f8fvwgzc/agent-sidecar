@@ -1483,7 +1483,10 @@ Audit records become evidence when embassy chains and seals them (design:
     env), then `agentscd` with `AGENTSC_NO_RUNTIME=true`, its state in its
     own emptyDir `agentsc-state` (`AGENTSC_STATE_DIR`) and the only
     `ANTHROPIC_API_KEY`. The runtime cannot read the sidecar's key or
-    environment;
+    environment. Both also mount the empty volume `agentsc-no-api-token`
+    read-only at `/var/run/secrets/kubernetes.io/serviceaccount`, so the
+    API server's ServiceAccount admission plugin (which runs again after
+    the webhook) gives neither the pod's Kubernetes API token;
   - a pod that brings its own `agentscd` or `agentsc-runtime`, mounts the
     sidecar's volumes elsewhere, projects another `agentsc`-audience token or
     sets `shareProcessNamespace`/`hostPID` is refused at admission;

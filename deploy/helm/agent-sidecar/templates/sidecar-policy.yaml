@@ -31,8 +31,11 @@ What it refuses (the sidecar containers are agentscd and agentsc-runtime):
 - hostAliases, dnsPolicy: None, and dnsConfig nameservers or searches (the sidecar's
   control-plane addresses could resolve to another container, which would get its token);
 - any other container mounting the sidecar's volumes (agentsc-run: the Unix sockets,
-  agentsc-state: the workload key, agentsc-token: the IssueCertificate credential), and
-  agentsc-runtime mounting anything but agentsc-run;
+  agentsc-state: the workload key, agentsc-token: the IssueCertificate credential,
+  agentsc-no-api-token: the empty volume at the Kubernetes API token's path), and
+  agentsc-runtime mounting anything but agentsc-run and agentsc-no-api-token (the API server's
+  ServiceAccount admission plugin mounts the pod's API token into every container without a mount
+  at that path, so a runtime without the blank mount holds the API token and is refused);
 - a projected service-account token for audience agentsc in any volume but agentsc-token.
 The spec checks run on CREATE only (those fields cannot change later), so pods admitted before the
 policy existed can still be labelled, patched and deleted.
@@ -144,18 +147,20 @@ spec:
     - expression: >-
         request.operation != 'CREATE' ||
         variables.others.all(c, !has(c.volumeMounts) ||
-        c.volumeMounts.all(m, !(m.name in ['agentsc-run', 'agentsc-state', 'agentsc-token'])))
+        c.volumeMounts.all(m, !(m.name in ['agentsc-run', 'agentsc-state', 'agentsc-token',
+        'agentsc-no-api-token'])))
       message: >-
         only the agentscd and agentsc-runtime containers may mount the sidecar volumes
-        agentsc-run, agentsc-state and agentsc-token
+        agentsc-run, agentsc-state, agentsc-token and agentsc-no-api-token
       reason: Forbidden
     - expression: >-
         request.operation != 'CREATE' ||
         variables.sidecars.filter(c, c.name == 'agentsc-runtime').all(c,
-        !has(c.volumeMounts) || c.volumeMounts.all(m, m.name == 'agentsc-run'))
+        !has(c.volumeMounts) || c.volumeMounts.all(m, m.name in ['agentsc-run', 'agentsc-no-api-token']))
       message: >-
-        agentsc-runtime may mount only agentsc-run (the sockets): the workload key and the token
-        are agentscd's
+        agentsc-runtime may mount only agentsc-run (the sockets) and agentsc-no-api-token: the
+        workload key and the token are agentscd's, and the pod's Kubernetes API token is nobody's
+        there
       reason: Forbidden
     - expression: >-
         request.operation != 'CREATE' || !has(object.spec.volumes) ||

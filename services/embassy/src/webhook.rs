@@ -39,6 +39,10 @@
 //! - `agentsc-runtime`: the same image, command [`RUNTIME_COMMAND`] with [`RUNTIME_ARGS`] only,
 //!   no env but the template's [`RUNTIME_TEMPLATE_ENV`] (no secret, no `ANTHROPIC_API_KEY`), and
 //!   only the `/run/agentsc` mount;
+//! - both mount an empty volume, [`NO_API_TOKEN_VOLUME`], read-only at [`API_TOKEN_DIR`]: the
+//!   ServiceAccount admission plugin runs again after this webhook and mounts the pod's
+//!   Kubernetes API token into every container that has no mount there, so this keeps the API
+//!   token out of both (neither calls the Kubernetes API);
 //! - image from annotation `agentsc.io/sidecar-image`, else `--injector-image`; with
 //!   `sidecar_images.allowed_digests` set it must be pinned to an allowed digest
 //!   ([`crate::sidecar_images`]), else the pod is denied with a message naming the image;
@@ -140,8 +144,15 @@ pub const TOKEN_DIR: &str = "/var/run/secrets/agentsc";
 pub const TOKEN_FILE: &str = "/var/run/secrets/agentsc/token";
 pub const TOKEN_AUDIENCE: &str = "agentsc";
 pub const TOKEN_EXPIRATION_SECONDS: i64 = 3600;
+/// An empty volume both sidecar containers mount at [`API_TOKEN_DIR`]. The API server's
+/// ServiceAccount admission plugin runs again after mutating webhooks and mounts the pod's
+/// Kubernetes API token at that path into every container without a mount there; with this one,
+/// neither sidecar container gets the API token (the runtime holds no credential).
+pub const NO_API_TOKEN_VOLUME: &str = "agentsc-no-api-token";
+pub const API_TOKEN_DIR: &str = "/var/run/secrets/kubernetes.io/serviceaccount";
 /// The volumes the injector adds: no other container may mount them.
-pub const SIDECAR_VOLUMES: [&str; 3] = [RUN_VOLUME, STATE_VOLUME, TOKEN_VOLUME];
+pub const SIDECAR_VOLUMES: [&str; 4] =
+    [RUN_VOLUME, STATE_VOLUME, TOKEN_VOLUME, NO_API_TOKEN_VOLUME];
 pub const MESH_PORT: i32 = 50002;
 /// The startup and readiness probes' command (see the module docs for the image contract).
 pub const READY_COMMAND: &str = "agentsc-ready";
@@ -838,6 +849,7 @@ fn sidecar_container(inj: &Injector, p: &PodRequest) -> Container {
                 read_only: Some(true),
                 ..Default::default()
             },
+            no_api_token_mount(),
         ]),
         // /readyz listens on loopback only: exec probes (module docs, image contract)
         startup_probe: Some(ready_probe(STARTUP_PROBE_PERIOD, STARTUP_PROBE_FAILURES)),
@@ -869,6 +881,16 @@ fn run_mount() -> VolumeMount {
     }
 }
 
+/// [`NO_API_TOKEN_VOLUME`] at [`API_TOKEN_DIR`], read-only.
+fn no_api_token_mount() -> VolumeMount {
+    VolumeMount {
+        name: NO_API_TOKEN_VOLUME.into(),
+        mount_path: API_TOKEN_DIR.into(),
+        read_only: Some(true),
+        ..Default::default()
+    }
+}
+
 /// The `agentsc-runtime` container for `p`: `agentscd`'s image, pull policy, resources and
 /// securityContext; its command line, the socket directory and the template's
 /// [`RUNTIME_TEMPLATE_ENV`] only (no secret).
@@ -889,7 +911,7 @@ fn runtime_container(inj: &Injector, p: &PodRequest) -> Container {
         command: Some(vec![RUNTIME_COMMAND.into()]),
         args: Some(RUNTIME_ARGS.iter().map(|a| a.to_string()).collect()),
         env: (!env.is_empty()).then_some(env),
-        volume_mounts: Some(vec![run_mount()]),
+        volume_mounts: Some(vec![run_mount(), no_api_token_mount()]),
         resources: Some(inj.template.resources()),
         security_context: Some(inj.template.security_context()),
         ..Default::default()
@@ -973,6 +995,7 @@ fn sidecar_volumes() -> Vec<Volume> {
             }),
             ..Default::default()
         },
+        empty_dir(NO_API_TOKEN_VOLUME),
     ]
 }
 
@@ -1380,7 +1403,8 @@ mod tests {
             "volumeMounts": [
                 {"name": "agentsc-run", "mountPath": "/run/agentsc"},
                 {"name": "agentsc-state", "mountPath": "/var/lib/agentsc/state"},
-                {"name": "agentsc-token", "mountPath": "/var/run/secrets/agentsc", "readOnly": true}
+                {"name": "agentsc-token", "mountPath": "/var/run/secrets/agentsc", "readOnly": true},
+                {"name": "agentsc-no-api-token", "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount", "readOnly": true}
             ],
             "startupProbe": {"exec": {"command": ["agentsc-ready"]}, "periodSeconds": 2, "timeoutSeconds": 3, "failureThreshold": 150},
             "readinessProbe": {"exec": {"command": ["agentsc-ready"]}, "periodSeconds": 10, "timeoutSeconds": 3, "failureThreshold": 3},
@@ -1398,7 +1422,10 @@ mod tests {
             "restartPolicy": "Always",
             "command": ["agentsc-runtime"],
             "args": ["--listen", "unix:/run/agentsc/runtime.sock", "--sidecar", "unix:/run/agentsc/sidecar.sock"],
-            "volumeMounts": [{"name": "agentsc-run", "mountPath": "/run/agentsc"}],
+            "volumeMounts": [
+                {"name": "agentsc-run", "mountPath": "/run/agentsc"},
+                {"name": "agentsc-no-api-token", "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount", "readOnly": true}
+            ],
             "resources": resources(),
             "securityContext": security_context()
         })
@@ -1410,7 +1437,8 @@ mod tests {
             {"name": "agentsc-state", "emptyDir": {}},
             {"name": "agentsc-token", "projected": {"sources": [
                 {"serviceAccountToken": {"audience": "agentsc", "expirationSeconds": 3600, "path": "token"}}
-            ]}}
+            ]}},
+            {"name": "agentsc-no-api-token", "emptyDir": {}}
         ])
     }
 
@@ -1471,8 +1499,11 @@ mod tests {
                 .map(|m| m["name"].as_str().unwrap().to_string())
                 .collect()
         };
-        assert_eq!(mounts(runtime), [RUN_VOLUME]);
-        assert_eq!(mounts(sidecar), [RUN_VOLUME, STATE_VOLUME, TOKEN_VOLUME]);
+        assert_eq!(mounts(runtime), [RUN_VOLUME, NO_API_TOKEN_VOLUME]);
+        assert_eq!(
+            mounts(sidecar),
+            [RUN_VOLUME, STATE_VOLUME, TOKEN_VOLUME, NO_API_TOKEN_VOLUME]
+        );
         assert_eq!(
             env(sidecar, "AGENTSC_STATE_DIR").unwrap()["value"],
             STATE_DIR
@@ -1555,6 +1586,7 @@ mod tests {
                 "/spec/initContainers/1",
                 "/spec/volumes/-",
                 "/spec/volumes/-",
+                "/spec/volumes/-",
                 "/spec/volumes/-"
             ]
         );
@@ -1570,7 +1602,7 @@ mod tests {
             ["agentsc-runtime", "agentscd", "migrate"],
             "the sidecars start first, the runtime before agentscd"
         );
-        assert_eq!(p["spec"]["volumes"].as_array().unwrap().len(), 4);
+        assert_eq!(p["spec"]["volumes"].as_array().unwrap().len(), 5);
         assert_eq!(p["spec"]["containers"][0]["name"], "app");
     }
 
