@@ -106,6 +106,8 @@ pub struct AppState {
     pub(crate) quarantined: Mutex<HashMap<String, String>>,
     /// Tool calls waiting for a person's approval (approvals.rs).
     pub approvals: crate::approvals::Approvals,
+    /// The person's tokens of the runs in flight, and delegated tokens (delegation.rs).
+    pub delegations: crate::delegation::Delegations,
 }
 
 /// The rule of a refusal because the agent is quarantined (CONTRACT.md §5.3).
@@ -311,6 +313,7 @@ impl AppState {
             pending_memory: Mutex::new(pending_memory),
             quarantined: Mutex::new(HashMap::new()),
             approvals: crate::approvals::Approvals::default(),
+            delegations: crate::delegation::Delegations::default(),
             file_yaml: Mutex::new(file_text),
             tls: Arc::new(ArcSwapOption::from(tls.map(Arc::new))),
             cert_not_after,

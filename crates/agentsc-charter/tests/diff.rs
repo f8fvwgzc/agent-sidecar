@@ -384,6 +384,7 @@ fn editors_may_change_agents_skills_and_local_callers() {
             label: None,
             effect: None,
             approval: None,
+            delegation: None,
         });
         c.agents[0].tools.push(ToolSpec {
             name: "stock".into(),
@@ -398,6 +399,7 @@ fn editors_may_change_agents_skills_and_local_callers() {
             label: None,
             effect: None,
             approval: None,
+            delegation: None,
         });
         c.guardrails.allowed_tools.remove("support");
     });
@@ -774,4 +776,53 @@ fn a_write_needs_the_key_of_its_change_class() {
     let put = first_charter(FirstCharter::Put);
     assert!(put.keys().contains(perm::CREATE_CHARTER));
     assert_eq!(put.role(), Role::Admin);
+}
+
+/// A tool's `delegation` lets the agent act with the invoking person's authority at another
+/// service (CONTRACT.md §5.3): adding, changing or removing one is an admin's, under the
+/// `edit_authz` key, and needs a sidecar that knows schema level 8.
+#[test]
+fn a_delegation_is_an_admins_change() {
+    let http = |c: &mut Charter| {
+        c.agents[0]
+            .tools
+            .iter()
+            .position(|t| t.tool_type == ToolType::Http)
+            .unwrap()
+    };
+    let delegated = |c: &mut Charter| {
+        let i = http(c);
+        c.agents[0].tools[i].delegation = Some(DelegationSpec {
+            audience: "symphony".into(),
+        });
+    };
+    let name = {
+        let mut c = v02();
+        let i = http(&mut c);
+        format!(
+            "agents.{}.tools.{} delegation requires admin",
+            c.agents[0].name, c.agents[0].tools[i].name
+        )
+    };
+    admin(delegated, &name);
+    let (old, new) = changed(delegated);
+    assert!(
+        required_permissions(&old, &new)
+            .needs
+            .iter()
+            .any(|n| n.key == perm::EDIT_AUTHZ && n.reason == name)
+    );
+    assert_eq!(new.schema_level(), 8);
+    // changing the audience and removing it are admin changes too
+    let mut with = v02();
+    delegated(&mut with);
+    let mut other = with.clone();
+    let i = http(&mut other);
+    other.agents[0].tools[i].delegation = Some(DelegationSpec {
+        audience: "crm-api".into(),
+    });
+    assert_eq!(required_role(&with, &other).0, Role::Admin);
+    let mut without = with.clone();
+    without.agents[0].tools[i].delegation = None;
+    assert_eq!(required_role(&with, &without).0, Role::Admin);
 }

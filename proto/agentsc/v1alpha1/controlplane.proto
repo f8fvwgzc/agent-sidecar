@@ -21,7 +21,21 @@ message SidecarMessage {
     LearningProposal proposal = 5;
     SpanStart span_start = 6;
     ApprovalRequest approval_request = 7;
+    DelegationRequest delegation_request = 8;
   }
+}
+
+// A delegated agent token for one tool call (CONTRACT.md §5.3, Tutela CONTRACTS.md 4.5): the
+// person's token the app sent with the invocation, exchanged at tutelad by embassy with the
+// agent's own token as the actor. Answered on the same stream only, by `DelegationResponse`.
+// Neither token is ever logged or audited.
+message DelegationRequest {
+  string id = 1;              // UUID, the sidecar's
+  string agent = 2;           // an agent of this service
+  string audience = 3;        // tools[].delegation.audience
+  string subject_token = 4;   // the person's token (or a delegated token), as the app sent it
+  string run_id = 5;          // the run: its request_id
+  string node_id = 6;         // the tool, `<agent>.<tool>`
 }
 
 // A tool call that waits for a person's approval (CONTRACT.md §5.4). Sent when the call starts and
@@ -105,7 +119,17 @@ message ControlMessage {
     AgentIds agent_ids = 3;
     Quarantine quarantine = 4;
     ApprovalDecision approval_decision = 5;
+    DelegationResponse delegation_response = 6;
   }
+}
+
+// The answer to one `DelegationRequest`, to the instance that asked only. `access_token` is set,
+// or `error` says why there is none (`rule: reason`).
+message DelegationResponse {
+  string id = 1;
+  string access_token = 2;
+  uint64 expires_in = 3;      // seconds
+  string error = 4;
 }
 
 // The decision on an approval (CONTRACT.md §5.4), sent to every instance of the service; an

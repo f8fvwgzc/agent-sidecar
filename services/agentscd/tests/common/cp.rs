@@ -325,6 +325,16 @@ impl FakeCp {
             .collect()
     }
 
+    pub fn delegation_requests(&self) -> Vec<agentsc_proto::DelegationRequest> {
+        self.received()
+            .into_iter()
+            .filter_map(|(_, m)| match m.msg {
+                Some(sidecar_message::Msg::DelegationRequest(r)) => Some(r),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub fn proposals(&self) -> Vec<agentsc_proto::LearningProposal> {
         self.received()
             .into_iter()

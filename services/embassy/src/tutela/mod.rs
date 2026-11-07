@@ -22,6 +22,7 @@ use crate::config::{ControlPlaneConfig, TutelaConfig};
 
 pub mod agent_token;
 pub mod client;
+pub mod delegation;
 pub mod sync;
 
 /// The app's credentials, as `tutelad bootstrap` writes them (Tutela CONTRACTS.md 7.13.9).
@@ -113,11 +114,13 @@ pub fn check_url(url: &str, dev_loopback: bool) -> Result<url::Url, String> {
     Ok(u)
 }
 
-/// What the `tutela` section makes: the client and the signer of agent tokens.
+/// What the `tutela` section makes: the client, the signer of agent tokens, and the verifier of
+/// the person's tokens apps send (`tutela.delegation`).
 pub struct Connection {
     pub config: TutelaConfig,
     pub client: client::Client,
     pub signer: Option<agent_token::Signer>,
+    pub verifier: Option<Arc<tutela_sdk::Verifier>>,
 }
 
 impl std::fmt::Debug for Connection {
@@ -136,6 +139,7 @@ impl Connection {
     /// Reads the credentials and the key. Needs the process's rustls provider installed.
     pub fn load(config: &TutelaConfig) -> anyhow::Result<Connection> {
         let creds = Credentials::read(&config.credentials).context("tutela.credentials")?;
+        let verifier = delegation::verifier(config, &creds).context("tutela.delegation")?;
         let client = client::Client::new(config, creds).context("tutela")?;
         let signer = config
             .agent_tokens
@@ -147,6 +151,7 @@ impl Connection {
             config: config.clone(),
             client,
             signer,
+            verifier,
         })
     }
 }

@@ -433,9 +433,10 @@ an oversized plain charter before it is parsed.
   new field, but an older sidecar would take it for a service of its own namespace), and 6 when
   it uses a practices or level-6 learning field (`agents[].practices`,
   `agents[].learning.require_evidence`, `agents[].learning.contrast_runs`,
-  `agents[].learning.scopes`), and 7 when a tool has an `approval` (§5.4).
+  `agents[].learning.scopes`), 7 when a tool has an `approval` (§5.4), and 8 when a tool has a
+  `delegation` (§5.3).
   `Charter::level_fields()` lists each such field with its level (a tool once, at the highest).
-  `CHARTER_SCHEMA_LEVEL` = 7 is the level this build understands (sent as `Hello.charter_schema_level`); the control
+  `CHARTER_SCHEMA_LEVEL` = 8 is the level this build understands (sent as `Hello.charter_schema_level`); the control
   plane refuses to push a field to a connected instance below its level, naming the field and
   the instances.
 - The practices need no charter field to be on (§3.3), so a level-6 sidecar gives every agent
@@ -481,7 +482,10 @@ Protobuf package `agentsc.v1alpha1` under `proto/agentsc/v1alpha1/`
 ```
 
 Request headers honoured: `traceparent` (W3C; generated when absent),
-`content-type: application/json`.
+`content-type: application/json`, and `X-Agentsc-Subject-Token`: the token of the person the
+invocation is for (at most 8 KiB), kept in memory for this run only and used by tools with
+`delegation` (§5.3); never written to a record, a log or the runtime. The gRPC `AppApi` takes it
+as the metadata `x-agentsc-subject-token`.
 
 Response `200`:
 
@@ -1079,7 +1083,41 @@ Design: [docs/design/agent-registry.md](docs/design/agent-registry.md).
   enabled. It fails closed: `503 tutela_unavailable` without a `tutela` section or when `tutelad`
   does not answer, `409` before the agent is registered there. Audited as
   `agent_tokens_revoked` (`reason`: `<principal>: <tutela principal>: epoch <n>`).
-- **Not yet:** delegated agent tokens (RFC 8693 token exchange at `tutelad`, #25).
+- **Delegated agent tokens** (#25, [docs/adr/0006-delegated-agent-tokens.md](docs/adr/0006-delegated-agent-tokens.md)).
+  An `http` tool may act for the person the invocation is for (schema level 8):
+
+  ```yaml
+  tools:
+    - name: ask_symphony
+      type: http
+      method: POST
+      url: https://symphony.example/v1/tasks
+      delegation:              # level 8, optional; http tools only
+        audience: symphony     # [a-z][a-z0-9-]{0,62}, delegation_aware in tutelad
+  ```
+
+  For each call the sidecar sends `SidecarMessage.delegation_request` (`DelegationRequest`: an id,
+  the agent, the audience, the person's token from `X-Agentsc-Subject-Token`, `run_id` = the
+  request id, `node_id` = `<agent>.<tool>`) and waits up to 10 s (or the run's deadline) for
+  `ControlMessage.delegation_response` for that id, sent to the asking instance only. embassy
+  (`tutela.delegation`) refuses unless the agent is an active, unquarantined agent of the stream's
+  service, registered and enabled in `tutelad`; the audience is in `tutela.delegation.audiences`;
+  and the person's token verifies with `tutela-sdk` for `tutelad`'s issuer, the app's tenant and
+  attache's own audience (`tutela.delegation.audience`). A delegated token passes as the subject
+  only when that audience is `delegation_aware` (the agent is then one more actor of its chain,
+  at most 4). embassy then exchanges it at `tutelad` as its app (RFC 8693): the person's token as
+  `subject_token`, an agent token it signs as `actor_token`, the audience, `run_id`, `node_id`, and
+  `cap` = `{"attache": {"service", "agent", "tools", "budgets"}}` from the stored charter (at most
+  4096 bytes; a tool list too long becomes its count and SHA-256). The result is `typ: agent+jwt`,
+  `sub` the person, `act.sub` the agent's `tutelad` principal, `azp` attache's client id, 60 to
+  120 s and never past the person's token. The sidecar sends it as `Authorization: Bearer`, in
+  place of any `Authorization` the model wrote, and keeps it for the run until 10 s before it
+  ends. A call is refused (`PERMISSION_DENIED`, a `tool_call` deny record) and never sent without
+  the token: `delegation.no_subject` (the invocation carried no person's token),
+  `delegation.unavailable` (no control plane, no `tutela.delegation`, `tutelad` or embassy did
+  not answer), `delegation.refused` (embassy or `tutelad` said no, with the reason). Neither token
+  is ever logged or audited; embassy logs the issued token's `jti`. Adding, changing or removing
+  a `delegation` needs admin (key `service:edit_authz`).
 
 ### 5.4 Approvals of tool calls
 

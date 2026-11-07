@@ -169,6 +169,7 @@ fn charter(app: SocketAddr, audit: &Path) -> Charter {
             label: None,
             effect: None,
             approval: None,
+            delegation: None,
         });
     }
     c.guardrails

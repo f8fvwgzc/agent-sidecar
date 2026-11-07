@@ -7,6 +7,7 @@ pub mod cache;
 pub mod config;
 pub mod control;
 pub mod deadline;
+pub mod delegation;
 pub mod gateway;
 pub mod grpc_app;
 pub mod http_api;

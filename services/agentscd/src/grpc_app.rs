@@ -66,6 +66,11 @@ impl AppApi for AppApiService {
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
         let deadline = crate::deadline::from_metadata(request.metadata());
+        let subject = request
+            .metadata()
+            .get(crate::delegation::SUBJECT_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
         let req = request.into_inner();
         let trace = match tp
             .as_deref()
@@ -74,11 +79,18 @@ impl AppApi for AppApiService {
             Some(t) => TraceContext::from_traceparent(t),
             None => TraceContext::new_root(),
         };
+        let request_id = new_request_id();
+        // the person's token, for tools with `delegation` (delegation.rs); this run only
+        let _subject = crate::delegation::SubjectGuard::new(
+            &self.state.delegations,
+            &request_id,
+            subject.as_deref(),
+        );
         let inv = Invocation {
             agent: req.agent,
             input: req.input,
             context_json: req.context_json,
-            request_id: new_request_id(),
+            request_id: request_id.clone(),
             trace,
             caller: "local".into(),
             caller_agent: None,

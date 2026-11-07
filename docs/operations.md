@@ -187,6 +187,7 @@ Rule names come in families:
 | `model.refusal` | The model refused the request. |
 | `agent.unknown` | The agent is not in the charter. The record has `decision: allow` and `error` set. |
 | `audit.unavailable` | `--audit-fail-closed` refused new work while the audit sink was failing. See [Audit sink failures](#audit-sink-failures). |
+| `delegation.no_subject`, `delegation.refused`, `delegation.unavailable` | A tool with `delegation` got no delegated token: the invocation carried no `X-Agentsc-Subject-Token`, embassy or Tutela refused (the reason says why: the person's token, the audience, a quarantined agent, `invalid_grant`), or there was no control plane or answer. See [Agents in tutelad](#agents-in-tutelad). |
 | `clarify.asked` | The agent stopped to ask its caller for decisions (`ask_caller`). The `agent_invocation` record has `decision: allow` and the questions, as text, in its `output`. The sidecar writes that `output` from the questions it kept after the output guardrails, so it is exactly what the caller got. `agentsc logs --rule clarify.asked` finds these records, and its table shows them as `allow clarify.asked`. |
 
 Some failures name a rule only in the HTTP response: `runtime.unavailable`, `model.error`, `budget.max_steps` and `budget.max_tokens_per_call`. Their `agent_invocation` record has `decision: allow`, `rule: null` and the reason in `error`.
@@ -676,6 +677,11 @@ ledger:
 
 ## Upgrade notes
 
+### Delegated agent tokens (charter schema level 8)
+
+- **`tools[].delegation` is charter schema level 8.** Upgrade every sidecar of a service before you add one: the control plane refuses the charter while an older sidecar is connected.
+- **Off until configured.** Without `tutela.delegation` a tool with `delegation` is refused (`delegation.unavailable`).
+
 ### Tutela service mode (agents in tutelad)
 
 - **The SQL stores migrate on start** to SQLite schema version 9 and PostgreSQL migration 9 (four `tutela_*` columns on `agents`).
@@ -1097,6 +1103,17 @@ tutela:
 - **When tutelad is down** nothing in attache waits: charters, the registry and quarantines work, and the sidecars refuse a quarantined agent. A new agent is registered, and a quarantine reaches tutelad, when it is back. What needs tutelad's answer fails closed: no agent token is signed for an agent that is not registered and enabled there, and `POST /api/v1/agents/$AGENT_ID/revoke-tokens` answers `503 tutela_unavailable`.
 - **Revoking an agent's tokens** without a quarantine: `POST /api/v1/agents/$AGENT_ID/revoke-tokens` (admin) raises its epoch at tutelad; the agent stays enabled, and its next tokens carry the new epoch.
 - **Two replicas** may register the same new agent at once; the first principal is kept, and the other replica disables the one it made. A registration whose answer was lost can leave such an unmapped, enabled principal at tutelad; it holds nothing (f8fvwgzc/tutela#165).
+- **Acting for people** (`tools[].delegation`, charter schema level 8). Add to the `tutela` section:
+
+  ```yaml
+  tutela:
+    delegation:
+      audience: attache            # people's tokens reach attache addressed to this audience
+      delegation_aware: false      # true: also take a delegated token (another system's agent), and add attache's agent to its chain
+      audiences: [symphony]        # the only audiences a tool's delegation may name
+  ```
+
+  and in tutelad's trust file `[[audience]] name = "attache"` (with the same `delegation_aware`) and each downstream audience with `delegation_aware = true`. An app sends the person's token for audience `attache` with the invocation (`X-Agentsc-Subject-Token`). It must be one attache's app may exchange: issued to a public client, or to attache itself (a token whose `azp` is another app is refused by tutelad). Each issued token is in the embassy log by its `jti` (`tutela: issued a delegated token`) and in tutelad's audit log, which forwards to the ledger.
 - **Rotating the agent key:** serve the old and the new key until tutelad's JWKS cache has turned over, then drop the old one. Rotating the app's secret: `tutela apps rotate`, then replace the Secret within the overlap; embassy reads it again when the ControlPlaneConfig changes, or at restart.
 
 ### Approving tool calls

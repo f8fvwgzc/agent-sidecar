@@ -105,6 +105,12 @@ async fn invoke(
         depth: 0,
         deadline: None,
     };
+    // the person's token, for tools with `delegation` (delegation.rs); this run only
+    let _subject = crate::delegation::SubjectGuard::new(
+        &state.delegations,
+        &request_id,
+        header(&headers, crate::delegation::SUBJECT_HEADER),
+    );
     let resp = pipeline::invoke(&state, inv).await;
     let status = StatusCode::from_u16(pipeline::http_status(&resp))
         .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);

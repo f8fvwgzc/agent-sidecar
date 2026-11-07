@@ -230,7 +230,7 @@ impl ControlPlane for ConnectService {
         on_hello(hub, &key, &instance_id, &hello, &actor, &tx).await;
         let hub = hub.clone();
         tokio::spawn(async move {
-            run_stream(&hub, &key, &instance_id, &actor, inbound).await;
+            run_stream(&hub, &key, &instance_id, &actor, &tx, inbound).await;
             if let Some(gone) = hub.registry.remove(&key, &instance_id) {
                 hub.publish(
                     SseEvent::Registry(RegistryEvent {
@@ -557,6 +557,7 @@ async fn run_stream(
     key: &ServiceKey,
     instance_id: &str,
     actor: &Actor,
+    outbox: &crate::registry::Outbox,
     mut inbound: Streaming<SidecarMessage>,
 ) {
     let mut warned = false;
@@ -581,6 +582,9 @@ async fn run_stream(
             Some(sidecar_message::Msg::SpanStart(s)) => ingest_span_start(hub, key, s),
             Some(sidecar_message::Msg::ApprovalRequest(r)) => {
                 crate::secops::approvals::on_request(hub, key, r).await
+            }
+            Some(sidecar_message::Msg::DelegationRequest(r)) => {
+                crate::tutela::delegation::on_request(hub, key, outbox, r);
             }
             Some(sidecar_message::Msg::Hello(_)) | None => {
                 if !warned {

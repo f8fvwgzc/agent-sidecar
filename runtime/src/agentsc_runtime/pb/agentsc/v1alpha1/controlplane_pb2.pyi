@@ -7,7 +7,7 @@ from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 DESCRIPTOR: _descriptor.FileDescriptor
 
 class SidecarMessage(_message.Message):
-    __slots__ = ("hello", "heartbeat", "audit", "ack", "proposal", "span_start", "approval_request")
+    __slots__ = ("hello", "heartbeat", "audit", "ack", "proposal", "span_start", "approval_request", "delegation_request")
     HELLO_FIELD_NUMBER: _ClassVar[int]
     HEARTBEAT_FIELD_NUMBER: _ClassVar[int]
     AUDIT_FIELD_NUMBER: _ClassVar[int]
@@ -15,6 +15,7 @@ class SidecarMessage(_message.Message):
     PROPOSAL_FIELD_NUMBER: _ClassVar[int]
     SPAN_START_FIELD_NUMBER: _ClassVar[int]
     APPROVAL_REQUEST_FIELD_NUMBER: _ClassVar[int]
+    DELEGATION_REQUEST_FIELD_NUMBER: _ClassVar[int]
     hello: Hello
     heartbeat: Heartbeat
     audit: AuditBatch
@@ -22,7 +23,24 @@ class SidecarMessage(_message.Message):
     proposal: LearningProposal
     span_start: SpanStart
     approval_request: ApprovalRequest
-    def __init__(self, hello: _Optional[_Union[Hello, _Mapping]] = ..., heartbeat: _Optional[_Union[Heartbeat, _Mapping]] = ..., audit: _Optional[_Union[AuditBatch, _Mapping]] = ..., ack: _Optional[_Union[ConfigAck, _Mapping]] = ..., proposal: _Optional[_Union[LearningProposal, _Mapping]] = ..., span_start: _Optional[_Union[SpanStart, _Mapping]] = ..., approval_request: _Optional[_Union[ApprovalRequest, _Mapping]] = ...) -> None: ...
+    delegation_request: DelegationRequest
+    def __init__(self, hello: _Optional[_Union[Hello, _Mapping]] = ..., heartbeat: _Optional[_Union[Heartbeat, _Mapping]] = ..., audit: _Optional[_Union[AuditBatch, _Mapping]] = ..., ack: _Optional[_Union[ConfigAck, _Mapping]] = ..., proposal: _Optional[_Union[LearningProposal, _Mapping]] = ..., span_start: _Optional[_Union[SpanStart, _Mapping]] = ..., approval_request: _Optional[_Union[ApprovalRequest, _Mapping]] = ..., delegation_request: _Optional[_Union[DelegationRequest, _Mapping]] = ...) -> None: ...
+
+class DelegationRequest(_message.Message):
+    __slots__ = ("id", "agent", "audience", "subject_token", "run_id", "node_id")
+    ID_FIELD_NUMBER: _ClassVar[int]
+    AGENT_FIELD_NUMBER: _ClassVar[int]
+    AUDIENCE_FIELD_NUMBER: _ClassVar[int]
+    SUBJECT_TOKEN_FIELD_NUMBER: _ClassVar[int]
+    RUN_ID_FIELD_NUMBER: _ClassVar[int]
+    NODE_ID_FIELD_NUMBER: _ClassVar[int]
+    id: str
+    agent: str
+    audience: str
+    subject_token: str
+    run_id: str
+    node_id: str
+    def __init__(self, id: _Optional[str] = ..., agent: _Optional[str] = ..., audience: _Optional[str] = ..., subject_token: _Optional[str] = ..., run_id: _Optional[str] = ..., node_id: _Optional[str] = ...) -> None: ...
 
 class ApprovalRequest(_message.Message):
     __slots__ = ("id", "agent", "tool", "request_id", "trace_id", "args_sha256", "timeout_s", "requested_at")
@@ -149,18 +167,32 @@ class LearningProposal(_message.Message):
     def __init__(self, dedup_key: _Optional[str] = ..., agent: _Optional[str] = ..., note: _Optional[str] = ..., rationale: _Optional[str] = ..., request_id: _Optional[str] = ..., trace_id: _Optional[str] = ..., auto: _Optional[bool] = ...) -> None: ...
 
 class ControlMessage(_message.Message):
-    __slots__ = ("charter", "memory", "agent_ids", "quarantine", "approval_decision")
+    __slots__ = ("charter", "memory", "agent_ids", "quarantine", "approval_decision", "delegation_response")
     CHARTER_FIELD_NUMBER: _ClassVar[int]
     MEMORY_FIELD_NUMBER: _ClassVar[int]
     AGENT_IDS_FIELD_NUMBER: _ClassVar[int]
     QUARANTINE_FIELD_NUMBER: _ClassVar[int]
     APPROVAL_DECISION_FIELD_NUMBER: _ClassVar[int]
+    DELEGATION_RESPONSE_FIELD_NUMBER: _ClassVar[int]
     charter: CharterUpdate
     memory: MemoryUpdate
     agent_ids: AgentIds
     quarantine: Quarantine
     approval_decision: ApprovalDecision
-    def __init__(self, charter: _Optional[_Union[CharterUpdate, _Mapping]] = ..., memory: _Optional[_Union[MemoryUpdate, _Mapping]] = ..., agent_ids: _Optional[_Union[AgentIds, _Mapping]] = ..., quarantine: _Optional[_Union[Quarantine, _Mapping]] = ..., approval_decision: _Optional[_Union[ApprovalDecision, _Mapping]] = ...) -> None: ...
+    delegation_response: DelegationResponse
+    def __init__(self, charter: _Optional[_Union[CharterUpdate, _Mapping]] = ..., memory: _Optional[_Union[MemoryUpdate, _Mapping]] = ..., agent_ids: _Optional[_Union[AgentIds, _Mapping]] = ..., quarantine: _Optional[_Union[Quarantine, _Mapping]] = ..., approval_decision: _Optional[_Union[ApprovalDecision, _Mapping]] = ..., delegation_response: _Optional[_Union[DelegationResponse, _Mapping]] = ...) -> None: ...
+
+class DelegationResponse(_message.Message):
+    __slots__ = ("id", "access_token", "expires_in", "error")
+    ID_FIELD_NUMBER: _ClassVar[int]
+    ACCESS_TOKEN_FIELD_NUMBER: _ClassVar[int]
+    EXPIRES_IN_FIELD_NUMBER: _ClassVar[int]
+    ERROR_FIELD_NUMBER: _ClassVar[int]
+    id: str
+    access_token: str
+    expires_in: int
+    error: str
+    def __init__(self, id: _Optional[str] = ..., access_token: _Optional[str] = ..., expires_in: _Optional[int] = ..., error: _Optional[str] = ...) -> None: ...
 
 class ApprovalDecision(_message.Message):
     __slots__ = ("id", "decision", "decided_by", "reason")

@@ -64,7 +64,7 @@ mints it, and how the rest of attache learns it.
 
 ## What it does not do yet
 
-- Delegated agent tokens (RFC 8693, #25). Creating, disabling and enabling the principal in
-  `tutelad` (`tutela.admin.v1`) is built (#24): see
-  [docs/adr/0005-agents-in-tutelad.md](../adr/0005-agents-in-tutelad.md).
+- Nothing that waited on `tutelad`: creating, disabling and enabling the principal there (#24,
+  [ADR 0005](../adr/0005-agents-in-tutelad.md)) and delegated agent tokens (#25,
+  [ADR 0006](../adr/0006-delegated-agent-tokens.md)) are built.
 - The risk score that quarantines by itself (#34) and human approvals (#35).

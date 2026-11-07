@@ -252,7 +252,7 @@ async fn issuance_hello_heartbeats_and_updates() {
         h.charter_schema_level,
         agentsc_charter::CHARTER_SCHEMA_LEVEL
     );
-    assert_eq!(h.charter_schema_level, 7);
+    assert_eq!(h.charter_schema_level, 8);
     assert_eq!(h.memory_version, "");
     assert_eq!(
         cp.shared.peers.lock().unwrap()[0],
@@ -1639,5 +1639,174 @@ async fn a_tool_with_an_approval_waits_for_the_decision() {
         .unwrap_err();
     assert_eq!(rule_of(&err), "approval.expired", "{err:?}");
     assert_eq!(m.state().approvals.waiting(), 0);
+    m.sidecar.abort();
+}
+
+fn delegation_answer(id: &str, token: &str, error: &str) -> ControlMessage {
+    ControlMessage {
+        msg: Some(control_message::Msg::DelegationResponse(
+            agentsc_proto::DelegationResponse {
+                id: id.into(),
+                access_token: token.into(),
+                expires_in: if token.is_empty() { 0 } else { 90 },
+                error: error.into(),
+            },
+        )),
+    }
+}
+
+/// CONTRACT.md §5.3 (#25): a tool with `delegation` carries a delegated token from the control
+/// plane, for the person whose token came with the invocation, in place of any the model wrote;
+/// without a person's token, or when the control plane refuses, the call never goes out.
+#[tokio::test]
+async fn a_delegated_tool_carries_the_control_planes_token_and_fails_closed() {
+    let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let s = seen.clone();
+    let app = axum::Router::new().route(
+        "/v1/ask",
+        axum::routing::post(move |headers: axum::http::HeaderMap| {
+            let s = s.clone();
+            async move {
+                let auth = headers
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_string();
+                s.lock().unwrap().push(auth);
+                "{}"
+            }
+        }),
+    );
+    let partner = serve_app(app).await;
+    let ca = agentsc_pki::ca_init().unwrap();
+    let cp = FakeCp::start(ca.clone()).await;
+    let state_dir = tempfile::tempdir().unwrap();
+    let audit_dir = tempfile::tempdir().unwrap();
+    let audit = audit_dir.path().join("audit.jsonl");
+    let m = start_managed(
+        cp.addr,
+        &ca,
+        state_dir.path(),
+        None,
+        |_| FakeRuntime::answering("done"),
+        |_| {},
+    )
+    .await;
+    eventually("hello", || !cp.hellos().is_empty()).await;
+    let mut c = charter(&audit);
+    c.agents[0].tools.push(agentsc_charter::ToolSpec {
+        name: "ask_partner".into(),
+        description: "Ask the partner for the person.".into(),
+        tool_type: agentsc_charter::ToolType::Http,
+        parameters: None,
+        service: None,
+        method: Some("POST".into()),
+        path: None,
+        agent: None,
+        url: Some(format!("http://127.0.0.1:{}/v1/ask", partner.port())),
+        label: None,
+        effect: None,
+        approval: None,
+        delegation: Some(agentsc_charter::DelegationSpec {
+            audience: "symphony".into(),
+        }),
+    });
+    c.guardrails
+        .allowed_tools
+        .get_mut("ops-assistant")
+        .unwrap()
+        .push("ask_partner".into());
+    cp.push(charter_update("e1", "1", &c)).await;
+    assert!(ack(&cp, "charter", "1").await.applied);
+    let mut tools = tools(&m.sock).await;
+    let call = move |request_id: &str| agentsc_proto::ToolHttpRequest {
+        ctx: ctx(
+            "ops-assistant",
+            "ask_partner",
+            request_id,
+            "00f067aa0ba902b7",
+        ),
+        method: "POST".into(),
+        url: format!("http://127.0.0.1:{}/v1/ask", partner.port()),
+        headers: [(
+            "Authorization".to_string(),
+            "Bearer from-the-model".to_string(),
+        )]
+        .into(),
+        body: b"{}".to_vec(),
+    };
+
+    // no person's token came with the invocation: refused, nothing sent, nothing asked
+    let _a = in_flight(&m.sidecar, "deleg-a", "ops-assistant");
+    let err = tools.invoke_http(call("deleg-a")).await.unwrap_err();
+    assert_eq!(rule_of(&err), "delegation.no_subject", "{err:?}");
+    assert!(cp.delegation_requests().is_empty());
+
+    // with one: the control plane is asked for the tool's audience and its token goes out, not
+    // the model's; a second call of the run reuses it
+    let _b = in_flight(&m.sidecar, "deleg-b", "ops-assistant");
+    let _subject = agentscd::delegation::SubjectGuard::new(
+        &m.state().delegations,
+        "deleg-b",
+        Some("person-token"),
+    );
+    let mut t = tools.clone();
+    let pending = tokio::spawn(async move { t.invoke_http(call("deleg-b")).await });
+    eventually("the request", || cp.delegation_requests().len() == 1).await;
+    let req = cp.delegation_requests()[0].clone();
+    assert_eq!(
+        (
+            req.agent.as_str(),
+            req.audience.as_str(),
+            req.subject_token.as_str(),
+            req.run_id.as_str(),
+            req.node_id.as_str()
+        ),
+        (
+            "ops-assistant",
+            "symphony",
+            "person-token",
+            "deleg-b",
+            "ops-assistant.ask_partner"
+        )
+    );
+    cp.push(delegation_answer(&req.id, "delegated-token", ""))
+        .await;
+    pending.await.unwrap().expect("the call goes out");
+    tools.invoke_http(call("deleg-b")).await.expect("again");
+    assert_eq!(
+        cp.delegation_requests().len(),
+        1,
+        "the token is kept for the run"
+    );
+    assert_eq!(
+        *seen.lock().unwrap(),
+        ["Bearer delegated-token", "Bearer delegated-token"]
+    );
+    // no record holds either token
+    let text = std::fs::read_to_string(&audit).unwrap_or_default();
+    assert!(!text.contains("person-token") && !text.contains("delegated-token"));
+
+    // the control plane refuses: the call is denied with its reason
+    let _c = in_flight(&m.sidecar, "deleg-c", "ops-assistant");
+    let _subject_c = agentscd::delegation::SubjectGuard::new(
+        &m.state().delegations,
+        "deleg-c",
+        Some("revoked-person"),
+    );
+    let mut t = tools.clone();
+    let pending = tokio::spawn(async move { t.invoke_http(call("deleg-c")).await });
+    eventually("the second request", || cp.delegation_requests().len() == 2).await;
+    let id = cp.delegation_requests()[1].id.clone();
+    cp.push(delegation_answer(
+        &id,
+        "",
+        "delegation.refused: tutelad answered 400 invalid_grant",
+    ))
+    .await;
+    let err = pending.await.unwrap().unwrap_err();
+    assert_eq!(rule_of(&err), "delegation.refused", "{err:?}");
+    assert!(err.message().contains("invalid_grant"), "{err:?}");
+    assert_eq!(seen.lock().unwrap().len(), 2, "nothing more went out");
     m.sidecar.abort();
 }

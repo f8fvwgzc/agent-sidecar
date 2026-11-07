@@ -231,6 +231,23 @@ spec:
                                 maximum: 86400
                             x-kubernetes-preserve-unknown-fields: true
                             nullable: true
+                          delegation:
+                            type: object
+                            description: |-
+                              `http` tools: each call carries a delegated agent token for this audience in
+                              `Authorization`, obtained from Tutela for the person whose token the invocation carried
+                              (schema level 8, CONTRACT.md §5.3). Absent = no token.
+                            properties:
+                              audience:
+                                type: string
+                                description: |-
+                                  The downstream service's audience, as Tutela registers it (`delegation_aware`):
+                                  `^[a-z][a-z0-9-]{0,62}$`.
+                                pattern: ^[a-z][a-z0-9-]{0,62}$
+                            required:
+                            - audience
+                            x-kubernetes-preserve-unknown-fields: true
+                            nullable: true
                         required:
                         - name
                         - description

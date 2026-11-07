@@ -36,6 +36,7 @@ fn support(c: &mut Charter, app_port: u16, mode: TaintMode) {
         label,
         effect: None,
         approval: None,
+        delegation: None,
     };
     a.tools.push(tool(
         "read_ticket",
@@ -150,6 +151,7 @@ fn triage_refunds(c: &mut Charter) {
         label: None,
         effect: None,
         approval: None,
+        delegation: None,
     });
     c.authz.services.push(
         serde_json::from_value(serde_json::json!({
@@ -272,6 +274,7 @@ async fn a_context_forwarded_over_the_mesh_carries_the_calling_runs_taint() {
         label: None,
         effect: None,
         approval: None,
+        delegation: None,
     });
     let (rt, mut runs) = FakeRuntime::gated();
     serve_runtime(&root.join("sock-inventory"), rt);
