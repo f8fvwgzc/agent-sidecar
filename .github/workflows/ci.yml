@@ -39,6 +39,9 @@ jobs:
     env:
       # the service has no TLS: plaintext is allowed to loopback only (store/postgres.rs tls_policy)
       AGENTSC_TEST_POSTGRES_URL: postgres://agentsc:agentsc@127.0.0.1:5432/agentsc_test?sslmode=disable
+      # Tutela's service mode against a real tutelad (tests/tutela_agents.rs): fail, never skip
+      ATTACHE_REQUIRE_TUTELAD: "1"
+      ATTACHE_TUTELAD_BIN: ${{ github.workspace }}/.local/tutela/bin/tutelad
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/tutela-ssh
@@ -63,6 +66,9 @@ jobs:
 
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: tutelad and the tutela CLI from Tutela's tag
+        run: make tutelad
 
       - name: cargo test
         run: cargo test --workspace --locked --no-fail-fast
