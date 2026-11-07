@@ -24,6 +24,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
+use agentsc_common::error::chain;
 use anyhow::Context;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -114,15 +115,15 @@ pub fn verifier_config(config: &OidcConfig) -> Result<VerifierConfig, String> {
     let audience: Audience = config
         .client_id
         .parse()
-        .map_err(|e| format!("auth.oidc.client_id: {e}"))?;
+        .map_err(|e| format!("auth.oidc.client_id: {}", chain(&e)))?;
     let iss: Issuer = config
         .issuer
         .parse()
-        .map_err(|e| format!("auth.oidc.issuer: {e}"))?;
+        .map_err(|e| format!("auth.oidc.issuer: {}", chain(&e)))?;
     let tenant: TenantId = config
         .tenant
         .parse()
-        .map_err(|e| format!("auth.oidc.tenant: {e}"))?;
+        .map_err(|e| format!("auth.oidc.tenant: {}", chain(&e)))?;
     let mut trust = if config.dev_loopback {
         TrustList::dev_mode()
     } else {
@@ -130,7 +131,7 @@ pub fn verifier_config(config: &OidcConfig) -> Result<VerifierConfig, String> {
     };
     trust
         .insert(iss.clone(), tenant)
-        .map_err(|e| format!("auth.oidc.issuer: {e}"))?;
+        .map_err(|e| format!("auth.oidc.issuer: {}", chain(&e)))?;
     let algs = config
         .algs
         .iter()
@@ -239,7 +240,7 @@ impl Oidc {
                 &[("accept", "application/json")],
             )
             .await
-            .map_err(|e| failed(format!("the token endpoint: {e}")))?;
+            .map_err(|e| failed(format!("the token endpoint: {}", chain(&e))))?;
         if !resp.is_success() {
             return Err(failed(format!(
                 "the token endpoint answered {}",

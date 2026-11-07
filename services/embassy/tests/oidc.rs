@@ -177,12 +177,19 @@ struct Trip {
 
 impl Rig {
     async fn start() -> Rig {
+        Self::start_edited(|_| {}).await
+    }
+
+    /// [`Rig::start`] with `edit` applied to `auth.oidc`.
+    async fn start_edited(edit: impl FnOnce(&mut OidcConfig)) -> Rig {
         let issuer = Issuer::start().await;
         let dir = tempfile::tempdir().unwrap();
         let secret = dir.path().join("secret");
         std::fs::write(&secret, "s3cret\n").unwrap();
+        let mut oidc = issuer.config(&secret);
+        edit(&mut oidc);
         let env = Env::start_with(Opts {
-            oidc: Some(issuer.config(&secret)),
+            oidc: Some(oidc),
             ..Opts::default()
         })
         .await;
@@ -425,6 +432,34 @@ async fn every_bad_answer_is_refused() {
         "failed",
     )
     .await;
+    rig.env.stop().await;
+}
+
+/// Since Tutela v0.2.0 a failed request of `tutela-safenet` says only `the request failed`
+/// (kind `Http`), and the reason is in its `source()` (MIGRATION-0.2.md, tutela#44). The refusal
+/// walks the chain, so the `login_failed` record still says why.
+#[tokio::test]
+async fn an_unreachable_token_endpoint_is_audited_with_its_reason() {
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = closed.local_addr().unwrap().port();
+    drop(closed);
+    let rig = Rig::start_edited(|o| {
+        o.token_endpoint = Some(format!("http://127.0.0.1:{port}/token"));
+    })
+    .await;
+    rig.refused(|_| {}, "failed").await;
+    let audit = std::fs::read_to_string(rig.env.store_dir.join(".audit.jsonl")).unwrap();
+    let reason = audit
+        .lines()
+        .map(|l| serde_json::from_str::<Value>(l).unwrap())
+        .filter(|l| l["action"] == "login_failed")
+        .filter_map(|l| l["reason"].as_str().map(str::to_string))
+        .find(|r| r.contains("the token endpoint"))
+        .expect("a login_failed record for the token endpoint");
+    let (_, cause) = reason
+        .split_once("the token endpoint: the request failed: ")
+        .unwrap_or_else(|| panic!("no cause after the request failed: {reason:?}"));
+    assert!(!cause.trim().is_empty(), "the reason is lost: {reason:?}");
     rig.env.stop().await;
 }
 
