@@ -15,6 +15,7 @@ subsystem works; a record here says why it is the way it is.
 | [0005](0005-agents-in-tutelad.md) | implemented | With a `tutela` section, embassy is an app of `tutelad`: the registry's agents are registered there and disabled on quarantine or retirement by a retrying reconciler, and embassy signs its agents' own tokens (the actor of a delegated token); actions that need `tutelad` fail closed |
 | [0006](0006-delegated-agent-tokens.md) | implemented | An `http` tool with `delegation` acts for the invoking person: the sidecar keeps the person's token for the run, embassy verifies it and exchanges it at `tutelad` with its own agent token as the actor, and the call carries the `agent+jwt`; it fails closed |
 | [0007](0007-kind-for-the-real-cluster-checks.md) | implemented | `make demo-helm CLUSTER=kind`; the chart is checked on kind at Kubernetes 1.34, 1.31 (the oldest kind v0.31.0 lists) and 1.29 (its `kubeVersion` floor, without the ValidatingAdmissionPolicy API) |
+| [0008](0008-keycloak-for-oidc-check.md) | implemented | `make oidc-check` signs in through Keycloak 26.8.1 pinned by digest (`26.8.1-1@sha256:a78d6b79...`), checks the full sign-out at Keycloak, and fails early when Docker's clock is off |
 
 ## Format
 

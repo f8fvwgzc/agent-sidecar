@@ -46,6 +46,19 @@ The release workflow's "Build" and "Package" steps (`.github/workflows/release.y
 
 Only GitHub can run the rest of that workflow: the multi-arch image push to GHCR, the build provenance attestations, and the GitHub release.
 
+## Console sign-in through Keycloak (#59)
+
+`make oidc-check` passed on 2026-11-07 against `quay.io/keycloak/keycloak:26.8.1-1` (Keycloak 26.8.1, pinned by digest; [ADR 0008](adr/0008-keycloak-for-oidc-check.md)), with `start-dev --import-realm`, `KC_HOSTNAME=http://localhost:18180` and `deploy/keycloak/dev-realm.json` unchanged. Docker's clock and the host's agreed to the second.
+
+| Case | Result |
+| --- | --- |
+| `dev-admin`, admitted by subject (`auth.oidc.users`) | `whoami`: `dev-admin`, `admin`; HttpOnly `agentsc_session` cookie |
+| `dev-operator`, admitted by the group `operators` (the realm's group membership mapper, ID token claim `groups`, not the full path) | `whoami`: `oidc:<sub>`, `editor` |
+| `dev-stranger`, signed in at Keycloak but in no entry | back at `/?signin=no_access`, `whoami` 401 |
+| sign-out | session gone (`whoami` 401); Keycloak accepted `client_id` + `post_logout_redirect_uri` without `id_token_hint`, showed its confirmation page, ended its session on confirm and sent the browser back to the console; a new sign-in shows the login form |
+
+The first run failed only in the script's new sign-out step: Keycloak's confirmation form posts to a relative URL, which the script now resolves.
+
 ## Still open
 
 - **Every GitHub Actions workflow.** CI (`ci.yml`, including the `oidc-check` job), the nightly real-model run, and a tagged release have never run on GitHub. They will run once the account's billing allows Actions again.
