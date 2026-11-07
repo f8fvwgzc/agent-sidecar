@@ -94,6 +94,8 @@ pub struct Hub {
     pub ledger_failures: std::sync::atomic::AtomicU64,
     /// Tutela's decision next to the role check on charter writes.
     pub shadow: crate::authz::Shadow,
+    /// `tutelad`, when the config has a `tutela` section (crate::tutela).
+    pub tutela: crate::tutela::Tutela,
     pub config: Arc<ArcSwap<ControlPlaneConfig>>,
     pub cp_audit: Arc<CpAudit>,
     pub auth: Auth,
@@ -261,6 +263,7 @@ impl Hub {
             ledger: std::sync::OnceLock::new(),
             ledger_failures: std::sync::atomic::AtomicU64::new(0),
             shadow: crate::authz::Shadow::new(),
+            tutela: crate::tutela::Tutela::default(),
             config,
             cp_audit,
             auth,
@@ -345,6 +348,10 @@ impl Hub {
                 self.clone(),
                 shutdown.clone(),
             )),
+            tokio::spawn(crate::tutela::sync::reconciler(
+                self.clone(),
+                shutdown.clone(),
+            )),
             tokio::spawn(crate::secops::ledger::sealer(
                 self.clone(),
                 self.opts.ledger_seal_after,
@@ -414,6 +421,8 @@ async fn on_store_event(hub: &Arc<Hub>, ev: StoreEvent) {
         }
         StoreEvent::AgentsChanged { key } => {
             crate::controlplane::push_agents(hub, &key).await;
+            // a quarantine or a release, here or on another replica: tutelad follows
+            hub.tutela.nudge();
         }
         StoreEvent::ApprovalDecided { key, id } => {
             crate::secops::approvals::push_decision_of(hub, &key, &id).await;

@@ -61,6 +61,10 @@ pub async fn sync_service(hub: &Hub, key: &ServiceKey, actor: &Actor) {
             for c in &changes {
                 audit_change(hub, actor, c).await;
             }
+            if !changes.is_empty() {
+                // registered, reactivated or retired: tutelad follows (crate::tutela::sync)
+                hub.tutela.nudge();
+            }
         }
         Err(e) => {
             tracing::error!(service = %key, error = %e, "agent registry: sync failed");

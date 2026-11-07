@@ -51,5 +51,6 @@ pub mod sidecar_images;
 pub mod store;
 pub mod token;
 pub mod traces;
+pub mod tutela;
 pub mod ui_assets;
 pub mod webhook;

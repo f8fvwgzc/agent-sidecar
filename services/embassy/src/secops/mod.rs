@@ -67,6 +67,22 @@ pub struct AgentEntry {
     pub aliases: Vec<String>,
     /// Set while the agent is quarantined: its sidecars refuse everything it does.
     pub quarantine: Option<QuarantineState>,
+    /// Its principal in `tutelad`, once registered there (crate::tutela::sync).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tutela: Option<TutelaPrincipal>,
+}
+
+/// An agent's principal in `tutelad` (CONTRACT.md §5.3): what `tutelad` last answered for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TutelaPrincipal {
+    /// `agent:agt_<uuidv7>`, made by `tutelad` (not the registry's id).
+    pub principal: String,
+    /// Its epoch: the agent's tokens carry it, and `tutelad` refuses a lower one.
+    pub epoch: u64,
+    /// `tutelad` holds it disabled: no token is issued for it, and its tokens are refused.
+    pub disabled: bool,
+    /// RFC 3339, UTC: when `tutelad` said so.
+    pub synced_at: String,
 }
 
 /// An agent's quarantine (CONTRACT.md §5.3).
@@ -419,6 +435,20 @@ pub trait SecOpsStore: Send + Sync {
     /// quarantined. Emits [`crate::store::StoreEvent::AgentsChanged`].
     async fn release_agent(&self, id: &str) -> Result<AgentEntry, StoreError>;
 
+    /// Keep `state` as agent `id`'s principal in `tutelad`, if the principal it has now is
+    /// `expected` (`None`: it has none). `false` when it is another one: another replica
+    /// registered the agent first. [`StoreError::NotFound`] for no such agent.
+    async fn put_tutela_principal(
+        &self,
+        id: &str,
+        expected: Option<&str>,
+        state: &TutelaPrincipal,
+    ) -> Result<bool, StoreError>;
+
+    /// Keep what `tutelad` answered for agent `id`'s principal (epoch, disabled), if that is
+    /// still its principal; nothing otherwise.
+    async fn put_tutela_state(&self, id: &str, state: &TutelaPrincipal) -> Result<(), StoreError>;
+
     /// Purge at most `limit` whole chains that a seal covers entirely and whose last entry came
     /// before `before`, oldest first: each leaves a [`PurgedChain`] record (`at`, `by`) and loses
     /// its entries, seals and head. A chain with entries no seal covers is never purged. Records
@@ -567,6 +597,7 @@ mod tests {
             updated_at: String::new(),
             aliases: Vec::new(),
             quarantine: None,
+            tutela: None,
         }
     }
 
