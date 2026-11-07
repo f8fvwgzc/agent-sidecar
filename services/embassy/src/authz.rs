@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use agentsc_common::error::chain;
 use agentsc_common::principal::{Principal, uuid7_from_bytes};
 use arc_swap::ArcSwapOption;
 use serde::Serialize;
@@ -155,7 +156,7 @@ impl Shadow {
 
     /// Check against `manifest` from now on.
     pub fn use_manifest(&self, manifest: &str) -> Result<(), String> {
-        let model = Model::from_toml(manifest).map_err(|e| e.to_string())?;
+        let model = Model::from_toml(manifest).map_err(|e| chain(&e))?;
         self.model.store(Some(Arc::new(model)));
         Ok(())
     }
@@ -169,14 +170,14 @@ impl Shadow {
     ) -> Result<Verdict, String> {
         let model = self.model.load_full().ok_or("no compiled model")?;
         let (tenant, org) = self.tenant.as_ref().ok_or("no tenant")?;
-        let org_entry = PathEntry::org(org).map_err(|e| e.to_string())?;
+        let org_entry = PathEntry::org(org).map_err(|e| chain(&e))?;
         let namespace_entry = |ns: &str| -> Result<PathEntry, String> {
             Ok(PathEntry::new(
                 type_of("namespace")?,
-                ResourceId::parse(ns).map_err(|e| e.to_string())?,
+                ResourceId::parse(ns).map_err(|e| chain(&e))?,
             ))
         };
-        let role = RoleKey::parse(caller.role.as_str()).map_err(|e| e.to_string())?;
+        let role = RoleKey::parse(caller.role.as_str()).map_err(|e| chain(&e))?;
         let mut bindings = Vec::new();
         let mut scopes = Vec::new();
         if caller.namespaces.iter().any(|n| n == ALL_NAMESPACES) {
@@ -189,7 +190,7 @@ impl Shadow {
         for (i, scope) in scopes.into_iter().enumerate() {
             bindings.push(Binding {
                 id: tutela_contracts::decision::RuleId::parse(&format!("ra_{i}"))
-                    .map_err(|e| e.to_string())?,
+                    .map_err(|e| chain(&e))?,
                 subject: Subject::Principal(caller.principal.clone()),
                 role: role.clone(),
                 scope,
@@ -201,13 +202,16 @@ impl Shadow {
             groups: Vec::new(),
             private_scopes: BTreeSet::new(),
             field_rules: Vec::new(),
+            // Tutela v0.2.0: move and link rules per scope; none here, so every scope has the
+            // defaults, as before the field existed.
+            boundaries: std::collections::BTreeMap::new(),
         };
         let mut pdp = Pdp::new();
         pdp.load(tenant.clone(), 1, model, data)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| chain(&e))?;
         let resource = ResourceRef {
             type_name: type_of("service")?,
-            id: ResourceId::parse(&key.service).map_err(|e| e.to_string())?,
+            id: ResourceId::parse(&key.service).map_err(|e| chain(&e))?,
             path: vec![namespace_entry(&key.namespace)?, org_entry],
             attrs: Attrs::new(),
         };
@@ -219,14 +223,14 @@ impl Shadow {
                     tenant: tenant.clone(),
                     subject: caller.principal.clone(),
                     actors: Vec::new(),
-                    action: ActionKey::parse(k).map_err(|e| e.to_string())?,
+                    action: ActionKey::parse(k).map_err(|e| chain(&e))?,
                     resource: resource.clone(),
                     fields: None,
                     at_least_revision: None,
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
-        let decisions = pdp.batch(&requests).map_err(|e| e.to_string())?;
+        let decisions = pdp.batch(&requests).map_err(|e| chain(&e))?;
         let denied: Vec<String> = wanted
             .iter()
             .zip(&decisions)
@@ -330,7 +334,7 @@ impl Shadow {
 }
 
 fn type_of(name: &str) -> Result<ResourceType, String> {
-    ResourceType::parse(name).map_err(|e| e.to_string())
+    ResourceType::parse(name).map_err(|e| chain(&e))
 }
 
 /// The tenant and org of the private bundle, named by [`ISSUER`].
@@ -445,6 +449,23 @@ mod tests {
         shadow.compare(&c, &keys(&["service:no_such_action"]), &key(), true);
         let r = shadow.report();
         assert_eq!((r.checks, r.matches, r.mismatches, r.errors), (1, 0, 0, 1));
+    }
+
+    /// Since Tutela v0.2.0 a key error's own text leaves its reason out (tutela#37, #44): `{e}`
+    /// prints `invalid name` and nothing else. The shadow check walks the chain, so the reason
+    /// still reaches the `tutela.shadow` log.
+    #[test]
+    fn a_bad_key_reports_its_reason_not_only_invalid_name() {
+        let plain = ActionKey::parse("service:Not_A_Name").unwrap_err();
+        assert_eq!(plain.to_string(), "invalid name");
+        let shadow = Shadow::new();
+        let c = caller(Role::Admin, &["*"]);
+        let e = shadow
+            .decide(&c, &keys(&["service:Not_A_Name"]), &key())
+            .unwrap_err();
+        assert_eq!(e, chain(&plain));
+        let reason = e.strip_prefix("invalid name: ").unwrap_or_default();
+        assert!(!reason.is_empty(), "the reason is lost: {e:?}");
     }
 
     #[test]

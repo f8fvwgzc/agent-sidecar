@@ -676,6 +676,12 @@ ledger:
 
 ## Upgrade notes
 
+### Tutela v0.2.0
+
+- **Nothing to do for a running deployment.** The Tutela crates move from the `v0.1.0` tag to `v0.2.0` (Tutela's `docs/MIGRATION-0.2.md`), in library mode as before; no setting, file or behaviour changes. Building from source still needs SSH read access to `f8fvwgzc/tutela`.
+- **Logs keep their reasons.** Tutela's errors no longer repeat their cause in their own text. embassy prints the whole chain where it reports one, so a `tutela.shadow` error or a `login_failed` record of an unreachable OIDC token endpoint still says why.
+- **No Tutela database here.** attache links `tutela-contracts`, `tutela-pdp`, `tutela-safenet` and `tutela-sdk`, not `tutela-store`, so Tutela's migrations, `grant_service` and outbox events do not apply to attache's stores. They belong to whoever runs `tutelad` (`tutelad migrate`).
+
 ### Ledger Append API
 
 - **The SQL stores migrate on start** to SQLite schema version 8 and PostgreSQL migration 8 (`ledger_forwarded`).

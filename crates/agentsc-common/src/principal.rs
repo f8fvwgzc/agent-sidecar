@@ -1,7 +1,7 @@
 //! Principals as Tutela names them (CONTRACT.md §5.3, docs/design/agent-registry.md).
 //!
 //! On the wire a principal is one string, `<kind>:<id>`. The types are Tutela's own
-//! (`tutela-contracts` at the `v0.1.0` tag, `principal.rs` and `id.rs`), re-exported here, so
+//! (`tutela-contracts` at the `v0.2.0` tag, `principal.rs` and `id.rs`), re-exported here, so
 //! attache reads and writes exactly what Tutela does. attache mints two kinds:
 //!
 //! - `agent:agt_<uuidv7>`: an agent of the registry, minted by embassy when a charter first

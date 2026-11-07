@@ -3507,7 +3507,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -3926,8 +3926,8 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tutela-contracts"
-version = "0.0.0"
-source = "git+ssh://git@github.com/f8fvwgzc/tutela.git?tag=v0.1.0#e7406a0ae7e7b67bc939c07c73b07e0ca95259b8"
+version = "0.2.0"
+source = "git+ssh://git@github.com/f8fvwgzc/tutela.git?tag=v0.2.0#80683e49c4ec5663d803f79254de8930fbc2910c"
 dependencies = [
  "chrono",
  "serde",
@@ -3939,8 +3939,8 @@ dependencies = [
 
 [[package]]
 name = "tutela-pdp"
-version = "0.0.0"
-source = "git+ssh://git@github.com/f8fvwgzc/tutela.git?tag=v0.1.0#e7406a0ae7e7b67bc939c07c73b07e0ca95259b8"
+version = "0.2.0"
+source = "git+ssh://git@github.com/f8fvwgzc/tutela.git?tag=v0.2.0#80683e49c4ec5663d803f79254de8930fbc2910c"
 dependencies = [
  "serde",
  "thiserror",
@@ -3950,8 +3950,8 @@ dependencies = [
 
 [[package]]
 name = "tutela-safenet"
-version = "0.0.0"
-source = "git+ssh://git@github.com/f8fvwgzc/tutela.git?tag=v0.1.0#e7406a0ae7e7b67bc939c07c73b07e0ca95259b8"
+version = "0.2.0"
+source = "git+ssh://git@github.com/f8fvwgzc/tutela.git?tag=v0.2.0#80683e49c4ec5663d803f79254de8930fbc2910c"
 dependencies = [
  "reqwest",
  "rustls",
@@ -3963,8 +3963,8 @@ dependencies = [
 
 [[package]]
 name = "tutela-sdk"
-version = "0.0.0"
-source = "git+ssh://git@github.com/f8fvwgzc/tutela.git?tag=v0.1.0#e7406a0ae7e7b67bc939c07c73b07e0ca95259b8"
+version = "0.2.0"
+source = "git+ssh://git@github.com/f8fvwgzc/tutela.git?tag=v0.2.0#80683e49c4ec5663d803f79254de8930fbc2910c"
 dependencies = [
  "aws-lc-rs",
  "base64 0.23.1",
