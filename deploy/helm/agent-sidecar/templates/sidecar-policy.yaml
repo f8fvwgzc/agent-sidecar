@@ -112,7 +112,9 @@ spec:
         variables.sidecars.exists(c, c.name == o.name && c.image == o.image))
       message: the image of the agentscd and agentsc-runtime containers cannot be changed
       reason: Forbidden
-    - expression: request.subResource != 'ephemeralcontainers'
+    # The API server leaves subResource out of a request without one (a pod's CREATE or UPDATE),
+    # and reading an absent field is an error, which denies the request.
+    - expression: "!has(request.subResource) || request.subResource != 'ephemeralcontainers'"
       message: >-
         ephemeral containers cannot be added to agentsc pods: a debug container could read the
         sidecar's memory, sockets and keys

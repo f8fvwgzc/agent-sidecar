@@ -1263,7 +1263,8 @@ class Policy:
         activation = {
             "object": to_cel(pod),
             "oldObject": to_cel(old),
-            "request": to_cel({"operation": operation, "subResource": sub_resource}),
+            # as the API server sends it: no subResource key in a request without one
+            "request": to_cel({"operation": operation, **({"subResource": sub_resource} if sub_resource else {})}),
         }
         if not all(bool(self._eval(m["expression"], activation)) for m in self.spec["matchConditions"]):
             return None
