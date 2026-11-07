@@ -12,6 +12,7 @@ subsystem works; a record here says why it is the way it is.
 | [0002](0002-response-caching.md) | implemented | Two revalidating caches: `ETag`/`304` between the console and the control plane, and a `Cache-Control`-driven response cache on both ends of a service-to-service call |
 | [0003](0003-sqlite-store-schema.md) | implemented | `--store sqlite:<path>`: one database with primary and foreign keys, covering indexes on every query path, and triggers that enforce what the file layout only promised |
 | [0004](0004-agent-practices-on-by-default.md) | implemented | Agent practices (plan, clarify, brevity) on by default with fixed texts in the runtime; questions keep status `ok` and add a field; lessons cite their evidence; learning stays off by default |
+| [0005](0005-agents-in-tutelad.md) | implemented | With a `tutela` section, embassy is an app of `tutelad`: the registry's agents are registered there and disabled on quarantine or retirement by a retrying reconciler, and embassy signs its agents' own tokens (the actor of a delegated token); actions that need `tutelad` fail closed |
 
 ## Format
 

@@ -1055,9 +1055,31 @@ Design: [docs/design/agent-registry.md](docs/design/agent-registry.md).
   record) and every tool call of its runs in flight (`PERMISSION_DENIED`, `x-agentsc-rule:
   quarantine.active`, a `tool_call` deny record). Other agents of the service go on. Only a
   release lifts it.
-- **Not yet:** creating and disabling the principal in Tutela (`tutela.admin.v1`, Tutela
-  phase B, #24) and delegated agent tokens (RFC 8693 token exchange at `tutelad`, #25); both
-  wait for `tutelad`.
+- **Principals in `tutelad`** (#24, [docs/adr/0005-agents-in-tutelad.md](docs/adr/0005-agents-in-tutelad.md)).
+  With a `tutela` section in the ControlPlaneConfig, embassy is an app of `tutelad` (Tutela
+  ADR-0044: `client_credentials` with the app's client id and secret; its service account holds
+  `org:manage_agents` at the org and no other admin key). Every active agent is registered there
+  (`tutela.admin.v1` `RegisterAgent`, without a workload), and the principal `tutelad` made,
+  `agent:agt_<uuidv7>`, is kept beside the registry's id (SQL migration 9) and shown as the
+  entry's `tutela: {principal, epoch, disabled, synced_at}`. An agent is enabled in `tutelad`
+  while it is active and not quarantined, and disabled otherwise (`SetDisabled`), so a quarantine
+  or a retirement stops its tokens, and a release or a reactivation enables it again with a
+  raised epoch: its old tokens stay refused. `tutelad` follows the registry: at start, at once
+  after a registry change, a quarantine or a release, and in full every `tutela.sync_seconds`
+  (60; it then reads every registered agent's state back); a failed call is logged with its
+  cause and retried in 5 s. A registry change or a quarantine never waits for `tutelad`.
+- **Agent tokens.** With `tutela.agent_tokens`, embassy signs access tokens whose `sub` is an
+  agent's `tutelad` principal (Tutela CONTRACTS.md 4.2: `typ: at+jwt`, ES256, `aud` `tutelad`'s
+  audience, `tid` the app's tenant, `azp` the app's client id, `epoch` the agent's, 60 s), only
+  for an agent that is active, not quarantined, and registered and enabled in `tutelad`. Its JWKS
+  is the unauthenticated `GET /.well-known/agent-jwks.json` (404 without `agent_tokens`), for
+  `tutelad`'s trust file. They are the actor of a delegated token (#25).
+- **Revoking an agent's tokens.** `POST /agents/{id}/revoke-tokens` (admin) asks `tutelad` to
+  raise the agent's epoch (`RevokeSessions`): every token it holds is refused, and it stays
+  enabled. It fails closed: `503 tutela_unavailable` without a `tutela` section or when `tutelad`
+  does not answer, `409` before the agent is registered there. Audited as
+  `agent_tokens_revoked` (`reason`: `<principal>: <tutela principal>: epoch <n>`).
+- **Not yet:** delegated agent tokens (RFC 8693 token exchange at `tutelad`, #25).
 
 ### 5.4 Approvals of tool calls
 

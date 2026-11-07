@@ -64,7 +64,7 @@ mints it, and how the rest of attache learns it.
 
 ## What it does not do yet
 
-- Create and disable the principal in Tutela (`tutela.admin.v1`) and delegated agent tokens
-  (RFC 8693): both need `tutelad`, Tutela phase B (#24, #25). The audit records of every
-  registration, retirement and reactivation are what a later sync replays.
+- Delegated agent tokens (RFC 8693, #25). Creating, disabling and enabling the principal in
+  `tutelad` (`tutela.admin.v1`) is built (#24): see
+  [docs/adr/0005-agents-in-tutelad.md](../adr/0005-agents-in-tutelad.md).
 - The risk score that quarantines by itself (#34) and human approvals (#35).

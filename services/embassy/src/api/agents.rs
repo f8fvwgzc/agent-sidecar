@@ -88,7 +88,7 @@ pub async fn get_agent(
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Resolved {
     /// `agent:agt_<uuidv7>`, or an alias of an agent.
-    Agent { agent: AgentEntry },
+    Agent { agent: Box<AgentEntry> },
     /// `workload:spiffe://<td>/ns/<ns>/svc/<svc>`: a service and its active agents.
     Workload {
         principal: String,
@@ -112,7 +112,7 @@ pub async fn resolve_principal(
     let parsed = text.parse::<Principal>().ok();
     let resolved = match parsed.as_ref() {
         Some(Principal::Agent(id)) => Resolved::Agent {
-            agent: visible_agent(&hub, &ident, &id.to_string()).await?,
+            agent: Box::new(visible_agent(&hub, &ident, &id.to_string()).await?),
         },
         Some(p @ Principal::Workload(_)) => {
             let Some(w) = service_of(p).filter(|w| {
@@ -136,7 +136,7 @@ pub async fn resolve_principal(
             }
         }
         _ => match store.resolve_alias(text).await {
-            Ok(a) if ident.allows_namespace(&a.namespace) => Resolved::Agent { agent: a },
+            Ok(a) if ident.allows_namespace(&a.namespace) => Resolved::Agent { agent: Box::new(a) },
             Ok(_) | Err(StoreError::NotFound) => return Err(missing()),
             Err(e) => return Err(Fail::store(e, "")),
         },
@@ -367,4 +367,92 @@ pub async fn risk(
         "latest": latest,
     }))
     .into_response())
+}
+
+/// `POST /agents/{id}/revoke-tokens`: admin. Every token the agent holds is refused from now on
+/// (`RevokeSessions` at `tutelad`: its epoch goes up), and the agent stays enabled; the tokens
+/// embassy signs for it from now on carry the new epoch. It fails closed: 503
+/// `tutela_unavailable` when this embassy has no `tutela` section or `tutelad` does not answer,
+/// 409 when the agent is not registered in `tutelad` yet. Audited as `agent_tokens_revoked`.
+pub async fn revoke_tokens(
+    State(hub): State<Arc<Hub>>,
+    Authed(ident): Authed,
+    Path(id): Path<String>,
+) -> Result<Response, Fail> {
+    require_role(&ident, Role::Admin)?;
+    let agent = visible_agent(&hub, &ident, &id).await?;
+    let result = revoke(&hub, &agent).await;
+    let detail = match &result {
+        Ok(a) => a
+            .tutela
+            .as_ref()
+            .map(|t| format!("{}: epoch {}", t.principal, t.epoch))
+            .unwrap_or_default(),
+        Err(_) => "revoking the agent's tokens".to_string(),
+    };
+    audit_quarantine(
+        &hub,
+        CpAction::AgentTokensRevoked,
+        &ident,
+        &agent,
+        &detail,
+        &result,
+    )
+    .await;
+    Ok(Json(result?).into_response())
+}
+
+async fn revoke(hub: &Hub, agent: &AgentEntry) -> Result<AgentEntry, Fail> {
+    let conn = hub.tutela.connection().ok_or_else(|| {
+        Fail::new(
+            ErrorCode::TutelaUnavailable,
+            ["this embassy has no tutela section: agents are not principals of tutelad"],
+        )
+    })?;
+    let Some(t) = &agent.tutela else {
+        return Err(Fail::conflict("not registered").with_detail(format!(
+            "agent {} is not registered in tutelad yet",
+            agent.id
+        )));
+    };
+    let state = conn
+        .client
+        .revoke_sessions(&t.principal)
+        .await
+        .map_err(|e| {
+            tracing::warn!(
+                agent_id = %agent.id,
+                tutela_principal = %t.principal,
+                error = %agentsc_common::error::chain(&e),
+                "tutela: revoking the agent's tokens failed"
+            );
+            Fail::new(
+                ErrorCode::TutelaUnavailable,
+                [format!(
+                    "tutelad did not revoke the agent's tokens: {}",
+                    agentsc_common::error::chain(&e)
+                )],
+            )
+        })?;
+    let secops = secops(hub)?;
+    secops
+        .put_tutela_state(&agent.id, &crate::tutela::sync::kept(&state))
+        .await
+        .map_err(|e| Fail::store(e, ""))?;
+    secops
+        .get_agent(&agent.id)
+        .await
+        .map_err(|e| Fail::store(e, ""))
+}
+
+/// `GET /.well-known/agent-jwks.json`: the keys of the agents' own tokens (crate::tutela::
+/// agent_token), for `tutelad`'s trust file. Public keys are public: no authentication. 404 when
+/// this embassy signs none.
+pub async fn agent_jwks(State(hub): State<Arc<Hub>>) -> Result<Response, Fail> {
+    let conn = hub.tutela.connection();
+    let signer = conn
+        .as_ref()
+        .and_then(|c| c.signer.as_ref())
+        .ok_or_else(|| Fail::not_found("this embassy signs no agent tokens"))?;
+    Ok(Json(signer.jwks()).into_response())
 }

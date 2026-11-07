@@ -11,14 +11,15 @@ use crate::secops::{
     AgentChange, AgentEntry, AgentFilter, AgentStatus, Approval, ApprovalFilter, ApprovalPut,
     ApprovalStatus, ChainFilter, ChainHead, ChainService, ForwardedAck, ForwardedRecord,
     LedgerRecord, MAX_ALIASES, PENDING_MAX, PurgedChain, QuarantineState, RegistryChange, RiskRow,
-    SecOpsStore, SyncPlan, by_chain, check_alias, check_reason, forwarded_differs,
+    SecOpsStore, SyncPlan, TutelaPrincipal, by_chain, check_alias, check_reason, forwarded_differs,
 };
 use crate::store::StoreEvent;
 use crate::store::{Actor, ServiceKey, StoreError};
 use agentsc_common::principal::new_agent_id;
 
 const AGENT_SELECT: &str = "SELECT id, namespace, service, name, status, created_at, updated_at, \
-     quarantined_at, quarantine_reason, quarantined_by FROM agents";
+     quarantined_at, quarantine_reason, quarantined_by, tutela_principal, tutela_epoch, \
+     tutela_disabled, tutela_synced_at FROM agents";
 
 fn entry_of(r: &rusqlite::Row<'_>) -> rusqlite::Result<AgentEntry> {
     let id: String = r.get(0)?;
@@ -35,6 +36,22 @@ fn entry_of(r: &rusqlite::Row<'_>) -> rusqlite::Result<AgentEntry> {
         aliases: Vec::new(),
         quarantine: match (r.get::<_, Option<String>>(7)?, r.get(8)?, r.get(9)?) {
             (Some(at), Some(reason), Some(by)) => Some(QuarantineState { at, reason, by }),
+            _ => None,
+        },
+        tutela: match (
+            r.get::<_, Option<String>>(10)?,
+            r.get::<_, Option<i64>>(11)?,
+            r.get::<_, Option<bool>>(12)?,
+            r.get::<_, Option<String>>(13)?,
+        ) {
+            (Some(principal), Some(epoch), Some(disabled), Some(synced_at)) => {
+                Some(TutelaPrincipal {
+                    principal,
+                    epoch: unsigned(epoch),
+                    disabled,
+                    synced_at,
+                })
+            }
             _ => None,
         },
     })
@@ -340,6 +357,66 @@ impl SecOpsStore for SqliteStore {
             key: ServiceKey::new(&out.namespace, &out.service),
         });
         Ok(out)
+    }
+
+    async fn put_tutela_principal(
+        &self,
+        id: &str,
+        expected: Option<&str>,
+        state: &TutelaPrincipal,
+    ) -> Result<bool, StoreError> {
+        let (id, expected, state) = (id.to_string(), expected.map(str::to_string), state.clone());
+        self.run(move |conn| {
+            let tx = conn.transaction()?;
+            let now: Option<Option<String>> = tx
+                .query_row(
+                    "SELECT tutela_principal FROM agents WHERE id = ?1",
+                    params![id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(now) = now else {
+                return Err(StoreError::NotFound);
+            };
+            if now != expected {
+                return Ok(false);
+            }
+            tx.execute(
+                "UPDATE agents SET tutela_principal = ?2, tutela_epoch = ?3, tutela_disabled = ?4, \
+                 tutela_synced_at = ?5 WHERE id = ?1",
+                params![
+                    id,
+                    state.principal,
+                    signed(state.epoch)?,
+                    state.disabled,
+                    state.synced_at
+                ],
+            )?;
+            tx.commit()?;
+            Ok(true)
+        })
+        .await
+    }
+
+    async fn put_tutela_state(&self, id: &str, state: &TutelaPrincipal) -> Result<(), StoreError> {
+        let (id, state) = (id.to_string(), state.clone());
+        self.run(move |conn| {
+            let tx = conn.transaction()?;
+            tx.execute(
+                "UPDATE agents SET tutela_epoch = ?3, tutela_disabled = ?4, tutela_synced_at = ?5 \
+                 WHERE id = ?1 AND tutela_principal = ?2",
+                params![
+                    id,
+                    state.principal,
+                    signed(state.epoch)?,
+                    state.disabled,
+                    state.synced_at
+                ],
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await
     }
 
     async fn release_agent(&self, id: &str) -> Result<AgentEntry, StoreError> {

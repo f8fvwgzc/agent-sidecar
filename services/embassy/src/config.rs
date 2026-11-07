@@ -88,6 +88,63 @@ pub struct ControlPlaneConfig {
     /// The evidence ledger (crate::secops::ledger, CONTRACT.md §6.3).
     #[serde(default)]
     pub ledger: LedgerConfig,
+    /// Tutela in service mode (crate::tutela): agents are principals of `tutelad`. Absent: none
+    /// (library mode only, as before).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tutela: Option<TutelaConfig>,
+}
+
+/// `tutela`: embassy as an app of `tutelad` (Tutela ADR-0044). The registry's agents become
+/// principals of the app's tenant through `tutela.admin.v1` (crate::tutela::sync), and embassy
+/// signs its agents' own tokens (crate::tutela::agent_token).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TutelaConfig {
+    /// The app's credentials as `tutelad bootstrap` writes them (Tutela CONTRACTS.md 7.13.9): a
+    /// directory with one file per key (a mounted Kubernetes Secret) or that JSON file. Keys:
+    /// `client_id`, `client_secret`, `tenant`, `issuer`, `token_url`.
+    pub credentials: PathBuf,
+    /// `tutelad`'s API. Absent: the credentials' `issuer`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// `tutelad`'s own audience (its `TUTELA_AUDIENCE`): the app's token and the agents' tokens
+    /// are addressed to it.
+    #[serde(default = "default_tutela_audience")]
+    pub audience: String,
+    /// `tutelad`'s host may resolve to private addresses (in the cluster). `https` still.
+    #[serde(default)]
+    pub private_host: bool,
+    /// `http` to loopback: a `tutelad` on this machine. Never in production.
+    #[serde(default)]
+    pub dev_loopback: bool,
+    /// Seconds between two full syncs of the agents with `tutelad`, 5 to 3600. A registry change
+    /// or a quarantine syncs at once.
+    #[serde(default = "default_tutela_sync_seconds")]
+    pub sync_seconds: u32,
+    /// The issuer of the agents' own tokens. Absent: embassy signs none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_tokens: Option<AgentTokensConfig>,
+}
+
+/// `tutela.agent_tokens`: embassy as a Tutela-format issuer of access tokens whose `sub` is an
+/// agent (Tutela CONTRACTS.md 4.2), listed in `tutelad`'s trust file with its JWKS
+/// (`/.well-known/agent-jwks.json`). They are the `actor_token` of a delegated token (4.8).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentTokensConfig {
+    /// The exact `iss`, as `tutelad`'s trust file names it: this embassy's public URL.
+    pub issuer: String,
+    /// The P-256 signing key, PKCS#8 PEM (`openssl genpkey -algorithm EC -pkeyopt
+    /// ec_paramgen_curve:P-256`).
+    pub key_file: PathBuf,
+}
+
+fn default_tutela_audience() -> String {
+    "tutela-authz".into()
+}
+
+fn default_tutela_sync_seconds() -> u32 {
+    60
 }
 
 /// `ledger`: how long the evidence ledger keeps a run.
@@ -139,6 +196,7 @@ impl Default for ControlPlaneConfig {
             events: EventsConfig::default(),
             risk: RiskConfig::default(),
             ledger: LedgerConfig::default(),
+            tutela: None,
         }
     }
 }
@@ -314,6 +372,41 @@ fn check_namespaces(errs: &mut Vec<String>, at: &str, namespaces: &[String]) {
         }
         if !seen.insert(ns.as_str()) {
             errs.push(format!("{at}.namespaces[{j}] {ns:?} is listed twice"));
+        }
+    }
+}
+
+/// The rules of `tutela`. The credentials and the key are read when the config is applied.
+fn check_tutela(errs: &mut Vec<String>, t: &TutelaConfig) {
+    if t.credentials.as_os_str().is_empty() {
+        errs.push("tutela.credentials is empty".into());
+    }
+    if let Some(url) = &t.url
+        && let Err(e) = crate::tutela::check_url(url, t.dev_loopback)
+    {
+        errs.push(format!("tutela.url: {e}"));
+    }
+    if tutela_contracts::claims::Audience::parse(&t.audience).is_err() {
+        errs.push(format!(
+            "tutela.audience {:?} is not an audience",
+            t.audience
+        ));
+    }
+    if !(5..=3600).contains(&t.sync_seconds) {
+        errs.push(format!(
+            "tutela.sync_seconds must be 5..=3600, not {}",
+            t.sync_seconds
+        ));
+    }
+    if let Some(a) = &t.agent_tokens {
+        if let Err(e) = a.issuer.parse::<tutela_contracts::tenant::Issuer>() {
+            errs.push(format!(
+                "tutela.agent_tokens.issuer: {}",
+                agentsc_common::error::chain(&e)
+            ));
+        }
+        if a.key_file.as_os_str().is_empty() {
+            errs.push("tutela.agent_tokens.key_file is empty".into());
         }
     }
 }
@@ -667,6 +760,9 @@ impl ControlPlaneConfig {
             check_oidc(&mut errs, o, &names);
         }
         check_producers(&mut errs, &self.ledger.producers, &names);
+        if let Some(t) = &self.tutela {
+            check_tutela(&mut errs, t);
+        }
         if let Some(p) = &self.auth.session_key_file
             && p.as_os_str().is_empty()
         {

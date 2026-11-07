@@ -779,7 +779,10 @@ async fn reload_config(
             Ok(next) if next == **config.load() => {}
             Ok(next) => {
                 if let Some(hub) = &hub
-                    && let Err(e) = hub.auth.reload_key(&next)
+                    && let Err(e) = hub
+                        .auth
+                        .reload_key(&next)
+                        .and_then(|()| hub.tutela.reload(&next))
                 {
                     tracing::error!(
                         error = format!("{e:#}"),
@@ -894,6 +897,7 @@ pub async fn start(
         if store.is_some() {
             h.ready.set("store", true);
         }
+        h.tutela.reload(&config.load())?;
         if let Some(s) = secops.clone() {
             let _ = h.secops.set(s);
             let keys = crate::secops::ledger::LedgerKeys::load(

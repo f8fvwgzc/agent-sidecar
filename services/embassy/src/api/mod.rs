@@ -254,6 +254,7 @@ pub fn api_routes() -> Router<Arc<Hub>> {
         )
         .route("/agents/{id}/quarantine", post(agents::quarantine))
         .route("/agents/{id}/release", post(agents::release))
+        .route("/agents/{id}/revoke-tokens", post(agents::revoke_tokens))
         .route("/agents/{id}/risk", get(agents::risk))
         .route("/principals", get(agents::resolve_principal))
         .route("/approvals", get(approvals::list))
@@ -289,6 +290,7 @@ pub fn router(hub: Arc<Hub>, api: bool, ui: Option<crate::ui_assets::UiFiles>) -
         .route("/readyz", get(handlers::readyz));
     if api {
         app = app.route("/.well-known/jwks.json", get(ledger::well_known_jwks));
+        app = app.route("/.well-known/agent-jwks.json", get(agents::agent_jwks));
         // every client's requests are rate limited (ratelimit.rs), probes excepted
         app = app.nest(
             "/api/v1",

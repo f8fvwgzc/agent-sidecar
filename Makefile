@@ -21,7 +21,7 @@ COMPOSE_ENV := deploy/compose/.env
 PACKAGING_PYTEST := uv run --no-project --with pytest==8.4.2 --with pyyaml==6.0.2 --with cel-python==0.5.0 python -m pytest -q
 .PHONY: local-demo platform-demo e2e-helm all build-host test test-rust test-python test-live fmt lint proto schema validate \
         minikube-up minikube-down build deploy charters undeploy demo logs logs-denied secret-anthropic clean dev-certs \
-        compose-up compose-down helm-lint helm-template demo-helm packaging-test oidc-check
+        compose-up compose-down helm-lint helm-template demo-helm packaging-test oidc-check tutelad
 
 all: build-host test
 
@@ -37,6 +37,15 @@ test-rust:
 
 test-python:
 	cd runtime && uv run pytest -q
+
+# A real tutelad and the tutela CLI from Tutela's tag, for the service-mode tests
+# (services/embassy/tests/tutela_agents.rs). Then, with a PostgreSQL that may create roles:
+#   ATTACHE_REQUIRE_TUTELAD=1 ATTACHE_TUTELAD_BIN=$$PWD/.local/tutela/bin/tutelad \
+#   AGENTSC_TEST_POSTGRES_URL='postgres://agentsc:agentsc@127.0.0.1:5432/agentsc_test?sslmode=disable' make test
+TUTELA_TAG ?= v0.2.0
+tutelad:
+	cargo install --locked --git ssh://git@github.com/f8fvwgzc/tutela.git --tag $(TUTELA_TAG) \
+	  --root .local/tutela tutelad tutela-cli
 
 # The real model path (needs ANTHROPIC_API_KEY; spends a few cents): agentscd, the runtime and the
 # Anthropic API through the sidecar's model gateway. CI runs it nightly (.github/workflows/real-model.yml).

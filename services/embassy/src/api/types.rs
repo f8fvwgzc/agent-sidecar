@@ -54,6 +54,10 @@ pub enum ErrorCode {
     /// This embassy keeps no AgentSecOps data (a Kubernetes store without `--secops-store`).
     #[serde(rename = "secops_unavailable")]
     SecopsUnavailable,
+    /// `tutelad` cannot be asked: no `tutela` section, or it does not answer (crate::tutela).
+    /// Actions that need it fail closed.
+    #[serde(rename = "tutela_unavailable")]
+    TutelaUnavailable,
 }
 
 impl ErrorCode {
@@ -67,7 +71,7 @@ impl ErrorCode {
             ErrorCode::MisdirectedRequest => 421,
             ErrorCode::RateLimited => 429,
             ErrorCode::Internal => 500,
-            ErrorCode::SecopsUnavailable => 503,
+            ErrorCode::SecopsUnavailable | ErrorCode::TutelaUnavailable => 503,
         }
     }
 }
@@ -950,6 +954,9 @@ pub enum CpAction {
     ApprovalDeny,
     /// Old ledger chains were purged (`reason`: how many, and the cut-off).
     LedgerPurge,
+    /// Every token of an agent was revoked at `tutelad` (`RevokeSessions`; `reason`:
+    /// `<principal> <tutela principal>: epoch <n>`).
+    AgentTokensRevoked,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

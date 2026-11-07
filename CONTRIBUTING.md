@@ -21,6 +21,8 @@ make validate     # validate the example charters
 make local-demo   # end-to-end demo with two sidecars and mTLS
 ```
 
+The PostgreSQL store's tests run with `AGENTSC_TEST_POSTGRES_URL` set (a role that may create roles and databases); without it they pass without running. The tests of Tutela's service mode (`services/embassy/tests/tutela_agents.rs`) also need a real `tutelad`: `make tutelad` installs it and the `tutela` CLI from Tutela's tag into `.local/tutela/bin`, and `ATTACHE_TUTELAD_BIN=$PWD/.local/tutela/bin/tutelad` runs them against that PostgreSQL. With `ATTACHE_REQUIRE_TUTELAD=1` a missing `tutelad` or database fails them instead of skipping them; set it when you run the gate before a merge.
+
 If you change a proto file, run `make proto` and commit the regenerated Python stubs. If you change the charter types, run `make schema` and commit `schemas/charter.schema.json`. A test fails when the schema drifts.
 
 This repo uses Symposium for the Rust guidance coding agents follow. Set it up with `cargo install symposium --locked`, then `cargo agents init --add-agent claude`.
@@ -29,7 +31,7 @@ This repo uses Symposium for the Rust guidance coding agents follow. Set it up w
 
 - Keep one topic per pull request.
 - Add or update tests for every behaviour change, especially for authz, guardrails, budgets and audit.
-- Make sure `make test`, `make lint` and `cargo fmt --all --check` pass.
+- Make sure `make test`, `make lint` and `cargo fmt --all --check` pass, with the PostgreSQL and `tutelad` variables above set.
 - Update the docs in `docs/` when you change something a user can see.
 - Write the commit message as a short summary line, a blank line, and a body that says why.
 

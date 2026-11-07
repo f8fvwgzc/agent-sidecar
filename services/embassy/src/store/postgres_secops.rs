@@ -14,14 +14,15 @@ use crate::secops::{
     AgentChange, AgentEntry, AgentFilter, AgentStatus, Approval, ApprovalFilter, ApprovalPut,
     ApprovalStatus, ChainFilter, ChainHead, ChainService, ForwardedAck, ForwardedRecord,
     LedgerRecord, MAX_ALIASES, PENDING_MAX, PurgedChain, QuarantineState, RegistryChange, RiskRow,
-    SecOpsStore, SyncPlan, by_chain, check_alias, check_reason, forwarded_differs,
+    SecOpsStore, SyncPlan, TutelaPrincipal, by_chain, check_alias, check_reason, forwarded_differs,
 };
 use crate::store::StoreEvent;
 use crate::store::{Actor, ServiceKey, StoreError};
 use agentsc_common::principal::new_agent_id;
 
 const AGENT_SELECT: &str = "SELECT id, namespace, service, name, status, created_at, updated_at, \
-     quarantined_at, quarantine_reason, quarantined_by FROM agents";
+     quarantined_at, quarantine_reason, quarantined_by, tutela_principal, tutela_epoch, \
+     tutela_disabled, tutela_synced_at FROM agents";
 
 fn entry_of(r: &Row) -> AgentEntry {
     let id: String = r.get(0);
@@ -38,6 +39,22 @@ fn entry_of(r: &Row) -> AgentEntry {
         aliases: Vec::new(),
         quarantine: match (r.get::<_, Option<String>>(7), r.get(8), r.get(9)) {
             (Some(at), Some(reason), Some(by)) => Some(QuarantineState { at, reason, by }),
+            _ => None,
+        },
+        tutela: match (
+            r.get::<_, Option<String>>(10),
+            r.get::<_, Option<i64>>(11),
+            r.get::<_, Option<bool>>(12),
+            r.get::<_, Option<String>>(13),
+        ) {
+            (Some(principal), Some(epoch), Some(disabled), Some(synced_at)) => {
+                Some(TutelaPrincipal {
+                    principal,
+                    epoch: u64::try_from(epoch).unwrap_or(0),
+                    disabled,
+                    synced_at,
+                })
+            }
             _ => None,
         },
     }
@@ -348,6 +365,62 @@ impl SecOpsStore for PgStore {
         tx.commit().await?;
         self.emit(event);
         Ok(out)
+    }
+
+    async fn put_tutela_principal(
+        &self,
+        id: &str,
+        expected: Option<&str>,
+        state: &TutelaPrincipal,
+    ) -> Result<bool, StoreError> {
+        let mut client = self.client().await?;
+        let tx = client.transaction().await?;
+        let row = tx
+            .query_opt(
+                "SELECT tutela_principal FROM agents WHERE id = $1 FOR UPDATE",
+                &[&id],
+            )
+            .await?
+            .ok_or(StoreError::NotFound)?;
+        if row.get::<_, Option<String>>(0).as_deref() != expected {
+            return Ok(false);
+        }
+        let epoch = i64::try_from(state.epoch)
+            .map_err(|_| StoreError::Invalid(vec!["the epoch is too large".into()]))?;
+        tx.execute(
+            "UPDATE agents SET tutela_principal = $2, tutela_epoch = $3, tutela_disabled = $4, \
+             tutela_synced_at = $5 WHERE id = $1",
+            &[
+                &id,
+                &state.principal,
+                &epoch,
+                &state.disabled,
+                &state.synced_at,
+            ],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    async fn put_tutela_state(&self, id: &str, state: &TutelaPrincipal) -> Result<(), StoreError> {
+        let client = self.client().await?;
+        let epoch = i64::try_from(state.epoch)
+            .map_err(|_| StoreError::Invalid(vec!["the epoch is too large".into()]))?;
+        client
+            .execute(
+                "UPDATE agents SET tutela_epoch = $3, tutela_disabled = $4, tutela_synced_at = $5 \
+                 WHERE id = $1 AND tutela_principal = $2",
+                &[
+                    &id,
+                    &state.principal,
+                    &epoch,
+                    &state.disabled,
+                    &state.synced_at,
+                ],
+            )
+            .await?;
+        Ok(())
     }
 
     async fn release_agent(&self, id: &str) -> Result<AgentEntry, StoreError> {

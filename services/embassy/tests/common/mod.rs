@@ -52,6 +52,10 @@ pub struct Opts {
     pub oidc: Option<embassy::config::OidcConfig>,
     /// `ledger.producers`.
     pub producers: Vec<embassy::config::LedgerProducer>,
+    /// `tutela`.
+    pub tutela: Option<embassy::config::TutelaConfig>,
+    /// `--http-addr`; `None` = `127.0.0.1:0`.
+    pub http_addr: Option<String>,
 }
 
 /// One response.
@@ -165,6 +169,7 @@ impl Env {
         config.policy = opts.policy.clone();
         config.auth.oidc = opts.oidc.clone();
         config.ledger.producers = opts.producers.clone();
+        config.tutela = opts.tutela.clone();
         config.issuance.join_tokens = opts.join_tokens.clone();
         if let Some(r) = opts.retain_bytes {
             config.events.retain_bytes = r;
@@ -182,7 +187,9 @@ impl Env {
             "--store".into(),
             store,
             "--http-addr".into(),
-            "127.0.0.1:0".into(),
+            opts.http_addr
+                .clone()
+                .unwrap_or_else(|| "127.0.0.1:0".into()),
             "--grpc-addr".into(),
             "127.0.0.1:0".into(),
             "--dns-name".into(),

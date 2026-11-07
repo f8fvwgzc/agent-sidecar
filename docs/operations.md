@@ -676,6 +676,11 @@ ledger:
 
 ## Upgrade notes
 
+### Tutela service mode (agents in tutelad)
+
+- **The SQL stores migrate on start** to SQLite schema version 9 and PostgreSQL migration 9 (four `tutela_*` columns on `agents`).
+- **Off until configured.** Without a `tutela` section embassy never calls tutelad. See [Agents in tutelad](#agents-in-tutelad).
+
 ### Tutela v0.2.0
 
 - **Nothing to do for a running deployment.** The Tutela crates move from the `v0.1.0` tag to `v0.2.0` (Tutela's `docs/MIGRATION-0.2.md`), in library mode as before; no setting, file or behaviour changes. Building from source still needs SSH read access to `f8fvwgzc/tutela`.
@@ -1048,6 +1053,51 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "X-Agentsc-CSRF: 1" -H "Con
 ```
 
 Its sidecars refuse every invocation (`403`, rule `quarantine.active`) and every further tool call of its runs in flight, within the time a push takes. Other agents of the service go on. Find the agent's id with `GET /api/v1/agents?service=<svc>`. Lift it with `POST /api/v1/agents/$AGENT_ID/release`; nothing else does. Both are in the control-plane audit (`agent_quarantined`, `agent_released`). `agentsc logs <svc> --rule quarantine.active` shows what was refused.
+
+### Agents in tutelad
+
+With Tutela's `tutelad` (v0.2.0) in front, agents are principals there too ([ADR 0005](adr/0005-agents-in-tutelad.md), CONTRACT.md §5.3): embassy registers each active agent, disables it on quarantine or retirement, and enables it on release. Without the `tutela` section nothing changes.
+
+**At tutelad** (its operator, once per tenant):
+
+1. An app manifest with a role that holds only what attache needs, applied with `tutela apply` (a first apply that adds an admin key is widening and needs an approval token, `tutela approve`):
+
+   ```toml
+   [roles.agent_admin]
+   label = "Agent admin"
+   grants = { "org:manage_agents" = true }
+   assignable_to = ["sa"]
+   ```
+
+2. An app for attache in the tenant, with that role at the org: in the Helm chart's bootstrap plan (`apps: [{name: attache, secret: attache-tutela, roles: [{role: agent_admin, scope: org}]}]`) or with `tutelad apps create` and `POST /v1/admin/assignments`. The bootstrap job writes `client_id`, `client_secret`, `tenant`, `issuer` and `token_url` to the Secret.
+3. For agent tokens (the actor of a delegated token), embassy's issuer in tutelad's trust file:
+
+   ```toml
+   [[issuer]]
+   iss = "https://embassy.example"                                  # tutela.agent_tokens.issuer
+   jwks_uri = "https://embassy.example/.well-known/agent-jwks.json"
+   algs = ["ES256"]
+   tenants = ["ten_..."]                                             # the app's tenant
+   ```
+
+**At embassy** (the ControlPlaneConfig; Helm: `tutela`), with the Secret mounted:
+
+```yaml
+tutela:
+  credentials: /etc/agentsc/tutela          # the app's Secret: a directory of keys, or its JSON file
+  url: https://tutelad.tutela.svc:8080      # absent: the credentials' issuer
+  private_host: true                        # tutelad on the cluster network (https still)
+  sync_seconds: 60                          # a full sync this often; changes sync at once
+  agent_tokens:                             # optional: sign the agents' own tokens
+    issuer: https://embassy.example
+    key_file: /etc/agentsc/tutela-agent/key.pem   # openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256
+```
+
+- **What you see.** `GET /api/v1/agents/$AGENT_ID` carries `tutela: {principal, epoch, disabled, synced_at}` once the agent is registered. The `tutela:` log lines say what each sync did; a failed call is a `warn` with its cause, and the sync runs again in 5 s.
+- **When tutelad is down** nothing in attache waits: charters, the registry and quarantines work, and the sidecars refuse a quarantined agent. A new agent is registered, and a quarantine reaches tutelad, when it is back. What needs tutelad's answer fails closed: no agent token is signed for an agent that is not registered and enabled there, and `POST /api/v1/agents/$AGENT_ID/revoke-tokens` answers `503 tutela_unavailable`.
+- **Revoking an agent's tokens** without a quarantine: `POST /api/v1/agents/$AGENT_ID/revoke-tokens` (admin) raises its epoch at tutelad; the agent stays enabled, and its next tokens carry the new epoch.
+- **Two replicas** may register the same new agent at once; the first principal is kept, and the other replica disables the one it made. A registration whose answer was lost can leave such an unmapped, enabled principal at tutelad; it holds nothing (f8fvwgzc/tutela#165).
+- **Rotating the agent key:** serve the old and the new key until tutelad's JWKS cache has turned over, then drop the old one. Rotating the app's secret: `tutela apps rotate`, then replace the Secret within the overlap; embassy reads it again when the ControlPlaneConfig changes, or at restart.
 
 ### Approving tool calls
 
