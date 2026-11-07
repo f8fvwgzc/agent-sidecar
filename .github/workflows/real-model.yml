@@ -81,7 +81,7 @@ jobs:
       - name: cargo build -p agentscd
         run: cargo build -p agentscd --locked
 
-      - uses: astral-sh/setup-uv@v10.3.0
+      - uses: astral-sh/setup-uv@v10.3.3
         with:
           enable-cache: true
           cache-dependency-glob: runtime/uv.lock

@@ -94,7 +94,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v10.3.0
+      - uses: astral-sh/setup-uv@v10.3.3
         with:
           enable-cache: true
           cache-dependency-glob: runtime/uv.lock
@@ -160,7 +160,7 @@ jobs:
           go-version-file: examples/orders/go.mod
           cache: false
 
-      - uses: astral-sh/setup-uv@v10.3.0
+      - uses: astral-sh/setup-uv@v10.3.3
         with:
           enable-cache: true
           cache-dependency-glob: runtime/uv.lock
@@ -223,7 +223,7 @@ jobs:
         with:
           tool: cargo-deny@0.20.2,cargo-audit@0.22.2
 
-      - uses: astral-sh/setup-uv@v10.3.0
+      - uses: astral-sh/setup-uv@v10.3.3
         with:
           enable-cache: false
 
@@ -274,7 +274,7 @@ jobs:
           go-version-file: examples/orders/go.mod
           cache: false
 
-      - uses: astral-sh/setup-uv@v10.3.0
+      - uses: astral-sh/setup-uv@v10.3.3
         with:
           enable-cache: true
           cache-dependency-glob: runtime/uv.lock
