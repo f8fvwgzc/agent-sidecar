@@ -1,12 +1,19 @@
 # agentsc developer entry points.
 #   v0.1 minikube path (explicit sidecars):  make minikube-up build deploy demo
 #   v0.2 minikube path (Helm, injection):    make demo-helm
+#   v0.2 on kind instead of minikube:        make demo-helm CLUSTER=kind [KIND_IMAGE=kindest/node:v1.31.14]
 #   v0.2 one machine (Docker Compose):       make compose-up / make compose-down
 SHELL := /bin/bash
 NS ?= agentsc-demo
 PROFILE ?= minikube
+# CLUSTER=kind: demo-helm on the kind cluster KIND_CLUSTER (kind's default node image, or
+# KIND_IMAGE), with the images built on this machine's docker and loaded with `kind load`.
+CLUSTER ?= minikube
+KIND ?= kind
+KIND_CLUSTER ?= agentsc
+KIND_IMAGE ?=
 # Every cluster call names the context explicitly: this kubeconfig may also hold production clusters.
-KUBE_CONTEXT ?= $(PROFILE)
+KUBE_CONTEXT ?= $(if $(filter kind,$(CLUSTER)),kind-$(KIND_CLUSTER),$(PROFILE))
 KUBECTL := kubectl --context $(KUBE_CONTEXT)
 AGENTSC := ./target/debug/agentsc
 EMBASSY := ./target/debug/embassy
@@ -21,7 +28,8 @@ COMPOSE_ENV := deploy/compose/.env
 PACKAGING_PYTEST := uv run --no-project --with pytest==8.4.2 --with pyyaml==6.0.2 --with cel-python==0.5.0 python -m pytest -q
 .PHONY: local-demo platform-demo e2e-helm all build-host test test-rust test-python test-live fmt lint proto schema validate \
         minikube-up minikube-down build deploy charters undeploy demo logs logs-denied secret-anthropic clean dev-certs \
-        compose-up compose-down helm-lint helm-template demo-helm packaging-test oidc-check tutelad
+        compose-up compose-down helm-lint helm-template demo-helm packaging-test oidc-check tutelad \
+        kind-up kind-down kind-build
 
 all: build-host test
 
@@ -97,6 +105,33 @@ minikube-up:
 minikube-down:
 	minikube -p $(PROFILE) delete
 
+# ---- kind (CLUSTER=kind) ----------------------------------------------------------------------
+# make kind-up CLUSTER=kind [KIND_CLUSTER=agentsc] [KIND_IMAGE=kindest/node:<version>]
+kind-up:
+	@$(KIND) get clusters | grep -qx '$(KIND_CLUSTER)' || \
+	  $(KIND) create cluster --name '$(KIND_CLUSTER)' $(if $(KIND_IMAGE),--image '$(KIND_IMAGE)') --wait 180s
+	$(KUBECTL) get nodes
+
+kind-down:
+	$(KIND) delete cluster --name '$(KIND_CLUSTER)'
+
+# The four images on this machine's docker, then into the kind node, so no registry is needed.
+# SKIP_BUILD=1 loads the agentsc/*:dev images already there; KIND_ARCHIVE=<tar> loads them from a
+# `docker save` archive instead (docker's disk then need not hold them as well).
+KIND_IMAGES := agentsc/agentscd:dev agentsc/embassy:dev agentsc/orders:dev agentsc/inventory:dev
+kind-build:
+	if [[ -n "$(KIND_ARCHIVE)" ]]; then \
+	  $(KIND) load image-archive --name '$(KIND_CLUSTER)' '$(KIND_ARCHIVE)'; \
+	else \
+	  if [[ -z "$(SKIP_BUILD)" ]]; then \
+	    docker build --ssh default -f docker/Dockerfile --target agentscd -t agentsc/agentscd:dev . && \
+	    docker build --ssh default -f docker/Dockerfile --target embassy  -t agentsc/embassy:dev . && \
+	    docker build -t agentsc/orders:dev examples/orders && \
+	    docker build -t agentsc/inventory:dev examples/inventory || exit 1; \
+	  fi; \
+	  $(KIND) load docker-image --name '$(KIND_CLUSTER)' $(KIND_IMAGES); \
+	fi
+
 # Build the four images inside minikube's docker daemon so no registry is needed.
 build:
 	eval $$(minikube -p $(PROFILE) docker-env) && \
@@ -143,7 +178,8 @@ helm-lint:
 helm-template:
 	helm template $(HELM_RELEASE) $(CHART) --namespace $(CP_NS) $(HELM_ARGS)
 
-# The v0.2 demo on minikube: the four images in minikube's docker, the chart, an injection-enabled
+# The v0.2 demo on minikube (CLUSTER=kind: on kind): the four images in the cluster, the chart (plus
+# HELM_ARGS, e.g. '-f deploy/helm/agent-sidecar/ci/tutela-values.yaml'), an injection-enabled
 # namespace, Charter resources made with `agentsc charter to-cr`, the two apps with the inject label
 # and annotations (no sidecar in their spec), then the demo calls of scripts/demo.sh.
 # The full end-to-end test against an installed chart and the demo apps (after demo-helm, or any
@@ -151,10 +187,10 @@ helm-template:
 e2e-helm:
 	KUBE_CONTEXT=$(KUBE_CONTEXT) ./deploy/helm/e2e.sh
 
-demo-helm: minikube-up build
+demo-helm: $(if $(filter kind,$(CLUSTER)),kind-up kind-build,minikube-up build)
 	cargo build -q -p agentsc-cli -p embassy
 	KUBE_CONTEXT=$(KUBE_CONTEXT) CP_NS=$(CP_NS) RELEASE=$(HELM_RELEASE) AGENTSC=$(AGENTSC) EMBASSY=$(EMBASSY) \
-	  ./deploy/helm/demo.sh
+	  HELM_ARGS="$(HELM_ARGS)" ./deploy/helm/demo.sh
 
 # ---- v0.2: Docker Compose on one machine (docs/design/agent-platform.md §14) ------------------
 # The embassy image is built first: gen-env.sh makes the tokens with `embassy token create`.

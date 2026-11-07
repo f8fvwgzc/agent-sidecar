@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# `make demo-helm`: the v0.2 demo on minikube through the Helm chart (docs/design/agent-platform.md
-# §13). The images are already in minikube's docker (make build). This script installs the chart,
+# `make demo-helm`: the v0.2 demo on minikube or kind through the Helm chart
+# (docs/design/agent-platform.md §13). The images are already in the cluster (make build, or make
+# kind-build with CLUSTER=kind). This script installs the chart (with HELM_ARGS appended),
 # waits for embassy-ca to arm the webhooks, enables injection for the demo namespace, makes sure the
 # Secret agentsc-anthropic exists (ANTHROPIC_API_KEY, empty for the mock model), applies the example
 # charters as Charter resources, deploys the two apps without a sidecar in their spec and runs the
@@ -14,6 +15,8 @@ RELEASE=${RELEASE:-agent-sidecar}
 AGENTSC=${AGENTSC:-./target/debug/agentsc}
 EMBASSY=${EMBASSY:-./target/debug/embassy}
 TAG=${TAG:-dev}
+# More `helm upgrade` arguments, split on spaces (e.g. -f deploy/helm/agent-sidecar/ci/tutela-values.yaml).
+read -r -a HELM_EXTRA <<<"${HELM_ARGS:-}"
 # The example charters name this namespace (service.namespace, and inventory's authz identities).
 NS=agentsc-demo
 TOKEN_FILE=.local/helm-admin-token
@@ -40,7 +43,7 @@ helm upgrade --install "$RELEASE" deploy/helm/agent-sidecar \
   --set images.agentscd.repository=agentsc/agentscd --set "images.agentscd.tag=$TAG" \
   --set injection.mockFallback=true \
   --set-json "auth.tokens=[{\"name\":\"demo-admin\",\"role\":\"admin\",\"sha256\":\"$SHA256\",\"namespaces\":[\"*\"],\"payloads\":true}]" \
-  --wait --timeout 5m
+  ${HELM_EXTRA[@]+"${HELM_EXTRA[@]}"} --wait --timeout 5m
 
 echo "▶ waiting for embassy-ca to set the webhooks' caBundle"
 for kind in mutatingwebhookconfiguration/agentsc-sidecar-injector validatingwebhookconfiguration/agentsc-charter-validator; do
