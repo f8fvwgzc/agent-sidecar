@@ -13,6 +13,7 @@ subsystem works; a record here says why it is the way it is.
 | [0003](0003-sqlite-store-schema.md) | implemented | `--store sqlite:<path>`: one database with primary and foreign keys, covering indexes on every query path, and triggers that enforce what the file layout only promised |
 | [0004](0004-agent-practices-on-by-default.md) | implemented | Agent practices (plan, clarify, brevity) on by default with fixed texts in the runtime; questions keep status `ok` and add a field; lessons cite their evidence; learning stays off by default |
 | [0005](0005-agents-in-tutelad.md) | implemented | With a `tutela` section, embassy is an app of `tutelad`: the registry's agents are registered there and disabled on quarantine or retirement by a retrying reconciler, and embassy signs its agents' own tokens (the actor of a delegated token); actions that need `tutelad` fail closed |
+| [0006](0006-delegated-agent-tokens.md) | implemented | An `http` tool with `delegation` acts for the invoking person: the sidecar keeps the person's token for the run, embassy verifies it and exchanges it at `tutelad` with its own agent token as the actor, and the call carries the `agent+jwt`; it fails closed |
 
 ## Format
 

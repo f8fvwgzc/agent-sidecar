@@ -607,6 +607,20 @@ An `http` tool calls a URL outside your services, for example a public API.
 
 A tool has no field for request headers or credentials. If an API needs a key, put a small endpoint in your app that adds the key, and call it with a `service` tool.
 
+**Acting for the person.** With Tutela's `tutelad` (an admin sets `tutela.delegation` on embassy), an `http` tool can call a service that takes delegated agent tokens, such as texc-symphony, for the person the invocation is for:
+
+```yaml
+- name: open_task
+  description: Open a task in Symphony for the person who asked.
+  type: http
+  method: POST
+  url: https://symphony.example/v1/tasks
+  delegation:
+    audience: symphony    # the service's audience in tutelad, marked delegation_aware
+```
+
+Your app sends the person's token with the invocation, `X-Agentsc-Subject-Token: <token for audience attache>`. For each call the sidecar gets a short-lived token (`typ: agent+jwt`: the person as `sub`, this agent as the actor) and sends it as `Authorization: Bearer`. Without a person's token, or when Tutela says no, the call is refused (`delegation.no_subject`, `delegation.refused`, `delegation.unavailable`) and never goes out. Adding or changing a `delegation` needs an admin, and every sidecar of the service on a version that knows charter schema level 8 ([CONTRACT.md §5.3](../../CONTRACT.md#53-agent-principals-and-the-registry)).
+
 ### Agent tools
 
 An `agent` tool runs another agent. Only an agent with `type: orchestrator` may declare one. See [Orchestrators](#orchestrators).

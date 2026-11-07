@@ -49,7 +49,7 @@ Four facts shaped the design:
    principal, `aud` tutelad's audience, `tid` the app's tenant, `azp` the app's client id,
    `epoch` the agent's epoch as tutelad last answered, a 60 s life. Its JWKS is
    `/.well-known/agent-jwks.json`; tutelad's trust file lists the issuer for the tenant. These are
-   the actor tokens of #25. The JWT-SVID route would name a workload, so it cannot tell two agents
+   the actor tokens of #25 ([ADR 0006](0006-delegated-agent-tokens.md)). The JWT-SVID route would name a workload, so it cannot tell two agents
    of one service apart.
 5. **The four admin calls.** Register is `RegisterAgent`; pause (quarantine) and retire are
    `SetDisabled(true)`, which also raises the epoch; re-enable (release, reactivation) is
