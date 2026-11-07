@@ -1173,6 +1173,7 @@ def test_sidecar_policy_names_match_the_injector() -> None:
         "RUN_VOLUME",
         "STATE_VOLUME",
         "TOKEN_VOLUME",
+        "NO_API_TOKEN_VOLUME",
         "TOKEN_AUDIENCE",
     ):
         assert f"'{consts[name]}'" in policy, name
@@ -1189,19 +1190,47 @@ HOST_PID_RULE = "hostPID must not be true"
 DNS_RULE = "agentsc pods may not set hostAliases, dnsPolicy None, or dnsConfig nameservers or searches"
 VOLUME_RULE = "only the agentscd and agentsc-runtime containers may mount the sidecar volumes"
 RUNTIME_MOUNT_RULE = "agentsc-runtime may mount only agentsc-run"
+API_TOKEN_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
+# The volume the ServiceAccount admission plugin adds for the pod's Kubernetes API token.
+API_TOKEN_VOLUME = {
+    "name": "kube-api-access-x1y2z",
+    "projected": {
+        "defaultMode": 420,
+        "sources": [
+            {"serviceAccountToken": {"expirationSeconds": 3607, "path": "token"}},
+            {"configMap": {"name": "kube-root-ca.crt", "items": [{"key": "ca.crt", "path": "ca.crt"}]}},
+            {
+                "downwardAPI": {
+                    "items": [
+                        {"path": "namespace", "fieldRef": {"apiVersion": "v1", "fieldPath": "metadata.namespace"}}
+                    ]
+                }
+            },
+        ],
+    },
+}
 TOKEN_RULE = "only the volume agentsc-token may project a service-account token"
 LABEL_RULE = "only the injector adds the agentscd and agentsc-runtime containers"
 
 
 def injected_pod(image: str) -> dict:
-    """A pod as the injector leaves it (services/embassy/src/webhook.rs)."""
+    """A pod as the injector (services/embassy/src/webhook.rs) and then the API server's
+    ServiceAccount admission plugin leave it: the pod's API token in the app container only, since
+    both sidecar containers have a mount at its path."""
     run = {"name": "agentsc-run", "mountPath": "/run/agentsc"}
+    no_api_token = {"name": "agentsc-no-api-token", "mountPath": API_TOKEN_DIR, "readOnly": True}
     return {
         "apiVersion": "v1",
         "kind": "Pod",
         "metadata": {"name": "orders-0", "labels": {"app": "orders", "agentsc.io/inject": "true"}},
         "spec": {
-            "containers": [{"name": "app", "image": "orders:1"}],
+            "containers": [
+                {
+                    "name": "app",
+                    "image": "orders:1",
+                    "volumeMounts": [{"name": "kube-api-access-x1y2z", "mountPath": API_TOKEN_DIR, "readOnly": True}],
+                }
+            ],
             "initContainers": [
                 {
                     "name": "agentsc-runtime",
@@ -1214,7 +1243,7 @@ def injected_pod(image: str) -> dict:
                         "--sidecar",
                         "unix:/run/agentsc/sidecar.sock",
                     ],
-                    "volumeMounts": [run],
+                    "volumeMounts": [run, no_api_token],
                 },
                 {
                     "name": "agentscd",
@@ -1224,10 +1253,12 @@ def injected_pod(image: str) -> dict:
                         run,
                         {"name": "agentsc-state", "mountPath": "/var/lib/agentsc/state"},
                         {"name": "agentsc-token", "mountPath": "/var/run/secrets/agentsc", "readOnly": True},
+                        no_api_token,
                     ],
                 },
             ],
             "volumes": [
+                API_TOKEN_VOLUME,
                 {"name": "agentsc-run", "emptyDir": {}},
                 {"name": "agentsc-state", "emptyDir": {}},
                 {
@@ -1238,6 +1269,7 @@ def injected_pod(image: str) -> dict:
                         ]
                     },
                 },
+                {"name": "agentsc-no-api-token", "emptyDir": {}},
             ],
         },
     }
@@ -1263,7 +1295,8 @@ class Policy:
         activation = {
             "object": to_cel(pod),
             "oldObject": to_cel(old),
-            "request": to_cel({"operation": operation, "subResource": sub_resource}),
+            # as the API server sends it: no subResource key in a request without one
+            "request": to_cel({"operation": operation, **({"subResource": sub_resource} if sub_resource else {})}),
         }
         if not all(bool(self._eval(m["expression"], activation)) for m in self.spec["matchConditions"]):
             return None
@@ -1389,6 +1422,24 @@ def test_the_policy_admits_the_injected_pod_and_ignores_other_pods(enforced: Pol
                 {"name": "agentsc-token", "mountPath": "/t"}
             ),
             [RUNTIME_MOUNT_RULE],
+        ),
+        (
+            # a runtime without the blank mount: the ServiceAccount admission plugin gives it the API token
+            "the runtime holds the pod's API token",
+            lambda p: sidecar(p, "agentsc-runtime").update(
+                volumeMounts=[
+                    {"name": "agentsc-run", "mountPath": "/run/agentsc"},
+                    {"name": "kube-api-access-x1y2z", "mountPath": API_TOKEN_DIR, "readOnly": True},
+                ]
+            ),
+            [RUNTIME_MOUNT_RULE],
+        ),
+        (
+            "the app mounts the blank volume",
+            lambda p: p["spec"]["containers"][0]["volumeMounts"].append(
+                {"name": "agentsc-no-api-token", "mountPath": "/x"}
+            ),
+            [VOLUME_RULE],
         ),
         (
             "another agentsc token",

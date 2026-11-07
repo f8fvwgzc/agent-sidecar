@@ -40,9 +40,10 @@ use serde_json::Value;
 use crate::config::SidecarImagesConfig;
 use crate::names::is_sha256_hex;
 use crate::webhook::{
-    CONTROL_PLANE_PORT, READY_COMMAND, RUN_DIR, RUN_VOLUME, RUNTIME_ARGS, RUNTIME_COMMAND,
-    RUNTIME_CONTAINER, RUNTIME_TEMPLATE_ENV, SIDECAR_CONTAINER, SIDECAR_VOLUMES, STATE_DIR,
-    STATE_VOLUME, TEMPLATE_ENV_ALLOWED, TOKEN_AUDIENCE, TOKEN_DIR, TOKEN_FILE, TOKEN_VOLUME,
+    API_TOKEN_DIR, CONTROL_PLANE_PORT, NO_API_TOKEN_VOLUME, READY_COMMAND, RUN_DIR, RUN_VOLUME,
+    RUNTIME_ARGS, RUNTIME_COMMAND, RUNTIME_CONTAINER, RUNTIME_TEMPLATE_ENV, SIDECAR_CONTAINER,
+    SIDECAR_VOLUMES, STATE_DIR, STATE_VOLUME, TEMPLATE_ENV_ALLOWED, TOKEN_AUDIENCE, TOKEN_DIR,
+    TOKEN_FILE, TOKEN_VOLUME,
 };
 
 /// The container names the injector owns: a pod may not bring its own.
@@ -239,9 +240,11 @@ const INJECTED_FIELD_ENV: [(&str, &str); 2] = [
 ///   lifecycle hooks, and no probe but exec [`READY_COMMAND`] (`agentscd`'s; the runtime has
 ///   none);
 /// - both are present, and mount exactly the injected volumes at the injected paths
-///   (`agentscd`: [`RUN_VOLUME`], [`STATE_VOLUME`], [`TOKEN_VOLUME`]; the runtime:
-///   [`RUN_VOLUME`]), which no other container mounts;
-/// - [`RUN_VOLUME`] and [`STATE_VOLUME`] are `emptyDir`s and [`TOKEN_VOLUME`] projects only
+///   (`agentscd`: [`RUN_VOLUME`], [`STATE_VOLUME`], [`TOKEN_VOLUME`], [`NO_API_TOKEN_VOLUME`];
+///   the runtime: [`RUN_VOLUME`], [`NO_API_TOKEN_VOLUME`]), which no other container mounts, so
+///   neither has the pod's Kubernetes API token;
+/// - [`RUN_VOLUME`], [`STATE_VOLUME`] and [`NO_API_TOKEN_VOLUME`] are `emptyDir`s and
+///   [`TOKEN_VOLUME`] projects only
 ///   the service-account token for audience [`TOKEN_AUDIENCE`]; no other volume projects one;
 /// - no ephemeral containers, `shareProcessNamespace` or `hostPID`;
 /// - no `hostAliases`, `dnsPolicy: None`, or `dnsConfig` nameservers or search domains: each
@@ -358,16 +361,22 @@ pub fn shape_problem(pod: &Pod, expected: &Expected) -> Option<String> {
             (RUN_VOLUME, RUN_DIR),
             (STATE_VOLUME, STATE_DIR),
             (TOKEN_VOLUME, TOKEN_DIR),
+            (NO_API_TOKEN_VOLUME, API_TOKEN_DIR),
         ],
     ) {
         return Some(format!(
             "container {SIDECAR_CONTAINER:?} must mount exactly {RUN_VOLUME} at {RUN_DIR}, \
-             {STATE_VOLUME} at {STATE_DIR} and {TOKEN_VOLUME} at {TOKEN_DIR}"
+             {STATE_VOLUME} at {STATE_DIR}, {TOKEN_VOLUME} at {TOKEN_DIR} and \
+             {NO_API_TOKEN_VOLUME} at {API_TOKEN_DIR}"
         ));
     }
-    if !mounts_are(runtime, &[(RUN_VOLUME, RUN_DIR)]) {
+    if !mounts_are(
+        runtime,
+        &[(RUN_VOLUME, RUN_DIR), (NO_API_TOKEN_VOLUME, API_TOKEN_DIR)],
+    ) {
         return Some(format!(
-            "container {RUNTIME_CONTAINER:?} must mount exactly {RUN_VOLUME} at {RUN_DIR}"
+            "container {RUNTIME_CONTAINER:?} must mount exactly {RUN_VOLUME} at {RUN_DIR} and \
+             {NO_API_TOKEN_VOLUME} at {API_TOKEN_DIR}"
         ));
     }
     let ephemeral_mounts = spec
@@ -394,7 +403,7 @@ pub fn shape_problem(pod: &Pod, expected: &Expected) -> Option<String> {
         .filter_map(|v| serde_json::to_value(v).ok())
         .collect();
     let volume = |name: &str| volumes.iter().find(|v| v["name"] == name);
-    for name in [RUN_VOLUME, STATE_VOLUME] {
+    for name in [RUN_VOLUME, STATE_VOLUME, NO_API_TOKEN_VOLUME] {
         if !volume(name).is_some_and(|v| keys_are(v, &["name", "emptyDir"])) {
             return Some(format!("volume {name:?} must be an emptyDir"));
         }
@@ -891,7 +900,7 @@ mod tests {
             "the addresses name the control plane's namespace"
         );
 
-        let cases: [ShapeCase; 27] = [
+        let cases: [ShapeCase; 30] = [
             (
                 "the key in a volume the app mounts (the review's pod)",
                 |p| {
@@ -1089,6 +1098,36 @@ mod tests {
                         .push(json!({"name": "agentsc-state", "mountPath": "/s"}))
                 },
                 "container \"agentsc-runtime\" must mount exactly",
+            ),
+            (
+                // what the ServiceAccount admission plugin does to a runtime without the blank
+                // mount at the API token's path
+                "the runtime holds the pod's API token",
+                |p| {
+                    p["spec"]["initContainers"][0]["volumeMounts"] = json!([
+                        {"name": "agentsc-run", "mountPath": "/run/agentsc"},
+                        {"name": "kube-api-access-x1y2z", "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount", "readOnly": true}
+                    ])
+                },
+                "container \"agentsc-runtime\" must mount exactly",
+            ),
+            (
+                "agentscd holds the pod's API token",
+                |p| {
+                    p["spec"]["initContainers"][1]["volumeMounts"][3] = json!(
+                        {"name": "kube-api-access-x1y2z", "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount", "readOnly": true}
+                    )
+                },
+                "container \"agentscd\" must mount exactly",
+            ),
+            (
+                "the blank volume is a token after all",
+                |p| {
+                    p["spec"]["volumes"][3] = json!({"name": "agentsc-no-api-token", "projected": {"sources": [
+                        {"serviceAccountToken": {"path": "token"}}
+                    ]}})
+                },
+                "volume \"agentsc-no-api-token\" must be an emptyDir",
             ),
             (
                 "the app mounts the state",

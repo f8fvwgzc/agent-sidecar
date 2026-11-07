@@ -115,6 +115,13 @@ unexpected=$(for n in $rnames; do [[ " $RUNTIME_ENV_ALLOWED " == *" $n "* ]] || 
 [[ -z $unexpected && -z $rfrom ]] \
   && ok "the agentsc-runtime container has no secret in its environment (${rnames:-no env})" \
   || die "agentsc-runtime env: names [$rnames], valueFrom/envFrom [$rfrom]"
+# Nor a token: the ServiceAccount admission plugin skips containers with a mount at the API
+# token's path, and both sidecars have the empty agentsc-no-api-token there.
+for c in agentsc-runtime agentscd; do
+  m=$(kc -n "$NS" get pods -l app=orders -o jsonpath="{.items[0].spec.initContainers[?(@.name==\"$c\")].volumeMounts[*].name}")
+  [[ " $m " != *" kube-api-access-"* && " $m " == *" agentsc-no-api-token "* ]] \
+    && ok "$c does not hold the pod's Kubernetes API token (mounts: $m)" || die "$c mounts: $m"
+done
 
 echo "▶ identity cannot be borrowed"
 # A pod that claims to be orders, but runs as the default service account: the CA refuses it.
