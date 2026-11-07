@@ -304,6 +304,8 @@ impl Tutelad {
             .unwrap()
             .trim()
             .to_string();
+        // `--public-key=<key>` in one argument: a base64url key may start with `-`, which the CLI
+        // would take for a flag
         run(
             &e.tutela,
             &[
@@ -311,8 +313,7 @@ impl Tutelad {
                 "add",
                 "--name",
                 "harness",
-                "--public-key",
-                &public,
+                &format!("--public-key={public}"),
             ],
             &owner_env,
         )
@@ -340,8 +341,7 @@ impl Tutelad {
                 "apply",
                 "--file",
                 manifest.to_str().unwrap(),
-                "--approval",
-                approval.trim(),
+                &format!("--approval={}", approval.trim()),
             ],
             &owner_env,
         )
