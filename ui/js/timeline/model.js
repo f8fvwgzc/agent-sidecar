@@ -7,12 +7,14 @@
 
 import { assignColors, displayName } from "./util.js";
 
-export const SPAN_KINDS = ["agent_invocation", "agent_call", "service_call", "http_call", "model_call", "tool_call"];
+export const SPAN_KINDS = ["agent_invocation", "agent_call", "service_call", "http_call", "mcp_call", "a2a_call", "model_call", "tool_call"];
 const KIND_ORDER = Object.fromEntries(SPAN_KINDS.map((k, i) => [k, i]));
 export const SEGMENT_BY_KIND = {
   model_call: "thinking",
   service_call: "tool",
   http_call: "tool",
+  mcp_call: "tool",
+  a2a_call: "tool",
   tool_call: "tool",
   agent_call: "waiting",
   agent_invocation: "invocation",
@@ -21,7 +23,7 @@ export const SEGMENTS = ["thinking", "tool", "waiting", "invocation"];
 export const STATUSES = ["running", "ok", "denied", "error"];
 export const MAX_SPANS = 2000;
 const MAX_EVENTS_PER_SPAN = 32;
-const WRAPPED_KINDS = new Set(["agent_call", "service_call", "http_call"]);
+const WRAPPED_KINDS = new Set(["agent_call", "service_call", "http_call", "mcp_call", "a2a_call"]);
 
 export function parseTime(v) {
   if (v === null || v === undefined || v === "") return null;
@@ -52,7 +54,10 @@ export function calleeNodeFor(kind, ns, svc, callee) {
       return `agent:${ns}/${svc}/${callee}`;
     case "service_call":
       return `app:${ns}/${callee.split(" ")[0]}`;
-    case "http_call": {
+    // `<METHOD> <url>`, `mcp <origin> <mcp_tool>` and `a2a <origin>`: the URL is the second word
+    case "http_call":
+    case "mcp_call":
+    case "a2a_call": {
       const url = callee.split(" ")[1] || "";
       const m = /^([a-z][a-z0-9+.-]*):\/\/([^/?#]+)/i.exec(url);
       return m ? `external:${m[1]}://${m[2]}` : null;

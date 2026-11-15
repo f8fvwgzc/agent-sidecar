@@ -426,8 +426,8 @@ pub fn required_permissions(old: &Charter, new: &Charter) -> Required {
         );
     }
 
-    // agents: created and deleted ones are editor; per agent, only `type`, `learning.mode: auto`
-    // and new http tool origins need admin
+    // agents: created and deleted ones are editor; per agent, only `type`, `learning.mode: auto`,
+    // new http, mcp and a2a tool origins, and the security fields of tools need admin
     let old_origins = http_origins(&old.agents);
     let old_remote = cross_namespace_targets(&old.agents);
     for a in &new.agents {
@@ -452,6 +452,14 @@ pub fn required_permissions(old: &Charter, new: &Charter) -> Required {
             admin.add(
                 perm::EDIT_TAINT,
                 format!("agents.{}.taint requires admin", a.name),
+            );
+        }
+        // an a2a block publishes the agent to callers outside the mesh (an agent card on the
+        // A2A server): adding or removing one is an authz change; its card text is not
+        if prev.map(|p| p.a2a.is_some()).unwrap_or(false) != a.a2a.is_some() {
+            admin.add(
+                perm::EDIT_AUTHZ,
+                format!("agents.{}.a2a added or removed requires admin", a.name),
             );
         }
         for t in &a.tools {
@@ -491,10 +499,39 @@ pub fn required_permissions(old: &Charter, new: &Charter) -> Required {
                     ),
                 );
             }
+            // a static credential is a secret the sidecar sends to a server: like a delegation,
+            // only an admin adds, changes or removes one
+            if before.map(|b| &b.credential) != Some(&t.credential)
+                && (before.is_some() || t.credential.is_some())
+            {
+                admin.add(
+                    perm::EDIT_AUTHZ,
+                    format!(
+                        "agents.{}.tools.{} credential requires admin",
+                        a.name, t.name
+                    ),
+                );
+            }
+            // an mcp tool's pin accepts a server's definition, and its parameters are what the
+            // sidecar lets through: changing either (or the server tool it names) of a declared
+            // tool needs admin. A widened `parameters` is not told from a narrowed one, so any
+            // change counts (docs/design/mcp-tools.md, decision 13)
+            if let Some(b) = before
+                && (b.tool_type == ToolType::Mcp || t.tool_type == ToolType::Mcp)
+                && (b.pin != t.pin || b.mcp_tool != t.mcp_tool || b.parameters != t.parameters)
+            {
+                admin.add(
+                    perm::OPEN_HTTP_ORIGIN,
+                    format!(
+                        "agents.{}.tools.{} pin, mcp_tool or parameters requires admin",
+                        a.name, t.name
+                    ),
+                );
+            }
         }
         // a tool aimed at another namespace opens an edge editors may not open (design §8.3:
         // `service` and `agent` tools "within the same namespace")
-        for t in a.tools.iter().filter(|t| t.tool_type != ToolType::Http) {
+        for t in a.tools.iter().filter(|t| !t.tool_type.is_egress()) {
             if let Some(s) = t.service.as_deref().filter(|s| is_qualified_peer(s))
                 && !old_remote.contains(s)
             {
@@ -507,14 +544,19 @@ pub fn required_permissions(old: &Charter, new: &Charter) -> Required {
                 );
             }
         }
-        for t in a.tools.iter().filter(|t| t.tool_type == ToolType::Http) {
+        for t in a.tools.iter().filter(|t| t.tool_type.is_egress()) {
             let origin = t.url.as_deref().and_then(http_origin);
+            let kind = match t.tool_type {
+                ToolType::Mcp => "mcp",
+                ToolType::A2a => "a2a",
+                _ => "http",
+            };
             match origin {
                 Some(o) if old_origins.contains(&o) => {}
                 Some(o) => admin.add(
                     perm::OPEN_HTTP_ORIGIN,
                     format!(
-                        "agents.{}.tools.{} (new http origin {o}) requires admin",
+                        "agents.{}.tools.{} (new {kind} origin {o}) requires admin",
                         a.name, t.name
                     ),
                 ),
@@ -616,18 +658,18 @@ fn cross_namespace_targets(agents: &[AgentSpec]) -> BTreeSet<&str> {
     agents
         .iter()
         .flat_map(|a| a.tools.iter())
-        .filter(|t| t.tool_type != ToolType::Http)
+        .filter(|t| !t.tool_type.is_egress())
         .filter_map(|t| t.service.as_deref())
         .filter(|s| is_qualified_peer(s))
         .collect()
 }
 
-/// Origins of every `http` tool of these agents.
+/// Origins of every `http` and `mcp` tool of these agents.
 fn http_origins(agents: &[AgentSpec]) -> BTreeSet<String> {
     agents
         .iter()
         .flat_map(|a| a.tools.iter())
-        .filter(|t| t.tool_type == ToolType::Http)
+        .filter(|t| t.tool_type.is_egress())
         .filter_map(|t| t.url.as_deref().and_then(http_origin))
         .collect()
 }

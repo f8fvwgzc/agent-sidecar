@@ -40,7 +40,7 @@ class ToolOutcome:
     is_error: bool
     decision: str  # allow | deny
     rule: str
-    kind: str  # service_call | agent_call | http_call
+    kind: str  # service_call | agent_call | http_call | mcp_call | a2a_call
     callee: str
     latency_ms: int
 
@@ -57,6 +57,14 @@ class SidecarClient(Protocol):
     async def invoke_http(
         self, ctx: CallContext, tool: str, method: str, url: str, headers: dict[str, str], body: bytes
     ) -> tuple[int, bytes]: ...
+
+    # A `type: mcp` tool: only the arguments go; the sidecar builds the MCP request from the charter
+    # and answers with the result as text, and whether it is a tool error.
+    async def invoke_mcp(self, ctx: CallContext, tool: str, arguments: dict[str, Any]) -> tuple[str, bool]: ...
+
+    # A `type: a2a` tool: only the arguments go (input, context, task_id); the sidecar sends the
+    # A2A message and renders the task as text.
+    async def invoke_a2a(self, ctx: CallContext, tool: str, arguments: dict[str, Any]) -> tuple[str, bool]: ...
 
     # The sidecar's answer: the rule it named (gRPC `x-agentsc-rule`), if any — `budget.max_cost_usd_per_day`
     # once a reported cost exhausts the agent's daily budget — and whether it refused the record (§6.5).
@@ -194,7 +202,13 @@ def with_query(path: str, args: dict[str, Any]) -> str:
 
 async def run_tool(tool: ToolSpec, args: dict[str, Any], ctx: CallContext, sidecar: SidecarClient) -> ToolOutcome:
     started = time.monotonic()
-    kind = {"service": "service_call", "agent": "agent_call", "http": "http_call"}[tool.type]
+    kind = {
+        "service": "service_call",
+        "agent": "agent_call",
+        "http": "http_call",
+        "mcp": "mcp_call",
+        "a2a": "a2a_call",
+    }[tool.type]
     callee = tool.name
     try:
         if tool.type == "service":
@@ -219,6 +233,14 @@ async def run_tool(tool: ToolSpec, args: dict[str, Any], ctx: CallContext, sidec
                 ctx, tool.name, target_service, tool.agent or "", question, context_json
             )
             return ToolOutcome(output, False, "allow", "", kind, callee, _ms(started))
+        if tool.type == "mcp":
+            callee = f"mcp {tool.name}"
+            text, is_error = await sidecar.invoke_mcp(ctx, tool.name, args)
+            return ToolOutcome(text, is_error, "allow", "", kind, callee, _ms(started))
+        if tool.type == "a2a":
+            callee = f"a2a {tool.name}"
+            text, is_error = await sidecar.invoke_a2a(ctx, tool.name, args)
+            return ToolOutcome(text, is_error, "allow", "", kind, callee, _ms(started))
         method = (tool.method or "GET").upper()
         url, rest = fill_path(tool.url or "", args)
         headers = {"accept": "application/json"}

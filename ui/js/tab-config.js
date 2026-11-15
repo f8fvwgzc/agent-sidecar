@@ -289,6 +289,8 @@ export class ConfigTab {
       ['service', 'service'],
       ['agent', 'agent'],
       ['http', 'http'],
+      ['mcp', 'mcp'],
+      ['a2a', 'a2a'],
     ]);
     typeField.querySelector('select').addEventListener('change', () => {
       this.renderTools();
@@ -310,6 +312,18 @@ export class ConfigTab {
       fields.push(
         form.select('Method', d, keys('method'), METHODS.map((m) => [m, m])),
         form.text('URL', d, keys('url'), { mono: true, required: true, emptyUnset: false, wide: true, validate: (v) => (/^https?:\/\/[^/?#]+/.test(v || '') ? null : 'an http(s) URL') }),
+      );
+    } else if (t.type === 'mcp') {
+      // `agentsc mcp import` writes these; the credential and delegation stay in the YAML
+      fields.push(
+        form.text('MCP endpoint', d, keys('url'), { mono: true, required: true, emptyUnset: false, wide: true, validate: (v) => (/^https?:\/\/[^/?#{}]+[^#{}]*$/.test(v || '') ? null : 'an http(s) URL') }),
+        form.text('Server tool', d, keys('mcp_tool'), { mono: true, hint: 'empty = the name', validate: (v) => (v === undefined || /^[A-Za-z0-9_.-]{1,128}$/.test(v) ? null : '1 to 128 of A-Z a-z 0-9 _ - .') }),
+        form.text('Pin', d, keys('pin'), { mono: true, required: true, emptyUnset: false, wide: true, validate: (v) => (/^sha256:[0-9a-f]{64}$/.test(v || '') ? null : 'sha256: and 64 hex digits (agentsc mcp import)') }),
+      );
+    } else if (t.type === 'a2a') {
+      // the remote agent's JSON-RPC endpoint (its card's JSONRPC interface); the credential stays in the YAML
+      fields.push(
+        form.text('Agent endpoint', d, keys('url'), { mono: true, required: true, emptyUnset: false, wide: true, validate: (v) => (/^https?:\/\/[^/?#{}]+[^#{}]*$/.test(v || '') ? null : 'an http(s) URL') }),
       );
     }
     const desc = form.textarea('Description', d, keys('description'), { rows: 2, emptyUnset: false, validate: (v) => (v ? null : 'required') });
@@ -360,7 +374,7 @@ export class ConfigTab {
       h('label', { class: 'tool-allowed', for: allowedId, title: 'guardrails.allowed_tools' }, allowed, h('span', { text: 'offered' })),
       remove,
     );
-    const det = h('details', { class: 'tool-card', open: !t.name }, h('summary', null, header), h('div', { class: 'form-grid' }, nameField, typeField, ...fields, desc, pf.el));
+    const det = h('details', { class: 'tool-card', open: !t.name }, h('summary', null, header), h('div', { class: 'form-grid' }, nameField, typeField, ...fields, desc, ...(t.type === 'a2a' ? [] : [pf.el])));
     if (!t.name) det.open = true;
     return det;
   }

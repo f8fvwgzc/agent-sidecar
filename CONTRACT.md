@@ -93,7 +93,11 @@ Flags / environment of `agentscd` (flag wins over env):
 | `--no-runtime`    | `AGENTSC_NO_RUNTIME`     | off. `1/true/yes/on` = do not spawn the runtime; something else serves `runtime.sock`, and readiness still follows its `Health` |
 | `--mesh-cache-bytes` | `AGENTSC_MESH_CACHE_BYTES` | `16777216`. Bytes of service-call responses the response cache keeps (`GET`/`HEAD` the app marked with `Cache-Control: max-age`; docs/adr/0002-response-caching.md); `0` disables it |
 | `--mesh-cache-max-age` | `AGENTSC_MESH_CACHE_MAX_AGE` | `300`. The longest, in seconds, a cached service-call response is served, whatever the app's `max-age` says |
-| `--max-response-bytes` | `AGENTSC_MAX_RESPONSE_BYTES` | `3145728` (3 MiB). The largest response body a tool or mesh call reads from the app, a peer or an http tool's origin, read as it streams; a longer one fails the call (`http.response_too_large`) |
+| `--max-response-bytes` | `AGENTSC_MAX_RESPONSE_BYTES` | `3145728` (3 MiB). The largest response body a tool or mesh call reads from the app, a peer, an http tool's origin or an MCP server (JSON or SSE), read as it streams; a longer one fails the call (`http.response_too_large`) |
+| `--tool-secrets-dir` | `AGENTSC_TOOL_SECRETS_DIR` | `/etc/agentsc/tool-secrets`. Where `mcp` and `a2a` tools' `credential.secret` files are read, on every call (a mounted Secret; §3.1) |
+| `--a2a-addr` | `AGENTSC_A2A_ADDR` | unset: no A2A server. Where the A2A 1.0 server listens for the agents with an `a2a` block (§4.5); plain HTTP, so put TLS in front of it |
+| `--a2a-public-url` | `AGENTSC_A2A_PUBLIC_URL` | `http://<--a2a-addr>`. The A2A server's base URL as callers reach it, for the agent cards' interface URLs (§4.5) |
+| `--a2a-callers-dir` | `AGENTSC_A2A_CALLERS_DIR` | `/etc/agentsc/a2a-callers`. The file `<name>` holds the bearer token of the A2A caller `a2a:<name>`, read on every request (a mounted Secret; §4.5) |
 | `--audit-fail-closed` | `AGENTSC_AUDIT_FAIL_CLOSED` | off. `1/true/yes/on` = while the audit sink fails, refuse new work with rule `audit.unavailable` and report not ready, until a write succeeds again (§6 "Sink failures") |
 | `--trust-domain`  | `AGENTSC_TRUST_DOMAIN`   | `agentsc`. The SPIFFE trust domain of this pod's identity, of the peers it accepts and calls, and of the control plane (§5); must be embassy's |
 | `--cluster-domain` | `AGENTSC_CLUSTER_DOMAIN` | `cluster.local`. `{cluster_domain}` of `--peer-address-template` (default `{service}.{namespace}.svc.{cluster_domain}:{port}`) |
@@ -217,7 +221,7 @@ audit:
 ```yaml
 - name: lookup_order           # tool name shown to the model, unique per agent
   description: "..."           # required
-  type: service                # service | agent | http
+  type: service                # service | agent | http | mcp (level 9) | a2a (level 10)
   parameters:                  # JSON Schema object for the tool input (default: {type: object, properties: {}})
     type: object
     properties: { order_id: { type: string } }
@@ -235,10 +239,78 @@ audit:
   # never in the scheme, host or port (the origin is fixed by the charter)
   method: GET
   url: https://example.com/items/{id}
+  # type: mcp (level 9) — one tool of a remote MCP server, called by the sidecar
+  url: https://mcp.example.com/mcp   # the server's MCP endpoint (Streamable HTTP); no {param}
+  mcp_tool: search_issues      # the server's name for it (1–128 of A-Z a-z 0-9 _ - .); default: name
+  pin: sha256:3b0c…            # required: the reviewed server definition (`agentsc mcp import`)
+  credential: {secret: github-pat}   # optional: a bearer token file in --tool-secrets-dir; not with delegation
   # level 3, any type, used by `agents[].taint` (§5.2)
-  label: untrusted             # trusted | untrusted | sensitive — what the tool returns (default: untrusted for http, else trusted)
-  effect: read                 # read | write (default: read for agent tools and GET/HEAD/OPTIONS, else write)
+  label: untrusted             # trusted | untrusted | sensitive — what the tool returns (default: untrusted for http and mcp, else trusted)
+  effect: read                 # read | write (default: read for agent tools and GET/HEAD/OPTIONS, write for mcp tools, else write)
 ```
+
+`mcp` tools (level 9, [docs/design/mcp-tools.md](docs/design/mcp-tools.md),
+[docs/adr/0009-mcp-tools.md](docs/adr/0009-mcp-tools.md)) call a tool of a remote MCP server
+that speaks protocol revision `2026-07-28` over Streamable HTTP; there are no stdio servers and
+no older revisions. The charter holds what the model sees — `name`, `description` and
+`parameters`, which is required and may be narrower than the server's `inputSchema` — and the
+sidecar builds the whole request: the runtime sends only the arguments (`InvokeMcp`, §4.3).
+Before anything is sent the arguments must validate against `parameters` (JSON Schema 2020-12,
+or the draft its `$schema` names; else `guardrail.tool_spec`), so an author narrows a broad
+server tool (`repo: {enum: [acme/app]}`, `additionalProperties: false`). The server's current
+definition of `mcp_tool` must hash to `pin`: `sha256:` and the hex SHA-256 of the RFC 8785
+canonical JSON of its `description`, `inputSchema`, `outputSchema` and `annotations` (absent
+ones left out; `title`, `icons` and `_meta` are not pinned). The sidecar keeps each server's
+`tools/list` (following `nextCursor`, at most 20 pages) for `min(ttlMs, 600 s)`, 300 s
+without a `ttlMs`, and lists it again for a call that fails the check once the list is 30 s old.
+A tool the server does not list, or whose `x-mcp-header`s break MCP's rules, is refused with
+`mcp.tool_missing`; another definition with `mcp.pin_mismatch`, whose reason names both hashes
+and never the new text (`agentsc mcp check` shows it to a person, §8). The request is
+`POST <url>` (no redirects) with `MCP-Protocol-Version: 2026-07-28`, `Mcp-Method: tools/call`,
+`Mcp-Name: <mcp_tool>`, an `Mcp-Param-<Name>` for each `x-mcp-header` of the pinned
+definition (values encoded as MCP says, `=?base64?…?=` when not plain ASCII; an argument that
+cannot be one — a fraction, an object — is `guardrail.tool_spec`), `Authorization: Bearer` from
+`delegation` (§5.3) or `credential`, `traceparent` and `x-agentsc-request-id`, and the body
+carries `_meta` (`io.modelcontextprotocol/protocolVersion`, `clientInfo` `{name: "agentscd",
+version}`, `clientCapabilities: {}`, `traceparent`). The answer is read as JSON or as an SSE
+stream (notifications and comments skipped) up to `--max-response-bytes`. The result reaches
+the model as text: text blocks joined, an embedded text resource's text, a placeholder line for
+images, audio and blobs (`[image image/png, 34 KB, not shown]`), a resource link's name and URI,
+and `structuredContent` as JSON when no block carries text. `isError: true` is a tool error
+(decision `allow`); `resultType: input_required` is a tool error naming what the server asked
+for (decision `allow`, rule `mcp.input_required`; the sidecar answers no elicitation or
+sampling request). A JSON-RPC error, a non-2xx answer or a transport failure is `mcp.error`
+(`UNAVAILABLE`); a server that answers `UnsupportedProtocolVersionError`, or 400/404/405
+without a JSON-RPC error (an older revision), is `mcp.unsupported_version`; an unreadable
+`credential` file is `mcp.credential_unavailable`. The credential file is
+`<--tool-secrets-dir>/<secret>`, read on every call, so a rotated Secret takes effect at once; a
+charter names only a file, never a path. Neither token is ever logged or audited.
+
+`a2a` tools (level 10, [docs/design/a2a.md](docs/design/a2a.md),
+[docs/adr/0010-a2a.md](docs/adr/0010-a2a.md)) send one A2A 1.0 `SendMessage` (JSON-RPC
+binding) to a remote agent:
+
+```yaml
+- name: partner_quotes
+  type: a2a
+  description: Quotes from the partner's agent.
+  url: https://agents.partner.example/a2a/quotes   # the agent card's JSONRPC interface URL
+  credential: {secret: partner}                    # optional; or delegation (§5.3)
+```
+
+They take `{ "input": string, "context"?: object, "task_id"?: string }`, which the sidecar
+fills in `agent_spec_json` as their `parameters` (a charter may not set them), default to
+`label: untrusted` and `effect: write`, and are egress like `http` and `mcp` tools
+(`taint.sensitive_egress`, new-origin roles, the origin allowlist). The sidecar sends a `ROLE_USER`
+message with `input` as a text part, `context` as a data part and `task_id` as `taskId`, with
+`A2A-Version: 1.0`, the bearer token and `traceparent`; it polls a task that is still submitted or
+working with `GetTask` until the call's time runs out. The model gets the artifacts' text of a
+completed task; for `TASK_STATE_INPUT_REQUIRED`, the remote agent's question and the `task_id` to
+answer with another call; a failed, rejected or canceled task is a tool error. A JSON-RPC error, a
+non-2xx answer or a transport failure is `a2a.error` (`Unavailable`), an answer that is not
+JSON-RPC or a `VersionNotSupportedError` `a2a.unsupported_version`, an unreadable credential
+`a2a.credential_unavailable`. Arguments other than the three, or of other types, are
+`guardrail.tool_spec`. The agent card is not fetched or verified.
 
 `agent` tools take `{ "input": string, "context"?: object }`: the question,
 and a JSON object the callee gets as its `context` (§4.1), which is how a
@@ -283,6 +355,10 @@ literal segments, and one segment of one or more characters for each
 - A `service` tool `path` and the path of an `http` tool `url` are templates: they start with `/`; have no empty (`//`), `.` or `..` segments; their literal text is RFC 3986 path characters except `;` (`A–Z a–z 0–9 -._~!$&'()*+,=:@`, plus `%XX` escapes other than `%2F`, `%5C`, `%00`; a `;` is written `%3B`); `{name}` has `name` matching `^[a-zA-Z0-9_]+$`; `{name?}` is only the whole last segment.
 - `budgets.max_tokens_per_call` ≤ 128000.
 - `service` tools need `service`, `method`, `path`; `http` tools need `method`, `url`; `agent` tools need `agent`.
+- `mcp` tools (level 9) need `url` (`http(s)://host[:port]/path` with no `{param}` or fragment), `pin` (`sha256:` and 64 lowercase hex digits) and `parameters` (a JSON Schema that compiles; an external `$ref` is refused, inline it under `$defs`); `mcp_tool` is 1 to 128 of `A-Z a-z 0-9 _ - .`; `credential.secret` is a DNS-1123 label; `credential` and `delegation` are mutually exclusive; they may not set `service`, `agent`, `path` or `method`. `mcp_tool` and `pin` are for `mcp` tools only, `credential` for `mcp` and `a2a` tools, and `delegation` for `http`, `mcp` and `a2a` tools.
+- `a2a` tools (level 10) need `url` (as `mcp` tools) and may not set `parameters`, `service`, `agent`, `path` or `method`; `credential` as for `mcp` tools.
+- `agents[].a2a` (level 10) needs the agent's `taint` block; `description` is 1 to 1024 characters; at most 32 `skills`, each with a unique DNS-1123 `id`, a `name` of 1 to 128 and a `description` of 1 to 1024 characters, at most 16 `tags` of 1 to 64 and at most 8 `examples` of 1 to 1024 characters.
+- `authz.callers[].identity` is `local`, a `spiffe://` URI or `a2a:<DNS-1123 label>`; an `a2a:` rule has no `caller_agents`, and every agent it names (other than `*`) has an `a2a` block.
 - `guardrails.allowed_tools` / `allowed_services` keys must be agent names and the values must be declared tools / referenced services.
 - `authz.services[].name` unique; `allow`/`deny` entries are `"<METHOD|*> <path-glob>"` where the glob supports a trailing `*` only, and the path is one a canonical path (§5.1) can be: the template characters above, no `?`, no empty, `.` or `..` segments.
 - Regexes must compile.
@@ -433,10 +509,12 @@ an oversized plain charter before it is parsed.
   new field, but an older sidecar would take it for a service of its own namespace), and 6 when
   it uses a practices or level-6 learning field (`agents[].practices`,
   `agents[].learning.require_evidence`, `agents[].learning.contrast_runs`,
-  `agents[].learning.scopes`), 7 when a tool has an `approval` (§5.4), and 8 when a tool has a
-  `delegation` (§5.3).
+  `agents[].learning.scopes`), 7 when a tool has an `approval` (§5.4), 8 when a tool has a
+  `delegation` (§5.3), 9 when a tool is `type: mcp` or has `mcp_tool`, `pin` or `credential`
+  (§3.1), and 10 for `agents[].a2a`, a `type: a2a` tool and an `a2a:` identity in
+  `authz.callers` (§3.1, §4.5).
   `Charter::level_fields()` lists each such field with its level (a tool once, at the highest).
-  `CHARTER_SCHEMA_LEVEL` = 8 is the level this build understands (sent as `Hello.charter_schema_level`); the control
+  `CHARTER_SCHEMA_LEVEL` = 9 is the level this build understands (sent as `Hello.charter_schema_level`); the control
   plane refuses to push a field to a connected instance below its level, naming the field and
   the instances.
 - The practices need no charter field to be on (§3.3), so a level-6 sidecar gives every agent
@@ -458,7 +536,10 @@ an oversized plain charter before it is parsed.
   (`agentsc_charter::diff::perm`, the custom actions of `services/embassy/tutela.resources.toml`),
   each with a `"<field> requires admin"` reason. Read as roles (`Required::role`, viewer < editor <
   admin) that is editor for `service:write` alone and admin otherwise; any change to
-  `agents[].taint`, and setting or changing a tool's `label` or `effect`, needs admin; the
+  `agents[].taint`, and setting or changing a tool's `label` or `effect`, needs admin; so do a
+  new `http`, `mcp` or `a2a` origin and changing a declared `mcp` tool's `pin`, `mcp_tool` or
+  `parameters` (`service:open_http_origin`), and adding, changing or removing a `credential` or
+  adding or removing an agent's `a2a` block (`service:edit_authz`; its card text is editor's); the
   level-6 fields need editor, and two of their changes are weakened, §6.1. A service with no stored
   charter has nothing to diff: `agentsc_charter::diff::first_charter` says that adopting a pending
   charter needs `service:write` and a first `PUT` needs `service:create_charter` as well.
@@ -707,6 +788,23 @@ declared path or URL template (§3.1) — else `guardrail.tool_spec`.
   (§5.1, `guardrail.path`), the template check against the declared URL's
   path (`guardrail.tool_spec`), then plain HTTP egress of the canonical URL,
   audited as `http_call`.
+- `InvokeMcp(ToolArgumentsRequest) → ToolTextResponse` (level 9) — a `type: mcp` tool:
+  `ToolArgumentsRequest {ToolContext ctx = 1; string arguments_json = 2;}` (a JSON
+  object, `""` for `{}`), `ToolTextResponse {string text = 1; bool is_error = 2;}`.
+  The runtime chooses no URL, header or credential: the sidecar checks the
+  arguments against the tool's `parameters` (`guardrail.tool_spec`), runs the
+  gates of `InvokeHttp` in the same order (taint, quarantine, approval,
+  delegation), verifies the server's definition against `pin`, builds the
+  `tools/call` and renders the result as text (§3.1). `is_error` is the
+  server's `isError`, or an `input_required` answer. Audited as a `tool_call`
+  and an `mcp_call` record (§6).
+- `InvokeA2a(ToolArgumentsRequest) → ToolTextResponse` (level 10) — a `type: a2a`
+  tool: the same messages. The sidecar checks the arguments (`input`, `context`,
+  `task_id`; `guardrail.tool_spec`), runs the gates of `InvokeHttp` in the same
+  order, sends the `SendMessage` and renders the task as text (§3.1); `is_error`
+  is a failed, rejected, canceled or still-working task. Audited as a `tool_call`
+  and an `a2a_call` record (callee `a2a <origin>`, input `{url, arguments}`,
+  output `{state, task_id, is_error, text}`; §6).
 - `ReportEvent(AuditEvent{json}) → Empty` — the runtime's `model_call` records
   of the `mock` model (a provider's calls go through the model gateway, §4.4,
   which writes their records itself; a `model_call` record with any other
@@ -856,6 +954,65 @@ Provider adapters implement one interface (`services/agentscd/src/gateway`:
 request check, upstream request, usage meter). Anthropic is the one shipped;
 an OpenAI-compatible adapter (`POST /v1/chat/completions`) is the next.
 
+### 4.5 A2A callers → sidecar (A2A 1.0, JSON-RPC, `--a2a-addr`)
+
+Level 10 ([docs/design/a2a.md](docs/design/a2a.md)). With `--a2a-addr` set, the sidecar serves
+every agent that has an `a2a` block:
+
+```yaml
+agents:
+  - name: order-triage
+    taint: {mode: enforce}                 # required with a2a
+    a2a:
+      description: Triage of order problems: refunds, delays, damage.   # the card's description
+      skills:                               # optional; absent = one skill, the agent itself
+        - {id: refunds, name: Refunds, description: Refund decisions for orders., tags: [orders], examples: ["Refund order 7"]}
+authz:
+  callers:
+    - identity: a2a:partner                 # the token in <--a2a-callers-dir>/partner
+      agents: [order-triage]
+```
+
+- `GET /a2a/<agent>/.well-known/agent-card.json` is the agent's card (A2A 1.0 `AgentCard`, proto3
+  JSON names): `name`, the block's `description` and `skills`, one `supportedInterfaces` entry
+  (`<--a2a-public-url>/a2a/<agent>`, `JSONRPC`, `1.0`), `version` (the charter version from
+  embassy, else the first 12 hex digits of the charter's SHA-256), `capabilities` with
+  `streaming`, `pushNotifications` and `extendedAgentCard` false, a `Bearer` security scheme,
+  and `text/plain` and `application/json` modes. `GET /.well-known/agent-card.json` is the card
+  when exactly one agent is served. Cards are public; any other agent is `404`, card or
+  endpoint. The system prompt, tools and policy are never published.
+- `POST /a2a/<agent>` is the JSON-RPC endpoint. `Authorization: Bearer <token>` must match the
+  file `<name>` in `--a2a-callers-dir` of an `a2a:<name>` identity that `authz.callers` names for
+  the agent (or `*`); every such file is read and compared in constant time on each request.
+  Otherwise `401` with `WWW-Authenticate: Bearer` and an `authz` record `a2a.unauthenticated`.
+  `A2A-Version` (header, or query parameter) must be 1.x; none means 0.3 and is
+  `VersionNotSupportedError` (`-32009`). Answers are HTTP 200 with a JSON-RPC result or error and
+  carry `A2A-Version`, `traceparent` and, for `SendMessage`, `x-agentsc-request-id`.
+- `SendMessage` is an invocation (§4.1) by the caller `a2a:<name>`, through the whole pipeline:
+  `authz.callers`, quarantine, budgets, guardrails, the run, output checks, and an
+  `agent_invocation` record. The text parts, joined by a blank line, are `input`; data parts
+  (JSON objects) are `context`; file parts are `ContentTypeNotSupportedError` (`-32005`); the
+  role must be `ROLE_USER`. The run starts `untrusted` (§5.2) and has no person's token. The
+  result is always `{"task": …}` with metadata `agentsc.io/request_id`:
+  - status `ok` → `TASK_STATE_COMPLETED`, `output` as the text of artifact `output`;
+  - status `ok` with questions (§4.1 Questions) → `TASK_STATE_INPUT_REQUIRED`, with an agent
+    message holding the rendered questions as text and `{"questions": [{question,
+    recommended}]}` as data;
+  - `denied` → `TASK_STATE_REJECTED`, `error` → `TASK_STATE_FAILED`, each with an agent message
+    `<status> by <rule>: <reason>`.
+- A message with the `taskId` of the caller's input-required task (and its `contextId`, if any)
+  answers it: the sidecar invokes the agent again with the first message's input and context and
+  every answer so far in `context.answers` — the message's text as the answer to the last
+  questions (numbered when there were several), and a data part's `answers` list
+  (`[{question, answer}]`) as it is. Another state is `UnsupportedOperationError` (`-32004`); a
+  task of another caller or agent is `TaskNotFoundError` (`-32001`).
+- `GetTask {id}` returns the caller's task; `CancelTask {id}` cancels one that waits for input
+  (`TASK_STATE_CANCELED`), any other is `TaskNotCancelableError` (`-32002`). A task is kept for an
+  hour after its last change, at most 10 000, in memory; while a run is in progress it shows
+  `TASK_STATE_WORKING`.
+- `SendStreamingMessage`, `SubscribeToTask` and `ListTasks` are `-32004`, the push notification
+  config methods `-32003`, `GetExtendedAgentCard` `-32007`, anything else `-32601`.
+
 ## 5. Identity, mTLS, authz
 
 - Trust domain: `--trust-domain` / `AGENTSC_TRUST_DOMAIN` on `agentscd` and on
@@ -972,23 +1129,25 @@ Design: [docs/design/taint-policy.md](docs/design/taint-policy.md).
 The sidecar keeps, per `request_id`, the set of labels the run has read and
 the tools they came from. A label is added:
 
-- when an invocation of an agent with `taint` starts: `taint.input` (source `input`);
-- when a `service`, `http` or `agent` tool call succeeds: the tool's `label`
-  (source: the tool name);
+- when an invocation of an agent with `taint` starts: `taint.input` (source `input`), and
+  `untrusted` too when the caller is an A2A caller (source `a2a:<name>`, §4.5);
+- when a `service`, `http`, `mcp`, `a2a` or `agent` tool call succeeds: the tool's `label`
+  (source: the tool name); for `mcp` and `a2a` also when the call fails with text the server
+  wrote (a JSON-RPC error message, an error body), which the model sees;
 - from `x-agentsc-taint` on an inbound `InvokeAgent` (source `caller <identity>`)
   and on an `InvokeAgent` response (source `agent <name>`).
 
 `trusted` adds nothing. Labels are never removed; a run's set is forgotten 15
 minutes after its last change. The state is in memory, per sidecar.
 
-For an agent with a `taint` block, each `InvokeService`, `InvokeAgent` and
-`InvokeHttp` tool RPC is checked right after the tool is resolved
+For an agent with a `taint` block, each `InvokeService`, `InvokeAgent`,
+`InvokeHttp` and `InvokeMcp` tool RPC is checked right after the tool is resolved
 (`guardrail.allowed_tools`), before any other rule:
 
 | rule | the run has read | the tool |
 | ---- | ---------------- | -------- |
 | `taint.untrusted_write` | `untrusted` | has `effect: write` |
-| `taint.sensitive_egress` | `sensitive` | has `type: http` |
+| `taint.sensitive_egress` | `sensitive` | has `type: http`, `type: mcp` or `type: a2a` |
 
 The effect is the charter's (`effect`, or the default from the declared
 method), never the request's. With `mode: enforce` the call is denied
@@ -1084,7 +1243,7 @@ Design: [docs/design/agent-registry.md](docs/design/agent-registry.md).
   does not answer, `409` before the agent is registered there. Audited as
   `agent_tokens_revoked` (`reason`: `<principal>: <tutela principal>: epoch <n>`).
 - **Delegated agent tokens** (#25, [docs/adr/0006-delegated-agent-tokens.md](docs/adr/0006-delegated-agent-tokens.md)).
-  An `http` tool may act for the person the invocation is for (schema level 8):
+  An `http` or `mcp` tool may act for the person the invocation is for (schema level 8):
 
   ```yaml
   tools:
@@ -1092,7 +1251,7 @@ Design: [docs/design/agent-registry.md](docs/design/agent-registry.md).
       type: http
       method: POST
       url: https://symphony.example/v1/tasks
-      delegation:              # level 8, optional; http tools only
+      delegation:              # level 8, optional; http and mcp tools only
         audience: symphony     # [a-z][a-z0-9-]{0,62}, delegation_aware in tutelad
   ```
 
@@ -1168,7 +1327,7 @@ embassy scores each agent's part of each run against the agent's own baseline (d
   `--ledger-seal-after`, one replica claims it and scores every agent with records in it (by
   `agent_id`). Records that arrive later are not scored again.
 - **Features:** model turns, tokens per turn, tool calls per turn, distinct tools, distinct hosts
-  (`http_call`), agent calls, denials (any record with `decision: deny`), egress calls.
+  (`http_call`, `mcp_call`), agent calls, denials (any record with `decision: deny`), egress calls.
 - **Baseline:** Welford mean and variance per feature over every run learned, the hosts and tools
   ever seen (at most 64 new ones per run), the MinHash signatures of the last 20 tool sequences.
 - **Score:** 0 before 3 runs. A feature with z ≥ 2 adds min(z, 3); new hosts add min(n, 3); new
@@ -1204,7 +1363,7 @@ With `--audit-fail-closed` (off by default) an unhealthy sink stops new work:
 an invocation from the app (`503`, `status: denied`, rule
 `audit.unavailable`; gRPC `UNAVAILABLE`), a peer's `InvokeAgent` /
 `InvokeService` and the runtime's `InvokeService` / `InvokeAgent` /
-`InvokeHttp` / `ProposeLesson` are refused (`UNAVAILABLE`, `x-agentsc-rule:
+`InvokeHttp` / `InvokeMcp` / `ProposeLesson` are refused (`UNAVAILABLE`, `x-agentsc-rule:
 audit.unavailable`), and `/readyz` answers `503`. Each refusal writes its own
 record (`agent_invocation`, `service_call` inbound or `tool_call`, `decision:
 deny`, rule `audit.unavailable`; a refused `ProposeLesson` writes none), which
@@ -1216,7 +1375,7 @@ and was billed).
 ```json
 {
   "ts": "2026-10-20T19:02:11.482Z",               // the step's END time (RFC 3339, ms); start = ts − latency_ms
-  "kind": "agent_invocation | model_call | tool_call | agent_call | service_call | http_call | authz | guardrail | budget | config | learning",
+  "kind": "agent_invocation | model_call | tool_call | agent_call | service_call | http_call | mcp_call | a2a_call | authz | guardrail | budget | config | learning",
   "request_id": "0c4a3f8e-…",             // one per top-level invocation, propagated unchanged across hops
   "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",   // W3C, propagated via traceparent
   "span_id": "00f067aa0ba902b7",           // this hop
@@ -1226,7 +1385,7 @@ and was billed).
   "agent_id": "agt_0193a1b2-c3d4-7b33-9c44-5d6e7f809102", // its registry id (§5.3); left out when the sidecar has none
   "caller": "local | spiffe://agentsc/ns/agentsc-demo/svc/orders",
   "caller_agent": "ops-assistant",         // when another agent made the call, else null
-  "callee": "ops-assistant | anthropic:claude-opus-5-5 | mock | inventory/stock-analyst | inventory GET /stock | https://…",
+  "callee": "ops-assistant | anthropic:claude-opus-5-5 | mock | inventory/stock-analyst | inventory GET /stock | https://… | mcp https://mcp.example.com search_issues | a2a https://agents.partner.example",
   "direction": "inbound | outbound | internal",
   "input":  <json or string, redacted>,    // what went in (prompt/messages for model_call, args for tools, body for service calls)
   "output": <json or string, redacted>,    // what came out (null when denied)
@@ -1306,7 +1465,7 @@ comes after its children's, and `ts` is that end time (a record's start is
 `ts − latency_ms`). A step whose handler is dropped before it finishes
 (the client disconnected, its deadline passed, the peer reset the stream)
 still writes the records it owes — `agent_invocation`; `tool_call` plus its
-`service_call` / `agent_call` / `http_call`; an inbound `service_call` — with
+`service_call` / `agent_call` / `http_call` / `mcp_call`; an inbound `service_call` — with
 the decision it was authorized with and `error: "cancelled: the caller went
 away or its deadline passed before this finished"`. The target may already
 have acted on it. That cancel guard stamps `ts` when it writes.
@@ -1515,8 +1674,40 @@ agentsc charter schema --crd           # the CustomResourceDefinition charters.a
 agentsc charter to-cr <file>           # the charter as a `Charter` custom resource, YAML; exit 1 if the charter is invalid
 agentsc logs <svc>[,<svc>…] [-n NS] [--context C] [--agent A] [--trace T] [--request R] [--kind <any kind>] [--rule PREFIX] [--denied] [-f] [--raw] [--file F|-] [--tail N]
 agentsc verify <bundle|-> (--keys <jwks.json> | --key <public key>) [--json]   # an evidence bundle, offline (§6.3); exit 0 verifies, 1 a check fails, 2 unreadable
+agentsc mcp import --url U (--tool T… | --all) [--credential-file F]   # `type: mcp` entries with their pins, YAML; annotations only as commented suggestions
+agentsc mcp check <charter> [--secrets-dir D] [--token-file F]   # every mcp tool's pin against its server: exit 0 all match, 1 drift / missing / invalid, 2 a server unreadable
+agentsc skill import <dir>… [--inline-references]   # Agent Skills directories (SKILL.md) as top-level `skills` entries, YAML; refuses scripts/, assets/, and references/ unless inlined
+agentsc skill export <charter> --out <dir> [--skill NAME…] [--force]   # each (or each named) skill as <dir>/<name>/SKILL.md, Agent Skills format
 agentsc version
 ```
+
+`agentsc mcp import` lists the server's tools (and asks `server/discover` for its name), and
+prints one `type: mcp` list item per tool for `agents[].tools`: the server's description, its
+`inputSchema` as `parameters`, the `pin`, and `mcp_tool` when the server's name is not a
+model tool name (dots become `_`). MCP annotations are untrusted, so they become commented
+lines a person reads (`# effect: read  # suggested by readOnlyHint: true`), never fields. It
+refuses a definition the sidecar would refuse (invalid `x-mcp-header`s, a schema that does
+not compile). `agentsc mcp check` prints `ok`, `DRIFT` (with the server's current pinned fields
+and the new pin, for review) or `MISSING` per tool, reading each `credential` file from
+`--secrets-dir` and `--token-file` for the others.
+
+`agentsc skill import` reads each directory's `SKILL.md` ([Agent Skills](https://agentskills.io/specification):
+YAML frontmatter, then a Markdown body) and prints one list item per skill for the top-level
+`skills` (§3.3): `name` (equal to the directory name, and a DNS-1123 label), `description`, and
+the trimmed body as `instructions`; `tools` is left for a person to fill. Each item follows a
+comment naming the directory and the `sha256:` of the `SKILL.md` bytes (and of each inlined
+reference). `allowed-tools` (the skill host's tool names, not charter tools), `license`,
+`compatibility`, `metadata`, fields the spec does not define and the directory's other files
+become comment lines, never fields, and a line break in them cannot end the comment. It refuses a
+non-empty `scripts/` (attache cannot run skill scripts; there is no sandbox) or `assets/`, and a
+non-empty `references/` unless `--inline-references`, which appends each UTF-8 text file under it,
+sorted, as a `## references/<path>` section; the instructions must still fit 32768 bytes. No
+symlink inside a skill directory is followed. `agentsc skill export` validates the charter and
+writes `<dir>/<name>/SKILL.md` with `name`, `description`, `metadata: {source: attache charter,
+charter-tools: "<tools>"}` (`charter-tools` only when the skill has `tools`) and the instructions
+as the body. It refuses a name the spec does not allow (two hyphens in a row), a symlinked target
+and, without `--force`, an existing `SKILL.md`, and checks every skill before writing any file.
+Both exit 0, or 2 with the error.
 
 `agentsc charter to-cr` validates the file (either form) and prints the
 resource form: `metadata: {name, namespace}` from `service`, everything else
@@ -1728,3 +1919,17 @@ reads records from a file instead of kubectl.
   only ends the run.
 - Digests of earlier runs (§9) are per runtime process, so per replica, and
   reset on restart.
+- A2A (§3.1, §4.5) is 1.0 over the JSON-RPC binding only: no gRPC or HTTP+JSON binding, no
+  streaming (`SendStreamingMessage`, `SubscribeToTask`), push notifications, `ListTasks` or
+  extended card. Tasks are in memory for an hour and lost on a restart, a run is not stopped by
+  `CancelTask`, and cards are not signed; an `a2a` tool neither fetches nor verifies the remote
+  card. A2A callers authenticate with static bearer tokens only (no OAuth or mTLS), and an A2A
+  run has no person's token, so a tool with `delegation` is refused in it. File parts are
+  refused both ways.
+- `mcp` tools (§3.1) speak only MCP `2026-07-28` over Streamable HTTP: no stdio servers and no
+  older revisions (sessions, `initialize`). Only tools: no resources, prompts,
+  `subscriptions/listen`, tasks, sampling or roots. An `input_required` answer is a tool error,
+  never answered or retried; images and audio reach the model as placeholders; `structuredContent`
+  is not validated against `outputSchema`. A widened `parameters` is not told from a narrowed
+  one, so any change to it needs admin. The definition cache is per sidecar and per URL, listed
+  with the bearer of the call that refreshed it.

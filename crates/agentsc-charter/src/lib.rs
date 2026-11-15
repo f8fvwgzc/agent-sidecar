@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub mod crd;
 pub mod diff;
+pub mod mcp;
 pub mod resource;
 
 pub use resource::{CharterResource, CharterSpec, ObjectMeta, ResourceServiceSpec};
@@ -37,8 +38,24 @@ pub const MAX_TOKENS_PER_CALL_LIMIT: u32 = 128_000;
 /// sidecar would take for a service of its own namespace), 6 = agent practices
 /// (`agents[].practices`, `learning.require_evidence`, `learning.contrast_runs`,
 /// `learning.scopes`; agent-practices design), 7 = approvals (`tools[].approval`), 8 = delegated
-/// agent tokens (`tools[].delegation`).
-pub const CHARTER_SCHEMA_LEVEL: u32 = 8;
+/// agent tokens (`tools[].delegation`), 9 = MCP tools (`type: mcp`, `tools[].mcp_tool`,
+/// `tools[].pin`, `tools[].credential`; docs/design/mcp-tools.md), 10 = A2A (`agents[].a2a`,
+/// `type: a2a` tools, `a2a:<name>` identities in `authz.callers`; docs/design/a2a.md).
+pub const CHARTER_SCHEMA_LEVEL: u32 = 10;
+/// An `authz.callers` identity of an A2A caller is this prefix and a DNS-1123 label: the name of
+/// its token file in the sidecar's `--a2a-callers-dir` (schema level 10).
+pub const A2A_IDENTITY_PREFIX: &str = "a2a:";
+/// The default of the sidecar's `--tool-secrets-dir`: where `tools[].credential` files are.
+pub const DEFAULT_TOOL_SECRETS_DIR: &str = "/etc/agentsc/tool-secrets";
+/// At most this many `agents[].a2a.skills`.
+pub const MAX_A2A_SKILLS: usize = 32;
+
+/// Is `identity` an A2A caller's (`a2a:<DNS-1123 label>`)?
+pub fn is_a2a_identity(identity: &str) -> bool {
+    identity
+        .strip_prefix(A2A_IDENTITY_PREFIX)
+        .is_some_and(is_dns_label)
+}
 /// A charter is at most this many bytes, measured the same way whatever form it arrived in
 /// ([`Charter::validate`]): its JSON serialization and its plain YAML ([`Charter::to_yaml`], the
 /// text `CharterUpdate.charter_yaml` and the file store carry) are each at most this size, so a
@@ -536,6 +553,45 @@ pub struct AgentSpec {
     /// Taint-aware policy (docs/design/taint-policy.md). Absent = off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub taint: Option<TaintSpec>,
+    /// Serve this agent over A2A 1.0 on the sidecar's `--a2a-addr`, with an agent card made from
+    /// this block (schema level 10, docs/design/a2a.md). Callers are `a2a:<name>` identities in
+    /// `authz.callers`. Needs `taint`: A2A input starts the run `untrusted`. Absent = not served.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub a2a: Option<A2aSpec>,
+}
+
+/// `agents[].a2a`: what the agent card says about the agent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct A2aSpec {
+    /// The card's `description`: what the agent does, for the agents that call it (1 to 1024
+    /// characters). The system prompt is never published.
+    #[schemars(length(min = 1, max = 1024))]
+    pub description: String,
+    /// The card's `skills`, at most 32. Absent = one skill: the agent itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<A2aSkillSpec>,
+}
+
+/// One `agents[].a2a.skills` entry: an A2A `AgentSkill`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct A2aSkillSpec {
+    /// DNS-1123 label, unique in the agent's skills.
+    #[schemars(pattern(DNS_LABEL_PATTERN))]
+    pub id: String,
+    /// 1 to 128 characters.
+    #[schemars(length(min = 1, max = 128))]
+    pub name: String,
+    /// 1 to 1024 characters.
+    #[schemars(length(min = 1, max = 1024))]
+    pub description: String,
+    /// Keywords, at most 16, each 1 to 64 characters.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// Example requests, at most 8, each 1 to 1024 characters.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub examples: Vec<String>,
 }
 
 /// Where a run's data came from. A run carries every label it has read.
@@ -630,6 +686,19 @@ pub enum ToolType {
     Service,
     Agent,
     Http,
+    /// A tool of a remote MCP server (Streamable HTTP, protocol 2026-07-28), called by the
+    /// sidecar (schema level 9).
+    Mcp,
+    /// A remote A2A 1.0 agent (JSON-RPC binding), called by the sidecar (schema level 10).
+    A2a,
+}
+
+impl ToolType {
+    /// Calls leave the mesh for a URL the charter names (`http`, `mcp` and `a2a` tools): the taint
+    /// rule `taint.sensitive_egress`, new-origin roles and the origin allowlist apply to them.
+    pub fn is_egress(self) -> bool {
+        matches!(self, ToolType::Http | ToolType::Mcp | ToolType::A2a)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -670,11 +739,38 @@ pub struct ToolSpec {
     /// = no approval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<ApprovalSpec>,
-    /// `http` tools: each call carries a delegated agent token for this audience in
+    /// `http`, `mcp` and `a2a` tools: each call carries a delegated agent token for this audience in
     /// `Authorization`, obtained from Tutela for the person whose token the invocation carried
     /// (schema level 8, CONTRACT.md §5.3). Absent = no token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegation: Option<DelegationSpec>,
+    /// `mcp` tools: the server's name for the tool, 1 to 128 of `A-Z a-z 0-9 _ - .`. Default:
+    /// `name` (schema level 9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(regex(pattern = r"^[A-Za-z0-9_.-]{1,128}$"))]
+    pub mcp_tool: Option<String>,
+    /// `mcp` tools, required: the server's tool definition an admin reviewed, `sha256:` and the
+    /// hex SHA-256 of the RFC 8785 canonical JSON of its `description`, `inputSchema`,
+    /// `outputSchema` and `annotations` (`agentsc mcp import` writes it). A call is refused
+    /// (`mcp.pin_mismatch`) while the server lists anything else (schema level 9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(regex(pattern = r"^sha256:[0-9a-f]{64}$"))]
+    pub pin: Option<String>,
+    /// `mcp` and `a2a` tools: a static bearer token for the server, read on every call from a
+    /// file of the sidecar's `--tool-secrets-dir` (schema level 9). Not with `delegation`.
+    /// Absent = no token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential: Option<CredentialSpec>,
+}
+
+/// `tools[].credential`: the call carries `Authorization: Bearer <the file's content>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialSpec {
+    /// A file in the sidecar's `--tool-secrets-dir` (a mounted Secret's key): a DNS-1123 label,
+    /// never a path.
+    #[schemars(regex(pattern = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"), length(max = 63))]
+    pub secret: String,
 }
 
 /// `tools[].delegation`: the call acts for the invoking person, with a delegated agent token
@@ -719,7 +815,7 @@ impl ToolSpec {
     /// [`ToolSpec::label`] with its default.
     pub fn effective_label(&self) -> TaintLabel {
         self.label.unwrap_or(match self.tool_type {
-            ToolType::Http => TaintLabel::Untrusted,
+            ToolType::Http | ToolType::Mcp | ToolType::A2a => TaintLabel::Untrusted,
             ToolType::Service | ToolType::Agent => TaintLabel::Trusted,
         })
     }
@@ -731,6 +827,10 @@ impl ToolSpec {
         }
         match self.tool_type {
             ToolType::Agent => ToolEffect::Read,
+            // an MCP server says what a tool does only in annotations, which are untrusted
+            ToolType::Mcp => ToolEffect::Write,
+            // a remote agent may do anything its own tools can
+            ToolType::A2a => ToolEffect::Write,
             ToolType::Service | ToolType::Http => {
                 match self
                     .method
@@ -744,12 +844,36 @@ impl ToolSpec {
             }
         }
     }
+
+    /// An `mcp` tool's name at its server: [`ToolSpec::mcp_tool`], else [`ToolSpec::name`].
+    pub fn mcp_tool_name(&self) -> &str {
+        self.mcp_tool.as_deref().unwrap_or(&self.name)
+    }
 }
 
 /// The `parameters` of an `agent` tool that declares none (CONTRACT.md §3.1): the question as
 /// `input`, and an optional `context` object the callee gets as its context, which is how a
 /// calling agent answers the callee's questions (agent-practices design, Answering). The runtime's
 /// `ToolSpec.input_schema` falls back to the same schema.
+/// The parameters of an `a2a` tool (the runtime offers these; the charter may not set them).
+pub fn a2a_tool_parameters() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "input": { "type": "string", "description": "The message for the remote agent." },
+            "context": {
+                "type": "object",
+                "description": "Optional JSON sent with the message as a data part."
+            },
+            "task_id": {
+                "type": "string",
+                "description": "To answer a remote agent that asked for input: the task_id its answer named."
+            }
+        },
+        "required": ["input"]
+    })
+}
+
 pub fn agent_tool_parameters() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -1060,8 +1184,19 @@ impl Charter {
             if a.taint.is_some() {
                 out.push((format!("agents.{}.taint", a.name), 3));
             }
+            if a.a2a.is_some() {
+                out.push((format!("agents.{}.a2a", a.name), 10));
+            }
             for t in &a.tools {
-                let level = if t.delegation.is_some() {
+                let level = if t.tool_type == ToolType::A2a {
+                    10
+                } else if t.tool_type == ToolType::Mcp
+                    || t.mcp_tool.is_some()
+                    || t.pin.is_some()
+                    || t.credential.is_some()
+                {
+                    9
+                } else if t.delegation.is_some() {
                     8
                 } else if t.approval.is_some() {
                     7
@@ -1077,6 +1212,11 @@ impl Charter {
         }
         for key in self.mesh.peers.keys().filter(|k| is_qualified_peer(k)) {
             out.push((format!("mesh.peers.{key}"), 5));
+        }
+        for (i, c) in self.authz.callers.iter().enumerate() {
+            if c.identity.starts_with(A2A_IDENTITY_PREFIX) {
+                out.push((format!("authz.callers[{i}]"), 10));
+            }
         }
         out
     }
@@ -1167,8 +1307,9 @@ impl Charter {
                 "practices".into(),
                 serde_json::to_value(a.practices_or_default()).unwrap_or(Value::Null),
             );
-            // the taint policy is the sidecar's: the runtime never sees it
+            // the taint policy and the A2A card are the sidecar's: the runtime never sees them
             map.remove("taint");
+            map.remove("a2a");
             if let Some(Value::Array(tools)) = map.get_mut("tools") {
                 for t in tools.iter_mut() {
                     if let Value::Object(t) = t {
@@ -1177,8 +1318,16 @@ impl Charter {
                         t.remove("effect");
                         t.remove("approval");
                         t.remove("delegation");
+                        // an mcp tool's server name, pin and credential: the sidecar builds the
+                        // whole MCP request, the runtime sends only the arguments
+                        t.remove("mcp_tool");
+                        t.remove("pin");
+                        t.remove("credential");
                         if t.get("type") == Some(&json!("agent")) && !t.contains_key("parameters") {
                             t.insert("parameters".into(), agent_tool_parameters());
+                        }
+                        if t.get("type") == Some(&json!("a2a")) {
+                            t.insert("parameters".into(), a2a_tool_parameters());
                         }
                     }
                 }
@@ -1299,6 +1448,7 @@ impl Charter {
             }
             self.validate_agent_v02(agent, &at, &mut errs);
             validate_agent_practices(agent, &at, &mut errs);
+            validate_agent_a2a(agent, &at, &mut errs);
             if agent.budgets.max_tokens_per_call == 0
                 || agent.budgets.max_calls_per_minute == 0
                 || agent.budgets.max_steps == 0
@@ -1350,8 +1500,10 @@ impl Charter {
                     ));
                 }
                 if let Some(d) = &tool.delegation {
-                    if tool.tool_type != ToolType::Http {
-                        errs.push(format!("{tt}: delegation is for http tools only"));
+                    if !tool.tool_type.is_egress() {
+                        errs.push(format!(
+                            "{tt}: delegation is for http, mcp and a2a tools only"
+                        ));
                     }
                     if !is_audience(&d.audience) {
                         errs.push(format!(
@@ -1364,6 +1516,16 @@ impl Charter {
                     && !p.is_object()
                 {
                     errs.push(format!("{tt}: parameters must be a JSON Schema object"));
+                }
+                if tool.tool_type != ToolType::Mcp
+                    && (tool.mcp_tool.is_some() || tool.pin.is_some())
+                {
+                    errs.push(format!("{tt}: mcp_tool and pin are for mcp tools only"));
+                }
+                if !matches!(tool.tool_type, ToolType::Mcp | ToolType::A2a)
+                    && tool.credential.is_some()
+                {
+                    errs.push(format!("{tt}: credential is for mcp and a2a tools only"));
                 }
                 match tool.tool_type {
                     ToolType::Service => {
@@ -1424,9 +1586,11 @@ impl Charter {
                             ));
                         }
                     }
+                    ToolType::Mcp => validate_mcp_tool(tool, &tt, &mut errs),
+                    ToolType::A2a => validate_a2a_tool(tool, &tt, &mut errs),
                 }
                 if let Some(s) = &tool.service
-                    && tool.tool_type != ToolType::Http
+                    && !tool.tool_type.is_egress()
                     && let Err(e) = self.check_peer_name(s)
                 {
                     errs.push(format!("{tt}: service {e}"));
@@ -1485,9 +1649,28 @@ impl Charter {
             }
         }
         for (i, c) in self.authz.callers.iter().enumerate() {
-            if c.identity != LOCAL_IDENTITY && !c.identity.starts_with("spiffe://") {
+            if c.identity.starts_with(A2A_IDENTITY_PREFIX) {
+                if !is_a2a_identity(&c.identity) {
+                    errs.push(format!(
+                        "authz.callers[{i}]: identity {:?} must be a2a: and a DNS-1123 label",
+                        c.identity
+                    ));
+                }
+                if !c.caller_agents.is_empty() {
+                    errs.push(format!(
+                        "authz.callers[{i}]: an A2A caller has no caller_agents (that is a mesh claim)"
+                    ));
+                }
+                for a in c.agents.iter().filter(|a| *a != "*") {
+                    if self.agent(a).is_some_and(|x| x.a2a.is_none()) {
+                        errs.push(format!(
+                            "authz.callers[{i}]: agent {a:?} has no a2a block, so A2A callers cannot reach it"
+                        ));
+                    }
+                }
+            } else if c.identity != LOCAL_IDENTITY && !c.identity.starts_with("spiffe://") {
                 errs.push(format!(
-                    "authz.callers[{i}]: identity must be `local` or a spiffe:// URI"
+                    "authz.callers[{i}]: identity must be `local`, a spiffe:// URI or a2a:<name>"
                 ));
             }
             if c.agents.is_empty() {
@@ -1835,6 +2018,167 @@ pub fn is_dns_label(s: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
         && !s.starts_with('-')
         && !s.ends_with('-')
+}
+
+/// The rules of a `type: mcp` tool (schema level 9, docs/design/mcp-tools.md).
+fn validate_mcp_tool(tool: &ToolSpec, tt: &str, errs: &mut Vec<String>) {
+    match &tool.url {
+        None => errs.push(format!(
+            "{tt}: mcp tools need url (the server's MCP endpoint)"
+        )),
+        Some(u) => {
+            if http_origin(u).is_none() || u.contains(['{', '}', '#']) {
+                errs.push(format!(
+                    "{tt}: url must be http(s)://host[:port]/path, with no {{param}} or fragment"
+                ));
+            }
+        }
+    }
+    match &tool.pin {
+        None => errs.push(format!(
+            "{tt}: mcp tools need pin (agentsc mcp import writes it)"
+        )),
+        Some(p) if !mcp::is_pin(p) => errs.push(format!(
+            "{tt}: pin {p:?} is not sha256: and 64 lowercase hex digits"
+        )),
+        Some(_) => {}
+    }
+    if let Some(m) = &tool.mcp_tool
+        && !mcp::is_tool_name(m)
+    {
+        errs.push(format!(
+            "{tt}: mcp_tool {m:?} must be 1 to 128 of A-Z a-z 0-9 _ - ."
+        ));
+    }
+    match &tool.parameters {
+        None => errs.push(format!(
+            "{tt}: mcp tools need parameters (what the model sees and the sidecar checks)"
+        )),
+        Some(p) if p.is_object() => {
+            if let Err(e) = mcp::arguments_validator(p) {
+                errs.push(format!("{tt}: parameters is not a usable JSON Schema: {e}"));
+            }
+        }
+        Some(_) => {} // reported above
+    }
+    validate_credential(tool, tt, errs);
+    if tool.service.is_some()
+        || tool.agent.is_some()
+        || tool.path.is_some()
+        || tool.method.is_some()
+    {
+        errs.push(format!(
+            "{tt}: mcp tools may not set service, agent, path or method"
+        ));
+    }
+}
+
+/// Is `s` 1 to `max` characters with no control character?
+fn plain_text(s: &str, max: usize) -> bool {
+    let n = s.chars().count();
+    (1..=max).contains(&n) && !s.chars().any(char::is_control)
+}
+
+/// `agents[].a2a` (schema level 10, docs/design/a2a.md).
+fn validate_agent_a2a(agent: &AgentSpec, at: &str, errs: &mut Vec<String>) {
+    let Some(a2a) = &agent.a2a else {
+        return;
+    };
+    if agent.taint.is_none() {
+        errs.push(format!(
+            "{at}: an agent served over A2A needs a taint block (A2A input starts the run untrusted)"
+        ));
+    }
+    let n = a2a.description.chars().count();
+    if !(1..=1024).contains(&n) {
+        errs.push(format!(
+            "{at}: a2a.description must be 1 to 1024 characters"
+        ));
+    }
+    if a2a.skills.len() > MAX_A2A_SKILLS {
+        errs.push(format!(
+            "{at}: a2a.skills has more than {MAX_A2A_SKILLS} entries"
+        ));
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    for (k, sk) in a2a.skills.iter().enumerate() {
+        let sat = format!("{at}: a2a.skills[{k}]");
+        if !is_dns_label(&sk.id) || !ids.insert(sk.id.as_str()) {
+            errs.push(format!("{sat}: id must be a unique DNS-1123 label"));
+        }
+        if !plain_text(&sk.name, 128) {
+            errs.push(format!(
+                "{sat}: name must be 1 to 128 characters, no control characters"
+            ));
+        }
+        let n = sk.description.chars().count();
+        if !(1..=1024).contains(&n) {
+            errs.push(format!("{sat}: description must be 1 to 1024 characters"));
+        }
+        if sk.tags.len() > 16 || !sk.tags.iter().all(|t| plain_text(t, 64)) {
+            errs.push(format!(
+                "{sat}: tags are at most 16, each 1 to 64 characters with no control characters"
+            ));
+        }
+        if sk.examples.len() > 8
+            || !sk
+                .examples
+                .iter()
+                .all(|e| (1..=1024).contains(&e.chars().count()))
+        {
+            errs.push(format!(
+                "{sat}: examples are at most 8, each 1 to 1024 characters"
+            ));
+        }
+    }
+}
+
+/// `tools[].credential`: a file name, and not with `delegation`.
+fn validate_credential(tool: &ToolSpec, tt: &str, errs: &mut Vec<String>) {
+    if let Some(c) = &tool.credential {
+        if !is_dns_label(&c.secret) {
+            errs.push(format!(
+                "{tt}: credential.secret {:?} is not a DNS-1123 label (a file name, never a path)",
+                c.secret
+            ));
+        }
+        if tool.delegation.is_some() {
+            errs.push(format!(
+                "{tt}: credential and delegation are mutually exclusive"
+            ));
+        }
+    }
+}
+
+/// The rules of a `type: a2a` tool (schema level 10, docs/design/a2a.md).
+fn validate_a2a_tool(tool: &ToolSpec, tt: &str, errs: &mut Vec<String>) {
+    match &tool.url {
+        None => errs.push(format!(
+            "{tt}: a2a tools need url (the agent's JSON-RPC endpoint, from its card)"
+        )),
+        Some(u) => {
+            if http_origin(u).is_none() || u.contains(['{', '}', '#']) {
+                errs.push(format!(
+                    "{tt}: url must be http(s)://host[:port]/path, with no {{param}} or fragment"
+                ));
+            }
+        }
+    }
+    validate_credential(tool, tt, errs);
+    if tool.parameters.is_some() {
+        errs.push(format!(
+            "{tt}: a2a tools may not set parameters (they take input, context and task_id)"
+        ));
+    }
+    if tool.service.is_some()
+        || tool.agent.is_some()
+        || tool.path.is_some()
+        || tool.method.is_some()
+    {
+        errs.push(format!(
+            "{tt}: a2a tools may not set service, agent, path or method"
+        ));
+    }
 }
 
 /// `scheme://authority` of an http(s) URL template, if it has no `{param}` before the path.
@@ -2202,6 +2546,9 @@ mod tests {
             effect: None,
             approval: None,
             delegation: None,
+            mcp_tool: None,
+            pin: None,
+            credential: None,
         };
         c.agents[0].tools.push(stock("inventory.warehouse"));
         c.mesh
@@ -2298,7 +2645,7 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("only type: orchestrator"), "{msg}");
         assert!(
-            msg.contains("identity must be `local` or a spiffe:// URI"),
+            msg.contains("identity must be `local`, a spiffe:// URI or a2a:<name>"),
             "{msg}"
         );
         assert!(msg.contains("unknown agent \"ghost\""), "{msg}");
@@ -2509,6 +2856,9 @@ mod tests {
             effect: None,
             approval: None,
             delegation: None,
+            mcp_tool: None,
+            pin: None,
+            credential: None,
         });
         let err = c.validate().unwrap_err().to_string();
         assert!(err.contains("empty segment"), "{err}");
@@ -2558,6 +2908,9 @@ mod tests {
             )
             .replace("        url: https://symphony.example.test/v1/ask\n", "");
         let e = Charter::from_yaml(&service).unwrap_err().to_string();
-        assert!(e.contains("delegation is for http tools only"), "{e}");
+        assert!(
+            e.contains("delegation is for http, mcp and a2a tools only"),
+            "{e}"
+        );
     }
 }

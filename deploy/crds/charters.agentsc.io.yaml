@@ -175,6 +175,8 @@ spec:
                             - service
                             - agent
                             - http
+                            - mcp
+                            - a2a
                           parameters:
                             description: JSON Schema object describing the tool input. Defaults per CONTRACT.md §3.1.
                             x-kubernetes-preserve-unknown-fields: true
@@ -234,7 +236,7 @@ spec:
                           delegation:
                             type: object
                             description: |-
-                              `http` tools: each call carries a delegated agent token for this audience in
+                              `http`, `mcp` and `a2a` tools: each call carries a delegated agent token for this audience in
                               `Authorization`, obtained from Tutela for the person whose token the invocation carried
                               (schema level 8, CONTRACT.md §5.3). Absent = no token.
                             properties:
@@ -246,6 +248,40 @@ spec:
                                 pattern: ^[a-z][a-z0-9-]{0,62}$
                             required:
                             - audience
+                            x-kubernetes-preserve-unknown-fields: true
+                            nullable: true
+                          mcp_tool:
+                            type: string
+                            description: |-
+                              `mcp` tools: the server's name for the tool, 1 to 128 of `A-Z a-z 0-9 _ - .`. Default:
+                              `name` (schema level 9).
+                            nullable: true
+                            pattern: ^[A-Za-z0-9_.-]{1,128}$
+                          pin:
+                            type: string
+                            description: |-
+                              `mcp` tools, required: the server's tool definition an admin reviewed, `sha256:` and the
+                              hex SHA-256 of the RFC 8785 canonical JSON of its `description`, `inputSchema`,
+                              `outputSchema` and `annotations` (`agentsc mcp import` writes it). A call is refused
+                              (`mcp.pin_mismatch`) while the server lists anything else (schema level 9).
+                            nullable: true
+                            pattern: ^sha256:[0-9a-f]{64}$
+                          credential:
+                            type: object
+                            description: |-
+                              `mcp` and `a2a` tools: a static bearer token for the server, read on every call from a
+                              file of the sidecar's `--tool-secrets-dir` (schema level 9). Not with `delegation`.
+                              Absent = no token.
+                            properties:
+                              secret:
+                                type: string
+                                description: |-
+                                  A file in the sidecar's `--tool-secrets-dir` (a mounted Secret's key): a DNS-1123 label,
+                                  never a path.
+                                maxLength: 63
+                                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                            required:
+                            - secret
                             x-kubernetes-preserve-unknown-fields: true
                             nullable: true
                         required:
@@ -426,6 +462,60 @@ spec:
                           - trusted
                           - untrusted
                           - sensitive
+                      x-kubernetes-preserve-unknown-fields: true
+                      nullable: true
+                    a2a:
+                      type: object
+                      description: |-
+                        Serve this agent over A2A 1.0 on the sidecar's `--a2a-addr`, with an agent card made from
+                        this block (schema level 10, docs/design/a2a.md). Callers are `a2a:<name>` identities in
+                        `authz.callers`. Needs `taint`: A2A input starts the run `untrusted`. Absent = not served.
+                      properties:
+                        description:
+                          type: string
+                          description: |-
+                            The card's `description`: what the agent does, for the agents that call it (1 to 1024
+                            characters). The system prompt is never published.
+                          minLength: 1
+                          maxLength: 1024
+                        skills:
+                          type: array
+                          description: 'The card''s `skills`, at most 32. Absent = one skill: the agent itself.'
+                          items:
+                            type: object
+                            description: 'One `agents[].a2a.skills` entry: an A2A `AgentSkill`.'
+                            properties:
+                              id:
+                                type: string
+                                description: DNS-1123 label, unique in the agent's skills.
+                                pattern: ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$
+                              name:
+                                type: string
+                                description: 1 to 128 characters.
+                                minLength: 1
+                                maxLength: 128
+                              description:
+                                type: string
+                                description: 1 to 1024 characters.
+                                minLength: 1
+                                maxLength: 1024
+                              tags:
+                                type: array
+                                description: Keywords, at most 16, each 1 to 64 characters.
+                                items:
+                                  type: string
+                              examples:
+                                type: array
+                                description: Example requests, at most 8, each 1 to 1024 characters.
+                                items:
+                                  type: string
+                            required:
+                            - id
+                            - name
+                            - description
+                            x-kubernetes-preserve-unknown-fields: true
+                      required:
+                      - description
                       x-kubernetes-preserve-unknown-fields: true
                       nullable: true
                   required:

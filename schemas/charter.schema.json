@@ -260,6 +260,17 @@
             }
           ],
           "description": "Taint-aware policy (docs/design/taint-policy.md). Absent = off."
+        },
+        "a2a": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/A2aSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Serve this agent over A2A 1.0 on the sidecar's `--a2a-addr`, with an agent card made from\nthis block (schema level 10, docs/design/a2a.md). Callers are `a2a:<name>` identities in\n`authz.callers`. Needs `taint`: A2A input starts the run `untrusted`. Absent = not served."
         }
       },
       "required": [
@@ -371,7 +382,34 @@
               "type": "null"
             }
           ],
-          "description": "`http` tools: each call carries a delegated agent token for this audience in\n`Authorization`, obtained from Tutela for the person whose token the invocation carried\n(schema level 8, CONTRACT.md §5.3). Absent = no token."
+          "description": "`http`, `mcp` and `a2a` tools: each call carries a delegated agent token for this audience in\n`Authorization`, obtained from Tutela for the person whose token the invocation carried\n(schema level 8, CONTRACT.md §5.3). Absent = no token."
+        },
+        "mcp_tool": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "`mcp` tools: the server's name for the tool, 1 to 128 of `A-Z a-z 0-9 _ - .`. Default:\n`name` (schema level 9).",
+          "pattern": "^[A-Za-z0-9_.-]{1,128}$"
+        },
+        "pin": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "`mcp` tools, required: the server's tool definition an admin reviewed, `sha256:` and the\nhex SHA-256 of the RFC 8785 canonical JSON of its `description`, `inputSchema`,\n`outputSchema` and `annotations` (`agentsc mcp import` writes it). A call is refused\n(`mcp.pin_mismatch`) while the server lists anything else (schema level 9).",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "credential": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CredentialSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`mcp` and `a2a` tools: a static bearer token for the server, read on every call from a\nfile of the sidecar's `--tool-secrets-dir` (schema level 9). Not with `delegation`.\nAbsent = no token."
         }
       },
       "required": [
@@ -381,11 +419,25 @@
       ]
     },
     "ToolType": {
-      "type": "string",
-      "enum": [
-        "service",
-        "agent",
-        "http"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "service",
+            "agent",
+            "http"
+          ]
+        },
+        {
+          "type": "string",
+          "const": "mcp",
+          "description": "A tool of a remote MCP server (Streamable HTTP, protocol 2026-07-28), called by the\nsidecar (schema level 9)."
+        },
+        {
+          "type": "string",
+          "const": "a2a",
+          "description": "A remote A2A 1.0 agent (JSON-RPC binding), called by the sidecar (schema level 10)."
+        }
       ]
     },
     "TaintLabel": {
@@ -445,6 +497,22 @@
         "audience"
       ],
       "description": "`tools[].delegation`: the call acts for the invoking person, with a delegated agent token\n(`typ: agent+jwt`) of exactly this audience (Tutela CONTRACTS.md 4.5)."
+    },
+    "CredentialSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "secret": {
+          "type": "string",
+          "description": "A file in the sidecar's `--tool-secrets-dir` (a mounted Secret's key): a DNS-1123 label,\nnever a path.",
+          "maxLength": 63,
+          "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+        }
+      },
+      "required": [
+        "secret"
+      ],
+      "description": "`tools[].credential`: the call carries `Authorization: Bearer <the file's content>`."
     },
     "Budgets": {
       "type": "object",
@@ -754,6 +822,72 @@
         "audit"
       ],
       "description": "`enforce` denies a call a rule forbids; `audit` allows it and records what would have been\ndenied (rule `taint.would_deny.<rule>`), for trying a policy on real traffic first."
+    },
+    "A2aSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "The card's `description`: what the agent does, for the agents that call it (1 to 1024\ncharacters). The system prompt is never published.",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "skills": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/A2aSkillSpec"
+          },
+          "description": "The card's `skills`, at most 32. Absent = one skill: the agent itself."
+        }
+      },
+      "required": [
+        "description"
+      ],
+      "description": "`agents[].a2a`: what the agent card says about the agent."
+    },
+    "A2aSkillSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "DNS-1123 label, unique in the agent's skills.",
+          "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"
+        },
+        "name": {
+          "type": "string",
+          "description": "1 to 128 characters.",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "description": {
+          "type": "string",
+          "description": "1 to 1024 characters.",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Keywords, at most 16, each 1 to 64 characters."
+        },
+        "examples": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Example requests, at most 8, each 1 to 1024 characters."
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "description"
+      ],
+      "description": "One `agents[].a2a.skills` entry: an A2A `AgentSkill`."
     },
     "Guardrails": {
       "type": "object",

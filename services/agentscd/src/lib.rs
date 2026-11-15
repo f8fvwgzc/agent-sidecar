@@ -1,5 +1,6 @@
 //! `agentscd` — the sidecar. See CONTRACT.md and docs/design/agent-platform.md §6; module names
 //! follow their sections.
+pub mod a2a;
 pub mod app_auth;
 pub mod approvals;
 pub mod audit;
@@ -14,6 +15,7 @@ pub mod http_api;
 pub mod identity;
 pub mod learning;
 pub mod loaded;
+pub mod mcp;
 pub mod mesh;
 pub mod otel;
 pub mod outbox;
@@ -153,6 +155,15 @@ pub async fn start(config: Config) -> anyhow::Result<Sidecar> {
     tasks.push(http_task);
     let (grpc_addr, grpc_task) = grpc_app::serve(state.clone(), config.grpc_addr).await?;
     tasks.push(grpc_task);
+    // A2A 1.0 for agents with an `a2a` block, only when asked for (a2a.rs)
+    let a2a_addr = match config.a2a_addr {
+        Some(addr) => {
+            let (bound, task) = a2a::serve(state.clone(), addr).await?;
+            tasks.push(task);
+            Some(bound)
+        }
+        None => None,
+    };
 
     // Mesh over mTLS: standalone only with an identity from --tls-dir; managed always (the
     // certificate arrives through the resolver once issued).
@@ -181,7 +192,7 @@ pub async fn start(config: Config) -> anyhow::Result<Sidecar> {
         namespace = %state.namespace,
         identity = %state.self_identity,
         managed = state.managed,
-        %http_addr, %grpc_addr, ?mesh_addr,
+        %http_addr, %grpc_addr, ?mesh_addr, ?a2a_addr,
         agents = state.loaded().map(|l| l.charter.agents.len()).unwrap_or(0),
         "agentscd is up"
     );

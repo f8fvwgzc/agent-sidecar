@@ -3,7 +3,7 @@
 //! a rule forbids:
 //!
 //! - `taint.untrusted_write`: after untrusted data, no tool whose effect is `write`;
-//! - `taint.sensitive_egress`: after sensitive data, no `http` tool (data leaving);
+//! - `taint.sensitive_egress`: after sensitive data, no `http` or `mcp` tool (data leaving);
 //! - `taint.untrusted_learning`: a lesson drawn from a run that read untrusted data is refused
 //!   (with an enforcing policy) and never becomes a note on its own: `learning.mode: auto` waits
 //!   for review for such a run (learning.rs). Memory outlives the run, so an injected note would
@@ -17,7 +17,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use agentsc_charter::{AgentSpec, Charter, TaintLabel, TaintMode, ToolEffect, ToolSpec, ToolType};
+use agentsc_charter::{AgentSpec, Charter, TaintLabel, TaintMode, ToolEffect, ToolSpec};
 use agentsc_common::authz::Verdict;
 
 /// gRPC metadata key carrying a run's labels between sidecars: `untrusted,sensitive`.
@@ -123,7 +123,7 @@ impl TaintStore {
             && tool.effective_effect() == ToolEffect::Write
         {
             (RULE_UNTRUSTED_WRITE, TaintLabel::Untrusted, "writes")
-        } else if labels.contains(&TaintLabel::Sensitive) && tool.tool_type == ToolType::Http {
+        } else if labels.contains(&TaintLabel::Sensitive) && tool.tool_type.is_egress() {
             (
                 RULE_SENSITIVE_EGRESS,
                 TaintLabel::Sensitive,
@@ -226,6 +226,9 @@ mod tests {
             effect: None,
             approval: None,
             delegation: None,
+            mcp_tool: None,
+            pin: None,
+            credential: None,
         }
     }
 
@@ -269,6 +272,16 @@ mod tests {
             .check(&a, &tool("post_webhook", ToolType::Http, "GET"), "r1")
             .expect("denied");
         assert_eq!(v.rule, RULE_SENSITIVE_EGRESS);
+        // an MCP server is outside too, even for a tool marked read
+        let mut search = tool("search_issues", ToolType::Mcp, "GET");
+        search.effect = Some(ToolEffect::Read);
+        let v = s.check(&a, &search, "r1").expect("denied");
+        assert_eq!(v.rule, RULE_SENSITIVE_EGRESS);
+        assert!(
+            s.check(&a, &tool("get_order", ToolType::Service, "GET"), "r1")
+                .is_none(),
+            "a service in the mesh is not egress"
+        );
     }
 
     #[test]

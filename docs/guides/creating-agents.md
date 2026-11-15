@@ -15,10 +15,12 @@ Contents:
 - [Budgets](#budgets)
 - [Guardrails](#guardrails)
 - [Prompt injection: taint rules](#prompt-injection-taint-rules)
+- [Skills](#skills)
 - [Practices](#practices)
 - [Learning](#learning)
 - [Authz for agents](#authz-for-agents)
 - [Calling an agent from your app](#calling-an-agent-from-your-app)
+- [Serving an agent over A2A](#serving-an-agent-over-a2a)
 - [Testing with the mock model](#testing-with-the-mock-model)
 - [Switching to Claude](#switching-to-claude)
 - [Editor autocompletion](#editor-autocompletion)
@@ -435,27 +437,30 @@ One service can have many agents. [Monolith and monorepo](monolith-and-monorepo.
 
 ## Tools
 
-A tool is something the model may ask for. There are three types:
+A tool is something the model may ask for. There are five types:
 
 | Type | What it does | Who performs it |
 | --- | --- | --- |
 | `service` | An HTTP request to your own app, or to another service's app | The sidecar. For another service, its sidecar forwards to its app. |
 | `http` | An HTTP request to a fixed external origin | The sidecar |
 | `agent` | Runs another agent, in this service or in another service | The sidecar |
+| `mcp` | Calls one tool of a remote MCP server | The sidecar |
+| `a2a` | Sends a message to a remote A2A agent, outside the mesh | The sidecar |
 
-These are the tool fields. "no" means validation rejects the field for that type.
+These are the tool fields. "no" means validation rejects the field for that type. `a2a` tools take only `name`, `description`, `url`, `credential` or `delegation`, `label`, `effect` and `approval` ([A2A tools](#a2a-tools)).
 
-| Field | `service` | `agent` | `http` |
-| --- | --- | --- | --- |
-| `name` | required | required | required |
-| `description` | required | required | required |
-| `type` | `service` | `agent` | `http` |
-| `parameters` | optional | optional | optional |
-| `service` | required | optional (omit = local agent) | no |
-| `method` | required | no | required |
-| `path` | required, starts with `/` | no | no |
-| `agent` | no | required | no |
-| `url` | no | no | required |
+| Field | `service` | `agent` | `http` | `mcp` |
+| --- | --- | --- | --- | --- |
+| `name` | required | required | required | required |
+| `description` | required | required | required | required |
+| `type` | `service` | `agent` | `http` | `mcp` |
+| `parameters` | optional | optional | optional | required |
+| `service` | required | optional (omit = local agent) | no | no |
+| `method` | required | no | required | no |
+| `path` | required, starts with `/` | no | no | no |
+| `agent` | no | required | no | no |
+| `url` | no | no | required | required (the MCP endpoint) |
+| `mcp_tool`, `pin`, `credential` | no | no | no | `pin` required, the others optional |
 
 Common rules:
 
@@ -621,6 +626,37 @@ A tool has no field for request headers or credentials. If an API needs a key, p
 
 Your app sends the person's token with the invocation, `X-Agentsc-Subject-Token: <token for audience attache>`. For each call the sidecar gets a short-lived token (`typ: agent+jwt`: the person as `sub`, this agent as the actor) and sends it as `Authorization: Bearer`. Without a person's token, or when Tutela says no, the call is refused (`delegation.no_subject`, `delegation.refused`, `delegation.unavailable`) and never goes out. Adding or changing a `delegation` needs an admin, and every sidecar of the service on a version that knows charter schema level 8 ([CONTRACT.md §5.3](../../CONTRACT.md#53-agent-principals-and-the-registry)).
 
+### MCP tools
+
+An `mcp` tool calls one tool of a remote MCP server, for example a GitHub or Jira server. The server must speak MCP `2026-07-28` over Streamable HTTP. Write the entries with `agentsc mcp import`, which reads the server's definitions and prints them ready to paste under `tools:`:
+
+```sh
+agentsc mcp import --url https://mcp.example.com/mcp --tool search_issues --credential-file ./pat
+```
+
+```yaml
+- name: search_issues
+  type: mcp
+  description: Search issues in acme/app.   # what the model reads: rewrite it as you like
+  url: https://mcp.example.com/mcp
+  pin: sha256:3b0c…                         # the server's definition you reviewed
+  parameters:                               # what the model sees and the sidecar checks
+    type: object
+    properties:
+      repo:  { type: string, enum: [acme/app] }   # narrowed: only this repo
+      query: { type: string, maxLength: 256 }
+    required: [repo, query]
+    additionalProperties: false
+  effect: read                              # import suggests it from readOnlyHint, as a comment
+  credential: { secret: github-pat }        # a file in the sidecar's --tool-secrets-dir
+```
+
+- The model sees your `name`, `description` and `parameters`, never the server's text. Narrow `parameters` to what the agent needs: the sidecar refuses arguments outside it (`guardrail.tool_spec`) before anything is sent.
+- `pin` fixes the server's definition. If the server changes the tool, calls are refused (`mcp.pin_mismatch`) until you review the change and pin it again. Run `agentsc mcp check charter.yaml` in CI: it exits 1 on drift and shows the new definition.
+- The runtime sends only the arguments. The sidecar builds the request, adds the credential (`credential`, or `delegation` as for an `http` tool) and reads a JSON or streamed answer. The model gets the result as text, and `isError` as a tool error. It is audited as `mcp_call`.
+- What an MCP server returns is `untrusted` by default, and its tools `write` unless you set `effect: read`. A run that has read `sensitive` data may not call an MCP server ([Prompt injection: taint rules](#prompt-injection-taint-rules)). Add `approval` to have a person approve each call.
+- A new MCP server, a changed `pin`, `mcp_tool` or `parameters`, and a `credential` need an admin, and every sidecar on a version that knows charter schema level 9 ([CONTRACT.md §3.1](../../CONTRACT.md#31-tools)).
+
 ### Agent tools
 
 An `agent` tool runs another agent. Only an agent with `type: orchestrator` may declare one. See [Orchestrators](#orchestrators).
@@ -670,6 +706,24 @@ What is the status of invoice INV-1001?
 ```
 
 A tool result is the response body as text, up to 20,000 characters. It is marked as an error when the HTTP status is 400 or higher. A denied call returns `denied by <rule>: <reason>`. A failed call (for example, the app is down) returns `tool failed: ...`. When the model asks for several tools in one turn, the runtime runs them one after another.
+
+### A2A tools
+
+An `a2a` tool sends one [A2A 1.0](https://a2a-protocol.org/latest/specification/) message to an agent outside the mesh, such as a partner's agent. Take the URL from the agent card's `supportedInterfaces` entry whose `protocolBinding` is `JSONRPC`:
+
+```yaml
+- name: partner_quotes
+  type: a2a
+  description: Ask the partner's agent for a price quote. Say the item and the quantity.
+  url: https://agents.partner.example/a2a/quotes
+  credential: { secret: partner }           # a file in the sidecar's --tool-secrets-dir
+```
+
+- The model gets three parameters: `input` (the message), `context` (optional JSON, sent as a data part) and `task_id`. You cannot set `parameters`.
+- When the remote agent needs more input, the tool result says so and names a `task_id`. The model answers by calling the tool again with that `task_id`.
+- The answer is untrusted by default (`label: untrusted`) and the tool counts as a write (`effect: write`), because a remote agent can do anything its own tools can. Set them only after you know what the agent does.
+- A new A2A origin needs an admin, like a new `http` origin, and a run that has read `sensitive` data may not call it (`taint.sensitive_egress`).
+- The sidecar never fetches the remote card, so its descriptions never reach your model. Write the tool's `description` yourself.
 
 ## Orchestrators
 
@@ -940,6 +994,53 @@ agentsc logs orders --rule taint.would_deny
 
 Changing `taint`, `label` or `effect` needs the admin role, and loosening them shows up as `weakened` in the audit. [The design note](../design/taint-policy.md) covers the limits, for example: the whole run is the unit, so split "read and propose" from "write".
 
+## Skills
+
+A skill is a named piece of instructions in the top-level `skills:` list. An agent lists the skills it uses in `agents[].skills`. A skill shorter than 2048 bytes goes into the system prompt. The model loads a longer one when it needs it, with the runtime's `load_skill` tool. `tools` names the charter tools the instructions use, and each must be allowed for every agent that uses the skill ([CONTRACT.md §3.3](../../CONTRACT.md#33-skills-harness-learning-telemetry-v02-practices-level-6)).
+
+```yaml
+skills:
+  - name: refund-policy
+    description: How to decide a refund. Use when a customer asks for money back.
+    instructions: |
+      Refund an order under 50 EUR at once. Above that, ask a person.
+    tools: [get_order]
+agents:
+  - name: support
+    model: claude-opus-5-5
+    skills: [refund-policy]
+    tools: [...]            # get_order among them
+```
+
+### Agent Skills: import and export
+
+`agentsc skill import` reads skill directories in the [Agent Skills](https://agentskills.io/specification) format (a `SKILL.md` with YAML frontmatter and a Markdown body) and prints entries to paste under `skills:`:
+
+```sh
+agentsc skill import ./skills/refund-policy
+```
+
+```yaml
+# Agent Skill ./skills/refund-policy (SKILL.md sha256:fc48…), imported by agentsc skill import.
+# license: Apache-2.0
+# allowed-tools: Read (tool names of the skill's host agent, not charter tools)
+# tools: none imported. List the charter tools these instructions use under `tools`; …
+- name: refund-policy
+  description: How to decide a refund. Use when a customer asks for money back.
+  instructions: |-
+    # Refunds
+    …
+```
+
+- The first comment names the directory and the sha256 of its `SKILL.md`. Keep it in the charter: it records which version of the skill you reviewed.
+- `name` must equal the directory name and be a DNS-1123 label. The Markdown body becomes `instructions` (at most 32768 bytes).
+- `allowed-tools` names tools of the agent the skill was written for, such as `Read` or `Bash`, not your charter tools. It stays a comment, so add `tools` yourself. `license`, `compatibility`, `metadata` and the other files of the directory become comments too.
+- A skill with files in `scripts/` is refused. There is no sandbox, so an agent cannot run them. Files in `assets/` are refused too, because a charter skill is text only.
+- Files in `references/` are refused unless you pass `--inline-references`. Then each text file is appended to the instructions as a `## references/<file>` section, with its sha256 in the comments. Binary files are refused, and the total must still fit 32768 bytes.
+- The command follows no symlink inside a skill directory.
+
+`agentsc skill export charter.yaml --out ./skills` writes `./skills/<name>/SKILL.md` for each skill, or for each `--skill NAME`. The frontmatter has `name`, `description` and `metadata` with `source: attache charter` and, when the skill has `tools`, `charter-tools`. An existing `SKILL.md` is kept unless you pass `--force`. A name with two hyphens in a row is a valid charter skill name but not a valid Agent Skills name, so export refuses it.
+
 ## Practices
 
 Every agent gets a small set of working habits from the platform. The runtime puts a fixed text for each one in the system prompt, after your `system` and your inline skills. They are on by default. Your charter can turn each one off or tune it, but it can't change the words. To give other advice, write it in `system` or in a skill.
@@ -1125,12 +1226,13 @@ Things to know:
 
 | Field | Required | Meaning |
 | --- | --- | --- |
-| `identity` | yes | `local`, or a SPIFFE id such as `spiffe://agentsc/ns/shop/svc/billing`. |
+| `identity` | yes | `local`, a SPIFFE id such as `spiffe://agentsc/ns/shop/svc/billing`, or `a2a:<name>` for a caller of the A2A server ([Serving an agent over A2A](#serving-an-agent-over-a2a)). |
 | `agents` | yes, not empty | Agent names of this charter, or `"*"` for all. |
 | `caller_agents` | no | Calling agents this rule admits. Empty means any caller, including a direct call from the app. |
 
 - `local` means calls to the app API on `127.0.0.1` (your app container), and calls from your own orchestrators.
 - A SPIFFE id means calls from that service's sidecar over mTLS. The id comes from the caller's certificate, never from a header.
+- `a2a:<name>` means calls to the A2A server that carry the token in the file `<name>` of the sidecar's `--a2a-callers-dir`. It may only name agents with an `a2a` block, and has no `caller_agents`.
 - An invocation is allowed when one rule has the caller's identity, lists the agent (or `"*"`), and has an empty `caller_agents` or one that contains the calling agent.
 - There is no default for callers. Without a matching rule, the invocation is denied: `authz.callers.default` when no rule has that identity, `authz.callers.<who>` when a rule has the identity but does not admit the call. `<who>` is the service name, or `local`.
 - This check runs before the agent name is looked up. A peer without a rule cannot learn your agent names.
@@ -1267,6 +1369,37 @@ When `status` is `ok`, the response is the `InvokeAgentResponse` message with th
 | other errors | `UNAVAILABLE` |
 
 The status message is `<rule>: <reason>`. The trailing metadata has `x-agentsc-rule` and `x-agentsc-request-id`.
+
+## Serving an agent over A2A
+
+An agent with an `a2a` block can be called by agents outside the mesh over [A2A 1.0](https://a2a-protocol.org/latest/specification/), once the sidecar runs with `--a2a-addr`:
+
+```yaml
+agents:
+  - name: order-triage
+    taint: { mode: enforce }      # required: A2A input starts the run untrusted
+    a2a:
+      description: Triage of order problems — refunds, delays, damage.
+      skills:                     # optional; without it the card lists the agent as one skill
+        - id: refunds
+          name: Refunds
+          description: Decide refunds for damaged or late orders.
+          tags: [orders, refunds]
+          examples: ["Order 7 arrived broken"]
+authz:
+  callers:
+    - identity: a2a:partner       # its token is the file /etc/agentsc/a2a-callers/partner
+      agents: [order-triage]
+```
+
+Run the sidecar with `--a2a-addr 0.0.0.0:8443 --a2a-public-url https://agents.example.com`, behind an ingress or gateway that terminates TLS. Then:
+
+- The agent card is at `https://agents.example.com/a2a/order-triage/.well-known/agent-card.json`. It shows the name, the `a2a` description and skills, and nothing else: no system prompt, tools or policy.
+- A partner's agent sends `SendMessage` to `https://agents.example.com/a2a/order-triage` with `Authorization: Bearer <token>` and `A2A-Version: 1.0`. Each message is an invocation like an app's, by the caller `a2a:partner`, with the same budgets, guardrails, taint rules and audit.
+- When your agent asks the caller a question (`ask_caller`), the partner gets a task in `TASK_STATE_INPUT_REQUIRED`. Its reply to that task runs your agent again, with the original message and every answer so far in `context.answers`.
+- Tasks are kept in memory for an hour and are lost when the sidecar restarts. Streaming and push notifications are not supported.
+
+Adding or removing an `a2a` block needs an admin, because it publishes the agent. Changing the card's text does not.
 
 ## Testing with the mock model
 

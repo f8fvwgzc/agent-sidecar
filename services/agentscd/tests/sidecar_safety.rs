@@ -170,6 +170,9 @@ fn charter(app: SocketAddr, audit: &Path) -> Charter {
             effect: None,
             approval: None,
             delegation: None,
+            mcp_tool: None,
+            pin: None,
+            credential: None,
         });
     }
     c.guardrails

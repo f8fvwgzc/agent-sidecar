@@ -39,11 +39,13 @@ pub const MAX_START_BYTES: usize = 32 * 1024 * 1024;
 /// Traces evicted at once when [`MAX_TRACES`] is reached.
 const EVICT_BATCH: usize = 100;
 /// The kinds that are spans.
-pub const SPAN_KINDS: [&str; 6] = [
+pub const SPAN_KINDS: [&str; 8] = [
     "agent_invocation",
     "agent_call",
     "service_call",
     "http_call",
+    "mcp_call",
+    "a2a_call",
     "model_call",
     "tool_call",
 ];

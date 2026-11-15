@@ -385,6 +385,9 @@ fn editors_may_change_agents_skills_and_local_callers() {
             effect: None,
             approval: None,
             delegation: None,
+            mcp_tool: None,
+            pin: None,
+            credential: None,
         });
         c.agents[0].tools.push(ToolSpec {
             name: "stock".into(),
@@ -400,6 +403,9 @@ fn editors_may_change_agents_skills_and_local_callers() {
             effect: None,
             approval: None,
             delegation: None,
+            mcp_tool: None,
+            pin: None,
+            credential: None,
         });
         c.guardrails.allowed_tools.remove("support");
     });

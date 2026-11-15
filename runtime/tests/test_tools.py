@@ -96,3 +96,53 @@ def test_a_context_that_is_not_an_object_never_reaches_the_sidecar(sidecar, ctx)
     assert out.is_error and out.decision == "deny" and out.rule == "guardrail.tool_spec"
     assert "context must be a JSON object, got str" in out.content
     assert sidecar.calls == []
+
+
+def test_an_a2a_tool_sends_only_its_arguments(sidecar, ctx):
+    # the sidecar fills the fixed parameters into the spec (runtime_spec); the runtime offers them
+    params = {
+        "type": "object",
+        "properties": {"input": {"type": "string"}, "context": {"type": "object"}, "task_id": {"type": "string"}},
+        "required": ["input"],
+    }
+    quotes = ToolSpec(
+        name="partner_quotes",
+        description="Quotes from the partner's agent.",
+        type="a2a",
+        url="https://agents.partner.example/a2a/quotes",
+        parameters=params,
+    )
+    out = asyncio.run(run_tool(quotes, {"input": "Quote 40", "task_id": "t-1"}, ctx, sidecar))
+    assert (out.content, out.is_error, out.decision, out.kind) == ("quote for: Quote 40", False, "allow", "a2a_call")
+    assert out.callee == "a2a partner_quotes"
+    assert sidecar.calls == [("a2a", ("partner_quotes", {"input": "Quote 40", "task_id": "t-1"}))]
+    assert quotes.anthropic_tool()["input_schema"] == params
+
+    # a failed remote task is a tool error the model sees
+    fails = quotes.model_copy(update={"name": "fails"})
+    out = asyncio.run(run_tool(fails, {"input": "x"}, ctx, sidecar))
+    assert (out.is_error, out.decision) == (True, "allow")
+
+
+def test_an_mcp_tool_sends_only_its_arguments(sidecar, ctx):
+    search = ToolSpec(
+        name="search_issues",
+        description="Search issues in acme/app.",
+        type="mcp",
+        url="https://mcp.example.com/mcp",
+        parameters={"type": "object", "properties": {"query": {"type": "string"}}},
+    )
+    out = asyncio.run(run_tool(search, {"repo": "acme/app", "query": "crash"}, ctx, sidecar))
+    assert (out.content, out.is_error, out.decision, out.kind) == ("found: crash", False, "allow", "mcp_call")
+    assert sidecar.calls == [("mcp", ("search_issues", {"repo": "acme/app", "query": "crash"}))]
+    assert search.anthropic_tool()["input_schema"] == search.parameters
+
+    # the server's isError is a tool error the model sees
+    fails = search.model_copy(update={"name": "fails"})
+    out = asyncio.run(run_tool(fails, {}, ctx, sidecar))
+    assert (out.content, out.is_error, out.decision) == ("no such repo", True, "allow")
+
+    # a refusal (a drifted pin, say) names its rule
+    denied = search.model_copy(update={"name": "denied"})
+    out = asyncio.run(run_tool(denied, {}, ctx, sidecar))
+    assert (out.is_error, out.decision, out.rule) == (True, "deny", "mcp.pin_mismatch")

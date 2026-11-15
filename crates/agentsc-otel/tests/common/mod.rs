@@ -136,6 +136,28 @@ pub fn one_of_every_kind() -> Vec<(&'static str, AuditRecord)> {
     r.latency_ms = 10000;
     out.push(("http_call", r));
 
+    let mut r = base(Kind::McpCall, Direction::Outbound);
+    r.ts = "2026-10-21T10:00:00.800Z".into();
+    r.span_id = "5656565656565656".into();
+    r.parent_span_id = Some(INVOCATION_SPAN.into());
+    r.callee = "mcp https://mcp.example.com search_issues".into();
+    r.input = json!({"url": "https://mcp.example.com/mcp", "tool": "search_issues",
+                     "arguments": {"repo": "acme/app", "query": "crash"}});
+    r.output = json!({"result_type": "complete", "is_error": false, "text": "2 issues"});
+    r.latency_ms = 120;
+    out.push(("mcp_call", r));
+
+    let mut r = base(Kind::A2aCall, Direction::Outbound);
+    r.ts = "2026-10-21T10:00:00.850Z".into();
+    r.span_id = "5757575757575757".into();
+    r.parent_span_id = Some(INVOCATION_SPAN.into());
+    r.callee = "a2a https://agents.partner.example".into();
+    r.input =
+        json!({"url": "https://agents.partner.example/a2a/quotes", "input": "Quote 40 WIDGET-1"});
+    r.output = json!({"state": "TASK_STATE_COMPLETED", "task_id": "t-1", "is_error": false, "text": "EUR 380"});
+    r.latency_ms = 640;
+    out.push(("a2a_call", r));
+
     let mut r = base(Kind::Authz, Direction::Inbound);
     r.ts = "2026-10-21T10:00:00.010Z".into();
     r.span_id = "6666666666666666".into();

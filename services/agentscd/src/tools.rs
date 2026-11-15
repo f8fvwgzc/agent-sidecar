@@ -5,7 +5,8 @@
 //! name a run the sidecar started, runs.rs; the run's trace and depth replace the runtime's), it
 //! must match a tool the agent declared and may use, the path is canonicalised before
 //! authz, and every outcome — allowed, denied, failed or cancelled — leaves exactly one `tool_call`
-//! record plus, once something was actually attempted, one `service_call` / `agent_call` / `http_call`.
+//! record plus, once something was actually attempted, one `service_call` / `agent_call` /
+//! `http_call` / `mcp_call`.
 //! `ReportEvent` takes only what design §6.5 allows, for runs this sidecar knows.
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -20,8 +21,8 @@ use agentsc_common::trace::TraceContext;
 use agentsc_proto::sidecar_tools_server::{SidecarTools, SidecarToolsServer};
 use agentsc_proto::{
     AuditEvent, Empty, InvokeAgentRequest, InvokeAgentResponse, LessonRequest, LessonResponse,
-    ServiceRequest, ServiceResponse, ToolAgentRequest, ToolContext, ToolHttpRequest,
-    ToolServiceRequest,
+    ServiceRequest, ServiceResponse, ToolAgentRequest, ToolArgumentsRequest, ToolContext,
+    ToolHttpRequest, ToolServiceRequest, ToolTextResponse,
 };
 use serde_json::{Value, json};
 use tokio_stream::wrappers::UnixListenerStream;
@@ -331,7 +332,8 @@ impl<'a> Call<'a> {
         self.svc.state.audit.write(rec);
     }
 
-    /// The record of what was actually attempted (`service_call` / `agent_call` / `http_call`).
+    /// The record of what was actually attempted (`service_call` / `agent_call` / `http_call` /
+    /// `mcp_call`).
     // One argument per field of the record; none has a default, so a builder would only move them.
     #[allow(clippy::too_many_arguments)]
     fn attempt(
@@ -1438,6 +1440,386 @@ impl SidecarTools for ToolsService {
                 Err(status_with_rule(Code::Unavailable, e.rule, &e.reason))
             }
         }
+    }
+
+    /// A `type: mcp` tool (charter schema level 9, docs/design/mcp-tools.md). The runtime sends
+    /// only the arguments; the sidecar checks them against the charter's `parameters`, runs the
+    /// gates of `invoke_http` in the same order, verifies the server's definition against the
+    /// tool's `pin`, and builds the whole `tools/call` itself: URL, headers and credentials come
+    /// from the charter, never from the runtime.
+    async fn invoke_mcp(
+        &self,
+        request: Request<ToolArgumentsRequest>,
+    ) -> Result<Response<ToolTextResponse>, Status> {
+        use crate::mcp::{self, ListContext, Outcome};
+        self.state.audit.gate_tool(request.get_ref().ctx.as_ref())?;
+        let deadline = deadline::from_metadata(request.metadata());
+        let req = request.into_inner();
+        let (c, trace) = ctx_of(&req.ctx)?;
+        let snap = self.state.loaded().ok_or_else(no_charter)?;
+        let mut call = Call {
+            svc: self,
+            c,
+            trace,
+            started: Instant::now(),
+            deadline,
+            withhold: None,
+        };
+        let parsed: Result<Value, String> = if req.arguments_json.trim().is_empty() {
+            Ok(json!({}))
+        } else {
+            serde_json::from_str(&req.arguments_json).map_err(|e| e.to_string())
+        };
+        let arguments = parsed
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|_| Value::String(req.arguments_json.clone()));
+        let mut input = json!({ "arguments": arguments });
+
+        if let Err(v) = call.bind() {
+            return Err(call.deny(&input, v));
+        }
+        let (spec, tool) = match self.tool_spec(&snap, &call.c.agent, &call.c.tool) {
+            Ok(x) => x,
+            Err(v) => return Err(call.deny(&input, v)),
+        };
+        let (ToolType::Mcp, Some(url), Some(params)) = (
+            tool.tool_type,
+            tool.url.as_deref(),
+            tool.parameters.as_ref(),
+        ) else {
+            return Err(call.deny(
+                &input,
+                Verdict::deny(RULE_TOOL_SPEC, format!("{} is not an mcp tool", tool.name)),
+            ));
+        };
+        let mcp_tool = tool.mcp_tool_name();
+        input = json!({ "url": url, "tool": mcp_tool, "arguments": arguments });
+        // the arguments must be a JSON object that fits the charter's (possibly narrowed) schema
+        let bad =
+            |reason: String| Verdict::deny(RULE_TOOL_SPEC, format!("{}: {reason}", tool.name));
+        match &parsed {
+            Err(e) => {
+                return Err(call.deny(&input, bad(format!("the arguments are not JSON: {e}"))));
+            }
+            Ok(a) if !a.is_object() => {
+                return Err(call.deny(&input, bad("the arguments must be a JSON object".into())));
+            }
+            Ok(_) => {}
+        }
+        let checked = agentsc_charter::mcp::arguments_validator(params)
+            .map_err(|e| format!("its parameters schema does not compile: {e}"))
+            .and_then(
+                |v| match agentsc_charter::mcp::argument_errors(&v, &arguments) {
+                    Some(why) => Err(format!(
+                        "the arguments break the charter's parameters: {why}"
+                    )),
+                    None => Ok(()),
+                },
+            );
+        if let Err(reason) = checked {
+            return Err(call.deny(&input, bad(reason)));
+        }
+        call.taint_gate(spec, tool, &input)?;
+        call.quarantine_gate(&input)?;
+        call.approval_gate(tool, &input).await?;
+        let mut bearer = call.delegation_gate(tool, &input).await?;
+        if let Some(cred) = &tool.credential {
+            match mcp::read_credential(&self.state.config.tool_secrets_dir, &cred.secret).await {
+                Ok(token) => bearer = Some(token),
+                Err(reason) => {
+                    let v = Verdict::allow("guardrail.allowed_tools");
+                    call.tool(&input, Value::Null, &v, Some(reason.clone()));
+                    return Err(status_with_rule(
+                        Code::Unavailable,
+                        mcp::RULE_CREDENTIAL,
+                        &reason,
+                    ));
+                }
+            }
+        }
+        let child = call.trace.child();
+        let max = self.state.config.max_response_bytes;
+        // the server's current definition must be the pinned one; its x-mcp-headers come from it
+        let traceparent = child.traceparent();
+        let listing = ListContext {
+            bearer: bearer.as_deref(),
+            traceparent: &traceparent,
+            request_id: &call.c.request_id,
+            deadline: call.deadline,
+            max_bytes: max,
+        };
+        let headers = match self
+            .state
+            .mcp_definitions
+            .verified(&self.state.egress, tool, listing)
+            .await
+        {
+            Ok(h) => h,
+            Err(Ok((rule, reason))) => return Err(call.deny(&input, Verdict::deny(rule, reason))),
+            Err(Err(e)) => {
+                if e.from_server {
+                    call.taint_mark(tool);
+                }
+                let v = Verdict::allow("guardrail.allowed_tools");
+                call.tool(&input, Value::Null, &v, Some(e.reason.clone()));
+                return Err(status_with_rule(Code::Unavailable, e.rule, &e.reason));
+            }
+        };
+        let param_headers = match mcp::param_headers_for(&headers, &arguments) {
+            Ok(h) => h,
+            Err(reason) => return Err(call.deny(&input, bad(reason))),
+        };
+        let v = Verdict::allow("guardrail.allowed_tools");
+        let origin = agentsc_charter::http_origin(url).unwrap_or_default();
+        let callee = format!("mcp {origin} {mcp_tool}");
+        let pending = call.begin(
+            Kind::McpCall,
+            Direction::Outbound,
+            &child,
+            &callee,
+            &input,
+            &v,
+        );
+        let sent = mcp::post(
+            &self.state.egress,
+            mcp::Request {
+                url,
+                method: "tools/call",
+                name: Some(mcp_tool),
+                params: json!({ "name": mcp_tool, "arguments": arguments }),
+                param_headers,
+                bearer: bearer.as_deref(),
+                traceparent: Some(child.traceparent()),
+                request_id: Some(&call.c.request_id),
+                timeout: deadline::budget(call.deadline, deadline::HTTP_TIMEOUT),
+                max_bytes: max,
+            },
+        )
+        .await
+        .and_then(|result| mcp::outcome(&result));
+        pending.disarm();
+        let (text, is_error, result_type, verdict) = match sent {
+            Ok(Outcome::Complete { text, is_error }) => (text, is_error, "complete", v),
+            Ok(Outcome::InputRequired { text }) => (
+                text,
+                true,
+                "input_required",
+                Verdict::allow(mcp::RULE_INPUT_REQUIRED),
+            ),
+            Err(e) => {
+                if e.from_server {
+                    call.taint_mark(tool);
+                }
+                call.tool(&input, Value::Null, &v, Some(e.reason.clone()));
+                call.attempt(
+                    Kind::McpCall,
+                    Direction::Outbound,
+                    &child,
+                    &callee,
+                    &input,
+                    Value::Null,
+                    &v,
+                    Some(e.reason.clone()),
+                    None,
+                );
+                return Err(status_with_rule(Code::Unavailable, e.rule, &e.reason));
+            }
+        };
+        let out = json!({ "result_type": result_type, "is_error": is_error, "text": text });
+        call.taint_mark(tool);
+        call.tool(&input, out.clone(), &verdict, None);
+        call.attempt(
+            Kind::McpCall,
+            Direction::Outbound,
+            &child,
+            &callee,
+            &input,
+            out,
+            &verdict,
+            None,
+            None,
+        );
+        Ok(Response::new(ToolTextResponse { text, is_error }))
+    }
+
+    /// A `type: a2a` tool (charter schema level 10, docs/design/a2a.md): one A2A 1.0
+    /// `SendMessage` to a remote agent. The runtime sends only `input`, `context` and `task_id`;
+    /// the sidecar runs the gates of `invoke_http` in the same order and builds the request: URL
+    /// and credentials come from the charter, never from the runtime.
+    async fn invoke_a2a(
+        &self,
+        request: Request<ToolArgumentsRequest>,
+    ) -> Result<Response<ToolTextResponse>, Status> {
+        use agentsc_common::a2a;
+        self.state.audit.gate_tool(request.get_ref().ctx.as_ref())?;
+        let deadline = deadline::from_metadata(request.metadata());
+        let req = request.into_inner();
+        let (c, trace) = ctx_of(&req.ctx)?;
+        let snap = self.state.loaded().ok_or_else(no_charter)?;
+        let mut call = Call {
+            svc: self,
+            c,
+            trace,
+            started: Instant::now(),
+            deadline,
+            withhold: None,
+        };
+        let parsed: Result<Value, String> = if req.arguments_json.trim().is_empty() {
+            Ok(json!({}))
+        } else {
+            serde_json::from_str(&req.arguments_json).map_err(|e| e.to_string())
+        };
+        let arguments = parsed
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|_| Value::String(req.arguments_json.clone()));
+        let mut input = json!({ "arguments": arguments });
+
+        if let Err(v) = call.bind() {
+            return Err(call.deny(&input, v));
+        }
+        let (spec, tool) = match self.tool_spec(&snap, &call.c.agent, &call.c.tool) {
+            Ok(x) => x,
+            Err(v) => return Err(call.deny(&input, v)),
+        };
+        let (ToolType::A2a, Some(url)) = (tool.tool_type, tool.url.as_deref()) else {
+            return Err(call.deny(
+                &input,
+                Verdict::deny(RULE_TOOL_SPEC, format!("{} is not an a2a tool", tool.name)),
+            ));
+        };
+        let bad =
+            |reason: String| Verdict::deny(RULE_TOOL_SPEC, format!("{}: {reason}", tool.name));
+        // input (string), context (object) and task_id (a short single-line string), nothing else
+        let checked: Result<(String, Option<Value>, Option<String>), String> = match &parsed {
+            Err(e) => Err(format!("the arguments are not JSON: {e}")),
+            Ok(Value::Object(m)) => {
+                let text = m.get("input").and_then(Value::as_str);
+                let context = m.get("context").filter(|v| !v.is_null());
+                let task_id = m.get("task_id").filter(|v| !v.is_null());
+                if let Some(k) = m
+                    .keys()
+                    .find(|k| !["input", "context", "task_id"].contains(&k.as_str()))
+                {
+                    Err(format!(
+                        "unknown argument {k:?}: a2a tools take input, context and task_id"
+                    ))
+                } else if text.is_none() {
+                    Err("input must be a string".into())
+                } else if context.is_some_and(|c| !c.is_object()) {
+                    Err("context must be a JSON object".into())
+                } else if task_id.is_some_and(|t| {
+                    t.as_str().is_none_or(|t| {
+                        t.is_empty() || t.len() > 256 || t.chars().any(char::is_control)
+                    })
+                }) {
+                    Err("task_id must be 1 to 256 characters on one line".into())
+                } else {
+                    Ok((
+                        text.unwrap_or_default().to_string(),
+                        context.cloned(),
+                        task_id.and_then(Value::as_str).map(str::to_string),
+                    ))
+                }
+            }
+            Ok(_) => Err("the arguments must be a JSON object".into()),
+        };
+        input = json!({ "url": url, "arguments": arguments });
+        let (text, context, task_id) = match checked {
+            Ok(x) => x,
+            Err(reason) => return Err(call.deny(&input, bad(reason))),
+        };
+        call.taint_gate(spec, tool, &input)?;
+        call.quarantine_gate(&input)?;
+        call.approval_gate(tool, &input).await?;
+        let mut bearer = call.delegation_gate(tool, &input).await?;
+        if let Some(cred) = &tool.credential {
+            match crate::mcp::read_credential(&self.state.config.tool_secrets_dir, &cred.secret)
+                .await
+            {
+                Ok(token) => bearer = Some(token),
+                Err(reason) => {
+                    let v = Verdict::allow("guardrail.allowed_tools");
+                    call.tool(&input, Value::Null, &v, Some(reason.clone()));
+                    return Err(status_with_rule(
+                        Code::Unavailable,
+                        a2a::RULE_CREDENTIAL,
+                        &reason,
+                    ));
+                }
+            }
+        }
+        let child = call.trace.child();
+        let v = Verdict::allow("guardrail.allowed_tools");
+        let origin = agentsc_charter::http_origin(url).unwrap_or_default();
+        let callee = format!("a2a {origin}");
+        let pending = call.begin(
+            Kind::A2aCall,
+            Direction::Outbound,
+            &child,
+            &callee,
+            &input,
+            &v,
+        );
+        let send = a2a::Send {
+            url,
+            input: &text,
+            context: context.as_ref(),
+            task_id: task_id.as_deref(),
+            bearer: bearer.as_deref(),
+            traceparent: Some(child.traceparent()),
+            request_id: Some(&call.c.request_id),
+            // a remote agent runs a model: the agent-call budget, not the http one
+            deadline: Instant::now() + deadline::budget(call.deadline, deadline::RUN_TIMEOUT),
+            max_bytes: self.state.config.max_response_bytes,
+        };
+        let sent = a2a::send_message(&self.state.egress, &send).await;
+        pending.disarm();
+        let rendered = match sent {
+            Ok(answer) => a2a::render(&answer),
+            Err(e) => {
+                if e.from_server {
+                    call.taint_mark(tool);
+                }
+                call.tool(&input, Value::Null, &v, Some(e.reason.clone()));
+                call.attempt(
+                    Kind::A2aCall,
+                    Direction::Outbound,
+                    &child,
+                    &callee,
+                    &input,
+                    Value::Null,
+                    &v,
+                    Some(e.reason.clone()),
+                    None,
+                );
+                return Err(status_with_rule(Code::Unavailable, e.rule, &e.reason));
+            }
+        };
+        let out = json!({
+            "state": rendered.state,
+            "task_id": rendered.task_id,
+            "is_error": rendered.is_error,
+            "text": rendered.text,
+        });
+        call.taint_mark(tool);
+        call.tool(&input, out.clone(), &v, None);
+        call.attempt(
+            Kind::A2aCall,
+            Direction::Outbound,
+            &child,
+            &callee,
+            &input,
+            out,
+            &v,
+            None,
+            None,
+        );
+        Ok(Response::new(ToolTextResponse {
+            text: rendered.text,
+            is_error: rendered.is_error,
+        }))
     }
 
     /// Design §6.5: only `model_call` records of the `mock` model (a provider's calls go through

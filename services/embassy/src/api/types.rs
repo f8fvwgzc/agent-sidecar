@@ -353,6 +353,8 @@ pub enum ToolType {
     Agent,
     Service,
     Http,
+    Mcp,
+    A2a,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

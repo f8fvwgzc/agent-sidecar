@@ -96,6 +96,25 @@
                       {
                         "key": "kind",
                         "value": {
+                          "stringValue": "a2a_call"
+                        }
+                      },
+                      {
+                        "key": "decision",
+                        "value": {
+                          "stringValue": "allow"
+                        }
+                      }
+                    ],
+                    "startTimeUnixNano": "1792576700000000000",
+                    "timeUnixNano": "1792576815000000000",
+                    "asInt": "1"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "kind",
+                        "value": {
                           "stringValue": "agent_call"
                         }
                       },
@@ -291,6 +310,25 @@
                         "key": "rule",
                         "value": {
                           "stringValue": "learning.proposed"
+                        }
+                      }
+                    ],
+                    "startTimeUnixNano": "1792576700000000000",
+                    "timeUnixNano": "1792576815000000000",
+                    "asInt": "1"
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "kind",
+                        "value": {
+                          "stringValue": "mcp_call"
+                        }
+                      },
+                      {
+                        "key": "decision",
+                        "value": {
+                          "stringValue": "allow"
                         }
                       }
                     ],
@@ -518,6 +556,59 @@
               "unit": "ms",
               "histogram": {
                 "dataPoints": [
+                  {
+                    "attributes": [
+                      {
+                        "key": "kind",
+                        "value": {
+                          "stringValue": "a2a_call"
+                        }
+                      },
+                      {
+                        "key": "agent",
+                        "value": {
+                          "stringValue": "ops-assistant"
+                        }
+                      }
+                    ],
+                    "startTimeUnixNano": "1792576700000000000",
+                    "timeUnixNano": "1792576815000000000",
+                    "count": "1",
+                    "sum": 640.0,
+                    "bucketCounts": [
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "1",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0"
+                    ],
+                    "explicitBounds": [
+                      5.0,
+                      10.0,
+                      25.0,
+                      50.0,
+                      100.0,
+                      250.0,
+                      500.0,
+                      1000.0,
+                      2500.0,
+                      5000.0,
+                      10000.0,
+                      30000.0,
+                      60000.0
+                    ],
+                    "min": 640.0,
+                    "max": 640.0
+                  },
                   {
                     "attributes": [
                       {
@@ -929,6 +1020,59 @@
                     ],
                     "min": 0.0,
                     "max": 0.0
+                  },
+                  {
+                    "attributes": [
+                      {
+                        "key": "kind",
+                        "value": {
+                          "stringValue": "mcp_call"
+                        }
+                      },
+                      {
+                        "key": "agent",
+                        "value": {
+                          "stringValue": "ops-assistant"
+                        }
+                      }
+                    ],
+                    "startTimeUnixNano": "1792576700000000000",
+                    "timeUnixNano": "1792576815000000000",
+                    "count": "1",
+                    "sum": 120.0,
+                    "bucketCounts": [
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "1",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0",
+                      "0"
+                    ],
+                    "explicitBounds": [
+                      5.0,
+                      10.0,
+                      25.0,
+                      50.0,
+                      100.0,
+                      250.0,
+                      500.0,
+                      1000.0,
+                      2500.0,
+                      5000.0,
+                      10000.0,
+                      30000.0,
+                      60000.0
+                    ],
+                    "min": 120.0,
+                    "max": 120.0
                   },
                   {
                     "attributes": [

@@ -13,6 +13,8 @@ const KIND_LABEL = {
   agent_call: 'agent call',
   service_call: 'service',
   http_call: 'http',
+  mcp_call: 'mcp',
+  a2a_call: 'a2a',
   guardrail: 'guardrail',
   budget: 'budget',
   authz: 'authz',

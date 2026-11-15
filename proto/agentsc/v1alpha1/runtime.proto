@@ -42,6 +42,8 @@ service SidecarTools {
   rpc InvokeService(ToolServiceRequest) returns (ServiceResponse);
   rpc InvokeAgent(ToolAgentRequest) returns (InvokeAgentResponse);
   rpc InvokeHttp(ToolHttpRequest) returns (ServiceResponse);
+  rpc InvokeMcp(ToolArgumentsRequest) returns (ToolTextResponse);
+  rpc InvokeA2a(ToolArgumentsRequest) returns (ToolTextResponse);
   rpc ReportEvent(AuditEvent) returns (Empty);
   rpc ProposeLesson(LessonRequest) returns (LessonResponse);
 }
@@ -78,6 +80,20 @@ message ToolHttpRequest {
   string url = 3;
   map<string, string> headers = 4;
   bytes body = 5;
+}
+
+// A call of a `type: mcp` (schema level 9) or `type: a2a` (level 10) tool. The runtime sends
+// only the arguments: the sidecar builds the whole request (URL, headers, credentials) from the
+// charter.
+message ToolArgumentsRequest {
+  ToolContext ctx = 1;
+  string arguments_json = 2;   // a JSON object, or "" for {}
+}
+
+// What the model sees of the result, rendered as text.
+message ToolTextResponse {
+  string text = 1;
+  bool is_error = 2;           // mcp: isError or input_required; a2a: a failed, rejected or canceled task
 }
 
 // A CONTRACT.md §6 record as JSON; the sidecar stamps service/namespace and redacts.

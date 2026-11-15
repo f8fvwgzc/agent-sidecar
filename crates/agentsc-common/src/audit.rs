@@ -34,6 +34,10 @@ pub enum Kind {
     AgentCall,
     ServiceCall,
     HttpCall,
+    /// A `tools/call` to an MCP server (`type: mcp` tools; callee `mcp <origin> <mcp_tool>`).
+    McpCall,
+    /// A `SendMessage` to a remote A2A agent (`type: a2a` tools; callee `a2a <origin>`).
+    A2aCall,
     Authz,
     Guardrail,
     Budget,
@@ -53,6 +57,8 @@ impl Kind {
             Kind::AgentCall => "agent_call",
             Kind::ServiceCall => "service_call",
             Kind::HttpCall => "http_call",
+            Kind::McpCall => "mcp_call",
+            Kind::A2aCall => "a2a_call",
             Kind::Authz => "authz",
             Kind::Guardrail => "guardrail",
             Kind::Budget => "budget",
@@ -1260,6 +1266,8 @@ mod tests {
             Kind::AgentCall,
             Kind::ServiceCall,
             Kind::HttpCall,
+            Kind::McpCall,
+            Kind::A2aCall,
             Kind::Authz,
             Kind::Guardrail,
             Kind::Budget,

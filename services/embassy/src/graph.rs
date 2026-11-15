@@ -14,10 +14,11 @@
 //! | `service_call` outbound or internal | tool edge agent→app `#<tool>` | edge |
 //! | `service_call` inbound (callee side) | nothing | callee app node |
 //! | `http_call` | tool edge agent→external `#<tool>` | edge |
+//! | `mcp_call` | tool edge agent→external `#<tool>` (the MCP server's origin) | edge |
 //! | `model_call` | `model` edge agent→provider (provider from the callee) | edge |
 //! | `tool_call`, `guardrail`, `budget`, `authz`, `config`, `learning`, `load_skill` | nothing | node counters only |
 //!
-//! The `#<tool>` of an `agent_call`, `service_call` or `http_call` is the `callee` of the
+//! The `#<tool>` of an `agent_call`, `service_call`, `http_call` or `mcp_call` is the `callee` of the
 //! `tool_call` whose `span_id` is the record's `parent_span_id` (the sidecar writes that
 //! `tool_call` first).
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -90,6 +91,18 @@ pub fn http_call_target(callee: &str) -> Option<String> {
     origin_of(url).map(|o| ids::external(&o))
 }
 
+/// The external node an `mcp_call` reaches: `callee` is `mcp <origin> <mcp_tool>`.
+pub fn mcp_call_target(callee: &str) -> Option<String> {
+    let origin = callee.strip_prefix("mcp ")?.split_whitespace().next()?;
+    origin_of(origin).map(|o| ids::external(&o))
+}
+
+/// The external node of an `a2a_call` (callee `a2a <origin>`): the remote agent's origin.
+pub fn a2a_call_target(callee: &str) -> Option<String> {
+    let origin = callee.strip_prefix("a2a ")?.split_whitespace().next()?;
+    origin_of(origin).map(|o| ids::external(&o))
+}
+
 /// The node a span reaches (design §10.1.1 `callee_node`).
 pub fn callee_node(
     rec_kind: &str,
@@ -105,6 +118,8 @@ pub fn callee_node(
         "service_call" if direction == "inbound" => Some(ids::app(namespace, service)),
         "service_call" => service_call_target(namespace, callee),
         "http_call" => http_call_target(callee),
+        "mcp_call" => mcp_call_target(callee),
+        "a2a_call" => a2a_call_target(callee),
         "model_call" => Some(ids::model_for_callee(callee).to_string()),
         _ => None,
     }
@@ -192,9 +207,13 @@ pub fn map_record(rec: &AuditRecord, tool: Option<&str>) -> Option<EdgeRef> {
                 Some(tool),
             ))
         }
-        "http_call" => {
+        "http_call" | "mcp_call" | "a2a_call" => {
             let tool = tool?;
-            let target = http_call_target(&rec.callee)?;
+            let target = match rec.kind.as_str() {
+                "mcp_call" => mcp_call_target(&rec.callee)?,
+                "a2a_call" => a2a_call_target(&rec.callee)?,
+                _ => http_call_target(&rec.callee)?,
+            };
             Some(EdgeRef::new(
                 EdgeKind::Tool,
                 me,
@@ -660,7 +679,7 @@ pub fn tool_target(
             let (svc, ns) = peer_in(namespace, t.service.as_deref()?);
             Some(ids::app(ns, svc))
         }
-        CharterToolType::Http => t
+        CharterToolType::Http | CharterToolType::Mcp | CharterToolType::A2a => t
             .url
             .as_deref()
             .and_then(agentsc_charter::http_origin)
@@ -673,6 +692,8 @@ fn tool_type(t: CharterToolType) -> ToolType {
         CharterToolType::Agent => ToolType::Agent,
         CharterToolType::Service => ToolType::Service,
         CharterToolType::Http => ToolType::Http,
+        CharterToolType::Mcp => ToolType::Mcp,
+        CharterToolType::A2a => ToolType::A2a,
     }
 }
 
@@ -680,7 +701,9 @@ fn tool_port(t: CharterToolType) -> &'static str {
     match t {
         CharterToolType::Agent => "invoke",
         CharterToolType::Service => "service",
-        CharterToolType::Http => "http",
+        // an MCP server or a remote A2A agent is an external node like an http origin: its one
+        // in-port is `http`
+        CharterToolType::Http | CharterToolType::Mcp | CharterToolType::A2a => "http",
     }
 }
 
@@ -1132,6 +1155,9 @@ mod tests {
             effect: None,
             approval: None,
             delegation: None,
+            mcp_tool: None,
+            pin: None,
+            credential: None,
         };
         assert_eq!(
             tool_target("shop", "orders", &tool("billing.finance")).as_deref(),
@@ -1210,6 +1236,35 @@ mod tests {
             Some(
                 "edge:tool:agent:shop/orders/ops->external:https://api.partner.example#partner_eta"
             )
+        );
+        // an MCP server is an external node too: `mcp <origin> <mcp_tool>`
+        let mcp =
+            rec(json!({"kind": "mcp_call", "callee": "mcp https://mcp.example.com search_issues"}));
+        assert_eq!(
+            map_record(&mcp, Some("search_issues")).map(|e| (e.id, e.target_port)),
+            Some((
+                "edge:tool:agent:shop/orders/ops->external:https://mcp.example.com#search_issues"
+                    .into(),
+                "http".into()
+            ))
+        );
+        assert_eq!(
+            callee_node("mcp_call", "shop", "orders", None, &mcp.callee, "outbound").as_deref(),
+            Some("external:https://mcp.example.com")
+        );
+        // so is a remote A2A agent: `a2a <origin>`
+        let a2a = rec(json!({"kind": "a2a_call", "callee": "a2a https://agents.partner.example"}));
+        assert_eq!(
+            map_record(&a2a, Some("partner_quotes")).map(|e| (e.id, e.target_port)),
+            Some((
+                "edge:tool:agent:shop/orders/ops->external:https://agents.partner.example#partner_quotes"
+                    .into(),
+                "http".into()
+            ))
+        );
+        assert_eq!(
+            callee_node("a2a_call", "shop", "orders", None, &a2a.callee, "outbound").as_deref(),
+            Some("external:https://agents.partner.example")
         );
         let mock = rec(json!({"kind": "model_call", "callee": "mock"}));
         assert_eq!(

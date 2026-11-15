@@ -162,6 +162,9 @@ async fn fail_closed_refuses_new_work_while_the_audit_sink_fails_and_recovers() 
         effect: None,
         approval: None,
         delegation: None,
+        mcp_tool: None,
+        pin: None,
+        credential: None,
     });
     ord.guardrails
         .allowed_tools

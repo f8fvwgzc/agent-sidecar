@@ -412,6 +412,178 @@
             },
             {
               "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "spanId": "5656565656565656",
+              "parentSpanId": "00f067aa0ba902b7",
+              "name": "tools/call search_issues",
+              "kind": 3,
+              "startTimeUnixNano": "1792576800680000000",
+              "endTimeUnixNano": "1792576800800000000",
+              "attributes": [
+                {
+                  "key": "agentsc.kind",
+                  "value": {
+                    "stringValue": "mcp_call"
+                  }
+                },
+                {
+                  "key": "agentsc.decision",
+                  "value": {
+                    "stringValue": "allow"
+                  }
+                },
+                {
+                  "key": "agentsc.caller",
+                  "value": {
+                    "stringValue": "local"
+                  }
+                },
+                {
+                  "key": "agentsc.agent",
+                  "value": {
+                    "stringValue": "ops-assistant"
+                  }
+                },
+                {
+                  "key": "agentsc.request_id",
+                  "value": {
+                    "stringValue": "0c4a3f8e-6b1d-4f7e-9c11-2a5d3e4f5a6b"
+                  }
+                },
+                {
+                  "key": "mcp.method.name",
+                  "value": {
+                    "stringValue": "tools/call"
+                  }
+                },
+                {
+                  "key": "mcp.protocol.version",
+                  "value": {
+                    "stringValue": "2026-07-28"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "execute_tool"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "search_issues"
+                  }
+                },
+                {
+                  "key": "server.address",
+                  "value": {
+                    "stringValue": "mcp.example.com"
+                  }
+                },
+                {
+                  "key": "server.port",
+                  "value": {
+                    "intValue": "443"
+                  }
+                },
+                {
+                  "key": "agentsc.input",
+                  "value": {
+                    "stringValue": "{\"url\":\"https://mcp.example.com/mcp\",\"tool\":\"search_issues\",\"arguments\":{\"repo\":\"acme/app\",\"query\":\"crash\"}}"
+                  }
+                },
+                {
+                  "key": "agentsc.output",
+                  "value": {
+                    "stringValue": "{\"result_type\":\"complete\",\"is_error\":false,\"text\":\"2 issues\"}"
+                  }
+                }
+              ]
+            },
+            {
+              "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "spanId": "5757575757575757",
+              "parentSpanId": "00f067aa0ba902b7",
+              "name": "invoke_agent agents.partner.example",
+              "kind": 3,
+              "startTimeUnixNano": "1792576800210000000",
+              "endTimeUnixNano": "1792576800850000000",
+              "attributes": [
+                {
+                  "key": "agentsc.kind",
+                  "value": {
+                    "stringValue": "a2a_call"
+                  }
+                },
+                {
+                  "key": "agentsc.decision",
+                  "value": {
+                    "stringValue": "allow"
+                  }
+                },
+                {
+                  "key": "agentsc.caller",
+                  "value": {
+                    "stringValue": "local"
+                  }
+                },
+                {
+                  "key": "agentsc.agent",
+                  "value": {
+                    "stringValue": "ops-assistant"
+                  }
+                },
+                {
+                  "key": "agentsc.request_id",
+                  "value": {
+                    "stringValue": "0c4a3f8e-6b1d-4f7e-9c11-2a5d3e4f5a6b"
+                  }
+                },
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "invoke_agent"
+                  }
+                },
+                {
+                  "key": "rpc.system",
+                  "value": {
+                    "stringValue": "jsonrpc"
+                  }
+                },
+                {
+                  "key": "rpc.method",
+                  "value": {
+                    "stringValue": "SendMessage"
+                  }
+                },
+                {
+                  "key": "server.address",
+                  "value": {
+                    "stringValue": "agents.partner.example"
+                  }
+                },
+                {
+                  "key": "server.port",
+                  "value": {
+                    "intValue": "443"
+                  }
+                },
+                {
+                  "key": "agentsc.input",
+                  "value": {
+                    "stringValue": "{\"url\":\"https://agents.partner.example/a2a/quotes\",\"input\":\"Quote 40 WIDGET-1\"}"
+                  }
+                },
+                {
+                  "key": "agentsc.output",
+                  "value": {
+                    "stringValue": "{\"state\":\"TASK_STATE_COMPLETED\",\"task_id\":\"t-1\",\"is_error\":false,\"text\":\"EUR 380\"}"
+                  }
+                }
+              ]
+            },
+            {
+              "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
               "spanId": "877f61d10e8c201a",
               "parentSpanId": "6666666666666666",
               "name": "authz",

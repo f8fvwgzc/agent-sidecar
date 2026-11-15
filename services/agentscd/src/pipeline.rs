@@ -449,6 +449,15 @@ pub async fn invoke(state: &Arc<AppState>, inv: Invocation) -> InvokeAgentRespon
     );
     if let Some(t) = &agent.taint {
         state.taint.add(&inv.request_id, t.input, "input");
+        // an A2A caller is another party: what it sent is untrusted whatever `taint.input` says
+        // (docs/design/a2a.md; the charter requires `taint` on an agent with an `a2a` block)
+        if inv.caller.starts_with(agentsc_charter::A2A_IDENTITY_PREFIX) {
+            state.taint.add(
+                &inv.request_id,
+                agentsc_charter::TaintLabel::Untrusted,
+                &inv.caller,
+            );
+        }
     }
     let exec = client.execute(req).await;
     drop(run);

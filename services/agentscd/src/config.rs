@@ -7,6 +7,8 @@ use clap::Parser;
 
 /// The default of `--max-response-bytes`: 3 MiB.
 pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 3 * 1024 * 1024;
+/// The default `--a2a-callers-dir`.
+pub const DEFAULT_A2A_CALLERS_DIR: &str = "/etc/agentsc/a2a-callers";
 /// The default of `--peer-address-template` (design §6.1). `{cluster_domain}` is
 /// `--cluster-domain` (`cluster.local` unless set).
 pub const DEFAULT_PEER_ADDRESS_TEMPLATE: &str = "{service}.{namespace}.svc.{cluster_domain}:{port}";
@@ -156,6 +158,30 @@ pub struct Config {
         default_value_t = DEFAULT_MAX_RESPONSE_BYTES
     )]
     pub max_response_bytes: usize,
+    /// Where `mcp` and `a2a` tools' `credential.secret` files are read (a mounted Secret): a
+    /// charter names only a file in it, never a path.
+    #[arg(
+        long,
+        env = "AGENTSC_TOOL_SECRETS_DIR",
+        default_value = agentsc_charter::DEFAULT_TOOL_SECRETS_DIR
+    )]
+    pub tool_secrets_dir: PathBuf,
+    /// Serve the agents with an `a2a` block over A2A 1.0 (JSON-RPC) on this address
+    /// (docs/design/a2a.md). Unset = no A2A server. Put TLS in front of it (an ingress or gateway).
+    #[arg(long, env = "AGENTSC_A2A_ADDR")]
+    pub a2a_addr: Option<SocketAddr>,
+    /// The A2A server's base URL as callers reach it (`https://agents.example.com`), for the
+    /// agent cards' interface URLs. Default: `http://<--a2a-addr>`.
+    #[arg(long, env = "AGENTSC_A2A_PUBLIC_URL")]
+    pub a2a_public_url: Option<String>,
+    /// Where A2A callers' bearer tokens are: the file `<name>` holds the token of the caller
+    /// `a2a:<name>` (a mounted Secret), read on every request.
+    #[arg(
+        long,
+        env = "AGENTSC_A2A_CALLERS_DIR",
+        default_value = DEFAULT_A2A_CALLERS_DIR
+    )]
+    pub a2a_callers_dir: PathBuf,
     /// The Anthropic API key, read by the sidecar only (the model gateway, CONTRACT.md §4.4): a
     /// file, re-read at start-up, e.g. a mounted Secret. Env `ANTHROPIC_API_KEY` is the other way.
     #[arg(long, env = "AGENTSC_ANTHROPIC_API_KEY_FILE")]
@@ -277,6 +303,10 @@ impl Config {
             mesh_cache_bytes: crate::cache::DEFAULT_CAPACITY_BYTES,
             mesh_cache_max_age: crate::cache::DEFAULT_MAX_AGE_SECS,
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
+            tool_secrets_dir: PathBuf::from(agentsc_charter::DEFAULT_TOOL_SECRETS_DIR),
+            a2a_addr: None,
+            a2a_public_url: None,
+            a2a_callers_dir: PathBuf::from(DEFAULT_A2A_CALLERS_DIR),
             audit_fail_closed: false,
             anthropic_api_key_file: None,
             anthropic_api_key: None,
