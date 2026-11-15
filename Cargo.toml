@@ -67,6 +67,8 @@ hex = "0.4"
 base64 = "0.23"
 rand = "0.10"
 url = "2"
+# JSON Schema 2020-12 (and older drafts) for `mcp` tool arguments; no remote `$ref` resolution.
+jsonschema = { version = "0.60", default-features = false }
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }

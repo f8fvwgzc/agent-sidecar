@@ -169,6 +169,16 @@ class SidecarToolsStub:
                 request_serializer=agentsc_dot_v1alpha1_dot_runtime__pb2.ToolHttpRequest.SerializeToString,
                 response_deserializer=agentsc_dot_v1alpha1_dot_common__pb2.ServiceResponse.FromString,
                 _registered_method=True)
+        self.InvokeMcp = channel.unary_unary(
+                '/agentsc.v1alpha1.SidecarTools/InvokeMcp',
+                request_serializer=agentsc_dot_v1alpha1_dot_runtime__pb2.ToolArgumentsRequest.SerializeToString,
+                response_deserializer=agentsc_dot_v1alpha1_dot_runtime__pb2.ToolTextResponse.FromString,
+                _registered_method=True)
+        self.InvokeA2a = channel.unary_unary(
+                '/agentsc.v1alpha1.SidecarTools/InvokeA2a',
+                request_serializer=agentsc_dot_v1alpha1_dot_runtime__pb2.ToolArgumentsRequest.SerializeToString,
+                response_deserializer=agentsc_dot_v1alpha1_dot_runtime__pb2.ToolTextResponse.FromString,
+                _registered_method=True)
         self.ReportEvent = channel.unary_unary(
                 '/agentsc.v1alpha1.SidecarTools/ReportEvent',
                 request_serializer=agentsc_dot_v1alpha1_dot_runtime__pb2.AuditEvent.SerializeToString,
@@ -203,6 +213,18 @@ class SidecarToolsServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def InvokeMcp(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def InvokeA2a(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def ReportEvent(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -232,6 +254,16 @@ def add_SidecarToolsServicer_to_server(servicer, server):
                     servicer.InvokeHttp,
                     request_deserializer=agentsc_dot_v1alpha1_dot_runtime__pb2.ToolHttpRequest.FromString,
                     response_serializer=agentsc_dot_v1alpha1_dot_common__pb2.ServiceResponse.SerializeToString,
+            ),
+            'InvokeMcp': grpc.unary_unary_rpc_method_handler(
+                    servicer.InvokeMcp,
+                    request_deserializer=agentsc_dot_v1alpha1_dot_runtime__pb2.ToolArgumentsRequest.FromString,
+                    response_serializer=agentsc_dot_v1alpha1_dot_runtime__pb2.ToolTextResponse.SerializeToString,
+            ),
+            'InvokeA2a': grpc.unary_unary_rpc_method_handler(
+                    servicer.InvokeA2a,
+                    request_deserializer=agentsc_dot_v1alpha1_dot_runtime__pb2.ToolArgumentsRequest.FromString,
+                    response_serializer=agentsc_dot_v1alpha1_dot_runtime__pb2.ToolTextResponse.SerializeToString,
             ),
             'ReportEvent': grpc.unary_unary_rpc_method_handler(
                     servicer.ReportEvent,
@@ -326,6 +358,60 @@ class SidecarTools:
             '/agentsc.v1alpha1.SidecarTools/InvokeHttp',
             agentsc_dot_v1alpha1_dot_runtime__pb2.ToolHttpRequest.SerializeToString,
             agentsc_dot_v1alpha1_dot_common__pb2.ServiceResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def InvokeMcp(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/agentsc.v1alpha1.SidecarTools/InvokeMcp',
+            agentsc_dot_v1alpha1_dot_runtime__pb2.ToolArgumentsRequest.SerializeToString,
+            agentsc_dot_v1alpha1_dot_runtime__pb2.ToolTextResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def InvokeA2a(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/agentsc.v1alpha1.SidecarTools/InvokeA2a',
+            agentsc_dot_v1alpha1_dot_runtime__pb2.ToolArgumentsRequest.SerializeToString,
+            agentsc_dot_v1alpha1_dot_runtime__pb2.ToolTextResponse.FromString,
             options,
             channel_credentials,
             insecure,

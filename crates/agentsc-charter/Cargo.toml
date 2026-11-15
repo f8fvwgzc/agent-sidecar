@@ -17,3 +17,7 @@ schemars.workspace = true
 regex.workspace = true
 thiserror.workspace = true
 url.workspace = true
+jsonschema.workspace = true
+sha2.workspace = true
+hex.workspace = true
+base64.workspace = true

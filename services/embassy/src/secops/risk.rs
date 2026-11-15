@@ -3,8 +3,8 @@
 //! constants and its rules:
 //!
 //! - **Features** of a run: model turns, tokens per turn, tool calls per turn, distinct tools,
-//!   distinct hosts (`http_call`s), agent calls, denials, egress calls. (nexc's `bytes_out` has no
-//!   source here: audit records carry hashes, not sizes.)
+//!   distinct hosts (`http_call`s and `mcp_call`s), agent calls, denials, egress calls. (nexc's
+//!   `bytes_out` has no source here: audit records carry hashes, not sizes.)
 //! - **Baselines**: Welford's running mean and variance per feature over every run learned (no
 //!   window), the hosts and tools ever seen (at most [`LEARNED_PER_RUN`] new ones per run), and the
 //!   MinHash signatures of the last [`SIGNATURES_KEPT`] runs' tool sequences.
@@ -82,6 +82,14 @@ impl RunFeatures {
                 "http_call" => {
                     f.egress_calls += 1;
                     if let Some(h) = host_of(callee) {
+                        f.hosts.insert(h);
+                    }
+                }
+                // `mcp <origin> <mcp_tool>` and `a2a <origin>`: calls to an MCP server or a
+                // remote agent leave the mesh too
+                "mcp_call" | "a2a_call" => {
+                    f.egress_calls += 1;
+                    if let Some(h) = callee.split_whitespace().nth(1).and_then(host_of) {
                         f.hosts.insert(h);
                     }
                 }

@@ -131,6 +131,22 @@ class ToolHttpRequest(_message.Message):
     body: bytes
     def __init__(self, ctx: _Optional[_Union[ToolContext, _Mapping]] = ..., method: _Optional[str] = ..., url: _Optional[str] = ..., headers: _Optional[_Mapping[str, str]] = ..., body: _Optional[bytes] = ...) -> None: ...
 
+class ToolArgumentsRequest(_message.Message):
+    __slots__ = ("ctx", "arguments_json")
+    CTX_FIELD_NUMBER: _ClassVar[int]
+    ARGUMENTS_JSON_FIELD_NUMBER: _ClassVar[int]
+    ctx: ToolContext
+    arguments_json: str
+    def __init__(self, ctx: _Optional[_Union[ToolContext, _Mapping]] = ..., arguments_json: _Optional[str] = ...) -> None: ...
+
+class ToolTextResponse(_message.Message):
+    __slots__ = ("text", "is_error")
+    TEXT_FIELD_NUMBER: _ClassVar[int]
+    IS_ERROR_FIELD_NUMBER: _ClassVar[int]
+    text: str
+    is_error: bool
+    def __init__(self, text: _Optional[str] = ..., is_error: _Optional[bool] = ...) -> None: ...
+
 class AuditEvent(_message.Message):
     __slots__ = ("json",)
     JSON_FIELD_NUMBER: _ClassVar[int]

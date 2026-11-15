@@ -48,6 +48,22 @@ class FakeSidecar:
         self.calls.append(("http", (tool, method, url, body)))
         return 200, b'{"ok": true}'
 
+    async def invoke_mcp(self, ctx: CallContext, tool: str, arguments: dict[str, Any]) -> tuple[str, bool]:
+        self.contexts.append(ctx)
+        self.calls.append(("mcp", (tool, arguments)))
+        if tool == "fails":
+            return "no such repo", True
+        if tool == "denied":
+            raise ToolDenied("mcp.pin_mismatch", "the server's definition changed")
+        return f"found: {arguments.get('query', '')}", False
+
+    async def invoke_a2a(self, ctx: CallContext, tool: str, arguments: dict[str, Any]) -> tuple[str, bool]:
+        self.contexts.append(ctx)
+        self.calls.append(("a2a", (tool, arguments)))
+        if tool == "fails":
+            return "task failed: no quote for that item", True
+        return f"quote for: {arguments.get('input', '')}", False
+
     async def report_event(self, record: dict[str, Any]) -> ReportOutcome:
         if self.in_flight is not None and record.get("request_id") not in self.in_flight:
             self.rejected.append(record)

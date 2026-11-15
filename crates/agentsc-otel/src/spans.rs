@@ -1,7 +1,7 @@
 //! Audit record → span (design §9, the stateless span rule).
 //!
-//! `agent_invocation`, `agent_call`, `model_call`, `tool_call`, `service_call` and `http_call`
-//! records are hops: their span keeps the record's `span_id` and `parent_span_id`. Every other
+//! `agent_invocation`, `agent_call`, `model_call`, `tool_call`, `service_call`, `http_call`,
+//! `mcp_call` and `a2a_call` records are hops: their span keeps the record's `span_id` and `parent_span_id`. Every other
 //! kind (`guardrail`, `budget`, `authz`, `config`, `learning`) is an event inside a hop and
 //! becomes its own child span of the record's `span_id`, with a derived id:
 //! the first 8 bytes of SHA-256(`span_id ‖ kind ‖ rule ‖ ts ‖ seq`), where `seq` is a
@@ -33,6 +33,8 @@ pub fn keeps_span_id(kind: Kind) -> bool {
             | Kind::ToolCall
             | Kind::ServiceCall
             | Kind::HttpCall
+            | Kind::McpCall
+            | Kind::A2aCall
     )
 }
 
@@ -141,6 +143,18 @@ fn http_call_url(callee: &str) -> &str {
     }
 }
 
+/// The server origin and tool of an `mcp_call` callee (`mcp <origin> <mcp_tool>`).
+fn mcp_call_parts(callee: &str) -> Option<(&str, &str)> {
+    let rest = callee.strip_prefix("mcp ")?;
+    let (origin, tool) = rest.split_once(' ')?;
+    (!origin.is_empty() && !tool.is_empty()).then_some((origin, tool))
+}
+
+/// The remote agent's origin of an `a2a_call` callee (`a2a <origin>`).
+fn a2a_call_origin(callee: &str) -> Option<url::Url> {
+    url::Url::parse(callee.strip_prefix("a2a ")?.split_whitespace().next()?).ok()
+}
+
 /// The low-cardinality span name (design §9).
 pub fn span_name(rec: &AuditRecord) -> String {
     let kind = rec.kind.as_str();
@@ -167,6 +181,18 @@ pub fn span_name(rec: &AuditRecord) -> String {
             Some(host) => format!("http_call {host}"),
             None => "http_call".to_string(),
         },
+        // the OTel MCP conventions: `{mcp.method.name} {target}`
+        Kind::McpCall => match mcp_call_parts(&rec.callee) {
+            Some((_, tool)) => format!("tools/call {tool}"),
+            None => "tools/call".to_string(),
+        },
+        // the OTel GenAI agent conventions: `invoke_agent {target}`
+        Kind::A2aCall => {
+            match a2a_call_origin(&rec.callee).and_then(|u| u.host_str().map(str::to_string)) {
+                Some(host) => format!("invoke_agent {host}"),
+                None => "invoke_agent".to_string(),
+            }
+        }
         _ => match agent {
             Some(a) => format!("{kind} {a}"),
             None => kind.to_string(),
@@ -226,6 +252,38 @@ fn attributes(rec: &AuditRecord, export_payloads: bool) -> Vec<KeyValue> {
                 "gen_ai.usage.output_tokens",
                 i64::from(t.output),
             ));
+        }
+    }
+    if rec.kind == Kind::McpCall {
+        a.push(KeyValue::string("mcp.method.name", "tools/call"));
+        a.push(KeyValue::string(
+            "mcp.protocol.version",
+            agentsc_charter::mcp::PROTOCOL_VERSION,
+        ));
+        a.push(KeyValue::string("gen_ai.operation.name", "execute_tool"));
+        if let Some((origin, tool)) = mcp_call_parts(&rec.callee) {
+            a.push(KeyValue::string("gen_ai.tool.name", tool));
+            if let Ok(u) = url::Url::parse(origin) {
+                if let Some(host) = u.host_str() {
+                    a.push(KeyValue::string("server.address", host));
+                }
+                if let Some(port) = u.port_or_known_default() {
+                    a.push(KeyValue::int("server.port", i64::from(port)));
+                }
+            }
+        }
+    }
+    if rec.kind == Kind::A2aCall {
+        a.push(KeyValue::string("gen_ai.operation.name", "invoke_agent"));
+        a.push(KeyValue::string("rpc.system", "jsonrpc"));
+        a.push(KeyValue::string("rpc.method", "SendMessage"));
+        if let Some(u) = a2a_call_origin(&rec.callee) {
+            if let Some(host) = u.host_str() {
+                a.push(KeyValue::string("server.address", host));
+            }
+            if let Some(port) = u.port_or_known_default() {
+                a.push(KeyValue::int("server.port", i64::from(port)));
+            }
         }
     }
     if export_payloads {

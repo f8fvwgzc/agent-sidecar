@@ -133,6 +133,16 @@ class GrpcSidecar:
         resp = await self._call(self._stub.InvokeHttp(req, timeout=timeout_for(ctx, SERVICE_TIMEOUT)))
         return resp.status, resp.body
 
+    async def invoke_mcp(self, ctx: CallContext, tool: str, arguments: dict[str, Any]) -> tuple[str, bool]:
+        req = runtime_pb2.ToolArgumentsRequest(ctx=_ctx(ctx, tool), arguments_json=json.dumps(arguments))
+        resp = await self._call(self._stub.InvokeMcp(req, timeout=timeout_for(ctx, SERVICE_TIMEOUT)))
+        return resp.text, resp.is_error
+
+    async def invoke_a2a(self, ctx: CallContext, tool: str, arguments: dict[str, Any]) -> tuple[str, bool]:
+        req = runtime_pb2.ToolArgumentsRequest(ctx=_ctx(ctx, tool), arguments_json=json.dumps(arguments))
+        resp = await self._call(self._stub.InvokeA2a(req, timeout=timeout_for(ctx, AGENT_TIMEOUT)))
+        return resp.text, resp.is_error
+
     async def report_event(self, record: dict[str, Any]) -> ReportOutcome:
         """Send one record. The answer carries the rule the sidecar named in `x-agentsc-rule` — e.g.
         `budget.max_cost_usd_per_day` once the agent's daily cost budget is spent — on a successful

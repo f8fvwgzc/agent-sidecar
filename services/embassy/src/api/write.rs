@@ -82,11 +82,7 @@ pub fn policy_problems(policy: Option<&PolicyConfig>, c: &Charter) -> Vec<String
     }
     if let Some(allow) = &p.http_origin_allowlist {
         for a in &c.agents {
-            for t in a
-                .tools
-                .iter()
-                .filter(|t| t.tool_type == agentsc_charter::ToolType::Http)
-            {
+            for t in a.tools.iter().filter(|t| t.tool_type.is_egress()) {
                 let origin = t.url.as_deref().and_then(agentsc_charter::http_origin);
                 match origin {
                     Some(o) if allow.contains(&o) => {}

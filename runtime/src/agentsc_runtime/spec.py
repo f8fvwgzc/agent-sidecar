@@ -45,7 +45,7 @@ class ToolSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str
     description: str
-    type: Literal["service", "agent", "http"]
+    type: Literal["service", "agent", "http", "mcp", "a2a"]
     parameters: dict[str, Any] | None = None
     service: str | None = None
     method: str | None = None

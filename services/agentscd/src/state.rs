@@ -81,8 +81,15 @@ pub struct AppState {
     pub providers: crate::gateway::Providers,
     /// Toward this pod's app on loopback: no proxy, no redirects.
     pub http: reqwest::Client,
-    /// Http tools: no redirects (the charter pins the origin), the environment's proxy if any.
+    /// Http and mcp tools: no redirects (the charter pins the origin), the environment's proxy
+    /// if any.
     pub egress: reqwest::Client,
+    /// Each MCP server's `tools/list`, for the pin check of `mcp` tools (mcp.rs).
+    pub mcp_definitions: crate::mcp::Definitions,
+    /// The A2A server's tasks (a2a.rs).
+    pub a2a_tasks: crate::a2a::Tasks,
+    /// The address the A2A server listens on, once it does (`--a2a-addr` with port 0 in tests).
+    pub a2a_bound: std::sync::OnceLock<std::net::SocketAddr>,
     pub runtime: RuntimeClient<Channel>,
     pub runtime_ready: AtomicBool,
     pub runtime_provider: Mutex<String>,
@@ -335,6 +342,9 @@ impl AppState {
                 .timeout(HTTP_TIMEOUT)
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
+            mcp_definitions: Default::default(),
+            a2a_tasks: Default::default(),
+            a2a_bound: Default::default(),
             runtime,
             runtime_ready: AtomicBool::new(false),
             runtime_provider: Mutex::new(String::from("unknown")),

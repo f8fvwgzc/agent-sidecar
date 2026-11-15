@@ -16,6 +16,8 @@ subsystem works; a record here says why it is the way it is.
 | [0006](0006-delegated-agent-tokens.md) | implemented | An `http` tool with `delegation` acts for the invoking person: the sidecar keeps the person's token for the run, embassy verifies it and exchanges it at `tutelad` with its own agent token as the actor, and the call carries the `agent+jwt`; it fails closed |
 | [0007](0007-kind-for-the-real-cluster-checks.md) | implemented | `make demo-helm CLUSTER=kind`; the chart is checked on kind at Kubernetes 1.34, 1.31 (the oldest kind v0.31.0 lists) and 1.29 (its `kubeVersion` floor, without the ValidatingAdmissionPolicy API) |
 | [0008](0008-keycloak-for-oidc-check.md) | implemented | `make oidc-check` signs in through Keycloak 26.8.1 pinned by digest (`26.8.1-1@sha256:a78d6b79...`), checks the full sign-out at Keycloak, and fails early when Docker's clock is off |
+| [0009](0009-mcp-tools.md) | implemented | `type: mcp` tools (charter schema level 9): the sidecar is the MCP client (protocol 2026-07-28), each tool pinned by a SHA-256 of the server's definition, arguments checked against the charter's narrower `parameters`; `InvokeMcp`, `mcp_call` records, `agentsc mcp import`/`check` |
+| [0010](0010-a2a.md) | implemented | A2A 1.0 at the edge (charter schema level 10): an A2A server per sidecar for agents with an `a2a` block, `a2a:<name>` callers with bearer tokens, questions as input-required tasks, and `type: a2a` tools; `InvokeA2a`, `a2a_call` records |
 
 ## Format
 

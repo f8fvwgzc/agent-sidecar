@@ -353,6 +353,9 @@ mod tests {
                 effect: None,
                 approval: None,
                 delegation: None,
+                mcp_tool: None,
+                pin: None,
+                credential: None,
             });
         }
         c.agents[0] = many;

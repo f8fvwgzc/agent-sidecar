@@ -6,6 +6,9 @@ use agentsc_charter::Charter;
 use agentsc_common::audit::AuditRecordView;
 use clap::{Parser, Subcommand};
 
+mod mcp;
+mod skill;
+
 /// An audit record (CONTRACT.md §6) as any sidecar version wrote it: `kind`, `direction` and
 /// `decision` are kept as written, so a record of a kind this CLI does not know (from a newer
 /// sidecar) is shown as-is, never dropped.
@@ -49,6 +52,17 @@ enum Cmd {
     },
     /// Tail and pretty-print the audit log of a service's sidecar.
     Logs(LogsArgs),
+    /// Import `type: mcp` tools from an MCP server, and check a charter's pins against them.
+    Mcp {
+        #[command(subcommand)]
+        cmd: mcp::McpCmd,
+    },
+    /// Import Agent Skills (SKILL.md directories) as charter skills, and export charter skills
+    /// as Agent Skills.
+    Skill {
+        #[command(subcommand)]
+        cmd: skill::SkillCmd,
+    },
     /// Verify an evidence bundle offline (CONTRACT.md §6.3): exit 0 when it verifies, 1 when a
     /// check fails, 2 when the bundle or the keys cannot be read.
     Verify(VerifyArgs),
@@ -89,7 +103,7 @@ struct LogsArgs {
     /// Only records of this request id.
     #[arg(long)]
     request: Option<String>,
-    /// Only records of this kind (agent_invocation, model_call, tool_call, agent_call, service_call, http_call, authz, guardrail, budget, config, learning, or any other kind a sidecar writes).
+    /// Only records of this kind (agent_invocation, model_call, tool_call, agent_call, service_call, http_call, mcp_call, authz, guardrail, budget, config, learning, or any other kind a sidecar writes).
     #[arg(long)]
     kind: Option<String>,
     /// Only records whose rule starts with this (e.g. `taint.would_deny`).
@@ -219,6 +233,20 @@ fn main() {
             Err(e) => {
                 eprintln!("error: {e:#}");
                 1
+            }
+        },
+        Cmd::Mcp { cmd } => match mcp::run(cmd) {
+            Ok(code) => code,
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                2
+            }
+        },
+        Cmd::Skill { cmd } => match skill::run(cmd) {
+            Ok(code) => code,
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                2
             }
         },
         Cmd::Verify(args) => match verify(&args) {

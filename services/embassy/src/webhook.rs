@@ -1090,7 +1090,7 @@ pub fn policy_violations(
     if let Some(allowed) = &policy.http_origin_allowlist {
         for agent in &charter.agents {
             for tool in &agent.tools {
-                if tool.tool_type != agentsc_charter::ToolType::Http {
+                if !tool.tool_type.is_egress() {
                     continue;
                 }
                 let origin = tool

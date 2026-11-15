@@ -78,6 +78,8 @@ fn hop_records_keep_their_ids_and_events_nest_under_them() {
         Kind::ToolCall,
         Kind::ServiceCall,
         Kind::HttpCall,
+        Kind::McpCall,
+        Kind::A2aCall,
     ] {
         let span = span_from_record(&base(kind, Direction::Outbound), 1, false);
         assert_eq!(span.span_id, INVOCATION_SPAN, "{kind}");
@@ -181,6 +183,50 @@ fn names_are_low_cardinality() {
     );
     rec.callee = "garbage".into();
     assert_eq!(span_from_record(&rec, 1, false).name, "http_call");
+    // the OTel MCP conventions: `tools/call <tool>`, the tool and the server as attributes
+    let mut rec = base(Kind::McpCall, Direction::Outbound);
+    rec.callee = "mcp https://mcp.example.com:8443 search_issues".into();
+    let span = span_from_record(&rec, 1, false);
+    assert_eq!(span.name, "tools/call search_issues");
+    for (key, want) in [
+        ("mcp.method.name", "tools/call"),
+        ("mcp.protocol.version", "2026-07-28"),
+        ("gen_ai.operation.name", "execute_tool"),
+        ("gen_ai.tool.name", "search_issues"),
+        ("server.address", "mcp.example.com"),
+    ] {
+        assert_eq!(
+            attr(&span, key),
+            Some(&AnyValue::StringValue(want.into())),
+            "{key}"
+        );
+    }
+    assert_eq!(
+        attr(&span, "server.port"),
+        Some(&AnyValue::IntValue("8443".into()))
+    );
+    rec.callee = "garbage".into();
+    assert_eq!(span_from_record(&rec, 1, false).name, "tools/call");
+    // the OTel GenAI agent conventions: `invoke_agent <host>`, the remote agent as attributes
+    let mut rec = base(Kind::A2aCall, Direction::Outbound);
+    rec.callee = "a2a https://agents.partner.example".into();
+    let span = span_from_record(&rec, 1, false);
+    assert_eq!(span.name, "invoke_agent agents.partner.example");
+    for (key, want) in [
+        ("gen_ai.operation.name", "invoke_agent"),
+        ("rpc.method", "SendMessage"),
+        ("server.address", "agents.partner.example"),
+    ] {
+        assert_eq!(
+            attr(&span, key),
+            Some(&AnyValue::StringValue(want.into())),
+            "{key}"
+        );
+    }
+    assert_eq!(
+        attr(&span, "server.port"),
+        Some(&AnyValue::IntValue("443".into()))
+    );
     let mut rec = base(Kind::ModelCall, Direction::Outbound);
     rec.callee = "mock".into();
     let span = span_from_record(&rec, 1, false);

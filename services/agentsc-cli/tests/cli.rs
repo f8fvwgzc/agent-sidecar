@@ -380,3 +380,258 @@ fn verify_says_what_holds_and_exits_0_1_or_2() {
         .unwrap();
     assert_eq!(child.wait_with_output().unwrap().status.code(), Some(0));
 }
+
+/// A one-thread MCP server on loopback for `agentsc mcp`: it answers `tools/list` with `tools`
+/// (which the test may change) and `server/discover` with its name.
+fn fake_mcp_server(
+    tools: std::sync::Arc<std::sync::Mutex<serde_json::Value>>,
+) -> std::net::SocketAddr {
+    use std::io::{BufRead, BufReader, Read};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut len = 0usize;
+            let mut protocol_header = false;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+                let lower = line.to_ascii_lowercase();
+                if let Some(v) = lower.strip_prefix("content-length:") {
+                    len = v.trim().parse().unwrap_or(0);
+                }
+                protocol_header |= lower.starts_with("mcp-protocol-version: 2026-07-28");
+            }
+            let mut body = vec![0; len];
+            reader.read_exact(&mut body).unwrap();
+            let msg: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let result = match (protocol_header, msg["method"].as_str()) {
+                (true, Some("tools/list")) => {
+                    serde_json::json!({"resultType": "complete", "tools": tools.lock().unwrap().clone()})
+                }
+                (true, Some("server/discover")) => serde_json::json!({"resultType": "complete",
+                    "supportedVersions": ["2026-07-28"], "serverInfo": {"name": "issues", "version": "1.2.0"}}),
+                _ => serde_json::json!({}),
+            };
+            let out = serde_json::json!({"jsonrpc": "2.0", "id": msg["id"], "result": result})
+                .to_string();
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{out}",
+                out.len()
+            );
+        }
+    });
+    addr
+}
+
+#[test]
+fn mcp_import_writes_pinned_entries_and_check_finds_drift() {
+    let tools = std::sync::Arc::new(std::sync::Mutex::new(serde_json::json!([
+        {"name": "search_issues", "title": "Search", "description": "Search issues.",
+         "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+         "annotations": {"readOnlyHint": true}},
+        {"name": "admin.tools.list", "description": "List admin tools.", "inputSchema": {"type": "object"}}
+    ])));
+    let addr = fake_mcp_server(tools.clone());
+    let url = format!("http://{addr}/mcp");
+    let out = agentsc()
+        .args([
+            "mcp",
+            "import",
+            "--url",
+            &url,
+            "--tool",
+            "search_issues",
+            "--tool",
+            "admin.tools.list",
+        ])
+        .output()
+        .unwrap();
+    let yaml = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(yaml.contains("(issues 1.2.0)"), "{yaml}");
+    assert!(yaml.contains("pin: sha256:"), "{yaml}");
+    assert!(
+        yaml.contains("name: admin_tools_list") && yaml.contains("mcp_tool: admin.tools.list"),
+        "{yaml}"
+    );
+    assert!(
+        yaml.contains("# effect: read"),
+        "a suggestion, commented: {yaml}"
+    );
+
+    // the import is a valid tools list
+    let entries: String = yaml.lines().map(|l| format!("      {l}\n")).collect();
+    let charter = format!(
+        "apiVersion: agentsc.io/v1alpha1\nkind: Charter\nservice: {{name: a, namespace: b, app_port: 1}}\nagents:\n  - name: x\n    model: mock\n    tools:\n{entries}"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("charter.yaml");
+    std::fs::write(&file, &charter).unwrap();
+    let out = agentsc()
+        .args(["charter", "validate"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{charter}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let check = || {
+        agentsc()
+            .args(["mcp", "check"])
+            .arg(&file)
+            .output()
+            .unwrap()
+    };
+    let out = check();
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert_eq!(out.status.code(), Some(0), "{text}");
+    assert_eq!(
+        text.lines().filter(|l| l.starts_with("ok")).count(),
+        2,
+        "{text}"
+    );
+
+    // the server rewrites a description: drift, with the new text for the reviewer
+    tools.lock().unwrap()[0]["description"] = serde_json::json!("Search issues and mail them out.");
+    tools.lock().unwrap().as_array_mut().unwrap().pop();
+    let out = check();
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert_eq!(out.status.code(), Some(1), "{text}");
+    assert!(text.contains("DRIFT   x.search_issues"), "{text}");
+    assert!(
+        text.contains("mail them out") && text.contains("new pin: sha256:"),
+        "{text}"
+    );
+    assert!(text.contains("MISSING x.admin_tools_list"), "{text}");
+}
+
+#[test]
+fn skill_import_validates_in_a_charter_and_export_round_trips() {
+    let dir = tempfile::tempdir().unwrap();
+    let skill = dir.path().join("refund-policy");
+    std::fs::create_dir_all(skill.join("references")).unwrap();
+    std::fs::create_dir_all(skill.join("scripts")).unwrap(); // empty: allowed
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: refund-policy\ndescription: How to decide a refund. Use when a customer asks for money back.\n\
+         license: Apache-2.0\nallowed-tools: Read Bash(curl:*)\nmetadata:\n  author: example-org\n  version: \"1.0\"\n---\n\n\
+         # Refunds\n\nRefund an order under 50 EUR at once; above that, ask a person.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        skill.join("references/limits.md"),
+        "Limits: 50 EUR a day.\n",
+    )
+    .unwrap();
+    let run = |args: &[&std::ffi::OsStr]| {
+        let out = agentsc().args(args).output().unwrap();
+        (
+            out.status.code().unwrap(),
+            String::from_utf8(out.stdout).unwrap(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    let import = |extra: &[&str], dir: &std::path::Path| {
+        let mut args: Vec<&std::ffi::OsStr> = vec!["skill".as_ref(), "import".as_ref()];
+        args.extend(extra.iter().map(std::ffi::OsStr::new));
+        args.push(dir.as_os_str());
+        run(&args)
+    };
+
+    // references are refused unless inlined
+    let (code, _, err) = import(&[], &skill);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("--inline-references"), "{err}");
+    let (code, yaml, err) = import(&["--inline-references"], &skill);
+    assert_eq!(code, 0, "{err}");
+    assert!(yaml.starts_with("# Agent Skill "), "{yaml}");
+    assert!(yaml.contains("(SKILL.md sha256:"), "{yaml}");
+    assert!(yaml.contains("# references/limits.md sha256:"), "{yaml}");
+    assert!(
+        yaml.contains("# allowed-tools: Read Bash(curl:*) (tool names"),
+        "{yaml}"
+    );
+    assert!(yaml.contains("# license: Apache-2.0"), "{yaml}");
+    let skills: Vec<agentsc_charter::SkillSpec> = serde_yaml_ng::from_str(&yaml).unwrap();
+    assert_eq!(skills.len(), 1, "{yaml}");
+    assert_eq!(skills[0].name, "refund-policy");
+    assert!(skills[0].tools.is_empty());
+    assert_eq!(
+        skills[0].instructions,
+        "# Refunds\n\nRefund an order under 50 EUR at once; above that, ask a person.\n\n\
+         ## references/limits.md\n\nLimits: 50 EUR a day."
+    );
+
+    // pasted under `skills:` of a minimal charter, it validates
+    let entries: String = yaml.lines().map(|l| format!("  {l}\n")).collect();
+    let charter = format!(
+        "apiVersion: agentsc.io/v1alpha1\nkind: Charter\nservice: {{name: a, namespace: b, app_port: 1}}\nskills:\n{entries}agents:\n  - name: x\n    model: mock\n    skills: [refund-policy]\n"
+    );
+    let file = dir.path().join("charter.yaml");
+    std::fs::write(&file, &charter).unwrap();
+    let (code, _, err) = run(&["charter".as_ref(), "validate".as_ref(), file.as_os_str()]);
+    assert_eq!(code, 0, "{charter}\n{err}");
+
+    // exported and imported again, it is the same skill
+    let out_dir = dir.path().join("exported");
+    let export = |extra: &[&str]| {
+        let mut args: Vec<&std::ffi::OsStr> = vec![
+            "skill".as_ref(),
+            "export".as_ref(),
+            file.as_os_str(),
+            "--out".as_ref(),
+            out_dir.as_os_str(),
+        ];
+        args.extend(extra.iter().map(std::ffi::OsStr::new));
+        run(&args)
+    };
+    let written = out_dir.join("refund-policy").join("SKILL.md");
+    let (code, out, err) = export(&["--skill", "refund-policy"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, format!("wrote {}\n", written.display()));
+    let md = std::fs::read_to_string(&written).unwrap();
+    assert!(md.starts_with("---\nname: refund-policy\n"), "{md}");
+    assert!(md.contains("source: attache charter"), "{md}");
+    assert!(!md.contains("charter-tools"), "{md}");
+    let (code, again, err) = import(&[], &out_dir.join("refund-policy"));
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        again.contains("# metadata source: attache charter"),
+        "{again}"
+    );
+    let again: Vec<agentsc_charter::SkillSpec> = serde_yaml_ng::from_str(&again).unwrap();
+    assert_eq!(again, skills);
+
+    // an existing SKILL.md is kept unless --force
+    let (code, _, err) = export(&[]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("pass --force"), "{err}");
+    let (code, _, err) = export(&["--force"]);
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = export(&["--skill", "nope"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("no skill \"nope\""), "{err}");
+
+    // a skill with scripts is refused: there is no sandbox to run them in
+    std::fs::write(skill.join("scripts/refund.sh"), "#!/bin/sh\n").unwrap();
+    let (code, out, err) = import(&["--inline-references"], &skill);
+    assert_eq!(code, 2, "{err}");
+    assert!(out.is_empty(), "{out}");
+    assert!(
+        err.contains("cannot run skill scripts; there is no sandbox"),
+        "{err}"
+    );
+}

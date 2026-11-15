@@ -34,6 +34,8 @@ fn every_kind_has_a_golden_trace() {
             Kind::AgentCall,
             Kind::ServiceCall,
             Kind::HttpCall,
+            Kind::McpCall,
+            Kind::A2aCall,
             Kind::Authz,
             Kind::Guardrail,
             Kind::Budget,

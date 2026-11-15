@@ -252,7 +252,7 @@ async fn issuance_hello_heartbeats_and_updates() {
         h.charter_schema_level,
         agentsc_charter::CHARTER_SCHEMA_LEVEL
     );
-    assert_eq!(h.charter_schema_level, 8);
+    assert_eq!(h.charter_schema_level, 10);
     assert_eq!(h.memory_version, "");
     assert_eq!(
         cp.shared.peers.lock().unwrap()[0],
@@ -1710,6 +1710,9 @@ async fn a_delegated_tool_carries_the_control_planes_token_and_fails_closed() {
         delegation: Some(agentsc_charter::DelegationSpec {
             audience: "symphony".into(),
         }),
+        mcp_tool: None,
+        pin: None,
+        credential: None,
     });
     c.guardrails
         .allowed_tools
